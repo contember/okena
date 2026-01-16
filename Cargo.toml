@@ -1,0 +1,52 @@
+[package]
+name = "term-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# UI Framework (from Zed repo)
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+# UI Components
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+
+# Terminal Emulation
+alacritty_terminal = "0.25"
+
+# PTY Management
+portable-pty = "0.9"
+
+# Async Runtime
+smol = "2.0"
+async-channel = "2.3"
+parking_lot = "0.12"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Git
+git2 = "0.19"
+
+# System info
+sysinfo = "0.33"
+libc = "0.2"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4"] }
+dirs = "5.0"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+thiserror = "2.0"
+regex = "1.10"
+
+# Asset embedding
+rust-embed = "8.5"
+
+# Time handling (cross-platform, thread-safe)
+time = { version = "0.3", features = ["local-offset"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"

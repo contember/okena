@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Term Manager
+Comment=Terminal multiplexer for managing multiple terminal sessions
+Exec=term-manager
+Icon=term-manager
+Terminal=false
+Categories=System;TerminalEmulator;Utility;
+Keywords=terminal;console;shell;command;pty;
+StartupWMClass=term-manager
+X-GNOME-UsesNotifications=true

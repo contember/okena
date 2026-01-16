@@ -1,0 +1,1240 @@
+use crate::theme::{theme, ThemeColors};
+use crate::views::root::TerminalsRegistry;
+use crate::workspace::state::{ProjectData, Workspace};
+use gpui::*;
+use gpui::prelude::*;
+use gpui_component::input::{Input, InputState};
+use gpui_component::tooltip::Tooltip;
+use std::collections::HashSet;
+
+/// Drag payload for project reordering
+#[derive(Clone)]
+struct ProjectDrag {
+    project_id: String,
+    project_name: String,
+}
+
+/// Drag preview view
+struct ProjectDragView {
+    name: String,
+}
+
+impl Render for ProjectDragView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x404040))
+            .rounded(px(4.0))
+            .shadow_lg()
+            .text_size(px(12.0))
+            .text_color(rgb(0xffffff))
+            .child(self.name.clone())
+    }
+}
+
+/// Sidebar view with project and terminal list
+pub struct Sidebar {
+    workspace: Entity<Workspace>,
+    width: f32,
+    expanded_projects: HashSet<String>,
+    show_add_dialog: bool,
+    name_input: Option<Entity<InputState>>,
+    path_input: Option<Entity<InputState>>,
+    /// Pending values to set on inputs (for async updates)
+    pending_name_value: Option<String>,
+    pending_path_value: Option<String>,
+    terminals: TerminalsRegistry,
+    /// Terminal currently being renamed: (project_id, terminal_id)
+    renaming_terminal: Option<(String, String)>,
+    /// Input for renaming terminal
+    rename_input: Option<Entity<InputState>>,
+    /// Last click info for double-click detection: (terminal_id, timestamp)
+    last_click: Option<(String, std::time::Instant)>,
+    /// Project currently being renamed
+    renaming_project: Option<String>,
+    /// Input for renaming project
+    project_rename_input: Option<Entity<InputState>>,
+    /// Last click info for project double-click detection: (project_id, timestamp)
+    last_project_click: Option<(String, std::time::Instant)>,
+    /// Context menu state: (project_id, position)
+    context_menu: Option<(String, Point<Pixels>)>,
+}
+
+impl Sidebar {
+    pub fn new(workspace: Entity<Workspace>, width: f32, terminals: TerminalsRegistry) -> Self {
+        Self {
+            workspace,
+            width,
+            expanded_projects: HashSet::new(),
+            show_add_dialog: false,
+            name_input: None,
+            path_input: None,
+            pending_name_value: None,
+            pending_path_value: None,
+            terminals,
+            renaming_terminal: None,
+            rename_input: None,
+            last_click: None,
+            renaming_project: None,
+            project_rename_input: None,
+            last_project_click: None,
+            context_menu: None,
+        }
+    }
+
+    /// Check for double-click on terminal and return true if detected
+    fn check_double_click(&mut self, terminal_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let is_double = if let Some((last_id, last_time)) = &self.last_click {
+            last_id == terminal_id && now.duration_since(*last_time).as_millis() < 400
+        } else {
+            false
+        };
+
+        if is_double {
+            self.last_click = None;
+            true
+        } else {
+            self.last_click = Some((terminal_id.to_string(), now));
+            false
+        }
+    }
+
+    fn toggle_expanded(&mut self, project_id: &str) {
+        if self.expanded_projects.contains(project_id) {
+            self.expanded_projects.remove(project_id);
+        } else {
+            self.expanded_projects.insert(project_id.to_string());
+        }
+    }
+
+    fn start_rename(&mut self, project_id: String, terminal_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming_terminal = Some((project_id, terminal_id));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Terminal name...")
+                .default_value(&current_name)
+        });
+        // Set up blur handler to finish rename
+        let focus_handle = input.read(cx).focus_handle(cx);
+        let _ = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.finish_rename(cx);
+        });
+        self.rename_input = Some(input);
+        // Clear focused terminal to prevent TerminalPane from stealing focus
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, cx: &mut Context<Self>) {
+        if let (Some((project_id, terminal_id)), Some(input)) = (&self.renaming_terminal, &self.rename_input) {
+            let new_name = input.read(cx).value().to_string();
+            if !new_name.is_empty() {
+                let project_id = project_id.clone();
+                let terminal_id = terminal_id.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
+                });
+            }
+        }
+        self.renaming_terminal = None;
+        self.rename_input = None;
+        // Restore focus after modal dismissal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_terminal = None;
+        self.rename_input = None;
+        // Restore focus after modal dismissal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Check for double-click on project and return true if detected
+    fn check_project_double_click(&mut self, project_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let is_double = if let Some((last_id, last_time)) = &self.last_project_click {
+            last_id == project_id && now.duration_since(*last_time).as_millis() < 400
+        } else {
+            false
+        };
+
+        if is_double {
+            self.last_project_click = None;
+            true
+        } else {
+            self.last_project_click = Some((project_id.to_string(), now));
+            false
+        }
+    }
+
+    fn start_project_rename(&mut self, project_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming_project = Some(project_id);
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Project name...")
+                .default_value(&current_name)
+        });
+        // Set up blur handler to finish rename
+        let focus_handle = input.read(cx).focus_handle(cx);
+        let _ = cx.on_blur(&focus_handle, window, |this, _window, cx| {
+            this.finish_project_rename(cx);
+        });
+        self.project_rename_input = Some(input);
+        // Clear focused terminal to prevent TerminalPane from stealing focus
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    fn finish_project_rename(&mut self, cx: &mut Context<Self>) {
+        if let (Some(project_id), Some(input)) = (&self.renaming_project, &self.project_rename_input) {
+            let new_name = input.read(cx).value().to_string();
+            if !new_name.is_empty() {
+                let project_id = project_id.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    ws.rename_project(&project_id, new_name, cx);
+                });
+            }
+        }
+        self.renaming_project = None;
+        self.project_rename_input = None;
+        // Restore focus after modal dismissal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    fn cancel_project_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_project = None;
+        self.project_rename_input = None;
+        // Restore focus after modal dismissal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    fn show_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.context_menu = Some((project_id, position));
+        cx.notify();
+    }
+
+    fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn render_context_menu(&self, project_id: &str, position: Point<Pixels>, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace.clone();
+        let workspace_for_add = self.workspace.clone();
+        let project_id_for_delete = project_id.to_string();
+        let project_id_for_rename = project_id.to_string();
+        let project_id_for_add = project_id.to_string();
+
+        // Get project name for rename
+        let project_name = self.workspace.read(cx)
+            .project(project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+
+        div()
+            .absolute()
+            .left(position.x)
+            .top(position.y)
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(4.0))
+            .shadow_lg()
+            .min_w(px(140.0))
+            .py(px(4.0))
+            .id("project-context-menu")
+            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                cx.stop_propagation();
+            })
+            .child(
+                // Add terminal option
+                div()
+                    .id("context-menu-add-terminal")
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.text_primary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path("icons/plus.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_secondary))
+                    )
+                    .child("Add Terminal")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.hide_context_menu(cx);
+                        workspace_for_add.update(cx, |ws, cx| {
+                            ws.add_terminal(&project_id_for_add, cx);
+                        });
+                    })),
+            )
+            // Separator
+            .child(
+                div()
+                    .h(px(1.0))
+                    .mx(px(8.0))
+                    .my(px(4.0))
+                    .bg(rgb(t.border)),
+            )
+            .child(
+                // Rename option
+                div()
+                    .id("context-menu-rename")
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.text_primary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path("icons/edit.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_secondary))
+                    )
+                    .child("Rename Project")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.hide_context_menu(cx);
+                        this.start_project_rename(project_id_for_rename.clone(), project_name.clone(), window, cx);
+                    })),
+            )
+            .child(
+                // Delete option
+                div()
+                    .id("context-menu-delete")
+                    .px(px(12.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.error))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path("icons/trash.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.error))
+                    )
+                    .child("Delete Project")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.hide_context_menu(cx);
+                        workspace.update(cx, |ws, cx| {
+                            ws.delete_project(&project_id_for_delete, cx);
+                        });
+                    })),
+            )
+    }
+
+    fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.name_input.is_none() {
+            self.name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Enter project name...")
+            }));
+        }
+        if self.path_input.is_none() {
+            self.path_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Enter project path...")
+            }));
+        }
+    }
+
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.name_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+        let path = self.path_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+
+        if !name.is_empty() && !path.is_empty() {
+            self.workspace.update(cx, |ws, cx| {
+                ws.add_project(name, path, cx);
+            });
+            // Clear inputs
+            if let Some(ref input) = self.name_input {
+                input.update(cx, |i, cx| i.set_value("", window, cx));
+            }
+            if let Some(ref input) = self.path_input {
+                input.update(cx, |i, cx| i.set_value("", window, cx));
+            }
+            self.show_add_dialog = false;
+            cx.notify();
+        }
+    }
+
+    fn set_quick_path(&mut self, name: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        let path = path.to_string();
+        if let Some(ref input) = self.name_input {
+            input.update(cx, |i, cx| i.set_value(&name, window, cx));
+        }
+        if let Some(ref input) = self.path_input {
+            input.update(cx, |i, cx| i.set_value(&path, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn open_folder_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select project folder".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(selected_paths))) = paths.await {
+                if let Some(path) = selected_paths.first() {
+                    let path_str = path.to_string_lossy().to_string();
+                    let name_str = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Project".to_string());
+
+                    this.update(cx, |this, cx| {
+                        // Store pending values to be applied in next render
+                        this.pending_path_value = Some(path_str);
+                        this.pending_name_value = Some(name_str);
+                        cx.notify();
+                    }).ok();
+                }
+            }
+        }).detach();
+    }
+
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        div()
+            .h(px(35.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(rgb(t.bg_header))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_secondary))
+                    .child("EXPLORER"),
+            )
+            .child(
+                // Add project button
+                div()
+                    .id("add-project-btn")
+                    .cursor_pointer()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .text_size(px(14.0))
+                    .text_color(rgb(t.text_secondary))
+                    .child("+")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.show_add_dialog = !this.show_add_dialog;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn render_add_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        // Ensure inputs exist
+        self.ensure_inputs(window, cx);
+
+        // Apply pending values from async operations
+        if let Some(name_value) = self.pending_name_value.take() {
+            if let Some(ref input) = self.name_input {
+                input.update(cx, |i, cx| i.set_value(&name_value, window, cx));
+            }
+        }
+        if let Some(path_value) = self.pending_path_value.take() {
+            if let Some(ref input) = self.path_input {
+                input.update(cx, |i, cx| i.set_value(&path_value, window, cx));
+            }
+        }
+
+        let name_input = self.name_input.clone().unwrap();
+        let path_input = self.path_input.clone().unwrap();
+
+        div()
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(4.0))
+            .m(px(8.0))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_primary))
+                    .child("Add Project"),
+            )
+            .child(
+                // Name input
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_muted))
+                            .child("Name:"),
+                    )
+                    .child(
+                        div()
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(4.0))
+                            .child(
+                                Input::new(&name_input)
+                                    .appearance(false)
+                                    .text_size(px(12.0))
+                            )
+                    ),
+            )
+            .child(
+                // Path input
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_muted))
+                            .child("Path:"),
+                    )
+                    .child(
+                        div()
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(4.0))
+                            .child(
+                                Input::new(&path_input)
+                                    .appearance(false)
+                                    .text_size(px(12.0))
+                            )
+                    ),
+            )
+            .child(
+                // Browse button
+                div()
+                    .id("browse-folder-btn")
+                    .cursor_pointer()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_secondary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .text_size(px(11.0))
+                    .text_color(rgb(t.text_primary))
+                    .child("Browse...")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_folder_picker(window, cx);
+                    })),
+            )
+            .child(
+                // Quick add buttons for common paths
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .id("quick-add-home")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.bg_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_primary))
+                            .child("Home (~)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let path = dirs::home_dir()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "/home".to_string());
+                                this.set_quick_path("Home", &path, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("quick-add-tmp")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.bg_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_primary))
+                            .child("Tmp (/tmp)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.set_quick_path("Tmp", "/tmp", window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("quick-add-projects")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.bg_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_primary))
+                            .child("Projects")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let path = dirs::home_dir()
+                                    .map(|p| p.join("projects").to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "/home/projects".to_string());
+                                this.set_quick_path("Projects", &path, window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                // Action buttons
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .justify_end()
+                    .child(
+                        div()
+                            .id("cancel-add-btn")
+                            .cursor_pointer()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.bg_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.text_secondary))
+                            .child("Cancel")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_add_dialog = false;
+                                if let Some(ref input) = this.name_input {
+                                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                                }
+                                if let Some(ref input) = this.path_input {
+                                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("confirm-add-btn")
+                            .cursor_pointer()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.border_active))
+                            .hover(|s| s.bg(rgb(0x0078d4)))
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xffffff))
+                            .child("Add")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_project(window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.clone();
+
+        div()
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .id("projects-header")
+            .on_click(move |_, _window, cx| {
+                workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(None, cx);
+                });
+            })
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_secondary))
+                    .child("PROJECTS"),
+            )
+    }
+
+    fn render_project_item(&self, project: &ProjectData, index: usize, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let is_expanded = self.expanded_projects.contains(&project.id);
+        let workspace_for_focus = self.workspace.clone();
+        let workspace_for_drop = self.workspace.clone();
+        let project_id = project.id.clone();
+        let project_id_for_focus = project.id.clone();
+        let project_id_for_toggle = project.id.clone();
+        let project_id_for_visibility = project.id.clone();
+        let project_id_for_rename = project.id.clone();
+        let project_id_for_context_menu = project.id.clone();
+        let project_id_for_drag = project.id.clone();
+        let project_name = project.name.clone();
+        let project_name_for_rename = project.name.clone();
+        let project_name_for_drag = project.name.clone();
+
+        let is_focused = {
+            let ws = self.workspace.read(cx);
+            ws.focused_project_id.as_ref() == Some(&project.id)
+        };
+
+        let is_renaming = self.renaming_project.as_ref() == Some(&project.id);
+
+        let terminal_ids = project.layout.collect_terminal_ids();
+        let terminal_count = terminal_ids.len();
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                // Project row
+                div()
+                    .id(ElementId::Name(format!("project-row-{}", project.id).into()))
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .cursor_pointer()
+                    .when(is_focused, |d| {
+                        d.border_l_2().border_color(rgb(t.border_active))
+                    })
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    // Drag source
+                    .on_drag(ProjectDrag { project_id: project_id_for_drag.clone(), project_name: project_name_for_drag.clone() }, move |drag, _position, _window, cx| {
+                        cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
+                    })
+                    // Drop target - show indicator line at top
+                    .drag_over::<ProjectDrag>(move |style, _, _, _| {
+                        style.border_t_2().border_color(rgb(t.border_active))
+                    })
+                    .on_drop(cx.listener(move |_this, drag: &ProjectDrag, _window, cx| {
+                        if drag.project_id != project_id_for_drag {
+                            workspace_for_drop.update(cx, |ws, cx| {
+                                ws.move_project(&drag.project_id, index, cx);
+                            });
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Right, cx.listener({
+                        let project_id = project_id_for_context_menu.clone();
+                        move |this, event: &MouseDownEvent, _window, cx| {
+                            this.show_context_menu(project_id.clone(), event.position, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(
+                        // Expand arrow
+                        div()
+                            .id(ElementId::Name(format!("expand-{}", project.id).into()))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                                    .size(px(12.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.toggle_expanded(&project_id_for_toggle);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        // Project folder icon
+                        div()
+                            .flex_shrink_0()
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path("icons/folder.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.border_active))
+                            ),
+                    )
+                    .child(
+                        // Project name (or input if renaming)
+                        if is_renaming {
+                            if let Some(ref input) = self.project_rename_input {
+                                div()
+                                    .id("project-rename-input")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .bg(rgb(t.bg_hover))
+                                    .rounded(px(2.0))
+                                    .child(
+                                        Input::new(input)
+                                            .appearance(false)
+                                            .text_size(px(12.0))
+                                            .pl(px(0.0))
+                                    )
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(|_, _window, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        match event.keystroke.key.as_str() {
+                                            "enter" => this.finish_project_rename(cx),
+                                            "escape" => this.cancel_project_rename(cx),
+                                            _ => {}
+                                        }
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div().flex_1().into_any_element()
+                            }
+                        } else {
+                            div()
+                                .id(ElementId::Name(format!("project-name-{}", project.id).into()))
+                                .flex_1()
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text_primary))
+                                .text_ellipsis()
+                                .child(project_name)
+                                .on_click(cx.listener({
+                                    let project_id = project_id_for_rename;
+                                    let project_id_for_focus = project_id_for_focus.clone();
+                                    let name = project_name_for_rename;
+                                    move |this, _event: &ClickEvent, window, cx| {
+                                        if this.check_project_double_click(&project_id) {
+                                            this.start_project_rename(project_id.clone(), name.clone(), window, cx);
+                                        } else {
+                                            // Single click - focus the project
+                                            workspace_for_focus.update(cx, |ws, cx| {
+                                                ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
+                                            });
+                                        }
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .into_any_element()
+                        },
+                    )
+                    .child(
+                        // Terminal count badge
+                        div()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(t.bg_secondary))
+                            .text_size(px(10.0))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("{}", terminal_count)),
+                    )
+                    .child(
+                        // Visibility toggle
+                        {
+                            let workspace = self.workspace.clone();
+                            let is_visible = project.is_visible;
+                            let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                            div()
+                                .id(ElementId::Name(format!("visibility-{}", project.id).into()))
+                                .cursor_pointer()
+                                .w(px(18.0))
+                                .h(px(18.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(3.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .on_click(move |_, _window, cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.toggle_project_visibility(&project_id_for_visibility, cx);
+                                    });
+                                })
+                                .child(
+                                    svg()
+                                        .path(if is_visible { "icons/eye.svg" } else { "icons/eye-off.svg" })
+                                        .size(px(12.0))
+                                        .text_color(if is_visible {
+                                            rgb(t.text_secondary)
+                                        } else {
+                                            rgb(t.text_muted)
+                                        })
+                                )
+                                .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                        },
+                    ),
+            )
+            .when(is_expanded, |d| {
+                // Collect minimized states first to avoid borrow checker issues
+                let minimized_states: Vec<(String, bool)> = {
+                    let ws = self.workspace.read(cx);
+                    terminal_ids.iter().map(|id| {
+                        let is_minimized = ws.is_terminal_minimized(&project_id, id);
+                        (id.clone(), is_minimized)
+                    }).collect()
+                };
+
+                // Show all terminals (minimized ones will be dimmed with different icon)
+                let terminal_elements: Vec<_> = minimized_states.iter().map(|(id, is_minimized)| {
+                    self.render_terminal_item(&project_id, id, project, *is_minimized, window, cx).into_any_element()
+                }).collect();
+
+                d.children(terminal_elements)
+            })
+    }
+
+    fn render_terminal_item(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        project: &ProjectData,
+        is_minimized: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.clone();
+        let workspace_for_focus = self.workspace.clone();
+        let workspace_for_minimize = self.workspace.clone();
+        let project_id = project_id.to_string();
+        let project_id_for_focus = project_id.clone();
+        let project_id_for_minimize = project_id.clone();
+        let project_id_for_rename = project_id.clone();
+        let terminal_id_owned = terminal_id.to_string();
+        let terminal_id_for_focus = terminal_id.to_string();
+        let terminal_id_for_minimize = terminal_id.to_string();
+        let terminal_id_for_rename = terminal_id.to_string();
+
+        // Priority: custom name > OSC title > terminal ID prefix
+        // Also check for bell notification
+        let (terminal_name, has_bell) = {
+            let terminals = self.terminals.lock();
+            if let Some(terminal) = terminals.get(terminal_id) {
+                let name = if let Some(custom_name) = project.terminal_names.get(terminal_id) {
+                    custom_name.clone()
+                } else {
+                    terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
+                };
+                (name, terminal.has_bell())
+            } else {
+                let name = project.terminal_names.get(terminal_id)
+                    .cloned()
+                    .unwrap_or_else(|| terminal_id.chars().take(8).collect());
+                (name, false)
+            }
+        };
+
+        // Check if this terminal is being renamed
+        let is_renaming = self.renaming_terminal.as_ref()
+            .map_or(false, |(pid, tid)| pid == &project_id && tid == terminal_id);
+
+        // Check if this terminal is currently focused
+        let is_focused = {
+            let ws = self.workspace.read(cx);
+            ws.focused_terminal.as_ref().map_or(false, |ft| {
+                if let Some(proj) = ws.project(&project_id) {
+                    proj.layout.find_terminal_path(&terminal_id_for_focus)
+                        .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
+                } else {
+                    false
+                }
+            })
+        };
+
+        let terminal_name_for_rename = terminal_name.clone();
+
+        div()
+            .id(ElementId::Name(format!("terminal-item-{}", terminal_id).into()))
+            .group("terminal-item")
+            .h(px(22.0))
+            .pl(px(28.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_minimized, |d| d.opacity(0.5))
+            .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
+            // Click to focus this terminal
+            .on_click({
+                let workspace = workspace_for_focus.clone();
+                let project_id = project_id_for_focus.clone();
+                let terminal_id = terminal_id_for_focus.clone();
+                move |_, _window, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                    });
+                }
+            })
+            .child(
+                // Terminal icon - different for minimized and bell state
+                div()
+                    .flex_shrink_0()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(if has_bell {
+                                "icons/bell.svg"
+                            } else if is_minimized {
+                                "icons/terminal-minimized.svg"
+                            } else {
+                                "icons/terminal.svg"
+                            })
+                            .size(px(12.0))
+                            .text_color(if has_bell {
+                                rgb(t.border_bell)
+                            } else if is_minimized {
+                                rgb(t.text_muted)
+                            } else {
+                                rgb(t.success)
+                            })
+                    ),
+            )
+            .child(
+                // Terminal name (or input if renaming)
+                if is_renaming {
+                    if let Some(ref input) = self.rename_input {
+                        div()
+                            .id("terminal-rename-input")
+                            .flex_1()
+                            .min_w_0()
+                            .bg(rgb(t.bg_hover))
+                            .rounded(px(2.0))
+                            .child(
+                                Input::new(input)
+                                    .appearance(false)
+                                    .text_size(px(11.0))
+                                    .pl(px(0.0))
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(|_, _window, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                match event.keystroke.key.as_str() {
+                                    "enter" => this.finish_rename(cx),
+                                    "escape" => this.cancel_rename(cx),
+                                    _ => {}
+                                }
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().flex_1().min_w_0().into_any_element()
+                    }
+                } else {
+                    div()
+                        .id(ElementId::Name(format!("terminal-name-{}", terminal_id).into()))
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_size(px(11.0))
+                        .text_color(rgb(t.text_primary))
+                        .text_ellipsis()
+                        .child(terminal_name)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener({
+                            let workspace = workspace_for_focus.clone();
+                            let project_id = project_id_for_rename;
+                            let project_id_for_focus = project_id_for_focus.clone();
+                            let terminal_id = terminal_id_for_rename;
+                            let terminal_id_for_focus = terminal_id_for_focus.clone();
+                            let name = terminal_name_for_rename;
+                            move |this, _event: &ClickEvent, window, cx| {
+                                if this.check_double_click(&terminal_id) {
+                                    this.start_rename(project_id.clone(), terminal_id.clone(), name.clone(), window, cx);
+                                } else {
+                                    // Single click - focus the terminal
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.focus_terminal_by_id(&project_id_for_focus, &terminal_id_for_focus, cx);
+                                    });
+                                }
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .into_any_element()
+                },
+            )
+            .child(
+                // Action buttons - show on hover
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .gap(px(2.0))
+                    .opacity(0.0)
+                    .group_hover("terminal-item", |s| s.opacity(1.0))
+                    .child(
+                        // Minimize/restore button
+                        div()
+                            .id(ElementId::Name(format!("minimize-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _window, cx| {
+                                cx.stop_propagation();
+                                workspace_for_minimize.update(cx, |ws, cx| {
+                                    ws.toggle_terminal_minimized_by_id(&project_id_for_minimize, &terminal_id_for_minimize, cx);
+                                });
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/minimize.svg")
+                                    .size(px(12.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .tooltip({
+                                let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
+                                move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx)
+                            }),
+                    )
+                    .child(
+                        // Fullscreen button
+                        div()
+                            .id(ElementId::Name(format!("fullscreen-{}", terminal_id).into()))
+                            .cursor_pointer()
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _window, cx| {
+                                cx.stop_propagation();
+                                workspace.update(cx, |ws, cx| {
+                                    ws.set_fullscreen_terminal(
+                                        project_id.clone(),
+                                        terminal_id_owned.clone(),
+                                        cx,
+                                    );
+                                });
+                            })
+                            .child(
+                                svg()
+                                    .path("icons/fullscreen.svg")
+                                    .size(px(12.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .tooltip(|_window, cx| Tooltip::new("Fullscreen").build(_window, cx)),
+                    ),
+            )
+    }
+}
+
+impl Render for Sidebar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.read(cx);
+        // Get projects in order from project_order
+        let ordered_projects: Vec<ProjectData> = workspace.data.project_order
+            .iter()
+            .filter_map(|id| workspace.data.projects.iter().find(|p| &p.id == id).cloned())
+            .collect();
+        let show_add_dialog = self.show_add_dialog;
+
+        // Build context menu element if visible
+        let context_menu = self.context_menu.as_ref().map(|(project_id, position)| {
+            self.render_context_menu(project_id, *position, t, cx)
+        });
+
+        div()
+            .relative()
+            .w(px(self.width))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(t.bg_secondary))
+            .border_r_1()
+            .border_color(rgb(t.border))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                // Close context menu on left click
+                if this.context_menu.is_some() {
+                    this.hide_context_menu(cx);
+                }
+            }))
+            .child(self.render_header(cx))
+            .when(show_add_dialog, |d| d.child(self.render_add_dialog(window, cx)))
+            .child(self.render_projects_header(cx))
+            .child(
+                div()
+                    .id("sidebar-scroll")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(
+                        ordered_projects
+                            .iter()
+                            .enumerate()
+                            .map(|(i, p)| self.render_project_item(p, i, window, cx)),
+                    ),
+            )
+            .children(context_menu)
+    }
+}

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Background -->
+  <circle cx="256" cy="256" r="240" fill="#1A202C"/>
+  <circle cx="256" cy="256" r="224" fill="#2D3748"/>
+
+  <!-- Terminal window frame -->
+  <rect x="80" y="100" width="352" height="312" rx="16" fill="#0D1117"/>
+
+  <!-- Title bar -->
+  <rect x="80" y="100" width="352" height="36" rx="16" fill="#161B22"/>
+  <rect x="80" y="120" width="352" height="16" fill="#161B22"/>
+
+  <!-- Window buttons -->
+  <circle cx="104" cy="118" r="6" fill="#FF5F56"/>
+  <circle cx="126" cy="118" r="6" fill="#FFBD2E"/>
+  <circle cx="148" cy="118" r="6" fill="#27C93F"/>
+
+  <!-- Vertical split -->
+  <line x1="256" y1="150" x2="256" y2="398" stroke="#30363D" stroke-width="3"/>
+
+  <!-- Left pane prompt -->
+  <text x="100" y="190" font-family="monospace" font-size="28" font-weight="bold" fill="#48BB78">$</text>
+  <rect x="130" y="168" width="16" height="28" fill="#48BB78" rx="2"/>
+
+  <!-- Left pane text lines -->
+  <rect x="100" y="220" width="120" height="8" rx="4" fill="#4A5568"/>
+  <rect x="100" y="250" width="90" height="8" rx="4" fill="#48BB78"/>
+  <rect x="100" y="280" width="100" height="8" rx="4" fill="#4A5568"/>
+
+  <!-- Right pane prompt -->
+  <text x="276" y="190" font-family="monospace" font-size="28" font-weight="bold" fill="#63B3ED">></text>
+  <rect x="306" y="168" width="16" height="28" fill="#63B3ED" rx="2"/>
+
+  <!-- Right pane text lines -->
+  <rect x="276" y="220" width="80" height="8" rx="4" fill="#F6AD55"/>
+  <rect x="276" y="250" width="110" height="8" rx="4" fill="#4A5568"/>
+  <rect x="276" y="280" width="70" height="8" rx="4" fill="#F6AD55"/>
+  <rect x="276" y="310" width="95" height="8" rx="4" fill="#4A5568"/>
+
+  <!-- Accent border -->
+  <circle cx="256" cy="256" r="244" fill="none" stroke="#48BB78" stroke-width="4" opacity="0.7"/>
+</svg>
