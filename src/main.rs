@@ -10,6 +10,7 @@ mod workspace;
 
 use gpui::*;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
+use gpui_component::Root;
 use std::sync::Arc;
 
 use crate::app::TermManager;
@@ -103,10 +104,11 @@ fn main() {
                     })
                     .detach();
 
-                // Create the main app view
-                cx.new(|cx| {
+                // Create the main app view wrapped in Root (required for gpui_component inputs)
+                let term_manager = cx.new(|cx| {
                     TermManager::new(workspace_data, pty_manager.clone(), pty_events, settings.show_focused_border, window, cx)
-                })
+                });
+                cx.new(|cx| Root::new(term_manager, window, cx))
             },
         )
         .unwrap();

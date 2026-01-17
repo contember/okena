@@ -489,19 +489,19 @@ impl KeybindingConfig {
         // Navigation keybindings
         bindings.insert(
             "FocusLeft".to_string(),
-            vec![KeybindingEntry::new("alt-left", None)],
+            vec![KeybindingEntry::new("cmd-alt-left", None)],
         );
         bindings.insert(
             "FocusRight".to_string(),
-            vec![KeybindingEntry::new("alt-right", None)],
+            vec![KeybindingEntry::new("cmd-alt-right", None)],
         );
         bindings.insert(
             "FocusUp".to_string(),
-            vec![KeybindingEntry::new("alt-up", None)],
+            vec![KeybindingEntry::new("cmd-alt-up", None)],
         );
         bindings.insert(
             "FocusDown".to_string(),
-            vec![KeybindingEntry::new("alt-down", None)],
+            vec![KeybindingEntry::new("cmd-alt-down", None)],
         );
         bindings.insert(
             "FocusNextTerminal".to_string(),

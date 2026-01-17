@@ -1,4 +1,5 @@
 use crate::elements::terminal_element::TerminalElement;
+use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
@@ -187,50 +188,8 @@ impl FullscreenTerminal {
     }
 
     fn key_to_input(&self, event: &KeyDownEvent) -> Option<Vec<u8>> {
-        let keystroke = &event.keystroke;
-
-        // If this keystroke produces text, let the TerminalElement InputHandler send it.
-        // This prevents double characters from keydown + text input.
-        if keystroke.key_char.is_some() {
-            return None;
-        }
-
-        // Handle special keys
-        match keystroke.key.as_str() {
-            "up" => return Some(b"\x1b[A".to_vec()),
-            "down" => return Some(b"\x1b[B".to_vec()),
-            "right" => return Some(b"\x1b[C".to_vec()),
-            "left" => return Some(b"\x1b[D".to_vec()),
-            "enter" => return Some(b"\r".to_vec()),
-            "backspace" => return Some(b"\x7f".to_vec()),
-            "tab" => return Some(b"\t".to_vec()),
-            "home" => return Some(b"\x1b[H".to_vec()),
-            "end" => return Some(b"\x1b[F".to_vec()),
-            "pageup" => return Some(b"\x1b[5~".to_vec()),
-            "pagedown" => return Some(b"\x1b[6~".to_vec()),
-            "delete" => return Some(b"\x1b[3~".to_vec()),
-            _ => {}
-        }
-
-        // Handle Ctrl+key combinations
-        if keystroke.modifiers.control {
-            let key = keystroke.key.as_str();
-            if key.len() == 1 {
-                let c = key.chars().next().unwrap();
-                if c.is_ascii_alphabetic() {
-                    let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
-                    return Some(vec![ctrl_char]);
-                }
-            }
-        }
-
-        // Single character keys
-        let key = keystroke.key.as_str();
-        if key.len() == 1 {
-            return Some(key.as_bytes().to_vec());
-        }
-
-        None
+        // Use the shared key_to_bytes function for consistent key handling
+        key_to_bytes(event)
     }
 }
 
