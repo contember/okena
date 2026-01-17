@@ -634,6 +634,8 @@ impl Workspace {
     ) {
         if let Some(project) = self.project(project_id) {
             if let Some(path) = project.layout.find_terminal_path(terminal_id) {
+                // Switch to the terminal's project so it becomes visible
+                self.set_focused_project(Some(project_id.to_string()), cx);
                 // Use the unified focus method for consistent propagation
                 self.set_focused_terminal(project_id.to_string(), path, cx);
             }
