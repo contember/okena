@@ -13,7 +13,7 @@ use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeM
 use std::sync::Arc;
 
 use crate::app::TermManager;
-use crate::assets::Assets;
+use crate::assets::{Assets, embedded_fonts};
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
 use crate::views::split_pane::init_split_drag_context;
@@ -23,6 +23,11 @@ fn main() {
     env_logger::init();
 
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        // Register embedded JetBrains Mono font
+        cx.text_system()
+            .add_fonts(embedded_fonts())
+            .expect("Failed to register embedded fonts");
+
         // Register keybindings
         keybindings::register_keybindings(cx);
 

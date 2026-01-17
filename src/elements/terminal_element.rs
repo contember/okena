@@ -242,42 +242,39 @@ impl BatchedTextRun {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let cell_width_f = f32::from(cell_width);
-        let line_y = px((f32::from(origin.y) + f32::from(line_height) * self.start_line as f32).floor());
+        let pos = Point::new(
+            origin.x + self.start_col as f32 * cell_width,
+            origin.y + self.start_line as f32 * line_height,
+        );
 
-        // Paint each character at its exact grid position for perfect cursor alignment
-        // This ensures no drift regardless of font metrics or character width variations
-        for (i, c) in self.text.chars().enumerate() {
-            let char_x = px((f32::from(origin.x) + cell_width_f * (self.start_col + i as i32) as f32).floor());
-            let pos = Point::new(char_x, line_y);
+        // Create style for the entire text run
+        let run_style = TextRun {
+            len: self.text.len(),
+            font: self.style.font.clone(),
+            color: self.style.color,
+            background_color: self.style.background_color,
+            underline: self.style.underline.clone(),
+            strikethrough: self.style.strikethrough.clone(),
+        };
 
-            // Create a single-char style with the same properties
-            let char_style = TextRun {
-                len: c.len_utf8(),
-                font: self.style.font.clone(),
-                color: self.style.color,
-                background_color: self.style.background_color,
-                underline: self.style.underline.clone(),
-                strikethrough: self.style.strikethrough.clone(),
-            };
-
-            let _ = window
-                .text_system()
-                .shape_line(
-                    c.to_string().into(),
-                    font_size,
-                    &[char_style],
-                    None,
-                )
-                .paint(
-                    pos,
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-        }
+        // Shape and paint entire run at once, passing cell_width for fixed-width spacing
+        // This is how Zed does it - allows proper glyph caching while maintaining grid alignment
+        let _ = window
+            .text_system()
+            .shape_line(
+                self.text.clone().into(),
+                font_size,
+                &[run_style],
+                Some(cell_width),
+            )
+            .paint(
+                pos,
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
     }
 }
 
@@ -351,16 +348,15 @@ impl Element for TerminalElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let font_size = px(14.0);
 
-        // Use platform-appropriate monospace fonts to ensure consistent glyph widths
-        // This is critical for cursor alignment - the measured cell_width must match rendered width
+        // JetBrains Mono - excellent screen hinting, same as Ghostty default
         #[cfg(target_os = "macos")]
         let font = Font {
-            family: "Menlo".into(),
+            family: "JetBrains Mono".into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "Menlo".into(),
                 "SF Mono".into(),
                 "Monaco".into(),
-                "Courier New".into(),
             ])),
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
@@ -403,8 +399,8 @@ impl Element for TerminalElement {
             .map(|size| size.width)
             .unwrap_or(font_size * 0.6);
 
-        // Calculate line height (like Zed: font_size * line_height_multiplier)
-        let line_height = font_size * 1.4;
+        // Line height equals font size - no gaps between lines
+        let line_height = font_size * 1.3;
 
         let style = Style {
             size: Size {
