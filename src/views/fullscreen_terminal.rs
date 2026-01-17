@@ -239,6 +239,12 @@ impl Render for FullscreenTerminal {
             .on_action(cx.listener(|this, _: &crate::keybindings::SendBacktab, _window, _cx| {
                 this.terminal.send_bytes(b"\x1b[Z");
             }))
+            .on_action(cx.listener(|this, _: &crate::keybindings::ToggleFullscreen, _window, cx| {
+                // In fullscreen mode, toggle means exit
+                this.workspace.update(cx, |ws, cx| {
+                    ws.exit_fullscreen(cx);
+                });
+            }))
             .absolute()
             .inset_0()
             .bg(rgb(t.bg_primary))

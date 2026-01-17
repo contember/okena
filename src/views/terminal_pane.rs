@@ -1,5 +1,5 @@
 use crate::elements::terminal_element::{TerminalElement, SearchMatch, URLMatch};
-use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, FocusNextTerminal, FocusPrevTerminal, SendTab, SendBacktab};
+use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, FocusNextTerminal, FocusPrevTerminal, SendTab, SendBacktab, ToggleFullscreen};
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -2109,6 +2109,17 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SendBacktab, _window, _cx| {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_bytes(b"\x1b[Z");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
+                // Toggle fullscreen: if already fullscreen, exit; otherwise enter fullscreen
+                let is_fullscreen = this.workspace.read(cx).fullscreen_terminal.is_some();
+                if is_fullscreen {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.exit_fullscreen(cx);
+                    });
+                } else {
+                    this.handle_fullscreen(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {

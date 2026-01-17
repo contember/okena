@@ -107,6 +107,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
+        "ToggleFullscreen",
+        ActionDescription {
+            name: "Toggle Fullscreen",
+            description: "Toggle fullscreen mode for focused terminal",
+            category: "Fullscreen",
+        },
+    );
+    map.insert(
         "FullscreenNextTerminal",
         ActionDescription {
             name: "Next Terminal",
@@ -404,6 +412,13 @@ impl KeybindingConfig {
         bindings.insert(
             "ExitFullscreen".to_string(),
             vec![KeybindingEntry::new("escape", Some("FullscreenTerminal"))],
+        );
+        bindings.insert(
+            "ToggleFullscreen".to_string(),
+            vec![
+                KeybindingEntry::new("shift-escape", Some("TerminalPane")),
+                KeybindingEntry::new("shift-escape", Some("FullscreenTerminal")),
+            ],
         );
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
