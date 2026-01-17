@@ -1603,8 +1603,9 @@ impl TerminalPane {
             .into_any_element()
     }
 
-    fn render_terminal_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_terminal_content(&mut self, is_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let term_bg = if is_focused { t.term_background } else { t.term_background_unfocused };
         // When minimized or detached, don't render terminal content
         // (detached terminals are hidden entirely in layout, this is just a safety check)
         if self.minimized || self.detached {
@@ -1703,9 +1704,15 @@ impl TerminalPane {
                     .size_full(),
                 )
                 .child(
-                    TerminalElement::new(terminal_clone, focus_handle.clone())
-                        .with_search(self.search_matches.clone(), self.current_match_index)
-                        .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
+                    div()
+                        .size_full()
+                        .p(px(4.0))
+                        .bg(rgb(term_bg))
+                        .child(
+                            TerminalElement::new(terminal_clone, focus_handle.clone())
+                                .with_search(self.search_matches.clone(), self.current_match_index)
+                                .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
+                        )
                 )
                 .child(scrollbar)
                 .children(context_menu)
@@ -2132,7 +2139,7 @@ impl Render for TerminalPane {
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(self.render_terminal_content(cx))
+                    .child(self.render_terminal_content(is_focused, cx))
             )
             .when(self.is_searching, |el: Stateful<Div>| {
                 el.child(self.render_search_bar(cx))
