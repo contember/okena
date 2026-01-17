@@ -1217,8 +1217,6 @@ impl TerminalPane {
             .items_center()
             .gap(px(8.0))
             .bg(rgb(t.bg_header))
-            .border_t_1()
-            .border_color(rgb(t.border))
             .child(
                 if let Some(ref input) = self.search_input {
                     div()
@@ -1436,8 +1434,6 @@ impl TerminalPane {
             .min_w_0()
             .overflow_hidden()
             .bg(rgb(t.bg_header))
-            .border_b_1()
-            .border_color(rgb(t.border))
             .child(
                 // Terminal name (or input if renaming)
                 if self.is_renaming {
@@ -2016,13 +2012,15 @@ impl Render for TerminalPane {
             }
         }
 
-        // Determine border color based on focus and bell state
-        let border_color = if is_focused {
+        // Get show_focused_border setting from workspace
+        let show_focused_border = self.workspace.read(cx).show_focused_border;
+
+        // Only show border when focused (if setting enabled) or has bell
+        let show_border = (is_focused && show_focused_border) || has_bell;
+        let border_color = if is_focused && show_focused_border {
             rgb(t.border_focused)
-        } else if has_bell {
-            rgb(t.border_bell)
         } else {
-            rgb(t.border)
+            rgb(t.border_bell)
         };
 
         // Check if terminal is in a tab group (header will be hidden)
@@ -2125,8 +2123,7 @@ impl Render for TerminalPane {
             .min_w_0()
             .overflow_hidden()
             .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(border_color)
+            .when(show_border, |d| d.border_1().border_color(border_color))
             .group("terminal-pane")
             .when(!in_tab_group, |el| el.child(self.render_header(cx)))
             .child(

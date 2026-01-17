@@ -1,5 +1,5 @@
-use crate::keybindings::{ShowThemeSelector, ToggleSidebar};
-use crate::theme::{theme, theme_entity, ThemeMode};
+use crate::keybindings::ToggleSidebar;
+use crate::theme::theme;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
@@ -80,44 +80,6 @@ impl TitleBar {
                             cx.quit();
                         }
                     }
-                }
-            })
-    }
-}
-
-impl TitleBar {
-    fn render_theme_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let theme_ent = theme_entity(cx);
-        let current_mode = theme_ent.read(cx).mode;
-
-        let icon = match current_mode {
-            ThemeMode::Dark => "D",
-            ThemeMode::Light => "L",
-            ThemeMode::HighContrast => "H",
-            ThemeMode::Auto => "A",
-            ThemeMode::Custom => "C",
-        };
-
-        div()
-            .id("theme-toggle")
-            .cursor_pointer()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(t.text_secondary))
-            .child(icon)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_click({
-                move |_, window, cx| {
-                    cx.stop_propagation();
-                    // Open theme selector dialog
-                    window.dispatch_action(Box::new(ShowThemeSelector), cx);
                 }
             })
     }
@@ -260,7 +222,6 @@ impl Render for TitleBar {
                                     }),
                             )
                     }))
-                    .child(self.render_theme_toggle(cx))
                     .when(needs_controls, |d| {
                         d.child(
                             div()

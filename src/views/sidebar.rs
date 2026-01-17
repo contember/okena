@@ -707,9 +707,9 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap(px(6.0))
+            .cursor_pointer()
             .border_t_1()
             .border_color(rgb(t.border))
-            .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .on_action(cx.listener(|_, _: &ShowKeybindings, _, _| {
                 // Action will be handled by parent

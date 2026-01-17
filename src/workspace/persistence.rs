@@ -37,6 +37,13 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
+    /// Whether to show border around focused terminal
+    #[serde(default = "default_show_focused_border")]
+    pub show_focused_border: bool,
+}
+
+fn default_show_focused_border() -> bool {
+    false
 }
 
 /// Metadata about a saved session

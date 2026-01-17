@@ -1,6 +1,6 @@
 use crate::theme::{
     get_themes_dir, load_custom_themes, theme, theme_entity, ThemeColors, ThemeInfo, ThemeMode,
-    DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME,
+    DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
@@ -66,6 +66,16 @@ impl ThemeSelector {
 
         themes.push(ThemeEntry {
             info: ThemeInfo {
+                id: "pastel-dark".to_string(),
+                name: "Pastel Dark".to_string(),
+                description: "Soft pastel colors on dark background".to_string(),
+                is_dark: true,
+            },
+            colors: PASTEL_DARK_THEME,
+        });
+
+        themes.push(ThemeEntry {
+            info: ThemeInfo {
                 id: "high-contrast".to_string(),
                 name: "High Contrast".to_string(),
                 description: "High contrast for better visibility".to_string(),
@@ -85,7 +95,8 @@ impl ThemeSelector {
             ThemeMode::Auto => 0,
             ThemeMode::Dark => 1,
             ThemeMode::Light => 2,
-            ThemeMode::HighContrast => 3,
+            ThemeMode::PastelDark => 3,
+            ThemeMode::HighContrast => 4,
             ThemeMode::Custom => {
                 // Try to find matching custom theme
                 themes.iter().position(|t| t.info.id.starts_with("custom:")).unwrap_or(0)
@@ -120,6 +131,7 @@ impl ThemeSelector {
             "auto" => (ThemeMode::Auto, None),
             "dark" => (ThemeMode::Dark, None),
             "light" => (ThemeMode::Light, None),
+            "pastel-dark" => (ThemeMode::PastelDark, None),
             "high-contrast" => (ThemeMode::HighContrast, None),
             id if id.starts_with("custom:") => (ThemeMode::Custom, Some(theme_entry.colors)),
             _ => (ThemeMode::Dark, None),
@@ -160,6 +172,7 @@ impl ThemeSelector {
             "auto" => ThemeMode::Auto,
             "dark" => ThemeMode::Dark,
             "light" => ThemeMode::Light,
+            "pastel-dark" => ThemeMode::PastelDark,
             "high-contrast" => ThemeMode::HighContrast,
             id if id.starts_with("custom:") => {
                 // For custom themes, set the preview colors directly

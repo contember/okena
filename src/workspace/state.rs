@@ -91,6 +91,8 @@ pub struct Workspace {
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
+    /// Whether to show border around focused terminal
+    pub show_focused_border: bool,
 }
 
 impl Workspace {
@@ -102,7 +104,13 @@ impl Workspace {
             focused_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
+            show_focused_border: false,
         }
+    }
+
+    pub fn with_show_focused_border(mut self, show: bool) -> Self {
+        self.show_focused_border = show;
+        self
     }
 
     pub fn projects(&self) -> &[ProjectData] {

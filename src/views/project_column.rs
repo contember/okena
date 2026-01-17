@@ -352,8 +352,6 @@ impl Render for ProjectColumn {
                     .size_full()
                     .min_h_0()
                     .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
                     .child(self.render_header(&project, cx))
                     .child(
                         div()

@@ -144,8 +144,8 @@ pub fn render_split_divider(
     div()
         .id(ElementId::Name(format!("split-handle-{}-{}", project_id, child_index).into()))
         .group("split-handle")
-        .when(is_horizontal, |d| d.h(px(8.0)).w_full())
-        .when(!is_horizontal, |d| d.w(px(8.0)).h_full())
+        .when(is_horizontal, |d| d.h(px(5.0)).w_full())
+        .when(!is_horizontal, |d| d.w(px(5.0)).h_full())
         .flex_none()
         .flex()
         .items_center()
@@ -174,8 +174,8 @@ pub fn render_split_divider(
         })
         .child(
             div()
-                .when(is_horizontal, |d| d.h(px(2.0)).w_full())
-                .when(!is_horizontal, |d| d.w(px(2.0)).h_full())
+                .when(is_horizontal, |d| d.h(px(1.0)).w_full())
+                .when(!is_horizontal, |d| d.w(px(1.0)).h_full())
                 .bg(rgb(t.border))
                 .group_hover("split-handle", |s| s.bg(rgb(t.border_active))),
         )
@@ -192,12 +192,15 @@ pub fn render_project_divider(
     let active_drag = get_active_drag(cx);
 
     div()
-        .w(px(6.0))
+        .id(ElementId::Name(format!("project-divider-{}", divider_index).into()))
+        .group("project-divider")
+        .w(px(5.0))
         .h_full()
         .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
         .cursor(CursorStyle::ResizeLeftRight)
-        .bg(rgb(t.border))
-        .hover(|s| s.bg(rgb(t.border_active)))
         .on_mouse_down(MouseButton::Left, {
             let active_drag = active_drag.clone();
             let project_ids = project_ids.clone();
@@ -212,4 +215,11 @@ pub fn render_project_divider(
                 cx.stop_propagation();
             }
         })
+        .child(
+            div()
+                .w(px(1.0))
+                .h_full()
+                .bg(rgb(t.border))
+                .group_hover("project-divider", |s| s.bg(rgb(t.border_active))),
+        )
 }

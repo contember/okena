@@ -485,8 +485,14 @@ impl Element for TerminalElement {
             self.terminal.resize(new_size);
         }
 
-        // Paint background using theme color
-        window.paint_quad(fill(bounds, rgb(t.term_background)));
+        // Paint background using theme color (different for focused vs unfocused)
+        let is_focused = self.focus_handle.is_focused(window);
+        let bg_color = if is_focused {
+            t.term_background
+        } else {
+            t.term_background_unfocused
+        };
+        window.paint_quad(fill(bounds, rgb(bg_color)));
 
         // Get selection bounds
         let selection = self.terminal.selection_bounds();

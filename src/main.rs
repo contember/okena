@@ -105,7 +105,7 @@ fn main() {
 
                 // Create the main app view
                 cx.new(|cx| {
-                    TermManager::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
+                    TermManager::new(workspace_data, pty_manager.clone(), pty_events, settings.show_focused_border, window, cx)
                 })
             },
         )
