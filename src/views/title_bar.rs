@@ -135,6 +135,13 @@ impl Render for TitleBar {
             Decorations::Client { .. } => true,
         };
 
+        // On macOS with server decorations, we need to leave space for traffic lights
+        let traffic_light_padding = if cfg!(target_os = "macos") && !needs_controls {
+            px(80.0) // Space for macOS traffic lights (close, minimize, fullscreen)
+        } else {
+            px(8.0)
+        };
+
         // Get focused project info
         let focused_project = {
             let ws = self.workspace.read(cx);
@@ -167,11 +174,11 @@ impl Render for TitleBar {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .pl(traffic_light_padding)
                     .child(
                         // Sidebar toggle
                         div()
                             .cursor_pointer()
-                            .ml(px(8.0))
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded(px(4.0))

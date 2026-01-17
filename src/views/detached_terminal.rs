@@ -6,6 +6,7 @@ use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
 use gpui::*;
+use gpui::prelude::FluentBuilder;
 use std::sync::Arc;
 
 /// Detached terminal window view
@@ -122,6 +123,18 @@ impl Render for DetachedTerminalView {
         let terminal_name = self.terminal_name.clone();
 
         let is_maximized = window.is_maximized();
+        let decorations = window.window_decorations();
+        let needs_controls = match decorations {
+            Decorations::Server => false,
+            Decorations::Client { .. } => true,
+        };
+
+        // On macOS with server decorations, we need to leave space for traffic lights
+        let traffic_light_padding = if cfg!(target_os = "macos") && !needs_controls {
+            px(80.0) // Space for macOS traffic lights (close, minimize, fullscreen)
+        } else {
+            px(12.0)
+        };
 
         div()
             .track_focus(&focus_handle)
@@ -140,7 +153,8 @@ impl Render for DetachedTerminalView {
                 // Header bar - draggable for window move
                 div()
                     .h(px(35.0))
-                    .px(px(12.0))
+                    .pl(traffic_light_padding)
+                    .pr(px(12.0))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -187,76 +201,78 @@ impl Render for DetachedTerminalView {
                                         this.handle_reattach(cx);
                                     })),
                             )
-                            // Window controls
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.0))
-                                    // Minimize
-                                    .child(
-                                        div()
-                                            .id("minimize-btn")
-                                            .cursor_pointer()
-                                            .w(px(28.0))
-                                            .h(px(28.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(4.0))
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(t.text_secondary))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .child("─")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                            .on_click(|_, window, cx| {
-                                                cx.stop_propagation();
-                                                window.minimize_window();
-                                            }),
-                                    )
-                                    // Maximize/Restore
-                                    .child(
-                                        div()
-                                            .id("maximize-btn")
-                                            .cursor_pointer()
-                                            .w(px(28.0))
-                                            .h(px(28.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(4.0))
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(t.text_secondary))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .child(if is_maximized { "❐" } else { "□" })
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                            .on_click(|_, window, cx| {
-                                                cx.stop_propagation();
-                                                window.zoom_window();
-                                            }),
-                                    )
-                                    // Close
-                                    .child(
-                                        div()
-                                            .id("close-btn")
-                                            .cursor_pointer()
-                                            .w(px(28.0))
-                                            .h(px(28.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(4.0))
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(t.text_secondary))
-                                            .hover(|s| s.bg(rgb(0xE81123)).text_color(rgb(0xffffff)))
-                                            .child("✕")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                // Close = re-attach
-                                                this.handle_reattach(cx);
-                                            })),
-                                    ),
-                            ),
+                            // Window controls - only show if client-side decorations
+                            .when(needs_controls, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        // Minimize
+                                        .child(
+                                            div()
+                                                .id("minimize-btn")
+                                                .cursor_pointer()
+                                                .w(px(28.0))
+                                                .h(px(28.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(4.0))
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(t.text_secondary))
+                                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                .child("─")
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .on_click(|_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    window.minimize_window();
+                                                }),
+                                        )
+                                        // Maximize/Restore
+                                        .child(
+                                            div()
+                                                .id("maximize-btn")
+                                                .cursor_pointer()
+                                                .w(px(28.0))
+                                                .h(px(28.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(4.0))
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(t.text_secondary))
+                                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                .child(if is_maximized { "❐" } else { "□" })
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .on_click(|_, window, cx| {
+                                                    cx.stop_propagation();
+                                                    window.zoom_window();
+                                                }),
+                                        )
+                                        // Close
+                                        .child(
+                                            div()
+                                                .id("close-btn")
+                                                .cursor_pointer()
+                                                .w(px(28.0))
+                                                .h(px(28.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(4.0))
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(t.text_secondary))
+                                                .hover(|s| s.bg(rgb(0xE81123)).text_color(rgb(0xffffff)))
+                                                .child("✕")
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                    // Close = re-attach
+                                                    this.handle_reattach(cx);
+                                                })),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .child(
