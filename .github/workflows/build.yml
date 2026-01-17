@@ -67,12 +67,18 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Prepare artifact (Linux)
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/term-manager dist/
           chmod +x dist/term-manager
+
+      - name: Create macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x scripts/bundle-macos.sh
+          ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
 
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
@@ -108,6 +114,11 @@ jobs:
             name="${dir%/}"
             if [[ "$name" == *windows* ]]; then
               zip -r "../${name}.zip" "$dir"
+            elif [[ "$name" == *macos* ]]; then
+              # macOS: DMG is already created, just move it
+              mv "$dir"/*.dmg "../" 2>/dev/null || true
+              # Also create a zip of the .app for those who prefer it
+              cd "$dir" && zip -r "../../${name}.zip" "Term Manager.app" && cd ..
             else
               tar -czvf "../${name}.tar.gz" -C "$dir" .
             fi
@@ -119,4 +130,5 @@ jobs:
           files: |
             *.tar.gz
             *.zip
+            *.dmg
           generate_release_notes: true
