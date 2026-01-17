@@ -1,9 +1,9 @@
 use crate::theme::{theme, ThemeColors};
 use crate::views::root::TerminalsRegistry;
+use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
 use gpui::prelude::*;
-use gpui_component::input::{Input, InputState};
 use gpui_component::tooltip::Tooltip;
 use std::collections::HashSet;
 
@@ -41,8 +41,8 @@ pub struct Sidebar {
     width: f32,
     expanded_projects: HashSet<String>,
     show_add_dialog: bool,
-    name_input: Option<Entity<InputState>>,
-    path_input: Option<Entity<InputState>>,
+    name_input: Option<Entity<SimpleInputState>>,
+    path_input: Option<Entity<SimpleInputState>>,
     /// Pending values to set on inputs (for async updates)
     pending_name_value: Option<String>,
     pending_path_value: Option<String>,
@@ -50,13 +50,13 @@ pub struct Sidebar {
     /// Terminal currently being renamed: (project_id, terminal_id)
     renaming_terminal: Option<(String, String)>,
     /// Input for renaming terminal
-    rename_input: Option<Entity<InputState>>,
+    rename_input: Option<Entity<SimpleInputState>>,
     /// Last click info for double-click detection: (terminal_id, timestamp)
     last_click: Option<(String, std::time::Instant)>,
     /// Project currently being renamed
     renaming_project: Option<String>,
     /// Input for renaming project
-    project_rename_input: Option<Entity<InputState>>,
+    project_rename_input: Option<Entity<SimpleInputState>>,
     /// Last click info for project double-click detection: (project_id, timestamp)
     last_project_click: Option<(String, std::time::Instant)>,
     /// Context menu state: (project_id, position)
@@ -114,7 +114,7 @@ impl Sidebar {
     fn start_rename(&mut self, project_id: String, terminal_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming_terminal = Some((project_id, terminal_id));
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            SimpleInputState::new(cx)
                 .placeholder("Terminal name...")
                 .default_value(&current_name)
         });
@@ -182,7 +182,7 @@ impl Sidebar {
     fn start_project_rename(&mut self, project_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming_project = Some(project_id);
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            SimpleInputState::new(cx)
                 .placeholder("Project name...")
                 .default_value(&current_name)
         });
@@ -355,22 +355,22 @@ impl Sidebar {
             )
     }
 
-    fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn ensure_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.name_input.is_none() {
             self.name_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
+                SimpleInputState::new(cx)
                     .placeholder("Enter project name...")
             }));
         }
         if self.path_input.is_none() {
             self.path_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
+                SimpleInputState::new(cx)
                     .placeholder("Enter project path...")
             }));
         }
     }
 
-    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
         let path = self.path_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
 
@@ -380,24 +380,24 @@ impl Sidebar {
             });
             // Clear inputs
             if let Some(ref input) = self.name_input {
-                input.update(cx, |i, cx| i.set_value("", window, cx));
+                input.update(cx, |i, cx| i.set_value("", cx));
             }
             if let Some(ref input) = self.path_input {
-                input.update(cx, |i, cx| i.set_value("", window, cx));
+                input.update(cx, |i, cx| i.set_value("", cx));
             }
             self.show_add_dialog = false;
             cx.notify();
         }
     }
 
-    fn set_quick_path(&mut self, name: &str, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_quick_path(&mut self, name: &str, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         let name = name.to_string();
         let path = path.to_string();
         if let Some(ref input) = self.name_input {
-            input.update(cx, |i, cx| i.set_value(&name, window, cx));
+            input.update(cx, |i, cx| i.set_value(&name, cx));
         }
         if let Some(ref input) = self.path_input {
-            input.update(cx, |i, cx| i.set_value(&path, window, cx));
+            input.update(cx, |i, cx| i.set_value(&path, cx));
         }
         cx.notify();
     }
@@ -474,17 +474,18 @@ impl Sidebar {
         // Apply pending values from async operations
         if let Some(name_value) = self.pending_name_value.take() {
             if let Some(ref input) = self.name_input {
-                input.update(cx, |i, cx| i.set_value(&name_value, window, cx));
+                input.update(cx, |i, cx| i.set_value(&name_value, cx));
             }
         }
         if let Some(path_value) = self.pending_path_value.take() {
             if let Some(ref input) = self.path_input {
-                input.update(cx, |i, cx| i.set_value(&path_value, window, cx));
+                input.update(cx, |i, cx| i.set_value(&path_value, cx));
             }
         }
 
-        let name_input = self.name_input.clone().unwrap();
-        let path_input = self.path_input.clone().unwrap();
+        // Safe to unwrap since ensure_inputs was just called
+        let name_input = self.name_input.clone().expect("name_input should exist after ensure_inputs");
+        let path_input = self.path_input.clone().expect("path_input should exist after ensure_inputs");
 
         div()
             .p(px(12.0))
@@ -522,8 +523,7 @@ impl Sidebar {
                             .border_color(rgb(t.border))
                             .rounded(px(4.0))
                             .child(
-                                Input::new(&name_input)
-                                    .appearance(false)
+                                SimpleInput::new(&name_input)
                                     .text_size(px(12.0))
                             )
                     ),
@@ -547,8 +547,7 @@ impl Sidebar {
                             .border_color(rgb(t.border))
                             .rounded(px(4.0))
                             .child(
-                                Input::new(&path_input)
-                                    .appearance(false)
+                                SimpleInput::new(&path_input)
                                     .text_size(px(12.0))
                             )
                     ),
@@ -649,13 +648,13 @@ impl Sidebar {
                             .text_size(px(12.0))
                             .text_color(rgb(t.text_secondary))
                             .child("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
                                 this.show_add_dialog = false;
                                 if let Some(ref input) = this.name_input {
-                                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                                    input.update(cx, |i, cx| i.set_value("", cx));
                                 }
                                 if let Some(ref input) = this.path_input {
-                                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                                    input.update(cx, |i, cx| i.set_value("", cx));
                                 }
                                 cx.notify();
                             })),
@@ -818,10 +817,8 @@ impl Sidebar {
                                     .bg(rgb(t.bg_hover))
                                     .rounded(px(2.0))
                                     .child(
-                                        Input::new(input)
-                                            .appearance(false)
+                                        SimpleInput::new(input)
                                             .text_size(px(12.0))
-                                            .pl(px(0.0))
                                     )
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
@@ -1055,10 +1052,8 @@ impl Sidebar {
                             .bg(rgb(t.bg_hover))
                             .rounded(px(2.0))
                             .child(
-                                Input::new(input)
-                                    .appearance(false)
+                                SimpleInput::new(input)
                                     .text_size(px(11.0))
-                                    .pl(px(0.0))
                             )
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
