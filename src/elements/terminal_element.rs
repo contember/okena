@@ -242,29 +242,42 @@ impl BatchedTextRun {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Use floor() for pixel-perfect positioning (like Zed)
-        let pos = Point::new(
-            px((f32::from(origin.x) + f32::from(cell_width) * self.start_col as f32).floor()),
-            px((f32::from(origin.y) + f32::from(line_height) * self.start_line as f32).floor()),
-        );
+        let cell_width_f = f32::from(cell_width);
+        let line_y = px((f32::from(origin.y) + f32::from(line_height) * self.start_line as f32).floor());
 
-        // Don't constrain wrap_width - let the text render naturally
-        let _ = window
-            .text_system()
-            .shape_line(
-                self.text.clone().into(),
-                font_size,
-                std::slice::from_ref(&self.style),
-                None,
-            )
-            .paint(
-                pos,
-                line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
+        // Paint each character at its exact grid position for perfect cursor alignment
+        // This ensures no drift regardless of font metrics or character width variations
+        for (i, c) in self.text.chars().enumerate() {
+            let char_x = px((f32::from(origin.x) + cell_width_f * (self.start_col + i as i32) as f32).floor());
+            let pos = Point::new(char_x, line_y);
+
+            // Create a single-char style with the same properties
+            let char_style = TextRun {
+                len: c.len_utf8(),
+                font: self.style.font.clone(),
+                color: self.style.color,
+                background_color: self.style.background_color,
+                underline: self.style.underline.clone(),
+                strikethrough: self.style.strikethrough.clone(),
+            };
+
+            let _ = window
+                .text_system()
+                .shape_line(
+                    c.to_string().into(),
+                    font_size,
+                    &[char_style],
+                    None,
+                )
+                .paint(
+                    pos,
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+        }
     }
 }
 
@@ -338,8 +351,22 @@ impl Element for TerminalElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let font_size = px(14.0);
 
-        // Use font features to disable ligatures (like Zed does for terminals)
-        // DejaVu Sans Mono is standard on Linux
+        // Use platform-appropriate monospace fonts to ensure consistent glyph widths
+        // This is critical for cursor alignment - the measured cell_width must match rendered width
+        #[cfg(target_os = "macos")]
+        let font = Font {
+            family: "Menlo".into(),
+            features: FontFeatures::disable_ligatures(),
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "SF Mono".into(),
+                "Monaco".into(),
+                "Courier New".into(),
+            ])),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+
+        #[cfg(not(target_os = "macos"))]
         let font = Font {
             family: "DejaVu Sans Mono".into(),
             features: FontFeatures::disable_ligatures(),
