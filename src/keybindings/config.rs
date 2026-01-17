@@ -312,6 +312,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             category: "Global",
         },
     );
+    map.insert(
+        "ShowCommandPalette",
+        ActionDescription {
+            name: "Command Palette",
+            description: "Open command palette for quick access to all commands",
+            category: "Global",
+        },
+    );
 
     map
 }
@@ -382,6 +390,13 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-k cmd-t", None),
                 KeybindingEntry::new("ctrl-k ctrl-t", None),
+            ],
+        );
+        bindings.insert(
+            "ShowCommandPalette".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-p", None),
+                KeybindingEntry::new("ctrl-shift-p", None),
             ],
         );
 

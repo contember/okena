@@ -205,11 +205,17 @@ impl Render for TitleBar {
                     ),
             )
             .child(
-                // Center - focused project indicator
+                // Center - spacer
+                div().flex_1()
+            )
+            .child(
+                // Right side - focused project indicator + theme toggle + window controls
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .pr(px(4.0))
+                    // Focused project indicator
                     .children(focused_project.map(|name| {
                         div()
                             .flex()
@@ -253,15 +259,7 @@ impl Render for TitleBar {
                                         }
                                     }),
                             )
-                    })),
-            )
-            .child(
-                // Right side - theme toggle + window controls
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .pr(px(4.0))
+                    }))
                     .child(self.render_theme_toggle(cx))
                     .when(needs_controls, |d| {
                         d.child(

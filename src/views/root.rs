@@ -1,6 +1,7 @@
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
+use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
@@ -8,7 +9,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ToggleSidebar, ToggleSidebarAutoHide};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ToggleSidebar, ToggleSidebarAutoHide};
 use crate::views::status_bar::StatusBar;
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::title_bar::TitleBar;
@@ -56,6 +57,8 @@ pub struct RootView {
     session_manager: Option<Entity<SessionManager>>,
     /// Theme selector overlay
     theme_selector: Option<Entity<ThemeSelector>>,
+    /// Command palette overlay
+    command_palette: Option<Entity<CommandPalette>>,
     /// Fullscreen terminal overlay (stored to preserve animation state)
     fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
     /// Currently displayed fullscreen state (to detect changes)
@@ -102,6 +105,7 @@ impl RootView {
             keybindings_help: None,
             session_manager: None,
             theme_selector: None,
+            command_palette: None,
             fullscreen_terminal: None,
             fullscreen_state: None,
         };
@@ -418,6 +422,26 @@ impl RootView {
         cx.notify();
     }
 
+    fn show_command_palette(&mut self, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            // Toggle off if already showing
+            self.command_palette = None;
+        } else {
+            let palette = cx.new(|cx| CommandPalette::new(cx));
+            cx.subscribe(&palette, |this, _, event: &CommandPaletteEvent, cx| {
+                match event {
+                    CommandPaletteEvent::Close => {
+                        this.command_palette = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.command_palette = Some(palette);
+        }
+        cx.notify();
+    }
+
     /// Toggle sidebar visibility with animation
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
@@ -526,6 +550,7 @@ impl Render for RootView {
         let has_keybindings_help = self.keybindings_help.is_some();
         let has_session_manager = self.session_manager.is_some();
         let has_theme_selector = self.theme_selector.is_some();
+        let has_command_palette = self.command_palette.is_some();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -604,6 +629,10 @@ impl Render for RootView {
             // Handle show theme selector action
             .on_action(cx.listener(|this, _: &ShowThemeSelector, _window, cx| {
                 this.show_theme_selector(cx);
+            }))
+            // Handle show command palette action
+            .on_action(cx.listener(|this, _: &ShowCommandPalette, _window, cx| {
+                this.show_command_palette(cx);
             }))
             // Title bar at the top (with window controls)
             .child(self.title_bar.clone())
@@ -705,6 +734,14 @@ impl Render for RootView {
             .when(has_theme_selector, |d| {
                 if let Some(selector) = &self.theme_selector {
                     d.child(selector.clone())
+                } else {
+                    d
+                }
+            })
+            // Command palette overlay (renders on top of everything)
+            .when(has_command_palette, |d| {
+                if let Some(palette) = &self.command_palette {
+                    d.child(palette.clone())
                 } else {
                     d
                 }
