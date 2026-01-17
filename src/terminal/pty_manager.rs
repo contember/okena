@@ -134,7 +134,7 @@ impl PtyManager {
 
     /// Build the command to run in the terminal
     fn build_terminal_command(&self, terminal_id: &str, cwd: &str) -> CommandBuilder {
-        if let Some((program, args)) = self
+        let mut cmd = if let Some((program, args)) = self
             .session_backend
             .build_command(&self.session_backend.session_name(terminal_id), cwd)
         {
@@ -152,7 +152,15 @@ impl PtyManager {
             let mut cmd = CommandBuilder::new_default_prog();
             cmd.cwd(cwd);
             cmd
-        }
+        };
+
+        // Set TERM environment variable - required for proper terminal operation
+        // especially when running as a macOS app bundle which doesn't inherit shell environment
+        cmd.env("TERM", "xterm-256color");
+        // COLORTERM enables 24-bit truecolor support in many applications
+        cmd.env("COLORTERM", "truecolor");
+
+        cmd
     }
 
     /// Read loop for PTY output
