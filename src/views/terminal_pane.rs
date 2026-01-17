@@ -1,5 +1,5 @@
 use crate::elements::terminal_element::{TerminalElement, SearchMatch, URLMatch};
-use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, SendTab, SendBacktab};
+use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, FocusNextTerminal, FocusPrevTerminal, SendTab, SendBacktab};
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -562,6 +562,40 @@ impl TerminalPane {
             });
         } else {
             log::debug!("Navigation {:?}: no target found (at boundary)", direction);
+        }
+    }
+
+    /// Handle sequential navigation to the next or previous pane
+    fn handle_sequential_navigation(&mut self, next: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let pane_map = get_pane_map();
+
+        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
+            Some(pane) => pane.clone(),
+            None => {
+                log::debug!("Sequential navigation: current pane not found in pane map");
+                return;
+            }
+        };
+
+        let target = if next {
+            pane_map.find_next_pane(&source)
+        } else {
+            pane_map.find_prev_pane(&source)
+        };
+
+        if let Some(target) = target {
+            log::debug!(
+                "Sequential navigation {}: from {:?} to {:?}",
+                if next { "next" } else { "prev" },
+                self.layout_path,
+                target.layout_path
+            );
+
+            self.workspace.update(cx, |ws, cx| {
+                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
+            });
+        } else {
+            log::debug!("Sequential navigation: no target found (only one pane)");
         }
     }
 
@@ -2049,6 +2083,12 @@ impl Render for TerminalPane {
             }))
             .on_action(cx.listener(|this, _: &FocusDown, window, cx| {
                 this.handle_navigation(NavigationDirection::Down, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
+                this.handle_sequential_navigation(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevTerminal, window, cx| {
+                this.handle_sequential_navigation(false, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
                 if let Some(ref terminal) = this.terminal {

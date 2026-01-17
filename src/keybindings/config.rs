@@ -488,6 +488,20 @@ impl KeybindingConfig {
             "FocusDown".to_string(),
             vec![KeybindingEntry::new("alt-down", None)],
         );
+        bindings.insert(
+            "FocusNextTerminal".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-]", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-tab", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "FocusPrevTerminal".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-[", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-shift-tab", Some("TerminalPane")),
+            ],
+        );
 
         Self {
             version: 1,

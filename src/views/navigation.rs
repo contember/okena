@@ -129,6 +129,42 @@ impl PaneMap {
     pub fn panes(&self) -> &[PaneBounds] {
         &self.panes
     }
+
+    /// Find the next pane in sequential order (cycles through all panes)
+    pub fn find_next_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
+        if self.panes.len() <= 1 {
+            return None;
+        }
+
+        // Find the current pane's index
+        let current_idx = self.panes.iter().position(|p| {
+            p.project_id == source.project_id && p.layout_path == source.layout_path
+        })?;
+
+        // Get the next pane (wrapping around)
+        let next_idx = (current_idx + 1) % self.panes.len();
+        self.panes.get(next_idx)
+    }
+
+    /// Find the previous pane in sequential order (cycles through all panes)
+    pub fn find_prev_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
+        if self.panes.len() <= 1 {
+            return None;
+        }
+
+        // Find the current pane's index
+        let current_idx = self.panes.iter().position(|p| {
+            p.project_id == source.project_id && p.layout_path == source.layout_path
+        })?;
+
+        // Get the previous pane (wrapping around)
+        let prev_idx = if current_idx == 0 {
+            self.panes.len() - 1
+        } else {
+            current_idx - 1
+        };
+        self.panes.get(prev_idx)
+    }
 }
 
 /// Calculate weighted distance favoring the navigation direction axis

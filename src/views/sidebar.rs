@@ -1,3 +1,4 @@
+use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
 use crate::theme::{theme, ThemeColors};
 use crate::views::root::TerminalsRegistry;
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
@@ -678,6 +679,61 @@ impl Sidebar {
             )
     }
 
+    fn render_keybindings_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        // Get the keybinding for ShowKeybindings action
+        let shortcut = get_config()
+            .bindings
+            .get("ShowKeybindings")
+            .and_then(|entries| entries.first())
+            .map(|e| format_keystroke(&e.keystroke))
+            .unwrap_or_else(|| "?".to_string());
+
+        div()
+            .id("keybindings-hint")
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .on_action(cx.listener(|_, _: &ShowKeybindings, _, _| {
+                // Action will be handled by parent
+            }))
+            .on_click(|_, _, cx| {
+                cx.dispatch_action(&ShowKeybindings);
+            })
+            .child(
+                svg()
+                    .path("icons/keyboard.svg")
+                    .size(px(14.0))
+                    .text_color(rgb(t.text_muted))
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(t.text_muted))
+                    .child("Shortcuts"),
+            )
+            .child(
+                div()
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .text_size(px(10.0))
+                    .font_family("monospace")
+                    .text_color(rgb(t.text_muted))
+                    .child(shortcut),
+            )
+    }
+
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
@@ -1230,6 +1286,7 @@ impl Render for Sidebar {
                             .map(|(i, p)| self.render_project_item(p, i, window, cx)),
                     ),
             )
+            .child(self.render_keybindings_hint(cx))
             .children(context_menu)
     }
 }
