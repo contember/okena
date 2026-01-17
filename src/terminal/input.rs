@@ -26,6 +26,13 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         return Some(b"\t".to_vec());
     }
 
+    // Handle Enter/Return before the key_char check because on macOS,
+    // Enter has a key_char but the InputHandler may not receive it correctly
+    match keystroke.key.as_str() {
+        "enter" | "return" | "kp_enter" => return Some(b"\r".to_vec()),
+        _ => {}
+    }
+
     // If the platform provides `key_char`, GPUI will also deliver it via the text-input
     // (InputHandler) path. To avoid double-sending characters, let the InputHandler
     // handle all text-producing keystrokes.
@@ -60,7 +67,6 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
 
     // Handle other special keys (with modifier support for some)
     match keystroke.key.as_str() {
-        "enter" | "return" | "kp_enter" => return Some(b"\r".to_vec()),
         "backspace" => return Some(b"\x7f".to_vec()),
         "escape" => return Some(b"\x1b".to_vec()),
         "home" => {
