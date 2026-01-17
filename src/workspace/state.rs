@@ -324,4 +324,24 @@ impl LayoutNode {
             }
         }
     }
+
+    /// Find the path to the first terminal in this layout subtree
+    pub fn find_first_terminal_path(&self) -> Vec<usize> {
+        self.find_first_terminal_path_recursive(vec![])
+    }
+
+    fn find_first_terminal_path_recursive(&self, current_path: Vec<usize>) -> Vec<usize> {
+        match self {
+            LayoutNode::Terminal { .. } => current_path,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                if let Some(first_child) = children.first() {
+                    let mut child_path = current_path;
+                    child_path.push(0);
+                    first_child.find_first_terminal_path_recursive(child_path)
+                } else {
+                    current_path
+                }
+            }
+        }
+    }
 }

@@ -453,9 +453,11 @@ impl TerminalPane {
             self.pty_manager.kill(id);
         }
 
-        // Remove from layout
+        // Remove from layout and focus the sibling (reverse of splitting)
+        let layout_path = self.layout_path.clone();
+        let project_id = self.project_id.clone();
         self.workspace.update(cx, |ws, cx| {
-            ws.close_terminal(&self.project_id, &self.layout_path, cx);
+            ws.close_terminal_and_focus_sibling(&project_id, &layout_path, cx);
         });
     }
 

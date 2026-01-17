@@ -167,6 +167,73 @@ impl Workspace {
         }
     }
 
+    /// Close a terminal and focus its sibling (reverse of splitting)
+    /// Focuses the previous sibling, or the next one if closing the first child
+    pub fn close_terminal_and_focus_sibling(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
+        if path.is_empty() {
+            // Closing root - just replace with empty terminal and focus it
+            self.close_terminal(project_id, path, cx);
+            self.set_focused_terminal(project_id.to_string(), vec![], cx);
+            return;
+        }
+
+        // Calculate the sibling to focus before closing
+        let focus_path = if let Some(project) = self.project(project_id) {
+            let parent_path = &path[..path.len() - 1];
+            let child_index = path[path.len() - 1];
+
+            if let Some(parent) = project.layout.get_at_path(parent_path) {
+                match parent {
+                    LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                        if children.len() <= 2 {
+                            // Parent will dissolve - sibling moves to parent_path
+                            let sibling_index = if child_index == 0 { 1 } else { 0 };
+                            if let Some(sibling) = children.get(sibling_index) {
+                                // Find first terminal within the sibling
+                                let relative_path = sibling.find_first_terminal_path();
+                                let mut full_path = parent_path.to_vec();
+                                full_path.extend(relative_path);
+                                Some(full_path)
+                            } else {
+                                Some(parent_path.to_vec())
+                            }
+                        } else {
+                            // Parent keeps multiple children
+                            // Focus previous sibling, or next if closing first
+                            let sibling_index = if child_index > 0 { child_index - 1 } else { 1 };
+                            if let Some(sibling) = children.get(sibling_index) {
+                                let relative_path = sibling.find_first_terminal_path();
+                                let mut full_path = parent_path.to_vec();
+                                full_path.push(sibling_index);
+                                full_path.extend(relative_path);
+                                // Adjust index if sibling comes after closed terminal
+                                if sibling_index > child_index {
+                                    full_path[parent_path.len()] -= 1;
+                                }
+                                Some(full_path)
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Close the terminal
+        self.close_terminal(project_id, path, cx);
+
+        // Focus the sibling
+        if let Some(focus_path) = focus_path {
+            self.set_focused_terminal(project_id.to_string(), focus_path, cx);
+        }
+    }
+
     /// Update split sizes at a path
     pub fn update_split_sizes(
         &mut self,
