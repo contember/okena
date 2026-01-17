@@ -387,6 +387,8 @@ impl Sidebar {
                 input.update(cx, |i, cx| i.set_value("", cx));
             }
             self.show_add_dialog = false;
+            // Exit modal mode to restore terminal focus
+            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
             cx.notify();
         }
     }
@@ -462,6 +464,12 @@ impl Sidebar {
                     .child("+")
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.show_add_dialog = !this.show_add_dialog;
+                        // Enter/exit modal mode to prevent terminal from stealing focus
+                        if this.show_add_dialog {
+                            this.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+                        } else {
+                            this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                        }
                         cx.notify();
                     })),
             )
@@ -657,6 +665,8 @@ impl Sidebar {
                                 if let Some(ref input) = this.path_input {
                                     input.update(cx, |i, cx| i.set_value("", cx));
                                 }
+                                // Exit modal mode to restore terminal focus
+                                this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
                                 cx.notify();
                             })),
                     )

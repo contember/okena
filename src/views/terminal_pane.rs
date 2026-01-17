@@ -1978,23 +1978,27 @@ impl Render for TerminalPane {
 
         // Check if this terminal should be focused based on workspace state
         // This enables focusing from the sidebar
-        // Skip if we're currently renaming or searching - don't steal focus from the input
-        if !self.is_renaming && !self.is_searching {
+        // Skip if we're currently renaming, searching, or a modal is open - don't steal focus from inputs
+        let is_modal = {
             let ws = self.workspace.read(cx);
-            if let Some(ref focused) = ws.focused_terminal {
-                if focused.project_id == self.project_id && focused.layout_path == self.layout_path {
-                    // This terminal should be focused
-                    if !focus_handle.is_focused(_window) {
-                        self.pending_focus = true;
+            let is_modal = ws.focus_manager.is_modal();
+            if !self.is_renaming && !self.is_searching && !is_modal {
+                if let Some(ref focused) = ws.focused_terminal {
+                    if focused.project_id == self.project_id && focused.layout_path == self.layout_path {
+                        // This terminal should be focused
+                        if !focus_handle.is_focused(_window) {
+                            self.pending_focus = true;
+                        }
                     }
                 }
             }
-        }
+            is_modal
+        };
 
         // If we just created/attached a terminal, focus it once on the next render.
         // (Do it here because we have access to the Window.)
-        // Skip if we're currently renaming or searching
-        if self.pending_focus && self.terminal.is_some() && !self.is_renaming && !self.is_searching {
+        // Skip if we're currently renaming, searching, or a modal is open
+        if self.pending_focus && self.terminal.is_some() && !self.is_renaming && !self.is_searching && !is_modal {
             self.pending_focus = false;
             _window.focus(&self.focus_handle, cx);
         }
