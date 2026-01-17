@@ -164,22 +164,28 @@ impl ProjectColumn {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .flex_shrink_0()
+                    .gap(px(6.0))
                     .text_size(px(10.0))
+                    .line_height(px(12.0))
                     // Branch name
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(4.0))
+                            .gap(px(3.0))
                             .child(
-                                div()
+                                svg()
+                                    .path("icons/git-branch.svg")
+                                    .size(px(10.0))
                                     .text_color(rgb(t.text_muted))
-                                    .child("\u{2387}") // ⎇ branch symbol
                             )
                             .child(
                                 div()
                                     .text_color(rgb(t.text_secondary))
+                                    .max_w(px(100.0))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
                                     .child(status.branch.clone().unwrap_or_default())
                             )
                     )
@@ -189,7 +195,7 @@ impl ProjectColumn {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
+                                .gap(px(3.0))
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_green))
@@ -235,22 +241,30 @@ impl ProjectColumn {
                 div()
                     .flex()
                     .flex_col()
+                    .gap(px(2.0))
+                    .overflow_hidden()
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
+                            .line_height(px(14.0))
+                            .text_ellipsis()
                             .child(project.name.clone()),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(12.0))
+                            .gap(px(8.0))
                             .child(
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(t.text_muted))
+                                    .line_height(px(12.0))
+                                    .max_w(px(180.0))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
                                     .child(project.path.clone()),
                             )
                             .child(self.render_git_status(&project.path, t)),
