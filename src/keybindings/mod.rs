@@ -13,6 +13,8 @@ pub use config::{
 actions!(
     term_manager,
     [
+        Quit,
+        About,
         ToggleSidebar,
         ToggleSidebarAutoHide,
         ExitFullscreen,
