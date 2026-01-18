@@ -13,9 +13,12 @@ pub use config::{
 actions!(
     term_manager,
     [
+        Quit,
+        About,
         ToggleSidebar,
         ToggleSidebarAutoHide,
         ExitFullscreen,
+        ToggleFullscreen,
         FullscreenNextTerminal,
         FullscreenPrevTerminal,
         SplitVertical,
@@ -30,6 +33,7 @@ actions!(
         FocusUp,
         FocusDown,
         NewProject,
+        CreateWorktree,
         ClearFocus,
         Copy,
         Paste,
@@ -42,6 +46,9 @@ actions!(
         ShowKeybindings,
         ShowSessionManager,
         ShowThemeSelector,
+        ShowCommandPalette,
+        ShowSettings,
+        OpenSettingsFile,
         SendTab,
         SendBacktab,
     ]
@@ -147,6 +154,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
         "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
         "ExitFullscreen" => Some(KeyBinding::new(keystroke, ExitFullscreen, context)),
+        "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),
         "FullscreenNextTerminal" => Some(KeyBinding::new(keystroke, FullscreenNextTerminal, context)),
         "FullscreenPrevTerminal" => Some(KeyBinding::new(keystroke, FullscreenPrevTerminal, context)),
         "SplitVertical" => Some(KeyBinding::new(keystroke, SplitVertical, context)),
@@ -161,6 +169,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "FocusUp" => Some(KeyBinding::new(keystroke, FocusUp, context)),
         "FocusDown" => Some(KeyBinding::new(keystroke, FocusDown, context)),
         "NewProject" => Some(KeyBinding::new(keystroke, NewProject, context)),
+        "CreateWorktree" => Some(KeyBinding::new(keystroke, CreateWorktree, context)),
         "ClearFocus" => Some(KeyBinding::new(keystroke, ClearFocus, context)),
         "Copy" => Some(KeyBinding::new(keystroke, Copy, context)),
         "Paste" => Some(KeyBinding::new(keystroke, Paste, context)),
@@ -173,6 +182,9 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
+        "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
+        "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
+        "OpenSettingsFile" => Some(KeyBinding::new(keystroke, OpenSettingsFile, context)),
         "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);

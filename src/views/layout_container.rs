@@ -222,14 +222,13 @@ impl LayoutContainer {
         div()
             .size_full()
             .min_h_0()
-            .overflow_hidden()
             .child(self.terminal_pane.clone().unwrap())
     }
 
     fn render_split(
         &mut self,
         direction: SplitDirection,
-        sizes: &[f32],
+        _sizes: &[f32],
         children: &[LayoutNode],
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -252,7 +251,7 @@ impl LayoutContainer {
         // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
 
-        // Check which children are hidden (minimized or detached) and calculate effective sizes
+        // Check which children are hidden (minimized or detached)
         let mut hidden_flags: Vec<bool> = Vec::new();
         for child in children {
             let is_hidden = match child {
@@ -261,14 +260,6 @@ impl LayoutContainer {
             };
             hidden_flags.push(is_hidden);
         }
-
-        // Calculate total size of visible (non-hidden) children
-        let total_visible_size: f32 = sizes
-            .iter()
-            .zip(hidden_flags.iter())
-            .filter(|(_, hidden)| !**hidden)
-            .map(|(size, _)| size)
-            .sum();
 
         // Build interleaved children and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
@@ -279,19 +270,11 @@ impl LayoutContainer {
             child_path.push(i);
 
             let is_hidden = hidden_flags[i];
-            let original_size = sizes.get(i).copied().unwrap_or(50.0);
 
             // Skip hidden (minimized or detached) children entirely - they get 0 space
             if is_hidden {
                 continue;
             }
-
-            // Redistribute size: give this child proportionally more space
-            let effective_size = if total_visible_size > 0.0 {
-                (original_size / total_visible_size) * 100.0
-            } else {
-                100.0 / (num_children as f32)
-            };
 
             let container = self
                 .child_containers
@@ -324,10 +307,10 @@ impl LayoutContainer {
             }
 
             let child_element = div()
-                // Use flex-basis for split sizing to avoid overlapping hitboxes.
-                .flex_none()
-                .when(is_horizontal, |d| d.flex_basis(relative(effective_size / 100.0)).w_full())
-                .when(!is_horizontal, |d| d.flex_basis(relative(effective_size / 100.0)).h_full())
+                // Use flex_1 for equal sizing (accounts for divider space automatically)
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
                 .child(container)
                 .into_any_element();
 
@@ -354,7 +337,6 @@ impl LayoutContainer {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .overflow_hidden()
             .children(elements)
     }
 

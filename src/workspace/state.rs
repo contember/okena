@@ -13,6 +13,15 @@ pub struct WorkspaceData {
     pub project_widths: HashMap<String, f32>,
 }
 
+/// Metadata for worktree projects
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorktreeMetadata {
+    /// ID of the main repo project
+    pub parent_project_id: String,
+    /// Path to main repository
+    pub main_repo_path: String,
+}
+
 /// A single project with its layout tree
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectData {
@@ -25,6 +34,9 @@ pub struct ProjectData {
     pub terminal_names: HashMap<String, String>,
     #[serde(default)]
     pub hidden_terminals: HashMap<String, bool>,
+    /// Optional worktree metadata (only set for worktree projects)
+    #[serde(default)]
+    pub worktree_info: Option<WorktreeMetadata>,
 }
 
 /// Recursive layout tree node
@@ -79,6 +91,20 @@ pub struct FocusedTerminalState {
     pub layout_path: Vec<usize>,
 }
 
+/// Request to show worktree dialog
+#[derive(Clone, Debug)]
+pub struct WorktreeDialogRequest {
+    pub project_id: String,
+    pub project_path: String,
+}
+
+/// Request to show context menu at a position
+#[derive(Clone, Debug)]
+pub struct ContextMenuRequest {
+    pub project_id: String,
+    pub position: gpui::Point<gpui::Pixels>,
+}
+
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
@@ -91,6 +117,10 @@ pub struct Workspace {
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
+    /// Pending request to show worktree dialog
+    pub worktree_dialog_request: Option<WorktreeDialogRequest>,
+    /// Pending request to show context menu
+    pub context_menu_request: Option<ContextMenuRequest>,
 }
 
 impl Workspace {
@@ -102,6 +132,8 @@ impl Workspace {
             focused_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
+            worktree_dialog_request: None,
+            context_menu_request: None,
         }
     }
 
@@ -322,6 +354,47 @@ impl LayoutNode {
                     child.collect_detached_recursive(result, child_path);
                 }
             }
+        }
+    }
+
+    /// Find the path to the first terminal in this layout subtree
+    pub fn find_first_terminal_path(&self) -> Vec<usize> {
+        self.find_first_terminal_path_recursive(vec![])
+    }
+
+    fn find_first_terminal_path_recursive(&self, current_path: Vec<usize>) -> Vec<usize> {
+        match self {
+            LayoutNode::Terminal { .. } => current_path,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                if let Some(first_child) = children.first() {
+                    let mut child_path = current_path;
+                    child_path.push(0);
+                    first_child.find_first_terminal_path_recursive(child_path)
+                } else {
+                    current_path
+                }
+            }
+        }
+    }
+
+    /// Clone the layout structure but clear all terminal IDs
+    /// Used when creating worktree projects to duplicate layout with fresh terminals
+    pub fn clone_structure(&self) -> Self {
+        match self {
+            LayoutNode::Terminal { .. } => LayoutNode::Terminal {
+                terminal_id: None,
+                minimized: false,
+                detached: false,
+            },
+            LayoutNode::Split { direction, sizes, children } => LayoutNode::Split {
+                direction: *direction,
+                sizes: sizes.clone(),
+                children: children.iter().map(|c| c.clone_structure()).collect(),
+            },
+            LayoutNode::Tabs { children, active_tab } => LayoutNode::Tabs {
+                children: children.iter().map(|c| c.clone_structure()).collect(),
+                active_tab: *active_tab,
+            },
         }
     }
 }

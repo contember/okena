@@ -7,7 +7,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::grid::{Scroll, Dimensions};
-use async_channel::{Sender, Receiver, unbounded};
+use async_channel::{Sender, unbounded};
 use parking_lot::Mutex;
 use regex::Regex;
 use std::sync::Arc;
@@ -102,8 +102,6 @@ pub struct Terminal {
     pending_pty_resize: Mutex<Option<(u16, u16)>>,
     /// Channel for notifying subscribers when terminal content changes (event-driven, no polling)
     dirty_notify: Sender<()>,
-    /// Receiver for dirty notifications - subscribers can clone this to listen for changes
-    dirty_receiver: Receiver<()>,
 }
 
 impl Terminal {
@@ -123,7 +121,7 @@ impl Terminal {
         let term = Term::new(config, &term_size, event_listener);
 
         // Create unbounded channel for dirty notifications (don't drop any updates)
-        let (dirty_notify, dirty_receiver) = unbounded();
+        let (dirty_notify, _) = unbounded();
 
         Self {
             term: Arc::new(Mutex::new(term)),
@@ -139,7 +137,6 @@ impl Terminal {
             last_pty_resize: Mutex::new(std::time::Instant::now()),
             pending_pty_resize: Mutex::new(None),
             dirty_notify,
-            dirty_receiver,
         }
     }
 
@@ -162,19 +159,27 @@ impl Terminal {
         self.dirty.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Get a receiver for dirty notifications (for event-driven updates instead of polling)
-    pub fn subscribe_dirty(&self) -> Receiver<()> {
-        self.dirty_receiver.clone()
-    }
-
     /// Send input to the PTY
+    /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
+        self.scroll_to_bottom();
         self.pty_manager.send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send raw bytes to the PTY
+    /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
+        self.scroll_to_bottom();
         self.pty_manager.send_input(&self.terminal_id, data);
+    }
+
+    /// Scroll to bottom (display_offset = 0)
+    pub fn scroll_to_bottom(&self) {
+        let mut term = self.term.lock();
+        let current = term.grid().display_offset();
+        if current > 0 {
+            term.scroll_display(Scroll::Delta(-(current as i32)));
+        }
     }
 
     /// Resize the terminal with debounced PTY resize
@@ -597,12 +602,6 @@ impl Terminal {
         // Otherwise check if the terminal itself requested mouse mode
         let term = self.term.lock();
         term.mode().contains(TermMode::MOUSE_MODE)
-    }
-
-    /// Check if terminal uses SGR mouse encoding
-    pub fn is_sgr_mouse(&self) -> bool {
-        let term = self.term.lock();
-        term.mode().contains(TermMode::SGR_MOUSE)
     }
 
     /// Send scroll event to PTY

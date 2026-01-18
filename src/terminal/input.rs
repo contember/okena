@@ -5,8 +5,19 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
     let keystroke = &event.keystroke;
     let mods = &keystroke.modifiers;
 
+    // Debug: log all key events to help diagnose input issues
+    log::debug!(
+        "key_to_bytes: key={:?}, key_char={:?}, mods=(ctrl={}, shift={}, alt={}, platform={})",
+        keystroke.key,
+        keystroke.key_char,
+        mods.control,
+        mods.shift,
+        mods.alt,
+        mods.platform
+    );
+
     // Handle Ctrl+key combinations for letters (produces control characters)
-    if mods.control && !mods.shift && !mods.alt {
+    if mods.control && !mods.shift && !mods.alt && !mods.platform {
         let key = keystroke.key.as_str();
         if key.len() == 1 {
             let c = key.chars().next().unwrap();
@@ -26,11 +37,55 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         return Some(b"\t".to_vec());
     }
 
-    // If the platform provides `key_char`, GPUI will also deliver it via the text-input
-    // (InputHandler) path. To avoid double-sending characters, let the InputHandler
-    // handle all text-producing keystrokes.
-    if keystroke.key_char.is_some() {
-        return None;
+    // Handle Enter/Return with modifiers
+    // Shift+Enter sends literal newline (for multi-line input in apps like Claude Code)
+    // Regular Enter sends carriage return (submit)
+    match keystroke.key.as_str() {
+        "enter" | "return" | "kp_enter" => {
+            if mods.shift {
+                return Some(b"\n".to_vec());
+            }
+            return Some(b"\r".to_vec());
+        }
+        _ => {}
+    }
+
+    // macOS-specific: Cmd+Arrow for line navigation
+    // Cmd+Left = Ctrl+A (start of line), Cmd+Right = Ctrl+E (end of line)
+    #[cfg(target_os = "macos")]
+    if mods.platform && !mods.alt && !mods.control {
+        match keystroke.key.as_str() {
+            "left" => {
+                log::debug!("macOS Cmd+Left -> Ctrl+A (0x01)");
+                return Some(vec![0x01]);
+            }
+            "right" => {
+                log::debug!("macOS Cmd+Right -> Ctrl+E (0x05)");
+                return Some(vec![0x05]);
+            }
+            "up" => return Some(b"\x1b[1;5A".to_vec()),
+            "down" => return Some(b"\x1b[1;5B".to_vec()),
+            "backspace" => return Some(vec![0x15]),
+            _ => {}
+        }
+    }
+
+    // macOS-specific: Option+Arrow for word navigation (readline sequences)
+    // Option+Left = ESC b (word back), Option+Right = ESC f (word forward)
+    #[cfg(target_os = "macos")]
+    if mods.alt && !mods.platform && !mods.control {
+        match keystroke.key.as_str() {
+            "left" => {
+                log::debug!("macOS Option+Left -> ESC b");
+                return Some(b"\x1bb".to_vec());
+            }
+            "right" => {
+                log::debug!("macOS Option+Right -> ESC f");
+                return Some(b"\x1bf".to_vec());
+            }
+            "backspace" => return Some(vec![0x17]),
+            _ => {}
+        }
     }
 
     // Calculate modifier code for CSI sequences
@@ -41,6 +96,7 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         + (if mods.control { 4 } else { 0 });
 
     // Handle arrow keys with modifiers (CSI 1;mod X format)
+    // On non-macOS, or when macOS handlers above didn't match
     match keystroke.key.as_str() {
         "up" | "down" | "right" | "left" => {
             let arrow_char = match keystroke.key.as_str() {
@@ -58,9 +114,15 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         _ => {}
     }
 
+    // If the platform provides `key_char`, GPUI will also deliver it via the text-input
+    // (InputHandler) path. To avoid double-sending characters, let the InputHandler
+    // handle all text-producing keystrokes.
+    if keystroke.key_char.is_some() {
+        return None;
+    }
+
     // Handle other special keys (with modifier support for some)
     match keystroke.key.as_str() {
-        "enter" | "return" | "kp_enter" => return Some(b"\r".to_vec()),
         "backspace" => return Some(b"\x7f".to_vec()),
         "escape" => return Some(b"\x1b".to_vec()),
         "home" => {

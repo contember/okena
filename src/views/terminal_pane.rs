@@ -1,5 +1,6 @@
 use crate::elements::terminal_element::{TerminalElement, SearchMatch, URLMatch};
-use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, SendTab, SendBacktab};
+use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, FocusNextTerminal, FocusPrevTerminal, SendTab, SendBacktab, ToggleFullscreen};
+use crate::settings::settings;
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -9,7 +10,7 @@ use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use gpui_component::input::{Input, InputState};
+use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ pub struct TerminalPane {
     context_menu_position: Option<Point<Pixels>>,
     /// Rename state
     is_renaming: bool,
-    rename_input: Option<Entity<InputState>>,
+    rename_input: Option<Entity<SimpleInputState>>,
     /// Last click time for double-click detection
     last_header_click: Option<std::time::Instant>,
     /// Last click time and position for terminal double/triple click detection
@@ -40,7 +41,7 @@ pub struct TerminalPane {
     terminal_click_count: u8,
     /// Search state
     is_searching: bool,
-    search_input: Option<Entity<InputState>>,
+    search_input: Option<Entity<SimpleInputState>>,
     search_matches: Arc<Vec<SearchMatch>>,
     current_match_index: Option<usize>,
     search_case_sensitive: bool,
@@ -56,6 +57,8 @@ pub struct TerminalPane {
     /// URL detection state
     url_matches: Vec<URLMatch>,
     hovered_url_index: Option<usize>,
+    /// Cursor blink state
+    cursor_visible: bool,
 }
 
 impl TerminalPane {
@@ -107,6 +110,7 @@ impl TerminalPane {
             scrollbar_visible: false,
             url_matches: Vec::new(),
             hovered_url_index: None,
+            cursor_visible: true,
         };
 
         // If we have an existing terminal ID, create terminal immediately
@@ -117,6 +121,9 @@ impl TerminalPane {
 
         // Start dirty check loop for this terminal pane
         pane.start_dirty_check_loop(cx);
+
+        // Start cursor blink loop
+        pane.start_cursor_blink_loop(cx);
 
         pane
     }
@@ -147,6 +154,35 @@ impl TerminalPane {
                     }
                     Ok(false) => {}
                     Err(_) => break, // Entity was dropped
+                }
+            }
+        }).detach();
+    }
+
+    /// Start a loop that blinks the cursor
+    fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
+        use std::time::Duration;
+
+        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+            // Blink every 500ms
+            let interval = Duration::from_millis(500);
+            loop {
+                smol::Timer::after(interval).await;
+
+                let result = this.update(cx, |pane, cx| {
+                    // Only blink if cursor_blink setting is enabled
+                    if settings(cx).cursor_blink {
+                        pane.cursor_visible = !pane.cursor_visible;
+                        cx.notify();
+                    } else if !pane.cursor_visible {
+                        // If blink is disabled but cursor is hidden, show it
+                        pane.cursor_visible = true;
+                        cx.notify();
+                    }
+                });
+
+                if result.is_err() {
+                    break; // Entity was dropped
                 }
             }
         }).detach();
@@ -220,11 +256,16 @@ impl TerminalPane {
 
     fn start_rename(&mut self, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.is_renaming = true;
-        self.rename_input = Some(cx.new(|cx| {
-            InputState::new(window, cx)
+        let input = cx.new(|cx| {
+            SimpleInputState::new(cx)
                 .placeholder("Terminal name...")
                 .default_value(&current_name)
-        }));
+        });
+        // Focus the input
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        self.rename_input = Some(input);
         // Clear focused terminal to prevent stealing focus back
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -265,12 +306,14 @@ impl TerminalPane {
     fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_searching = true;
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            SimpleInputState::new(cx)
                 .placeholder("Search...")
+                .icon("icons/search.svg")
         });
         // Focus the input
-        let focus_handle = input.read(cx).focus_handle(cx);
-        window.focus(&focus_handle, cx);
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
         self.search_input = Some(input);
         self.search_matches = Arc::new(Vec::new());
         self.current_match_index = None;
@@ -453,9 +496,11 @@ impl TerminalPane {
             self.pty_manager.kill(id);
         }
 
-        // Remove from layout
+        // Remove from layout and focus the sibling (reverse of splitting)
+        let layout_path = self.layout_path.clone();
+        let project_id = self.project_id.clone();
         self.workspace.update(cx, |ws, cx| {
-            ws.close_terminal(&self.project_id, &self.layout_path, cx);
+            ws.close_terminal_and_focus_sibling(&project_id, &layout_path, cx);
         });
     }
 
@@ -533,6 +578,48 @@ impl TerminalPane {
         }
     }
 
+    /// Handle file drop (drag & drop from external sources)
+    /// Pastes shell-escaped file paths, similar to how Ghostty handles drops
+    fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
+        let Some(ref terminal) = self.terminal else {
+            log::warn!("No terminal for file drop");
+            return;
+        };
+
+        for path in paths.paths() {
+            log::info!("File dropped: {}", path.display());
+
+            // Shell-escape the path (escape spaces and special characters with backslashes)
+            // This matches Ghostty's behavior for drag & drop
+            let escaped_path = Self::shell_escape_path(path);
+
+            // Add space after to make it easier to continue typing
+            terminal.send_input(&format!("{} ", escaped_path));
+        }
+    }
+
+    /// Shell-escape a path for safe pasting into terminal
+    /// Escapes spaces and special shell characters with backslashes
+    fn shell_escape_path(path: &std::path::Path) -> String {
+        let path_str = path.to_string_lossy();
+        let mut escaped = String::with_capacity(path_str.len() * 2);
+
+        for c in path_str.chars() {
+            match c {
+                // Characters that need escaping in shell
+                ' ' | '(' | ')' | '[' | ']' | '{' | '}' |
+                '\'' | '"' | '`' | '$' | '&' | '|' | ';' |
+                '<' | '>' | '*' | '?' | '!' | '#' | '~' | '\\' => {
+                    escaped.push('\\');
+                    escaped.push(c);
+                }
+                _ => escaped.push(c),
+            }
+        }
+
+        escaped
+    }
+
     /// Handle directional navigation to an adjacent pane
     fn handle_navigation(&mut self, direction: NavigationDirection, _window: &mut Window, cx: &mut Context<Self>) {
         // Get the pane map
@@ -562,6 +649,40 @@ impl TerminalPane {
             });
         } else {
             log::debug!("Navigation {:?}: no target found (at boundary)", direction);
+        }
+    }
+
+    /// Handle sequential navigation to the next or previous pane
+    fn handle_sequential_navigation(&mut self, next: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let pane_map = get_pane_map();
+
+        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
+            Some(pane) => pane.clone(),
+            None => {
+                log::debug!("Sequential navigation: current pane not found in pane map");
+                return;
+            }
+        };
+
+        let target = if next {
+            pane_map.find_next_pane(&source)
+        } else {
+            pane_map.find_prev_pane(&source)
+        };
+
+        if let Some(target) = target {
+            log::debug!(
+                "Sequential navigation {}: from {:?} to {:?}",
+                if next { "next" } else { "prev" },
+                self.layout_path,
+                target.layout_path
+            );
+
+            self.workspace.update(cx, |ws, cx| {
+                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
+            });
+        } else {
+            log::debug!("Sequential navigation: no target found (only one pane)");
         }
     }
 
@@ -1181,8 +1302,6 @@ impl TerminalPane {
             .items_center()
             .gap(px(8.0))
             .bg(rgb(t.bg_header))
-            .border_t_1()
-            .border_color(rgb(t.border))
             .child(
                 if let Some(ref input) = self.search_input {
                     div()
@@ -1190,7 +1309,11 @@ impl TerminalPane {
                         .flex_1()
                         .min_w(px(100.0))
                         .max_w(px(300.0))
-                        .child(Input::new(input))
+                        .bg(rgb(t.bg_secondary))
+                        .border_1()
+                        .border_color(rgb(t.border_active))
+                        .rounded(px(4.0))
+                        .child(SimpleInput::new(input).text_size(px(12.0)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
@@ -1400,8 +1523,6 @@ impl TerminalPane {
             .min_w_0()
             .overflow_hidden()
             .bg(rgb(t.bg_header))
-            .border_b_1()
-            .border_color(rgb(t.border))
             .child(
                 // Terminal name (or input if renaming)
                 if self.is_renaming {
@@ -1410,7 +1531,11 @@ impl TerminalPane {
                             .id("terminal-rename-input")
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(input))
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border_active))
+                            .rounded(px(4.0))
+                            .child(SimpleInput::new(input).text_size(px(12.0)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
@@ -1454,7 +1579,6 @@ impl TerminalPane {
     /// Render the scrollbar overlay
     fn render_scrollbar(&mut self, id_suffix: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let scrollbar_width = 10.0;
         let scrollbar_dragging = self.scrollbar_dragging;
 
         // Determine visibility and opacity
@@ -1482,97 +1606,85 @@ impl TerminalPane {
         // Opacity for auto-hide effect
         let opacity = if should_show { 1.0 } else { 0.0 };
 
+        // Clone terminal for canvas closure
+        let terminal_for_canvas = self.terminal.clone();
+
+        // Scrollbar with absolute positioning (overlay on terminal content)
         div()
             .id(format!("scrollbar-track-{}", id_suffix))
-            .group("scrollbar")
             .absolute()
-            .right_0()
             .top_0()
             .bottom_0()
-            .w(px(scrollbar_width))
+            .right_0()
+            .w(px(10.0))
             .opacity(opacity)
-            // Scrollbar track styling
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.last_scroll_activity = std::time::Instant::now();
+                this.scrollbar_visible = true;
+                if let Some(bounds) = this.element_bounds {
+                    let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+                    let content_height = f32::from(bounds.size.height);
+                    if let Some((thumb_y, thumb_height, _)) = this.calculate_scrollbar_geometry(content_height) {
+                        if relative_y >= thumb_y && relative_y <= thumb_height + thumb_y {
+                            this.start_scrollbar_drag(f32::from(event.position.y), cx);
+                        } else {
+                            this.handle_scrollbar_click(relative_y, content_height, cx);
+                        }
+                    }
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrollbar_dragging {
+                    if let Some(bounds) = this.element_bounds {
+                        let content_height = f32::from(bounds.size.height);
+                        this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
+                    }
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.end_scrollbar_drag(cx);
+            }))
+            // Canvas-based thumb rendering
             .child(
-                div()
-                    .id(format!("scrollbar-thumb-container-{}", id_suffix))
-                    .size_full()
-                    .relative()
-                    .cursor(CursorStyle::Arrow)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        // Update scroll activity for auto-hide
-                        this.last_scroll_activity = std::time::Instant::now();
-                        this.scrollbar_visible = true;
-                        // Get content bounds for calculations
-                        if let Some(bounds) = this.element_bounds {
-                            let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
-                            let content_height = f32::from(bounds.size.height);
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |bounds: Bounds<Pixels>, _state: (), window: &mut Window, _cx: &mut App| {
+                        if let Some(ref terminal) = terminal_for_canvas {
+                            let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
+                            if total_lines > visible_lines {
+                                let track_height = f32::from(bounds.size.height);
+                                let scrollable_lines = total_lines - visible_lines;
+                                let thumb_height = (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+                                let available_scroll_space = track_height - thumb_height;
+                                let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
+                                let thumb_y = (1.0 - scroll_ratio) * available_scroll_space;
 
-                            // Check if click is on thumb or track
-                            if let Some((thumb_y, thumb_height, _)) = this.calculate_scrollbar_geometry(content_height) {
-                                if relative_y >= thumb_y && relative_y <= thumb_y + thumb_height {
-                                    // Click on thumb - start drag
-                                    this.start_scrollbar_drag(f32::from(event.position.y), cx);
+                                let thumb_color = if scrollbar_dragging {
+                                    scrollbar_hover_color
                                 } else {
-                                    // Click on track - jump to position
-                                    this.handle_scrollbar_click(relative_y, content_height, cx);
-                                }
+                                    scrollbar_color
+                                };
+
+                                // Paint thumb using bounds origin (absolute coordinates)
+                                let thumb_bounds = Bounds {
+                                    origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
+                                    size: size(px(6.0), px(thumb_height)),
+                                };
+                                window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(px(3.0)));
                             }
                         }
-                    }))
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                        if this.scrollbar_dragging {
-                            if let Some(bounds) = this.element_bounds {
-                                let content_height = f32::from(bounds.size.height);
-                                this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
-                            }
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                        this.end_scrollbar_drag(cx);
-                    }))
-                    // Render thumb using canvas
-                    .child({
-                        let entity = cx.entity().downgrade();
-                        canvas(
-                            move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
-                                // Prepaint: calculate geometry and return state for paint
-                                if let Some(entity) = entity.upgrade() {
-                                    entity.update(cx, |this, _cx| {
-                                        let content_height = f32::from(bounds.size.height);
-                                        this.calculate_scrollbar_geometry(content_height).map(|(thumb_y, thumb_height, _)| {
-                                            let color = if this.scrollbar_dragging {
-                                                scrollbar_hover_color
-                                            } else {
-                                                scrollbar_color
-                                            };
-                                            (thumb_y, thumb_height, color)
-                                        })
-                                    })
-                                } else {
-                                    None
-                                }
-                            },
-                            move |bounds: Bounds<Pixels>, state: Option<(f32, f32, Rgba)>, window: &mut Window, _cx: &mut App| {
-                                // Paint: use the pre-calculated state to paint the thumb
-                                if let Some((thumb_y, thumb_height, color)) = state {
-                                    let thumb_bounds = Bounds {
-                                        origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
-                                        size: size(px(6.0), px(thumb_height)),
-                                    };
-                                    window.paint_quad(fill(thumb_bounds, color).corner_radii(px(3.0)));
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                    })
+                    },
+                )
+                .size_full()
             )
             .into_any_element()
     }
 
-    fn render_terminal_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_terminal_content(&mut self, is_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let term_bg = if is_focused { t.term_background } else { t.term_background_unfocused };
         // When minimized or detached, don't render terminal content
         // (detached terminals are hidden entirely in layout, this is just a safety check)
         if self.minimized || self.detached {
@@ -1618,7 +1730,6 @@ impl TerminalPane {
                 .id(format!("terminal-content-wrapper-{}", id_suffix))
                 .size_full()
                 .min_h_0()
-                .overflow_hidden()
                 .relative()
                 .bg(rgb(t.bg_primary))
                 .cursor(CursorStyle::Arrow)
@@ -1671,10 +1782,18 @@ impl TerminalPane {
                     .size_full(),
                 )
                 .child(
-                    TerminalElement::new(terminal_clone, focus_handle.clone())
-                        .with_search(self.search_matches.clone(), self.current_match_index)
-                        .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
+                    div()
+                        .size_full()
+                        .p(px(4.0))
+                        .bg(rgb(term_bg))
+                        .child(
+                            TerminalElement::new(terminal_clone, focus_handle.clone())
+                                .with_search(self.search_matches.clone(), self.current_match_index)
+                                .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
+                                .with_cursor_visible(self.cursor_visible)
+                        )
                 )
+                // Scrollbar overlay
                 .child(scrollbar)
                 .children(context_menu)
                 .into_any_element()
@@ -1942,23 +2061,27 @@ impl Render for TerminalPane {
 
         // Check if this terminal should be focused based on workspace state
         // This enables focusing from the sidebar
-        // Skip if we're currently renaming or searching - don't steal focus from the input
-        if !self.is_renaming && !self.is_searching {
+        // Skip if we're currently renaming, searching, or a modal is open - don't steal focus from inputs
+        let is_modal = {
             let ws = self.workspace.read(cx);
-            if let Some(ref focused) = ws.focused_terminal {
-                if focused.project_id == self.project_id && focused.layout_path == self.layout_path {
-                    // This terminal should be focused
-                    if !focus_handle.is_focused(_window) {
-                        self.pending_focus = true;
+            let is_modal = ws.focus_manager.is_modal();
+            if !self.is_renaming && !self.is_searching && !is_modal {
+                if let Some(ref focused) = ws.focused_terminal {
+                    if focused.project_id == self.project_id && focused.layout_path == self.layout_path {
+                        // This terminal should be focused
+                        if !focus_handle.is_focused(_window) {
+                            self.pending_focus = true;
+                        }
                     }
                 }
             }
-        }
+            is_modal
+        };
 
         // If we just created/attached a terminal, focus it once on the next render.
         // (Do it here because we have access to the Window.)
-        // Skip if we're currently renaming or searching
-        if self.pending_focus && self.terminal.is_some() && !self.is_renaming && !self.is_searching {
+        // Skip if we're currently renaming, searching, or a modal is open
+        if self.pending_focus && self.terminal.is_some() && !self.is_renaming && !self.is_searching && !is_modal {
             self.pending_focus = false;
             _window.focus(&self.focus_handle, cx);
         }
@@ -1976,13 +2099,15 @@ impl Render for TerminalPane {
             }
         }
 
-        // Determine border color based on focus and bell state
-        let border_color = if is_focused {
+        // Get show_focused_border setting from global settings
+        let show_focused_border = settings(cx).show_focused_border;
+
+        // Only show border when focused (if setting enabled) or has bell
+        let show_border = (is_focused && show_focused_border) || has_bell;
+        let border_color = if is_focused && show_focused_border {
             rgb(t.border_focused)
-        } else if has_bell {
-            rgb(t.border_bell)
         } else {
-            rgb(t.border)
+            rgb(t.border_bell)
         };
 
         // Check if terminal is in a tab group (header will be hidden)
@@ -2050,6 +2175,12 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &FocusDown, window, cx| {
                 this.handle_navigation(NavigationDirection::Down, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
+                this.handle_sequential_navigation(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevTerminal, window, cx| {
+                this.handle_sequential_navigation(false, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_bytes(b"\t");
@@ -2058,6 +2189,17 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SendBacktab, _window, _cx| {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_bytes(b"\x1b[Z");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
+                // Toggle fullscreen: if already fullscreen, exit; otherwise enter fullscreen
+                let is_fullscreen = this.workspace.read(cx).fullscreen_terminal.is_some();
+                if is_fullscreen {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.exit_fullscreen(cx);
+                    });
+                } else {
+                    this.handle_fullscreen(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
@@ -2072,6 +2214,11 @@ impl Render for TerminalPane {
                     ws.set_focused_terminal(this.project_id.clone(), this.layout_path.clone(), cx);
                 });
             }))
+            // Handle file drops (drag & drop from external sources)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                log::info!("Files dropped onto terminal pane");
+                this.handle_file_drop(paths, cx);
+            }))
             .flex()
             .flex_col()
             .size_full()
@@ -2079,8 +2226,7 @@ impl Render for TerminalPane {
             .min_w_0()
             .overflow_hidden()
             .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(border_color)
+            .when(show_border, |d| d.border_1().border_color(border_color))
             .group("terminal-pane")
             .when(!in_tab_group, |el| el.child(self.render_header(cx)))
             .child(
@@ -2089,7 +2235,7 @@ impl Render for TerminalPane {
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(self.render_terminal_content(cx))
+                    .child(self.render_terminal_content(is_focused, cx))
             )
             .when(self.is_searching, |el: Stateful<Div>| {
                 el.child(self.render_search_bar(cx))

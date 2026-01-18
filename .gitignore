@@ -14,3 +14,5 @@ Thumbs.db
 
 # Project specific
 .ralph-tui/
+
+dist

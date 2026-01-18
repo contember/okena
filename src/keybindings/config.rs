@@ -107,6 +107,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
+        "ToggleFullscreen",
+        ActionDescription {
+            name: "Toggle Fullscreen",
+            description: "Toggle fullscreen mode for focused terminal",
+            category: "Fullscreen",
+        },
+    );
+    map.insert(
         "FullscreenNextTerminal",
         ActionDescription {
             name: "Next Terminal",
@@ -289,6 +297,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
+        "CreateWorktree",
+        ActionDescription {
+            name: "Create Worktree",
+            description: "Create a git worktree from the focused project",
+            category: "Project",
+        },
+    );
+    map.insert(
         "ShowKeybindings",
         ActionDescription {
             name: "Show Keybindings",
@@ -309,6 +325,30 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         ActionDescription {
             name: "Theme Selector",
             description: "Open theme selector to change appearance",
+            category: "Global",
+        },
+    );
+    map.insert(
+        "ShowCommandPalette",
+        ActionDescription {
+            name: "Command Palette",
+            description: "Open command palette for quick access to all commands",
+            category: "Global",
+        },
+    );
+    map.insert(
+        "ShowSettings",
+        ActionDescription {
+            name: "Settings",
+            description: "Open settings panel",
+            category: "Global",
+        },
+    );
+    map.insert(
+        "OpenSettingsFile",
+        ActionDescription {
+            name: "Open Settings File",
+            description: "Open settings JSON file in default editor",
             category: "Global",
         },
     );
@@ -384,11 +424,39 @@ impl KeybindingConfig {
                 KeybindingEntry::new("ctrl-k ctrl-t", None),
             ],
         );
+        bindings.insert(
+            "ShowCommandPalette".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-p", None),
+                KeybindingEntry::new("ctrl-shift-p", None),
+            ],
+        );
+        bindings.insert(
+            "ShowSettings".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-,", None),
+                KeybindingEntry::new("ctrl-,", None),
+            ],
+        );
+        bindings.insert(
+            "OpenSettingsFile".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-alt-,", None),
+                KeybindingEntry::new("ctrl-alt-,", None),
+            ],
+        );
 
         // Fullscreen keybindings
         bindings.insert(
             "ExitFullscreen".to_string(),
             vec![KeybindingEntry::new("escape", Some("FullscreenTerminal"))],
+        );
+        bindings.insert(
+            "ToggleFullscreen".to_string(),
+            vec![
+                KeybindingEntry::new("shift-escape", Some("TerminalPane")),
+                KeybindingEntry::new("shift-escape", Some("FullscreenTerminal")),
+            ],
         );
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
@@ -474,19 +542,33 @@ impl KeybindingConfig {
         // Navigation keybindings
         bindings.insert(
             "FocusLeft".to_string(),
-            vec![KeybindingEntry::new("alt-left", None)],
+            vec![KeybindingEntry::new("cmd-alt-left", None)],
         );
         bindings.insert(
             "FocusRight".to_string(),
-            vec![KeybindingEntry::new("alt-right", None)],
+            vec![KeybindingEntry::new("cmd-alt-right", None)],
         );
         bindings.insert(
             "FocusUp".to_string(),
-            vec![KeybindingEntry::new("alt-up", None)],
+            vec![KeybindingEntry::new("cmd-alt-up", None)],
         );
         bindings.insert(
             "FocusDown".to_string(),
-            vec![KeybindingEntry::new("alt-down", None)],
+            vec![KeybindingEntry::new("cmd-alt-down", None)],
+        );
+        bindings.insert(
+            "FocusNextTerminal".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-]", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-tab", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "FocusPrevTerminal".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-[", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-shift-tab", Some("TerminalPane")),
+            ],
         );
 
         Self {

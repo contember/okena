@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub enum ThemeMode {
     Light,
     Dark,
+    PastelDark,
     HighContrast,
     #[default]
     Auto,
@@ -39,6 +40,12 @@ impl ThemeInfo {
                 name: "Light".to_string(),
                 description: "Clean light theme".to_string(),
                 is_dark: false,
+            },
+            ThemeInfo {
+                id: "pastel-dark".to_string(),
+                name: "Pastel Dark".to_string(),
+                description: "Soft pastel colors on dark background".to_string(),
+                is_dark: true,
             },
             ThemeInfo {
                 id: "high-contrast".to_string(),
@@ -104,6 +111,7 @@ pub struct ThemeColors {
     pub term_bright_white: u32,
     pub term_foreground: u32,
     pub term_background: u32,
+    pub term_background_unfocused: u32,
 
     // UI element colors
     pub cursor: u32,
@@ -130,8 +138,8 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     bg_selection: 0x264f78,
     bg_hover: 0x2a2d2e,
 
-    // Border colors
-    border: 0x252526,
+    // Border colors - subtle but visible borders for clean separation
+    border: 0x3c3c3c,
     border_active: 0x007acc,
     border_focused: 0x569cd6,
     border_bell: 0xe69500,
@@ -168,6 +176,7 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     term_bright_white: 0xffffff,
     term_foreground: 0xcccccc,
     term_background: 0x1e1e1e,
+    term_background_unfocused: 0x252526,
 
     // UI element colors
     cursor: 0xaeafad,
@@ -227,6 +236,7 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     term_bright_white: 0xa5a5a5,
     term_foreground: 0x333333,
     term_background: 0xffffff,
+    term_background_unfocused: 0xf3f3f3,
 
     // UI element colors
     cursor: 0x000000,
@@ -237,6 +247,67 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     success: 0x008000,
     warning: 0x795e26,
     error: 0xa31515,
+};
+
+/// Pastel Dark theme (Ghostty Builtin Pastel Dark)
+/// UI elements use lighter colors, terminal uses dark background
+pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
+    // Background colors - slightly lighter than terminal for UI elements
+    bg_primary: 0x1a1a1a,
+    bg_secondary: 0x222222,
+    bg_header: 0x282828,
+    bg_selection: 0x363983,
+    bg_hover: 0x303030,
+
+    // Border colors - subtle but visible
+    border: 0x404040,
+    border_active: 0x96cbfe,
+    border_focused: 0x96cbfe,
+    border_bell: 0xffa560,
+
+    // Text colors
+    text_primary: 0xeeeeee,
+    text_secondary: 0x999999,
+    text_muted: 0x666666,
+
+    // Selection colors
+    selection_bg: 0x363983,
+    selection_fg: 0xf2f2f2,
+
+    // Search highlight colors
+    search_match_bg: 0x613214,
+    search_current_bg: 0xffa560,
+
+    // Terminal colors (Ghostty Builtin Pastel Dark)
+    term_black: 0x4f4f4f,
+    term_red: 0xff6c60,
+    term_green: 0xa8ff60,
+    term_yellow: 0xffffb6,
+    term_blue: 0x96cbfe,
+    term_magenta: 0xff73fd,
+    term_cyan: 0xc6c5fe,
+    term_white: 0xeeeeee,
+    term_bright_black: 0x7c7c7c,
+    term_bright_red: 0xffb6b0,
+    term_bright_green: 0xceffac,
+    term_bright_yellow: 0xffffcc,
+    term_bright_blue: 0xb5dcff,
+    term_bright_magenta: 0xff9cfe,
+    term_bright_cyan: 0xdfdffe,
+    term_bright_white: 0xffffff,
+    term_foreground: 0xbbbbbb,
+    term_background: 0x000000, // Terminal stays dark
+    term_background_unfocused: 0x111111,
+
+    // UI element colors
+    cursor: 0xffa560,
+    scrollbar: 0x3a3a3a,
+    scrollbar_hover: 0x555555,
+
+    // Status colors
+    success: 0xa8ff60,
+    warning: 0xffffb6,
+    error: 0xff6c60,
 };
 
 /// High Contrast theme for accessibility
@@ -286,6 +357,7 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     term_bright_white: 0xffffff,
     term_foreground: 0xffffff,
     term_background: 0x000000,
+    term_background_unfocused: 0x111111,
 
     // UI element colors
     cursor: 0xffffff,
@@ -325,6 +397,7 @@ impl AppTheme {
         match mode {
             ThemeMode::Dark => DARK_THEME,
             ThemeMode::Light => LIGHT_THEME,
+            ThemeMode::PastelDark => PASTEL_DARK_THEME,
             ThemeMode::HighContrast => HIGH_CONTRAST_THEME,
             ThemeMode::Custom => custom.unwrap_or(DARK_THEME),
             ThemeMode::Auto => {
@@ -385,7 +458,7 @@ impl AppTheme {
     #[allow(dead_code)]
     pub fn is_dark(&self) -> bool {
         match self.mode {
-            ThemeMode::Dark | ThemeMode::HighContrast => true,
+            ThemeMode::Dark | ThemeMode::PastelDark | ThemeMode::HighContrast => true,
             ThemeMode::Light => false,
             ThemeMode::Custom => self.custom_colors.map(|_| true).unwrap_or(true), // Assume dark for custom
             ThemeMode::Auto => self.system_is_dark,
@@ -613,6 +686,8 @@ pub struct CustomThemeColors {
     pub term_foreground: String,
     #[serde(default = "default_term_background")]
     pub term_background: String,
+    #[serde(default = "default_term_background_unfocused")]
+    pub term_background_unfocused: String,
 
     // UI element colors
     #[serde(default = "default_cursor")]
@@ -666,6 +741,7 @@ fn default_term_bright_cyan() -> String { "#29b8db".to_string() }
 fn default_term_bright_white() -> String { "#ffffff".to_string() }
 fn default_term_foreground() -> String { "#cccccc".to_string() }
 fn default_term_background() -> String { "#1e1e1e".to_string() }
+fn default_term_background_unfocused() -> String { "#252526".to_string() }
 fn default_cursor() -> String { "#aeafad".to_string() }
 fn default_scrollbar() -> String { "#5a5a5a".to_string() }
 fn default_scrollbar_hover() -> String { "#7a7a7a".to_string() }
@@ -717,6 +793,7 @@ impl CustomThemeColors {
             term_bright_white: Self::parse_hex(&self.term_bright_white),
             term_foreground: Self::parse_hex(&self.term_foreground),
             term_background: Self::parse_hex(&self.term_background),
+            term_background_unfocused: Self::parse_hex(&self.term_background_unfocused),
             cursor: Self::parse_hex(&self.cursor),
             scrollbar: Self::parse_hex(&self.scrollbar),
             scrollbar_hover: Self::parse_hex(&self.scrollbar_hover),
@@ -753,46 +830,47 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
             description: "An example custom theme - modify colors as desired".to_string(),
             is_dark: true,
             colors: CustomThemeColors {
-                bg_primary: "#1a1a2e".to_string(),
-                bg_secondary: "#16213e".to_string(),
-                bg_header: "#0f3460".to_string(),
-                bg_selection: "#e94560".to_string(),
-                bg_hover: "#1f2b4a".to_string(),
-                border: "#0f3460".to_string(),
-                border_active: "#e94560".to_string(),
-                border_focused: "#e94560".to_string(),
-                border_bell: "#f39c12".to_string(),
-                text_primary: "#eaeaea".to_string(),
-                text_secondary: "#a0a0a0".to_string(),
-                text_muted: "#707070".to_string(),
-                selection_bg: "#e94560".to_string(),
-                selection_fg: "#ffffff".to_string(),
-                search_match_bg: "#f39c12".to_string(),
-                search_current_bg: "#e94560".to_string(),
-                term_black: "#000000".to_string(),
-                term_red: "#e94560".to_string(),
-                term_green: "#0dbc79".to_string(),
-                term_yellow: "#f5f543".to_string(),
-                term_blue: "#0f3460".to_string(),
-                term_magenta: "#bc3fbc".to_string(),
-                term_cyan: "#11a8cd".to_string(),
-                term_white: "#e5e5e5".to_string(),
-                term_bright_black: "#666666".to_string(),
-                term_bright_red: "#ff6b6b".to_string(),
-                term_bright_green: "#23d18b".to_string(),
-                term_bright_yellow: "#f5f543".to_string(),
-                term_bright_blue: "#3b8eea".to_string(),
-                term_bright_magenta: "#d670d6".to_string(),
-                term_bright_cyan: "#29b8db".to_string(),
+                bg_primary: "#1a1a1a".to_string(),
+                bg_secondary: "#222222".to_string(),
+                bg_header: "#282828".to_string(),
+                bg_selection: "#363983".to_string(),
+                bg_hover: "#303030".to_string(),
+                border: "#3a3a3a".to_string(),
+                border_active: "#96cbfe".to_string(),
+                border_focused: "#96cbfe".to_string(),
+                border_bell: "#ffa560".to_string(),
+                text_primary: "#eeeeee".to_string(),
+                text_secondary: "#999999".to_string(),
+                text_muted: "#666666".to_string(),
+                selection_bg: "#363983".to_string(),
+                selection_fg: "#f2f2f2".to_string(),
+                search_match_bg: "#613214".to_string(),
+                search_current_bg: "#ffa560".to_string(),
+                term_black: "#4f4f4f".to_string(),
+                term_red: "#ff6c60".to_string(),
+                term_green: "#a8ff60".to_string(),
+                term_yellow: "#ffffb6".to_string(),
+                term_blue: "#96cbfe".to_string(),
+                term_magenta: "#ff73fd".to_string(),
+                term_cyan: "#c6c5fe".to_string(),
+                term_white: "#eeeeee".to_string(),
+                term_bright_black: "#7c7c7c".to_string(),
+                term_bright_red: "#ffb6b0".to_string(),
+                term_bright_green: "#ceffac".to_string(),
+                term_bright_yellow: "#ffffcc".to_string(),
+                term_bright_blue: "#b5dcff".to_string(),
+                term_bright_magenta: "#ff9cfe".to_string(),
+                term_bright_cyan: "#dfdffe".to_string(),
                 term_bright_white: "#ffffff".to_string(),
-                term_foreground: "#eaeaea".to_string(),
-                term_background: "#1a1a2e".to_string(),
-                cursor: "#e94560".to_string(),
-                scrollbar: "#5a5a5a".to_string(),
-                scrollbar_hover: "#7a7a7a".to_string(),
-                success: "#4ec9b0".to_string(),
-                warning: "#f39c12".to_string(),
-                error: "#e94560".to_string(),
+                term_foreground: "#bbbbbb".to_string(),
+                term_background: "#000000".to_string(),
+                term_background_unfocused: "#111111".to_string(),
+                cursor: "#ffa560".to_string(),
+                scrollbar: "#3a3a3a".to_string(),
+                scrollbar_hover: "#555555".to_string(),
+                success: "#a8ff60".to_string(),
+                warning: "#ffffb6".to_string(),
+                error: "#ff6c60".to_string(),
             },
         };
 

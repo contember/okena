@@ -156,30 +156,56 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    fn render_git_status(&self, path: &str, t: ThemeColors) -> impl IntoElement {
-        let status = git::get_git_status(Path::new(path));
+    fn render_git_status(&self, project: &ProjectData, t: ThemeColors) -> impl IntoElement {
+        let status = git::get_git_status(Path::new(&project.path));
+        let is_worktree = project.worktree_info.is_some();
+        let main_repo_path = project.worktree_info.as_ref()
+            .map(|w| w.main_repo_path.clone())
+            .unwrap_or_default();
 
         match status {
             Some(status) if status.branch.is_some() => {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .flex_shrink_0()
+                    .gap(px(6.0))
                     .text_size(px(10.0))
+                    .line_height(px(12.0))
+                    // Worktree indicator
+                    .when(is_worktree, |d| {
+                        let tooltip_text = format!("Worktree of {}", main_repo_path);
+                        d.child(
+                            div()
+                                .id("worktree-indicator")
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(t.border_active))
+                                .text_size(px(9.0))
+                                .text_color(rgb(0xffffff))
+                                .child("WT")
+                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+                        )
+                    })
                     // Branch name
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(4.0))
+                            .gap(px(3.0))
                             .child(
-                                div()
+                                svg()
+                                    .path("icons/git-branch.svg")
+                                    .size(px(10.0))
                                     .text_color(rgb(t.text_muted))
-                                    .child("\u{2387}") // ⎇ branch symbol
                             )
                             .child(
                                 div()
                                     .text_color(rgb(t.text_secondary))
+                                    .max_w(px(100.0))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
                                     .child(status.branch.clone().unwrap_or_default())
                             )
                     )
@@ -189,7 +215,7 @@ impl ProjectColumn {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
+                                .gap(px(3.0))
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_green))
@@ -235,25 +261,33 @@ impl ProjectColumn {
                 div()
                     .flex()
                     .flex_col()
+                    .gap(px(2.0))
+                    .overflow_hidden()
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
+                            .line_height(px(14.0))
+                            .text_ellipsis()
                             .child(project.name.clone()),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(12.0))
+                            .gap(px(8.0))
                             .child(
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(t.text_muted))
+                                    .line_height(px(12.0))
+                                    .max_w(px(180.0))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
                                     .child(project.path.clone()),
                             )
-                            .child(self.render_git_status(&project.path, t)),
+                            .child(self.render_git_status(project, t)),
                     ),
             )
             .child(
@@ -352,8 +386,6 @@ impl Render for ProjectColumn {
                     .size_full()
                     .min_h_0()
                     .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
                     .child(self.render_header(&project, cx))
                     .child(
                         div()

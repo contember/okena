@@ -1,3 +1,4 @@
+use crate::settings::settings;
 use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ThemeColors};
 use alacritty_terminal::term::cell::Flags;
@@ -33,6 +34,7 @@ pub struct TerminalElement {
     current_match_index: Option<usize>,
     url_matches: Arc<Vec<URLMatch>>,
     hovered_url_index: Option<usize>,
+    cursor_visible: bool,
 }
 
 /// Input handler for terminal text input
@@ -162,6 +164,7 @@ impl TerminalElement {
             current_match_index: None,
             url_matches: Arc::new(Vec::new()),
             hovered_url_index: None,
+            cursor_visible: true,
         }
     }
 
@@ -182,6 +185,11 @@ impl TerminalElement {
     ) -> Self {
         self.url_matches = url_matches;
         self.hovered_url_index = hovered_url_index;
+        self
+    }
+
+    pub fn with_cursor_visible(mut self, visible: bool) -> Self {
+        self.cursor_visible = visible;
         self
     }
 }
@@ -242,20 +250,30 @@ impl BatchedTextRun {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Use floor() for pixel-perfect positioning (like Zed)
         let pos = Point::new(
-            px((f32::from(origin.x) + f32::from(cell_width) * self.start_col as f32).floor()),
-            px((f32::from(origin.y) + f32::from(line_height) * self.start_line as f32).floor()),
+            origin.x + self.start_col as f32 * cell_width,
+            origin.y + self.start_line as f32 * line_height,
         );
 
-        // Don't constrain wrap_width - let the text render naturally
+        // Create style for the entire text run
+        let run_style = TextRun {
+            len: self.text.len(),
+            font: self.style.font.clone(),
+            color: self.style.color,
+            background_color: self.style.background_color,
+            underline: self.style.underline.clone(),
+            strikethrough: self.style.strikethrough.clone(),
+        };
+
+        // Shape and paint entire run at once, passing cell_width for fixed-width spacing
+        // This is how Zed does it - allows proper glyph caching while maintaining grid alignment
         let _ = window
             .text_system()
             .shape_line(
                 self.text.clone().into(),
                 font_size,
-                std::slice::from_ref(&self.style),
-                None,
+                &[run_style],
+                Some(cell_width),
             )
             .paint(
                 pos,
@@ -334,16 +352,36 @@ impl Element for TerminalElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let font_size = px(14.0);
+        // Get font settings from global settings
+        let app_settings = settings(cx);
+        let font_size = px(app_settings.font_size);
+        let line_height_multiplier = app_settings.line_height;
+        let font_family = app_settings.font_family.clone();
 
-        // Use font features to disable ligatures (like Zed does for terminals)
-        // DejaVu Sans Mono is standard on Linux
+        // Use configured font family with fallbacks
+        #[cfg(target_os = "macos")]
         let font = Font {
-            family: "DejaVu Sans Mono".into(),
+            family: font_family.into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "JetBrains Mono".into(),
+                "Menlo".into(),
+                "SF Mono".into(),
+                "Monaco".into(),
+            ])),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        let font = Font {
+            family: font_family.into(),
+            features: FontFeatures::disable_ligatures(),
+            fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "JetBrains Mono".into(),
+                "DejaVu Sans Mono".into(),
                 "Liberation Mono".into(),
                 "Ubuntu Mono".into(),
                 "Noto Sans Mono".into(),
@@ -376,8 +414,8 @@ impl Element for TerminalElement {
             .map(|size| size.width)
             .unwrap_or(font_size * 0.6);
 
-        // Calculate line height (like Zed: font_size * line_height_multiplier)
-        let line_height = font_size * 1.4;
+        // Line height from settings
+        let line_height = font_size * line_height_multiplier;
 
         let style = Style {
             size: Size {
@@ -387,7 +425,7 @@ impl Element for TerminalElement {
             ..Default::default()
         };
 
-        let layout_id = window.request_layout(style, [], _cx);
+        let layout_id = window.request_layout(style, [], cx);
 
         (
             layout_id,
@@ -462,16 +500,26 @@ impl Element for TerminalElement {
             self.terminal.resize(new_size);
         }
 
-        // Paint background using theme color
-        window.paint_quad(fill(bounds, rgb(t.term_background)));
+        // Paint background using theme color (different for focused vs unfocused)
+        let is_focused = self.focus_handle.is_focused(window);
+        let bg_color = if is_focused {
+            t.term_background
+        } else {
+            t.term_background_unfocused
+        };
+        window.paint_quad(fill(bounds, rgb(bg_color)));
 
         // Get selection bounds
         let selection = self.terminal.selection_bounds();
+
+        // Capture cursor visibility for the closure
+        let cursor_visible = self.cursor_visible;
 
         self.terminal.with_content(|term| {
             let grid = term.grid();
             let screen_lines = grid.screen_lines();
             let cols = grid.columns();
+            let display_offset = grid.display_offset() as i32;
 
             let origin = bounds.origin;
 
@@ -482,7 +530,11 @@ impl Element for TerminalElement {
             let mut current_rect: Option<LayoutRect> = None;
 
             for row in 0..screen_lines {
-                let line = row as i32;
+                // visual_line is the row position on screen for rendering
+                let visual_line = row as i32;
+                // buffer_line is the actual grid line to fetch (accounts for scroll)
+                // When display_offset > 0, we're scrolled up into history (negative lines)
+                let buffer_line = visual_line - display_offset;
 
                 // Flush batch at line boundaries
                 if let Some(batch) = current_batch.take() {
@@ -495,7 +547,7 @@ impl Element for TerminalElement {
 
                 for col in 0..cols {
                     let cell_point = alacritty_terminal::index::Point {
-                        line: Line(line),
+                        line: Line(buffer_line),
                         column: Column(col),
                     };
                     let cell = &grid[cell_point];
@@ -544,14 +596,14 @@ impl Element for TerminalElement {
 
                     if let Some(color) = bg_color {
                         if let Some(ref mut rect) = current_rect {
-                            if rect.line == line && rect.start_col + rect.num_cells as i32 == col_i32 && rect.color == color {
+                            if rect.line == visual_line && rect.start_col + rect.num_cells as i32 == col_i32 && rect.color == color {
                                 rect.extend();
                             } else {
                                 rects.push(current_rect.take().unwrap());
-                                current_rect = Some(LayoutRect::new(line, col_i32, color));
+                                current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                             }
                         } else {
-                            current_rect = Some(LayoutRect::new(line, col_i32, color));
+                            current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                         }
                     } else if let Some(rect) = current_rect.take() {
                         rects.push(rect);
@@ -608,14 +660,14 @@ impl Element for TerminalElement {
 
                     // Batch text runs
                     if let Some(ref mut batch) = current_batch {
-                        if batch.can_append(&text_style, line, col_i32) {
+                        if batch.can_append(&text_style, visual_line, col_i32) {
                             batch.append_char(cell.c);
                         } else {
                             batched_runs.push(current_batch.take().unwrap());
-                            current_batch = Some(BatchedTextRun::new(line, col_i32, cell.c, text_style));
+                            current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                         }
                     } else {
-                        current_batch = Some(BatchedTextRun::new(line, col_i32, cell.c, text_style));
+                        current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                     }
                 }
             }
@@ -729,25 +781,34 @@ impl Element for TerminalElement {
                 batch.paint(origin, cell_width, line_height, font_size, window, cx);
             }
 
-            // Phase 4: Paint cursor
-            let cursor_point = term.grid().cursor.point;
-            let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
-            let cursor_y = px((f32::from(origin.y) + cursor_point.line.0 as f32 * line_height_f).floor());
+            // Phase 4: Paint cursor (only if visible within current viewport and cursor_visible is true)
+            // When scrolled into history (display_offset > 0), the cursor is at the bottom
+            // of the active area and may be outside the visible viewport
+            if cursor_visible {
+                let cursor_point = term.grid().cursor.point;
+                let cursor_visual_line = cursor_point.line.0 + display_offset;
 
-            let cursor_bounds = Bounds {
-                origin: point(cursor_x, cursor_y),
-                size: size(cell_width, line_height),
-            };
+                // Only paint cursor if it's within the visible viewport
+                if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
+                    let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
+                    let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
 
-            // Block cursor with transparency
-            let cursor_rgba = rgb(t.cursor);
-            let cursor_color = Hsla::from(Rgba {
-                r: cursor_rgba.r,
-                g: cursor_rgba.g,
-                b: cursor_rgba.b,
-                a: 0.8,
-            });
-            window.paint_quad(fill(cursor_bounds, cursor_color));
+                    let cursor_bounds = Bounds {
+                        origin: point(cursor_x, cursor_y),
+                        size: size(cell_width, line_height),
+                    };
+
+                    // Block cursor with transparency
+                    let cursor_rgba = rgb(t.cursor);
+                    let cursor_color = Hsla::from(Rgba {
+                        r: cursor_rgba.r,
+                        g: cursor_rgba.g,
+                        b: cursor_rgba.b,
+                        a: 0.8,
+                    });
+                    window.paint_quad(fill(cursor_bounds, cursor_color));
+                }
+            }
         });
     }
 }

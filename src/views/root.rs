@@ -1,6 +1,7 @@
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
+use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
@@ -8,12 +9,16 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ToggleSidebar, ToggleSidebarAutoHide};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::settings::open_settings_file;
+use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::status_bar::StatusBar;
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::title_bar::TitleBar;
+use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::workspace::persistence::{load_settings, save_settings, AppSettings};
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{ContextMenuRequest, Workspace};
+use crate::git;
 use async_channel::Receiver;
 use gpui::*;
 use gpui::prelude::*;
@@ -56,6 +61,14 @@ pub struct RootView {
     session_manager: Option<Entity<SessionManager>>,
     /// Theme selector overlay
     theme_selector: Option<Entity<ThemeSelector>>,
+    /// Command palette overlay
+    command_palette: Option<Entity<CommandPalette>>,
+    /// Settings panel overlay
+    settings_panel: Option<Entity<SettingsPanel>>,
+    /// Worktree dialog overlay
+    worktree_dialog: Option<Entity<WorktreeDialog>>,
+    /// Context menu state: (project_id, position)
+    context_menu: Option<ContextMenuRequest>,
     /// Fullscreen terminal overlay (stored to preserve animation state)
     fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
     /// Currently displayed fullscreen state (to detect changes)
@@ -102,6 +115,10 @@ impl RootView {
             keybindings_help: None,
             session_manager: None,
             theme_selector: None,
+            command_palette: None,
+            settings_panel: None,
+            worktree_dialog: None,
+            context_menu: None,
             fullscreen_terminal: None,
             fullscreen_state: None,
         };
@@ -418,6 +435,429 @@ impl RootView {
         cx.notify();
     }
 
+    fn show_command_palette(&mut self, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            // Toggle off if already showing
+            self.command_palette = None;
+        } else {
+            let palette = cx.new(|cx| CommandPalette::new(cx));
+            cx.subscribe(&palette, |this, _, event: &CommandPaletteEvent, cx| {
+                match event {
+                    CommandPaletteEvent::Close => {
+                        this.command_palette = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.command_palette = Some(palette);
+        }
+        cx.notify();
+    }
+
+    fn show_settings_panel(&mut self, cx: &mut Context<Self>) {
+        if self.settings_panel.is_some() {
+            // Toggle off if already showing
+            self.settings_panel = None;
+        } else {
+            let panel = cx.new(|cx| SettingsPanel::new(cx));
+            cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| {
+                match event {
+                    SettingsPanelEvent::Close => {
+                        this.settings_panel = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.settings_panel = Some(panel);
+        }
+        cx.notify();
+    }
+
+    /// Show worktree dialog for a project
+    pub fn show_worktree_dialog(&mut self, project_id: String, project_path: String, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let dialog = cx.new(|cx| {
+            WorktreeDialog::new(workspace, project_id, project_path, cx)
+        });
+        cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
+            match event {
+                WorktreeDialogEvent::Close => {
+                    this.close_worktree_dialog(cx);
+                }
+                WorktreeDialogEvent::Created(new_project_id) => {
+                    // Spawn terminals for the new worktree project
+                    this.spawn_terminals_for_project(new_project_id.clone(), cx);
+                    this.close_worktree_dialog(cx);
+                }
+            }
+        })
+        .detach();
+        self.worktree_dialog = Some(dialog);
+        // Clear focused terminal during modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Close worktree dialog
+    fn close_worktree_dialog(&mut self, cx: &mut Context<Self>) {
+        self.worktree_dialog = None;
+        // Restore focus after modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Spawn terminals for all layout slots in a project that have terminal_id: None
+    /// Used after creating a worktree project to immediately populate terminals
+    fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        use crate::terminal::terminal::{Terminal, TerminalSize};
+
+        // Get the project path and collect all terminal slots to spawn
+        let project_info = {
+            let ws = self.workspace.read(cx);
+            ws.project(&project_id).map(|p| (p.path.clone(), p.layout.clone()))
+        };
+
+        let (project_path, layout) = match project_info {
+            Some(info) => info,
+            None => {
+                log::error!("spawn_terminals_for_project: Project {} not found", project_id);
+                return;
+            }
+        };
+
+        // Collect all paths to terminal nodes that need spawning
+        let mut terminal_paths: Vec<Vec<usize>> = Vec::new();
+        Self::collect_empty_terminal_paths(&layout, vec![], &mut terminal_paths);
+
+        log::info!("spawn_terminals_for_project: Found {} empty terminal slots for project {}",
+            terminal_paths.len(), project_id);
+
+        // Spawn a terminal for each empty slot
+        for path in terminal_paths {
+            match self.pty_manager.create_terminal(&project_path) {
+                Ok(terminal_id) => {
+                    log::info!("Spawned terminal {} for worktree at path {:?}", terminal_id, path);
+
+                    // Store terminal ID in workspace
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.set_terminal_id(&project_id, &path, terminal_id.clone(), cx);
+                    });
+
+                    // Create terminal wrapper and register it
+                    let size = TerminalSize::default();
+                    let terminal = std::sync::Arc::new(Terminal::new(
+                        terminal_id.clone(),
+                        size,
+                        self.pty_manager.clone(),
+                    ));
+                    self.terminals.lock().insert(terminal_id, terminal);
+                }
+                Err(e) => {
+                    log::error!("Failed to spawn terminal for worktree at path {:?}: {}", path, e);
+                }
+            }
+        }
+
+        // Sync project columns to pick up the new project
+        self.sync_project_columns(cx);
+    }
+
+    /// Recursively collect paths to all Terminal nodes with terminal_id: None
+    fn collect_empty_terminal_paths(
+        node: &crate::workspace::state::LayoutNode,
+        current_path: Vec<usize>,
+        result: &mut Vec<Vec<usize>>,
+    ) {
+        match node {
+            crate::workspace::state::LayoutNode::Terminal { terminal_id, .. } => {
+                if terminal_id.is_none() {
+                    result.push(current_path);
+                }
+            }
+            crate::workspace::state::LayoutNode::Split { children, .. }
+            | crate::workspace::state::LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    let mut child_path = current_path.clone();
+                    child_path.push(i);
+                    Self::collect_empty_terminal_paths(child, child_path, result);
+                }
+            }
+        }
+    }
+
+    /// Show context menu for a project
+    fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
+        self.context_menu = Some(request);
+        cx.notify();
+    }
+
+    /// Hide context menu
+    fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_context_menu_request(cx);
+        });
+        cx.notify();
+    }
+
+    /// Render context menu overlay
+    fn render_context_menu(&self, request: &ContextMenuRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.clone();
+        let project_id = request.project_id.clone();
+        let position = request.position;
+
+        // Get project info
+        let ws = self.workspace.read(cx);
+        let project = ws.project(&project_id);
+        let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
+        let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
+        let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
+        let is_git_repo = git::get_git_status(std::path::Path::new(&project_path)).is_some();
+
+        let project_id_for_add = project_id.clone();
+        let project_id_for_worktree = project_id.clone();
+        let project_id_for_rename = project_id.clone();
+        let project_id_for_close_wt = project_id.clone();
+        let project_id_for_delete = project_id.clone();
+        let project_name_for_rename = project_name.clone();
+        let project_path_for_worktree = project_path.clone();
+
+        div()
+            .absolute()
+            .inset_0()
+            .id("context-menu-backdrop")
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.hide_context_menu(cx);
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
+                this.hide_context_menu(cx);
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(position.x)
+                    .top(position.y)
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(4.0))
+                    .shadow_xl()
+                    .min_w(px(160.0))
+                    .py(px(4.0))
+                    .id("project-context-menu")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        // Add terminal option
+                        div()
+                            .id("context-menu-add-terminal")
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_pointer()
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.text_primary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .child(
+                                svg()
+                                    .path("icons/plus.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .child("Add Terminal")
+                            .on_click({
+                                let workspace = workspace.clone();
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.hide_context_menu(cx);
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.add_terminal(&project_id_for_add, cx);
+                                    });
+                                })
+                            }),
+                    )
+                    // Create Worktree option (only for git repos that are not already worktrees)
+                    .when(is_git_repo && !is_worktree, |d| {
+                        d.child(
+                            div()
+                                .id("context-menu-create-worktree")
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text_primary))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .child(
+                                    svg()
+                                        .path("icons/git-branch.svg")
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_secondary))
+                                )
+                                .child("Create Worktree...")
+                                .on_click(cx.listener({
+                                    let project_id = project_id_for_worktree.clone();
+                                    let project_path = project_path_for_worktree.clone();
+                                    move |this, _, _window, cx| {
+                                        this.hide_context_menu(cx);
+                                        this.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
+                                    }
+                                }))
+                        )
+                    })
+                    // Separator
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .mx(px(8.0))
+                            .my(px(4.0))
+                            .bg(rgb(t.border)),
+                    )
+                    .child(
+                        // Rename option - note: rename is complex because it's in sidebar, just delete for now
+                        div()
+                            .id("context-menu-rename")
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_pointer()
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.text_primary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .child(
+                                svg()
+                                    .path("icons/edit.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .child("Rename Project")
+                            .on_click({
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.hide_context_menu(cx);
+                                    // For now, just log - rename requires sidebar state
+                                    log::info!("Rename project: {} ({})", project_name_for_rename, project_id_for_rename);
+                                })
+                            }),
+                    )
+                    // Close Worktree option (only for worktree projects)
+                    .when(is_worktree, |d| {
+                        d.child(
+                            div()
+                                .id("context-menu-close-worktree")
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.warning))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .child(
+                                    svg()
+                                        .path("icons/git-branch.svg")
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.warning))
+                                )
+                                .child("Close Worktree")
+                                .on_click({
+                                    let workspace = workspace.clone();
+                                    let project_id = project_id_for_close_wt.clone();
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.hide_context_menu(cx);
+                                        let result = workspace.update(cx, |ws, cx| {
+                                            ws.remove_worktree_project(&project_id, false, cx)
+                                        });
+                                        if let Err(e) = result {
+                                            log::error!("Failed to close worktree: {}", e);
+                                        }
+                                    })
+                                })
+                        )
+                    })
+                    .child(
+                        // Delete option
+                        div()
+                            .id("context-menu-delete")
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .cursor_pointer()
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.error))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .child(
+                                svg()
+                                    .path("icons/trash.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.error))
+                            )
+                            .child("Delete Project")
+                            .on_click({
+                                let workspace = workspace.clone();
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.hide_context_menu(cx);
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.delete_project(&project_id_for_delete, cx);
+                                    });
+                                })
+                            }),
+                    ),
+            )
+    }
+
+    /// Create worktree from the focused project
+    fn create_worktree_from_focus(&mut self, cx: &mut Context<Self>) {
+        // Get the focused project ID and info
+        let project_info = {
+            let ws = self.workspace.read(cx);
+            let project_id = ws.focused_terminal
+                .as_ref()
+                .map(|f| f.project_id.clone())
+                .or_else(|| {
+                    // Fallback: use the first visible project
+                    ws.visible_projects()
+                        .first()
+                        .map(|p| p.id.clone())
+                });
+
+            project_id.and_then(|id| {
+                ws.project(&id).map(|p| {
+                    let project_path = p.path.clone();
+                    let is_worktree = p.worktree_info.is_some();
+                    let is_git = crate::git::get_git_status(std::path::Path::new(&project_path)).is_some();
+                    (id, project_path, is_git, is_worktree)
+                })
+            })
+        };
+
+        if let Some((project_id, project_path, is_git, is_worktree)) = project_info {
+            if is_git && !is_worktree {
+                self.show_worktree_dialog(project_id, project_path, cx);
+            } else {
+                log::info!("Cannot create worktree: project is not a git repo or is already a worktree");
+            }
+        }
+    }
+
     /// Toggle sidebar visibility with animation
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
@@ -518,6 +958,26 @@ impl Render for RootView {
         // Sync fullscreen entity with workspace state (creates entity only when state changes)
         self.sync_fullscreen(cx);
 
+        // Check for worktree dialog request from workspace
+        if let Some(request) = self.workspace.read(cx).worktree_dialog_request.clone() {
+            if self.worktree_dialog.is_none() {
+                self.show_worktree_dialog(request.project_id, request.project_path, cx);
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_worktree_dialog_request(cx);
+                });
+            }
+        }
+
+        // Check for context menu request from workspace
+        if let Some(request) = self.workspace.read(cx).context_menu_request.clone() {
+            if self.context_menu.is_none() {
+                self.show_context_menu(request.clone(), cx);
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_context_menu_request(cx);
+                });
+            }
+        }
+
         let has_fullscreen = self.fullscreen_terminal.is_some();
         if has_fullscreen {
             log::info!("RootView render: has_fullscreen=true, fullscreen_terminal={:?}",
@@ -526,6 +986,10 @@ impl Render for RootView {
         let has_keybindings_help = self.keybindings_help.is_some();
         let has_session_manager = self.session_manager.is_some();
         let has_theme_selector = self.theme_selector.is_some();
+        let has_command_palette = self.command_palette.is_some();
+        let has_settings_panel = self.settings_panel.is_some();
+        let has_worktree_dialog = self.worktree_dialog.is_some();
+        let has_context_menu = self.context_menu.is_some();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -604,6 +1068,22 @@ impl Render for RootView {
             // Handle show theme selector action
             .on_action(cx.listener(|this, _: &ShowThemeSelector, _window, cx| {
                 this.show_theme_selector(cx);
+            }))
+            // Handle show command palette action
+            .on_action(cx.listener(|this, _: &ShowCommandPalette, _window, cx| {
+                this.show_command_palette(cx);
+            }))
+            // Handle show settings panel action
+            .on_action(cx.listener(|this, _: &ShowSettings, _window, cx| {
+                this.show_settings_panel(cx);
+            }))
+            // Handle open settings file action
+            .on_action(cx.listener(|_this, _: &OpenSettingsFile, _window, _cx| {
+                open_settings_file();
+            }))
+            // Handle create worktree action
+            .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
+                this.create_worktree_from_focus(cx);
             }))
             // Title bar at the top (with window controls)
             .child(self.title_bar.clone())
@@ -705,6 +1185,38 @@ impl Render for RootView {
             .when(has_theme_selector, |d| {
                 if let Some(selector) = &self.theme_selector {
                     d.child(selector.clone())
+                } else {
+                    d
+                }
+            })
+            // Command palette overlay (renders on top of everything)
+            .when(has_command_palette, |d| {
+                if let Some(palette) = &self.command_palette {
+                    d.child(palette.clone())
+                } else {
+                    d
+                }
+            })
+            // Settings panel overlay (renders on top of everything)
+            .when(has_settings_panel, |d| {
+                if let Some(panel) = &self.settings_panel {
+                    d.child(panel.clone())
+                } else {
+                    d
+                }
+            })
+            // Worktree dialog overlay (renders on top of everything)
+            .when(has_worktree_dialog, |d| {
+                if let Some(dialog) = &self.worktree_dialog {
+                    d.child(dialog.clone())
+                } else {
+                    d
+                }
+            })
+            // Context menu overlay (renders on top of everything)
+            .when(has_context_menu, |d| {
+                if let Some(request) = &self.context_menu {
+                    d.child(self.render_context_menu(request, cx))
                 } else {
                     d
                 }

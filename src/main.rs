@@ -3,6 +3,7 @@ mod assets;
 mod elements;
 mod git;
 mod keybindings;
+mod settings;
 mod terminal;
 mod theme;
 mod views;
@@ -10,19 +11,75 @@ mod workspace;
 
 use gpui::*;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
+use gpui_component::Root;
 use std::sync::Arc;
 
 use crate::app::TermManager;
-use crate::assets::Assets;
+use crate::assets::{Assets, embedded_fonts};
+use crate::keybindings::{About, Quit};
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
 use crate::views::split_pane::init_split_drag_context;
 use crate::workspace::persistence;
 
+/// Quit action handler
+fn quit(_: &Quit, cx: &mut App) {
+    cx.quit();
+}
+
+/// About action handler - shows about dialog
+fn about(_: &About, _cx: &mut App) {
+    // TODO: Show about dialog when GPUI supports it
+    log::info!("Term Manager - A modern terminal manager");
+}
+
+/// Set up macOS application menu
+fn set_app_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "Term Manager".into(),
+            items: vec![
+                MenuItem::action("About Term Manager", About),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit Term Manager", Quit),
+            ],
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Undo", crate::keybindings::Copy, OsAction::Undo), // Using Copy as placeholder since we need an action
+                MenuItem::os_action("Redo", crate::keybindings::Copy, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", crate::keybindings::Copy, OsAction::Cut),
+                MenuItem::os_action("Copy", crate::keybindings::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", crate::keybindings::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", crate::keybindings::Copy, OsAction::SelectAll),
+            ],
+        },
+    ]);
+}
+
 fn main() {
     env_logger::init();
 
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        // Quit the app when the last window is closed (default on macOS is to keep running)
+        cx.set_quit_mode(QuitMode::LastWindowClosed);
+
+        // Register action handlers for menu items
+        cx.on_action(quit);
+        cx.on_action(about);
+
+        // Set up macOS application menu
+        set_app_menus(cx);
+
+        // Register embedded JetBrains Mono font
+        cx.text_system()
+            .add_fonts(embedded_fonts())
+            .expect("Failed to register embedded fonts");
+
         // Register keybindings
         keybindings::register_keybindings(cx);
 
@@ -35,9 +92,12 @@ fn main() {
             persistence::default_workspace()
         });
 
-        // Load settings and create theme entity
-        let settings = persistence::load_settings();
-        let theme_entity = cx.new(|_cx| AppTheme::new(settings.theme_mode, true)); // Default to dark for initial
+        // Initialize global settings entity
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
+        // Create theme entity from settings
+        let theme_entity = cx.new(|_cx| AppTheme::new(app_settings.theme_mode, true)); // Default to dark for initial
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
         // Create PTY manager
@@ -98,10 +158,11 @@ fn main() {
                     })
                     .detach();
 
-                // Create the main app view
-                cx.new(|cx| {
+                // Create the main app view wrapped in Root (required for gpui_component inputs)
+                let term_manager = cx.new(|cx| {
                     TermManager::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
-                })
+                });
+                cx.new(|cx| Root::new(term_manager, window, cx))
             },
         )
         .unwrap();

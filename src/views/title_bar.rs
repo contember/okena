@@ -1,5 +1,5 @@
-use crate::keybindings::{ShowThemeSelector, ToggleSidebar};
-use crate::theme::{theme, theme_entity, ThemeMode};
+use crate::keybindings::ToggleSidebar;
+use crate::theme::theme;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
@@ -85,44 +85,6 @@ impl TitleBar {
     }
 }
 
-impl TitleBar {
-    fn render_theme_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let theme_ent = theme_entity(cx);
-        let current_mode = theme_ent.read(cx).mode;
-
-        let icon = match current_mode {
-            ThemeMode::Dark => "D",
-            ThemeMode::Light => "L",
-            ThemeMode::HighContrast => "H",
-            ThemeMode::Auto => "A",
-            ThemeMode::Custom => "C",
-        };
-
-        div()
-            .id("theme-toggle")
-            .cursor_pointer()
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .text_size(px(11.0))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(t.text_secondary))
-            .child(icon)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_click({
-                move |_, window, cx| {
-                    cx.stop_propagation();
-                    // Open theme selector dialog
-                    window.dispatch_action(Box::new(ShowThemeSelector), cx);
-                }
-            })
-    }
-}
-
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -133,6 +95,13 @@ impl Render for TitleBar {
         let needs_controls = match decorations {
             Decorations::Server => false,
             Decorations::Client { .. } => true,
+        };
+
+        // On macOS with server decorations, we need to leave space for traffic lights
+        let traffic_light_padding = if cfg!(target_os = "macos") && !needs_controls {
+            px(80.0) // Space for macOS traffic lights (close, minimize, fullscreen)
+        } else {
+            px(8.0)
         };
 
         // Get focused project info
@@ -167,11 +136,11 @@ impl Render for TitleBar {
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .pl(traffic_light_padding)
                     .child(
                         // Sidebar toggle
                         div()
                             .cursor_pointer()
-                            .ml(px(8.0))
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded(px(4.0))
@@ -198,11 +167,17 @@ impl Render for TitleBar {
                     ),
             )
             .child(
-                // Center - focused project indicator
+                // Center - spacer
+                div().flex_1()
+            )
+            .child(
+                // Right side - focused project indicator + theme toggle + window controls
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.0))
+                    .pr(px(4.0))
+                    // Focused project indicator
                     .children(focused_project.map(|name| {
                         div()
                             .flex()
@@ -246,16 +221,7 @@ impl Render for TitleBar {
                                         }
                                     }),
                             )
-                    })),
-            )
-            .child(
-                // Right side - theme toggle + window controls
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .pr(px(4.0))
-                    .child(self.render_theme_toggle(cx))
+                    }))
                     .when(needs_controls, |d| {
                         d.child(
                             div()
