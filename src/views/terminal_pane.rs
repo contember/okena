@@ -1566,7 +1566,6 @@ impl TerminalPane {
             .bottom_0()
             .right_0()
             .w(px(10.0))
-            .bg(rgba(0xFF000044)) // DEBUG: red background to see track position
             .opacity(opacity)
             .cursor(CursorStyle::Arrow)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
