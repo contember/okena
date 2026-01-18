@@ -29,12 +29,11 @@ impl TermManager {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
-        show_focused_border: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Create workspace entity
-        let workspace = cx.new(|_cx| Workspace::new(workspace_data).with_show_focused_border(show_focused_border));
+        let workspace = cx.new(|_cx| Workspace::new(workspace_data));
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));

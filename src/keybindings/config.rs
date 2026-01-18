@@ -336,6 +336,22 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             category: "Global",
         },
     );
+    map.insert(
+        "ShowSettings",
+        ActionDescription {
+            name: "Settings",
+            description: "Open settings panel",
+            category: "Global",
+        },
+    );
+    map.insert(
+        "OpenSettingsFile",
+        ActionDescription {
+            name: "Open Settings File",
+            description: "Open settings JSON file in default editor",
+            category: "Global",
+        },
+    );
 
     map
 }
@@ -413,6 +429,20 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-shift-p", None),
                 KeybindingEntry::new("ctrl-shift-p", None),
+            ],
+        );
+        bindings.insert(
+            "ShowSettings".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-,", None),
+                KeybindingEntry::new("ctrl-,", None),
+            ],
+        );
+        bindings.insert(
+            "OpenSettingsFile".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-alt-,", None),
+                KeybindingEntry::new("ctrl-alt-,", None),
             ],
         );
 

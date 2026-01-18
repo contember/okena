@@ -1,6 +1,6 @@
 use crate::keybindings::{
     format_keystroke, get_action_descriptions, get_config,
-    ShowKeybindings, ShowSessionManager, ShowThemeSelector,
+    ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowSettings, OpenSettingsFile,
     ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
     SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
     FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
@@ -127,6 +127,8 @@ impl CommandPalette {
                 "ScrollDown" => window.dispatch_action(Box::new(ScrollDown), cx),
                 "Search" => window.dispatch_action(Box::new(Search), cx),
                 "CreateWorktree" => window.dispatch_action(Box::new(CreateWorktree), cx),
+                "ShowSettings" => window.dispatch_action(Box::new(ShowSettings), cx),
+                "OpenSettingsFile" => window.dispatch_action(Box::new(OpenSettingsFile), cx),
                 _ => {
                     log::warn!("Unknown action in command palette: {}", action);
                 }

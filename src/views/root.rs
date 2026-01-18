@@ -9,7 +9,9 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::settings::open_settings_file;
+use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::status_bar::StatusBar;
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::title_bar::TitleBar;
@@ -61,6 +63,8 @@ pub struct RootView {
     theme_selector: Option<Entity<ThemeSelector>>,
     /// Command palette overlay
     command_palette: Option<Entity<CommandPalette>>,
+    /// Settings panel overlay
+    settings_panel: Option<Entity<SettingsPanel>>,
     /// Worktree dialog overlay
     worktree_dialog: Option<Entity<WorktreeDialog>>,
     /// Context menu state: (project_id, position)
@@ -112,6 +116,7 @@ impl RootView {
             session_manager: None,
             theme_selector: None,
             command_palette: None,
+            settings_panel: None,
             worktree_dialog: None,
             context_menu: None,
             fullscreen_terminal: None,
@@ -446,6 +451,26 @@ impl RootView {
             })
             .detach();
             self.command_palette = Some(palette);
+        }
+        cx.notify();
+    }
+
+    fn show_settings_panel(&mut self, cx: &mut Context<Self>) {
+        if self.settings_panel.is_some() {
+            // Toggle off if already showing
+            self.settings_panel = None;
+        } else {
+            let panel = cx.new(|cx| SettingsPanel::new(cx));
+            cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| {
+                match event {
+                    SettingsPanelEvent::Close => {
+                        this.settings_panel = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.settings_panel = Some(panel);
         }
         cx.notify();
     }
@@ -962,6 +987,7 @@ impl Render for RootView {
         let has_session_manager = self.session_manager.is_some();
         let has_theme_selector = self.theme_selector.is_some();
         let has_command_palette = self.command_palette.is_some();
+        let has_settings_panel = self.settings_panel.is_some();
         let has_worktree_dialog = self.worktree_dialog.is_some();
         let has_context_menu = self.context_menu.is_some();
 
@@ -1046,6 +1072,14 @@ impl Render for RootView {
             // Handle show command palette action
             .on_action(cx.listener(|this, _: &ShowCommandPalette, _window, cx| {
                 this.show_command_palette(cx);
+            }))
+            // Handle show settings panel action
+            .on_action(cx.listener(|this, _: &ShowSettings, _window, cx| {
+                this.show_settings_panel(cx);
+            }))
+            // Handle open settings file action
+            .on_action(cx.listener(|_this, _: &OpenSettingsFile, _window, _cx| {
+                open_settings_file();
             }))
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
@@ -1159,6 +1193,14 @@ impl Render for RootView {
             .when(has_command_palette, |d| {
                 if let Some(palette) = &self.command_palette {
                     d.child(palette.clone())
+                } else {
+                    d
+                }
+            })
+            // Settings panel overlay (renders on top of everything)
+            .when(has_settings_panel, |d| {
+                if let Some(panel) = &self.settings_panel {
+                    d.child(panel.clone())
                 } else {
                     d
                 }

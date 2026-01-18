@@ -47,6 +47,8 @@ actions!(
         ShowSessionManager,
         ShowThemeSelector,
         ShowCommandPalette,
+        ShowSettings,
+        OpenSettingsFile,
         SendTab,
         SendBacktab,
     ]
@@ -181,6 +183,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
         "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
+        "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
+        "OpenSettingsFile" => Some(KeyBinding::new(keystroke, OpenSettingsFile, context)),
         "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);

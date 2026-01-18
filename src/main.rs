@@ -3,6 +3,7 @@ mod assets;
 mod elements;
 mod git;
 mod keybindings;
+mod settings;
 mod terminal;
 mod theme;
 mod views;
@@ -91,9 +92,12 @@ fn main() {
             persistence::default_workspace()
         });
 
-        // Load settings and create theme entity
-        let settings = persistence::load_settings();
-        let theme_entity = cx.new(|_cx| AppTheme::new(settings.theme_mode, true)); // Default to dark for initial
+        // Initialize global settings entity
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
+        // Create theme entity from settings
+        let theme_entity = cx.new(|_cx| AppTheme::new(app_settings.theme_mode, true)); // Default to dark for initial
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
         // Create PTY manager
@@ -156,7 +160,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let term_manager = cx.new(|cx| {
-                    TermManager::new(workspace_data, pty_manager.clone(), pty_events, settings.show_focused_border, window, cx)
+                    TermManager::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
                 });
                 cx.new(|cx| Root::new(term_manager, window, cx))
             },

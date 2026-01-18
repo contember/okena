@@ -117,8 +117,6 @@ pub struct Workspace {
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
-    /// Whether to show border around focused terminal
-    pub show_focused_border: bool,
     /// Pending request to show worktree dialog
     pub worktree_dialog_request: Option<WorktreeDialogRequest>,
     /// Pending request to show context menu
@@ -134,15 +132,9 @@ impl Workspace {
             focused_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
-            show_focused_border: false,
             worktree_dialog_request: None,
             context_menu_request: None,
         }
-    }
-
-    pub fn with_show_focused_border(mut self, show: bool) -> Self {
-        self.show_focused_border = show;
-        self
     }
 
     pub fn projects(&self) -> &[ProjectData] {

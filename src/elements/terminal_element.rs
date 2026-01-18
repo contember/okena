@@ -1,3 +1,4 @@
+use crate::settings::settings;
 use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ThemeColors};
 use alacritty_terminal::term::cell::Flags;
@@ -33,6 +34,7 @@ pub struct TerminalElement {
     current_match_index: Option<usize>,
     url_matches: Arc<Vec<URLMatch>>,
     hovered_url_index: Option<usize>,
+    cursor_visible: bool,
 }
 
 /// Input handler for terminal text input
@@ -162,6 +164,7 @@ impl TerminalElement {
             current_match_index: None,
             url_matches: Arc::new(Vec::new()),
             hovered_url_index: None,
+            cursor_visible: true,
         }
     }
 
@@ -182,6 +185,11 @@ impl TerminalElement {
     ) -> Self {
         self.url_matches = url_matches;
         self.hovered_url_index = hovered_url_index;
+        self
+    }
+
+    pub fn with_cursor_visible(mut self, visible: bool) -> Self {
+        self.cursor_visible = visible;
         self
     }
 }
@@ -344,16 +352,21 @@ impl Element for TerminalElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let font_size = px(14.0);
+        // Get font settings from global settings
+        let app_settings = settings(cx);
+        let font_size = px(app_settings.font_size);
+        let line_height_multiplier = app_settings.line_height;
+        let font_family = app_settings.font_family.clone();
 
-        // JetBrains Mono - excellent screen hinting, same as Ghostty default
+        // Use configured font family with fallbacks
         #[cfg(target_os = "macos")]
         let font = Font {
-            family: "JetBrains Mono".into(),
+            family: font_family.into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "JetBrains Mono".into(),
                 "Menlo".into(),
                 "SF Mono".into(),
                 "Monaco".into(),
@@ -364,9 +377,11 @@ impl Element for TerminalElement {
 
         #[cfg(not(target_os = "macos"))]
         let font = Font {
-            family: "DejaVu Sans Mono".into(),
+            family: font_family.into(),
             features: FontFeatures::disable_ligatures(),
             fallbacks: Some(FontFallbacks::from_fonts(vec![
+                "JetBrains Mono".into(),
+                "DejaVu Sans Mono".into(),
                 "Liberation Mono".into(),
                 "Ubuntu Mono".into(),
                 "Noto Sans Mono".into(),
@@ -399,8 +414,8 @@ impl Element for TerminalElement {
             .map(|size| size.width)
             .unwrap_or(font_size * 0.6);
 
-        // Line height equals font size - no gaps between lines
-        let line_height = font_size * 1.3;
+        // Line height from settings
+        let line_height = font_size * line_height_multiplier;
 
         let style = Style {
             size: Size {
@@ -410,7 +425,7 @@ impl Element for TerminalElement {
             ..Default::default()
         };
 
-        let layout_id = window.request_layout(style, [], _cx);
+        let layout_id = window.request_layout(style, [], cx);
 
         (
             layout_id,
@@ -496,6 +511,9 @@ impl Element for TerminalElement {
 
         // Get selection bounds
         let selection = self.terminal.selection_bounds();
+
+        // Capture cursor visibility for the closure
+        let cursor_visible = self.cursor_visible;
 
         self.terminal.with_content(|term| {
             let grid = term.grid();
@@ -763,31 +781,33 @@ impl Element for TerminalElement {
                 batch.paint(origin, cell_width, line_height, font_size, window, cx);
             }
 
-            // Phase 4: Paint cursor (only if visible within current viewport)
+            // Phase 4: Paint cursor (only if visible within current viewport and cursor_visible is true)
             // When scrolled into history (display_offset > 0), the cursor is at the bottom
             // of the active area and may be outside the visible viewport
-            let cursor_point = term.grid().cursor.point;
-            let cursor_visual_line = cursor_point.line.0 + display_offset;
+            if cursor_visible {
+                let cursor_point = term.grid().cursor.point;
+                let cursor_visual_line = cursor_point.line.0 + display_offset;
 
-            // Only paint cursor if it's within the visible viewport
-            if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
-                let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
-                let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
+                // Only paint cursor if it's within the visible viewport
+                if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
+                    let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
+                    let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
 
-                let cursor_bounds = Bounds {
-                    origin: point(cursor_x, cursor_y),
-                    size: size(cell_width, line_height),
-                };
+                    let cursor_bounds = Bounds {
+                        origin: point(cursor_x, cursor_y),
+                        size: size(cell_width, line_height),
+                    };
 
-                // Block cursor with transparency
-                let cursor_rgba = rgb(t.cursor);
-                let cursor_color = Hsla::from(Rgba {
-                    r: cursor_rgba.r,
-                    g: cursor_rgba.g,
-                    b: cursor_rgba.b,
-                    a: 0.8,
-                });
-                window.paint_quad(fill(cursor_bounds, cursor_color));
+                    // Block cursor with transparency
+                    let cursor_rgba = rgb(t.cursor);
+                    let cursor_color = Hsla::from(Rgba {
+                        r: cursor_rgba.r,
+                        g: cursor_rgba.g,
+                        b: cursor_rgba.b,
+                        a: 0.8,
+                    });
+                    window.paint_quad(fill(cursor_bounds, cursor_color));
+                }
             }
         });
     }

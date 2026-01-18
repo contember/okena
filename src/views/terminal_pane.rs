@@ -1,5 +1,6 @@
 use crate::elements::terminal_element::{TerminalElement, SearchMatch, URLMatch};
 use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizontal, SplitVertical, Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch, FocusLeft, FocusRight, FocusUp, FocusDown, FocusNextTerminal, FocusPrevTerminal, SendTab, SendBacktab, ToggleFullscreen};
+use crate::settings::settings;
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -56,6 +57,8 @@ pub struct TerminalPane {
     /// URL detection state
     url_matches: Vec<URLMatch>,
     hovered_url_index: Option<usize>,
+    /// Cursor blink state
+    cursor_visible: bool,
 }
 
 impl TerminalPane {
@@ -107,6 +110,7 @@ impl TerminalPane {
             scrollbar_visible: false,
             url_matches: Vec::new(),
             hovered_url_index: None,
+            cursor_visible: true,
         };
 
         // If we have an existing terminal ID, create terminal immediately
@@ -117,6 +121,9 @@ impl TerminalPane {
 
         // Start dirty check loop for this terminal pane
         pane.start_dirty_check_loop(cx);
+
+        // Start cursor blink loop
+        pane.start_cursor_blink_loop(cx);
 
         pane
     }
@@ -147,6 +154,35 @@ impl TerminalPane {
                     }
                     Ok(false) => {}
                     Err(_) => break, // Entity was dropped
+                }
+            }
+        }).detach();
+    }
+
+    /// Start a loop that blinks the cursor
+    fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
+        use std::time::Duration;
+
+        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+            // Blink every 500ms
+            let interval = Duration::from_millis(500);
+            loop {
+                smol::Timer::after(interval).await;
+
+                let result = this.update(cx, |pane, cx| {
+                    // Only blink if cursor_blink setting is enabled
+                    if settings(cx).cursor_blink {
+                        pane.cursor_visible = !pane.cursor_visible;
+                        cx.notify();
+                    } else if !pane.cursor_visible {
+                        // If blink is disabled but cursor is hidden, show it
+                        pane.cursor_visible = true;
+                        cx.notify();
+                    }
+                });
+
+                if result.is_err() {
+                    break; // Entity was dropped
                 }
             }
         }).detach();
@@ -1739,6 +1775,7 @@ impl TerminalPane {
                             TerminalElement::new(terminal_clone, focus_handle.clone())
                                 .with_search(self.search_matches.clone(), self.current_match_index)
                                 .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
+                                .with_cursor_visible(self.cursor_visible)
                         )
                 )
                 // Scrollbar overlay
@@ -2047,8 +2084,8 @@ impl Render for TerminalPane {
             }
         }
 
-        // Get show_focused_border setting from workspace
-        let show_focused_border = self.workspace.read(cx).show_focused_border;
+        // Get show_focused_border setting from global settings
+        let show_focused_border = settings(cx).show_focused_border;
 
         // Only show border when focused (if setting enabled) or has bell
         let show_border = (is_focused && show_focused_border) || has_bell;

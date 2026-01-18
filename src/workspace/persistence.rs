@@ -27,7 +27,7 @@ impl Default for SidebarSettings {
 }
 
 /// App settings (persisted separately from workspace)
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub theme_mode: ThemeMode,
@@ -40,10 +40,73 @@ pub struct AppSettings {
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
+
+    // Font settings
+    /// Terminal font size (default: 14.0)
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+    /// Terminal font family (default: "JetBrains Mono")
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+    /// Line height multiplier (default: 1.3)
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+    /// UI font size for panels/dialogs (default: 13.0)
+    #[serde(default = "default_ui_font_size")]
+    pub ui_font_size: f32,
+
+    // Terminal settings
+    /// Enable cursor blinking (default: false)
+    #[serde(default = "default_cursor_blink")]
+    pub cursor_blink: bool,
+    /// Number of scrollback lines (default: 10000)
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: u32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme_mode: ThemeMode::default(),
+            active_session: None,
+            sidebar: SidebarSettings::default(),
+            show_focused_border: default_show_focused_border(),
+            font_size: default_font_size(),
+            font_family: default_font_family(),
+            line_height: default_line_height(),
+            ui_font_size: default_ui_font_size(),
+            cursor_blink: default_cursor_blink(),
+            scrollback_lines: default_scrollback_lines(),
+        }
+    }
 }
 
 fn default_show_focused_border() -> bool {
     false
+}
+
+fn default_font_size() -> f32 {
+    14.0
+}
+
+fn default_font_family() -> String {
+    "JetBrains Mono".to_string()
+}
+
+fn default_line_height() -> f32 {
+    1.3
+}
+
+fn default_ui_font_size() -> f32 {
+    13.0
+}
+
+fn default_cursor_blink() -> bool {
+    false
+}
+
+fn default_scrollback_lines() -> u32 {
+    10000
 }
 
 /// Metadata about a saved session
