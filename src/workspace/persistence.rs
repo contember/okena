@@ -1,4 +1,5 @@
 use crate::terminal::session_backend::SessionBackend;
+use crate::terminal::shell_config::ShellType;
 use crate::theme::ThemeMode;
 use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
 use anyhow::{Context, Result};
@@ -62,6 +63,11 @@ pub struct AppSettings {
     /// Number of scrollback lines (default: 10000)
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: u32,
+
+    // Shell settings
+    /// Default shell type for new terminals
+    #[serde(default)]
+    pub default_shell: ShellType,
 }
 
 impl Default for AppSettings {
@@ -77,6 +83,7 @@ impl Default for AppSettings {
             ui_font_size: default_ui_font_size(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
+            default_shell: ShellType::default(),
         }
     }
 }

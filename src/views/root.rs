@@ -516,6 +516,7 @@ impl RootView {
     /// Used after creating a worktree project to immediately populate terminals
     fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         use crate::terminal::terminal::{Terminal, TerminalSize};
+        use crate::settings::settings;
 
         // Get the project path and collect all terminal slots to spawn
         let project_info = {
@@ -531,6 +532,9 @@ impl RootView {
             }
         };
 
+        // Get the default shell from settings
+        let shell = settings(cx).default_shell;
+
         // Collect all paths to terminal nodes that need spawning
         let mut terminal_paths: Vec<Vec<usize>> = Vec::new();
         Self::collect_empty_terminal_paths(&layout, vec![], &mut terminal_paths);
@@ -540,7 +544,7 @@ impl RootView {
 
         // Spawn a terminal for each empty slot
         for path in terminal_paths {
-            match self.pty_manager.create_terminal(&project_path) {
+            match self.pty_manager.create_terminal_with_shell(&project_path, Some(&shell)) {
                 Ok(terminal_id) => {
                     log::info!("Spawned terminal {} for worktree at path {:?}", terminal_id, path);
 

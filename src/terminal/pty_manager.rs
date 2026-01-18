@@ -1,4 +1,5 @@
 use crate::terminal::session_backend::{ResolvedBackend, SessionBackend};
+use crate::terminal::shell_config::ShellType;
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use parking_lot::Mutex;
@@ -57,20 +58,37 @@ impl PtyManager {
         )
     }
 
-    /// Create a new terminal with a PTY process
+    /// Create a new terminal with a PTY process (uses system default shell)
+    #[allow(dead_code)] // Kept for API compatibility, prefer create_terminal_with_shell
     pub fn create_terminal(&self, cwd: &str) -> Result<String> {
+        self.create_terminal_with_shell(cwd, None)
+    }
+
+    /// Create a new terminal with a specific shell type
+    pub fn create_terminal_with_shell(&self, cwd: &str, shell: Option<&ShellType>) -> Result<String> {
         let terminal_id = uuid::Uuid::new_v4().to_string();
-        self.create_terminal_with_id(&terminal_id, cwd)?;
+        self.create_terminal_with_id(&terminal_id, cwd, shell)?;
         Ok(terminal_id)
     }
 
-    /// Create or reconnect to a terminal
+    /// Create or reconnect to a terminal (uses system default shell)
     /// If terminal_id is provided and session backend supports persistence,
     /// it will try to reconnect to an existing session.
+    #[allow(dead_code)] // Kept for API compatibility, prefer create_or_reconnect_terminal_with_shell
     pub fn create_or_reconnect_terminal(
         &self,
         terminal_id: Option<&str>,
         cwd: &str,
+    ) -> Result<String> {
+        self.create_or_reconnect_terminal_with_shell(terminal_id, cwd, None)
+    }
+
+    /// Create or reconnect to a terminal with a specific shell type
+    pub fn create_or_reconnect_terminal_with_shell(
+        &self,
+        terminal_id: Option<&str>,
+        cwd: &str,
+        shell: Option<&ShellType>,
     ) -> Result<String> {
         match terminal_id {
             Some(id) => {
@@ -79,15 +97,15 @@ impl PtyManager {
                     return Ok(id.to_string());
                 }
                 // Try to reconnect or create with this ID
-                self.create_terminal_with_id(id, cwd)?;
+                self.create_terminal_with_id(id, cwd, shell)?;
                 Ok(id.to_string())
             }
-            None => self.create_terminal(cwd),
+            None => self.create_terminal_with_shell(cwd, shell),
         }
     }
 
     /// Internal: create a terminal with a specific ID
-    fn create_terminal_with_id(&self, terminal_id: &str, cwd: &str) -> Result<()> {
+    fn create_terminal_with_id(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> Result<()> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -96,8 +114,8 @@ impl PtyManager {
             pixel_height: 0,
         })?;
 
-        // Build command based on session backend
-        let cmd = self.build_terminal_command(terminal_id, cwd);
+        // Build command based on session backend and shell config
+        let cmd = self.build_terminal_command(terminal_id, cwd, shell);
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
@@ -133,7 +151,11 @@ impl PtyManager {
     }
 
     /// Build the command to run in the terminal
-    fn build_terminal_command(&self, terminal_id: &str, cwd: &str) -> CommandBuilder {
+    #[allow(unused_variables)] // terminal_id used only on Unix for session backend
+    fn build_terminal_command(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> CommandBuilder {
+        // On Unix, if session backend is active, use it for persistence
+        // Session backends (tmux/screen) are not available on Windows
+        #[cfg(unix)]
         let mut cmd = if let Some((program, args)) = self
             .session_backend
             .build_command(&self.session_backend.session_name(terminal_id), cwd)
@@ -148,10 +170,26 @@ impl PtyManager {
             }
             cmd
         } else {
-            // No session backend - use default shell
-            let mut cmd = CommandBuilder::new_default_prog();
-            cmd.cwd(cwd);
-            cmd
+            // No session backend - use shell config or default
+            match shell {
+                Some(shell_type) => shell_type.build_command(cwd),
+                None => {
+                    let mut cmd = CommandBuilder::new_default_prog();
+                    cmd.cwd(cwd);
+                    cmd
+                }
+            }
+        };
+
+        // On Windows, always use shell config (no session backend support)
+        #[cfg(windows)]
+        let mut cmd = match shell {
+            Some(shell_type) => shell_type.build_command(cwd),
+            None => {
+                let mut cmd = CommandBuilder::new_default_prog();
+                cmd.cwd(cwd);
+                cmd
+            }
         };
 
         // Set TERM environment variable - required for proper terminal operation

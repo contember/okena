@@ -98,6 +98,7 @@ impl ResolvedBackend {
 
     /// Build the command to create or attach to a session
     /// Returns (program, args) tuple
+    #[allow(dead_code)] // Used only on Unix
     pub fn build_command(&self, session_name: &str, cwd: &str) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
@@ -159,12 +160,14 @@ impl ResolvedBackend {
 }
 
 /// Escape a string for safe use in shell commands
+#[allow(dead_code)] // Used only on Unix for tmux/screen commands
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any existing single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Extract directory name from a path for use as window name
+#[allow(dead_code)] // Used only on Unix for tmux window naming
 fn extract_dir_name(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -174,21 +177,39 @@ fn extract_dir_name(path: &str) -> String {
 }
 
 /// Check if tmux is available on the system
+/// Always returns false on Windows as tmux is not natively available
 fn is_tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Check if screen is available on the system
+/// Always returns false on Windows as screen is not natively available
 fn is_screen_available() -> bool {
-    Command::new("screen")
-        .arg("-v")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("screen")
+            .arg("-v")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

@@ -202,7 +202,7 @@ impl TerminalPane {
         }
     }
 
-    fn create_terminal_for_existing_pty(&mut self, terminal_id: String, _cx: &mut Context<Self>) {
+    fn create_terminal_for_existing_pty(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         // Check if terminal already exists in registry
         let existing = self.terminals.lock().get(&terminal_id).cloned();
         if let Some(terminal) = existing {
@@ -212,7 +212,9 @@ impl TerminalPane {
 
         // PTY doesn't exist in current session - try to reconnect (for tmux/screen persistence)
         // or create new PTY with this ID
-        match self.pty_manager.create_or_reconnect_terminal(Some(&terminal_id), &self.project_path) {
+        // Get the default shell from settings
+        let shell = settings(cx).default_shell;
+        match self.pty_manager.create_or_reconnect_terminal_with_shell(Some(&terminal_id), &self.project_path, Some(&shell)) {
             Ok(_) => {
                 log::info!("Reconnected to terminal: {}", terminal_id);
             }
@@ -442,8 +444,10 @@ impl TerminalPane {
 
     fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
         log::info!("Creating new terminal for project path: {}", self.project_path);
-        // Create new PTY
-        match self.pty_manager.create_terminal(&self.project_path) {
+        // Get the default shell from settings
+        let shell = settings(cx).default_shell;
+        // Create new PTY with the configured shell
+        match self.pty_manager.create_terminal_with_shell(&self.project_path, Some(&shell)) {
             Ok(terminal_id) => {
                 log::info!("PTY created with ID: {}", terminal_id);
                 // Store terminal ID in workspace

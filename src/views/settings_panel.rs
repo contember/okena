@@ -3,6 +3,7 @@
 //! Provides a Zed-style settings dialog with sections for font, terminal, and appearance settings.
 
 use crate::settings::{open_settings_file, settings_entity, SettingsState};
+use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::theme::{theme, ThemeColors};
 use crate::workspace::persistence::get_settings_path;
 use gpui::*;
@@ -140,6 +141,9 @@ fn with_alpha(hex: u32, alpha: f32) -> Hsla {
 pub struct SettingsPanel {
     focus_handle: FocusHandle,
     font_dropdown_open: bool,
+    shell_dropdown_open: bool,
+    /// Cache of available shells (detected once)
+    available_shells: Vec<AvailableShell>,
 }
 
 impl SettingsPanel {
@@ -147,6 +151,8 @@ impl SettingsPanel {
         Self {
             focus_handle: cx.focus_handle(),
             font_dropdown_open: false,
+            shell_dropdown_open: false,
+            available_shells: available_shells(),
         }
     }
 
@@ -353,6 +359,107 @@ impl SettingsPanel {
             }))
     }
 
+    fn render_shell_dropdown_row(&mut self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let dropdown_open = self.shell_dropdown_open;
+        let display_name = current_shell.display_name();
+
+        settings_row("default-shell".to_string(), "Default Shell", &t, true).child(
+            div()
+                .id("default-shell-btn")
+                .cursor_pointer()
+                .min_w(px(150.0))
+                .h(px(28.0))
+                .px(px(10.0))
+                .rounded(px(4.0))
+                .bg(rgb(t.bg_secondary))
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(t.text_primary))
+                        .child(display_name),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_muted))
+                        .child(if dropdown_open { "▲" } else { "▼" }),
+                )
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.shell_dropdown_open = !this.shell_dropdown_open;
+                    // Close font dropdown if open
+                    this.font_dropdown_open = false;
+                    cx.notify();
+                })),
+        )
+    }
+
+    fn render_shell_dropdown_overlay(&self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        // Filter to only show available shells
+        let available: Vec<_> = self.available_shells.iter()
+            .filter(|s| s.available)
+            .collect();
+
+        div()
+            .id("shell-dropdown-list")
+            .absolute()
+            // Position the dropdown inside the modal - below the shell row in Terminal section
+            .top(px(290.0))  // Approximate position below the shell row
+            .right(px(32.0))
+            .min_w(px(180.0))
+            .max_h(px(250.0))
+            .overflow_y_scroll()
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(4.0))
+            .shadow_xl()
+            .py(px(4.0))
+            .children(available.into_iter().map(|shell_info| {
+                let is_selected = &shell_info.shell_type == current_shell;
+                let shell_type = shell_info.shell_type.clone();
+                let name = shell_info.name.clone();
+                div()
+                    .id(ElementId::Name(format!("shell-opt-{}", name).into()))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.text_primary))
+                    .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.2)))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(name)
+                    .when(is_selected, |d| {
+                        d.child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(t.border_active))
+                                .child("✓"),
+                        )
+                    })
+                    .on_mouse_down(MouseButton::Left, cx.listener({
+                        let shell_type = shell_type.clone();
+                        move |this, _, _, cx| {
+                            let shell = shell_type.clone();
+                            settings_entity(cx).update(cx, |state, cx| {
+                                state.set_default_shell(shell, cx);
+                            });
+                            this.shell_dropdown_open = false;
+                            cx.notify();
+                        }
+                    }))
+            }))
+    }
+
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let settings = settings_entity(cx);
@@ -384,6 +491,7 @@ impl SettingsPanel {
             .child(section_header("Terminal", &t))
             .child(
                 section_container(&t)
+                    .child(self.render_shell_dropdown_row(&s.default_shell, cx))
                     .child(self.render_toggle(
                         "cursor-blink", "Cursor Blink", s.cursor_blink, true,
                         |state, val, cx| state.set_cursor_blink(val, cx), cx,
@@ -427,6 +535,9 @@ impl Render for SettingsPanel {
                     if this.font_dropdown_open {
                         this.font_dropdown_open = false;
                         cx.notify();
+                    } else if this.shell_dropdown_open {
+                        this.shell_dropdown_open = false;
+                        cx.notify();
                     } else {
                         this.close(cx);
                     }
@@ -442,6 +553,9 @@ impl Render for SettingsPanel {
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.font_dropdown_open {
                     this.font_dropdown_open = false;
+                    cx.notify();
+                } else if this.shell_dropdown_open {
+                    this.shell_dropdown_open = false;
                     cx.notify();
                 } else {
                     this.close(cx);
@@ -550,6 +664,12 @@ impl Render for SettingsPanel {
                         let settings = settings_entity(cx);
                         let current = settings.read(cx).settings.font_family.clone();
                         modal.child(self.render_font_dropdown_overlay(&current, cx))
+                    })
+                    // Shell dropdown overlay
+                    .when(self.shell_dropdown_open, |modal| {
+                        let settings = settings_entity(cx);
+                        let current = settings.read(cx).settings.default_shell.clone();
+                        modal.child(self.render_shell_dropdown_overlay(&current, cx))
                     }),
             )
     }
