@@ -2,6 +2,18 @@
 
 A modern terminal multiplexer written in Rust, built with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI framework from Zed editor).
 
+## Downloads
+
+Download the latest build from the `main` branch:
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | [term-manager-macos-arm64.zip](https://nightly.link/contember/term-manager/workflows/build/main/term-manager-macos-arm64.zip) |
+| Linux (x64) | [term-manager-linux-x64.zip](https://nightly.link/contember/term-manager/workflows/build/main/term-manager-linux-x64.zip) |
+| Windows (x64) | [term-manager-windows-x64.zip](https://nightly.link/contember/term-manager/workflows/build/main/term-manager-windows-x64.zip) |
+
+> **Note:** These are development builds from the latest commit. For stable releases, check the [Releases](https://github.com/contember/term-manager/releases) page.
+
 ## Features
 
 - **Split panes** - Horizontal and vertical splits with drag-to-resize
