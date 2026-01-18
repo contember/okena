@@ -10,7 +10,7 @@ use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use gpui_component::input::{Input, InputState};
+use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ pub struct TerminalPane {
     context_menu_position: Option<Point<Pixels>>,
     /// Rename state
     is_renaming: bool,
-    rename_input: Option<Entity<InputState>>,
+    rename_input: Option<Entity<SimpleInputState>>,
     /// Last click time for double-click detection
     last_header_click: Option<std::time::Instant>,
     /// Last click time and position for terminal double/triple click detection
@@ -41,7 +41,7 @@ pub struct TerminalPane {
     terminal_click_count: u8,
     /// Search state
     is_searching: bool,
-    search_input: Option<Entity<InputState>>,
+    search_input: Option<Entity<SimpleInputState>>,
     search_matches: Arc<Vec<SearchMatch>>,
     current_match_index: Option<usize>,
     search_case_sensitive: bool,
@@ -256,11 +256,16 @@ impl TerminalPane {
 
     fn start_rename(&mut self, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.is_renaming = true;
-        self.rename_input = Some(cx.new(|cx| {
-            InputState::new(window, cx)
+        let input = cx.new(|cx| {
+            SimpleInputState::new(cx)
                 .placeholder("Terminal name...")
                 .default_value(&current_name)
-        }));
+        });
+        // Focus the input
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        self.rename_input = Some(input);
         // Clear focused terminal to prevent stealing focus back
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -301,12 +306,14 @@ impl TerminalPane {
     fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_searching = true;
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            SimpleInputState::new(cx)
                 .placeholder("Search...")
+                .icon("icons/search.svg")
         });
         // Focus the input
-        let focus_handle = input.read(cx).focus_handle(cx);
-        window.focus(&focus_handle, cx);
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
         self.search_input = Some(input);
         self.search_matches = Arc::new(Vec::new());
         self.current_match_index = None;
@@ -1302,7 +1309,11 @@ impl TerminalPane {
                         .flex_1()
                         .min_w(px(100.0))
                         .max_w(px(300.0))
-                        .child(Input::new(input))
+                        .bg(rgb(t.bg_secondary))
+                        .border_1()
+                        .border_color(rgb(t.border_active))
+                        .rounded(px(4.0))
+                        .child(SimpleInput::new(input).text_size(px(12.0)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
@@ -1520,7 +1531,11 @@ impl TerminalPane {
                             .id("terminal-rename-input")
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(input))
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border_active))
+                            .rounded(px(4.0))
+                            .child(SimpleInput::new(input).text_size(px(12.0)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })

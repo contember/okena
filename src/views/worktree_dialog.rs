@@ -24,13 +24,14 @@ pub struct WorktreeDialog {
     project_path: String,
     branches: Vec<String>,
     filtered_branches: Vec<usize>,
-    branch_search: String,
     selected_branch_index: Option<usize>,
-    new_branch_name: Option<Entity<SimpleInputState>>,
-    path_input: Option<Entity<SimpleInputState>>,
+    branch_search_input: Entity<SimpleInputState>,
+    new_branch_input: Entity<SimpleInputState>,
+    path_input: Entity<SimpleInputState>,
     create_new_branch: bool,
     error_message: Option<String>,
     focus_handle: FocusHandle,
+    initialized: bool,
 }
 
 impl WorktreeDialog {
@@ -63,6 +64,12 @@ impl WorktreeDialog {
                 .placeholder("New branch name...")
         });
 
+        let branch_search_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Type to filter branches...")
+                .icon("icons/search.svg")
+        });
+
         let filtered_branches: Vec<usize> = (0..branches.len()).collect();
         let focus_handle = cx.focus_handle();
 
@@ -72,18 +79,19 @@ impl WorktreeDialog {
             project_path,
             branches,
             filtered_branches,
-            branch_search: String::new(),
             selected_branch_index: None,
-            new_branch_name: Some(new_branch_input),
-            path_input: Some(path_input),
+            branch_search_input,
+            new_branch_input,
+            path_input,
             create_new_branch: false,
             error_message: None,
             focus_handle,
+            initialized: false,
         }
     }
 
-    fn filter_branches(&mut self) {
-        let query = self.branch_search.to_lowercase();
+    fn filter_branches(&mut self, cx: &App) {
+        let query = self.branch_search_input.read(cx).value().to_lowercase();
         if query.is_empty() {
             self.filtered_branches = (0..self.branches.len()).collect();
         } else {
@@ -103,13 +111,11 @@ impl WorktreeDialog {
     }
 
     fn get_target_path(&self, branch: &str, cx: &App) -> String {
-        if let Some(ref input) = self.path_input {
-            let base = input.read(cx).value();
-            if !base.is_empty() {
-                // Sanitize branch name for use in path
-                let safe_branch = branch.replace('/', "-");
-                return format!("{}/{}", base, safe_branch);
-            }
+        let base = self.path_input.read(cx).value();
+        if !base.is_empty() {
+            // Sanitize branch name for use in path
+            let safe_branch = branch.replace('/', "-");
+            return format!("{}/{}", base, safe_branch);
         }
 
         // Fallback
@@ -128,19 +134,13 @@ impl WorktreeDialog {
     fn create_worktree(&mut self, cx: &mut Context<Self>) {
         let (branch, create_branch) = if self.create_new_branch {
             // Get new branch name from input
-            if let Some(ref input) = self.new_branch_name {
-                let name = input.read(cx).value().trim().to_string();
-                if name.is_empty() {
-                    self.error_message = Some("Branch name cannot be empty".to_string());
-                    cx.notify();
-                    return;
-                }
-                (name, true)
-            } else {
-                self.error_message = Some("No branch name provided".to_string());
+            let name = self.new_branch_input.read(cx).value().trim().to_string();
+            if name.is_empty() {
+                self.error_message = Some("Branch name cannot be empty".to_string());
                 cx.notify();
                 return;
             }
+            (name, true)
         } else {
             // Use selected existing branch (selected_branch_index refers to filtered list)
             if let Some(filtered_idx) = self.selected_branch_index {
@@ -184,12 +184,13 @@ impl WorktreeDialog {
     }
 
     fn render_branch_list(&self, t: crate::theme::ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_empty = self.branch_search_input.read(cx).value().is_empty();
         if self.filtered_branches.is_empty() {
             return div()
                 .p(px(12.0))
                 .text_size(px(12.0))
                 .text_color(rgb(t.text_muted))
-                .child(if self.branch_search.is_empty() {
+                .child(if search_empty {
                     "No available branches for worktree"
                 } else {
                     "No branches match your search"
@@ -249,24 +250,43 @@ impl Render for WorktreeDialog {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        // Focus on first render
-        window.focus(&focus_handle, cx);
+        // Focus search input on first render
+        if !self.initialized {
+            self.initialized = true;
+            let search_input = self.branch_search_input.clone();
+            search_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+
+        // Filter branches based on search input
+        self.filter_branches(cx);
 
         let path_input = self.path_input.clone();
-        let new_branch_input = self.new_branch_name.clone();
-        let branch_search = self.branch_search.clone();
+        let new_branch_input = self.new_branch_input.clone();
+        let branch_search_input = self.branch_search_input.clone();
+
+        // Check if inputs are focused for visual styling
+        let path_input_focused = self.path_input.read(cx).focus_handle(cx).is_focused(window);
+        let new_branch_input_focused = self.new_branch_input.read(cx).focus_handle(cx).is_focused(window);
+        let search_input_focused = self.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
 
         div()
             .id("worktree-dialog-backdrop")
             .track_focus(&focus_handle)
             .key_context("WorktreeDialog")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // Check if path or new branch input has focus
+                let text_input_focused = this.path_input.read(cx).focus_handle(cx).is_focused(window)
+                    || this.new_branch_input.read(cx).focus_handle(cx).is_focused(window);
+                let search_focused = this.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+
                 match event.keystroke.key.as_str() {
                     "escape" => {
                         this.close(cx);
                     }
                     "up" => {
-                        if !this.create_new_branch && this.selected_branch_index.is_some() {
+                        if search_focused && !this.create_new_branch && this.selected_branch_index.is_some() {
                             if let Some(idx) = this.selected_branch_index {
                                 if idx > 0 {
                                     this.selected_branch_index = Some(idx - 1);
@@ -276,7 +296,7 @@ impl Render for WorktreeDialog {
                         }
                     }
                     "down" => {
-                        if !this.create_new_branch {
+                        if search_focused && !this.create_new_branch {
                             let max = this.filtered_branches.len().saturating_sub(1);
                             if let Some(idx) = this.selected_branch_index {
                                 if idx < max {
@@ -290,23 +310,8 @@ impl Render for WorktreeDialog {
                         }
                     }
                     "enter" => {
-                        if this.selected_branch_index.is_some() || this.create_new_branch {
+                        if !text_input_focused && (this.selected_branch_index.is_some() || this.create_new_branch) {
                             this.create_worktree(cx);
-                        }
-                    }
-                    "backspace" => {
-                        if !this.branch_search.is_empty() {
-                            this.branch_search.pop();
-                            this.filter_branches();
-                            cx.notify();
-                        }
-                    }
-                    key if key.len() == 1 => {
-                        let ch = key.chars().next().unwrap();
-                        if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == '/' {
-                            this.branch_search.push(ch);
-                            this.filter_branches();
-                            cx.notify();
                         }
                     }
                     _ => {}
@@ -413,14 +418,16 @@ impl Render for WorktreeDialog {
                                         div()
                                             .bg(rgb(t.bg_secondary))
                                             .border_1()
-                                            .border_color(rgb(t.border))
-                                            .rounded(px(4.0))
-                                            .when_some(path_input, |d, input| {
-                                                d.child(
-                                                    SimpleInput::new(&input)
-                                                        .text_size(px(12.0))
-                                                )
+                                            .border_color(if path_input_focused {
+                                                rgb(t.border_active)
+                                            } else {
+                                                rgb(t.border)
                                             })
+                                            .rounded(px(4.0))
+                                            .child(
+                                                SimpleInput::new(&path_input)
+                                                    .text_size(px(12.0))
+                                            )
                                     )
                                     .child(
                                         div()
@@ -456,38 +463,20 @@ impl Render for WorktreeDialog {
                                                     .child(format!("{} branches", self.filtered_branches.len()))
                                             )
                                     )
-                                    // Search input display
+                                    // Search input
                                     .child(
                                         div()
-                                            .px(px(8.0))
-                                            .py(px(6.0))
                                             .bg(rgb(t.bg_secondary))
                                             .border_1()
-                                            .border_color(rgb(t.border))
+                                            .border_color(if search_input_focused {
+                                                rgb(t.border_active)
+                                            } else {
+                                                rgb(t.border)
+                                            })
                                             .rounded(px(4.0))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
                                             .child(
-                                                svg()
-                                                    .path("icons/search.svg")
-                                                    .size(px(12.0))
-                                                    .text_color(rgb(t.text_muted))
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
+                                                SimpleInput::new(&branch_search_input)
                                                     .text_size(px(12.0))
-                                                    .text_color(if branch_search.is_empty() {
-                                                        rgb(t.text_muted)
-                                                    } else {
-                                                        rgb(t.text_primary)
-                                                    })
-                                                    .child(if branch_search.is_empty() {
-                                                        "Type to filter branches...".to_string()
-                                                    } else {
-                                                        branch_search
-                                                    })
                                             )
                                     )
                                     // Create new branch option
@@ -515,9 +504,13 @@ impl Render for WorktreeDialog {
                                                     .text_color(rgb(t.border_active))
                                                     .child("Create new branch")
                                             )
-                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                            .on_click(cx.listener(|this, _, window, cx| {
                                                 this.create_new_branch = true;
                                                 this.selected_branch_index = None;
+                                                // Focus the new branch input
+                                                this.new_branch_input.update(cx, |input, cx| {
+                                                    input.focus(window, cx);
+                                                });
                                                 cx.notify();
                                             }))
                                     )
@@ -531,14 +524,16 @@ impl Render for WorktreeDialog {
                                                     div()
                                                         .bg(rgb(t.bg_secondary))
                                                         .border_1()
-                                                        .border_color(rgb(t.border))
-                                                        .rounded(px(4.0))
-                                                        .when_some(new_branch_input, |d, input| {
-                                                            d.child(
-                                                                SimpleInput::new(&input)
-                                                                    .text_size(px(12.0))
-                                                            )
+                                                        .border_color(if new_branch_input_focused {
+                                                            rgb(t.border_active)
+                                                        } else {
+                                                            rgb(t.border)
                                                         })
+                                                        .rounded(px(4.0))
+                                                        .child(
+                                                            SimpleInput::new(&new_branch_input)
+                                                                .text_size(px(12.0))
+                                                        )
                                                 )
                                         )
                                     })

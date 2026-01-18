@@ -2,6 +2,7 @@ use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
 use std::ops::Range;
+use std::time::Duration;
 
 /// A simple text input state that doesn't rely on gpui-component's Root entity
 pub struct SimpleInputState {
@@ -10,16 +11,40 @@ pub struct SimpleInputState {
     placeholder: String,
     cursor_position: usize,
     selection: Option<Range<usize>>,
+    cursor_visible: bool,
+    _blink_task: Option<Task<()>>,
+    icon: Option<SharedString>,
 }
 
 impl SimpleInputState {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let focus_handle = cx.focus_handle();
+
+        // Start cursor blink task
+        let blink_task = cx.spawn(async move |this: WeakEntity<SimpleInputState>, cx| {
+            loop {
+                smol::Timer::after(Duration::from_millis(530)).await;
+                let result = cx.update(|cx| {
+                    this.update(cx, |state, cx| {
+                        state.cursor_visible = !state.cursor_visible;
+                        cx.notify();
+                    })
+                });
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             value: String::new(),
             placeholder: String::new(),
             cursor_position: 0,
             selection: None,
+            cursor_visible: true,
+            _blink_task: Some(blink_task),
+            icon: None,
         }
     }
 
@@ -32,6 +57,11 @@ impl SimpleInputState {
         let v = value.into();
         self.cursor_position = v.len();
         self.value = v;
+        self
+    }
+
+    pub fn icon(mut self, icon: impl Into<SharedString>) -> Self {
+        self.icon = Some(icon.into());
         self
     }
 
@@ -55,6 +85,10 @@ impl SimpleInputState {
         window.focus(&self.focus_handle, cx);
     }
 
+    fn reset_cursor_blink(&mut self) {
+        self.cursor_visible = true;
+    }
+
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         // Delete selection first if any
         if let Some(range) = self.selection.take() {
@@ -66,6 +100,7 @@ impl SimpleInputState {
         let byte_pos = self.byte_position_for_char(self.cursor_position);
         self.value.insert_str(byte_pos, text);
         self.cursor_position += text.chars().count();
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -82,6 +117,7 @@ impl SimpleInputState {
             self.value.replace_range(byte_range, "");
             self.cursor_position = prev_pos;
         }
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -99,6 +135,7 @@ impl SimpleInputState {
                 self.value.replace_range(byte_range, "");
             }
         }
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -106,6 +143,7 @@ impl SimpleInputState {
         self.selection = None;
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
+            self.reset_cursor_blink();
             cx.notify();
         }
     }
@@ -115,6 +153,7 @@ impl SimpleInputState {
         let char_count = self.value.chars().count();
         if self.cursor_position < char_count {
             self.cursor_position += 1;
+            self.reset_cursor_blink();
             cx.notify();
         }
     }
@@ -122,12 +161,14 @@ impl SimpleInputState {
     fn move_to_start(&mut self, cx: &mut Context<Self>) {
         self.selection = None;
         self.cursor_position = 0;
+        self.reset_cursor_blink();
         cx.notify();
     }
 
     fn move_to_end(&mut self, cx: &mut Context<Self>) {
         self.selection = None;
         self.cursor_position = self.value.chars().count();
+        self.reset_cursor_blink();
         cx.notify();
     }
 
@@ -136,6 +177,7 @@ impl SimpleInputState {
         if char_count > 0 {
             self.selection = Some(0..char_count);
             self.cursor_position = char_count;
+            self.reset_cursor_blink();
             cx.notify();
         }
     }
@@ -227,6 +269,8 @@ impl Render for SimpleInputState {
         let placeholder = self.placeholder.clone();
         let cursor_position = self.cursor_position;
         let selection = self.selection.clone();
+        let cursor_visible = self.cursor_visible && is_focused;
+        let icon = self.icon.clone();
 
         // Split value into parts for rendering with cursor
         let (before_cursor, after_cursor) = {
@@ -237,11 +281,17 @@ impl Render for SimpleInputState {
 
         let show_placeholder = value.is_empty() && !is_focused;
 
+        let cursor_element = div()
+            .w(px(1.0))
+            .h(px(14.0))
+            .when(cursor_visible, |d| d.bg(rgb(t.text_primary)));
+
         div()
             .id("simple-input")
             .track_focus(&focus_handle)
             .flex()
             .items_center()
+            .gap(px(6.0))
             .w_full()
             .h(px(24.0))
             .px(px(8.0))
@@ -252,6 +302,15 @@ impl Render for SimpleInputState {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key_down(event, cx);
             }))
+            // Optional icon
+            .when_some(icon, |d, icon_path| {
+                d.child(
+                    svg()
+                        .path(icon_path)
+                        .size(px(12.0))
+                        .text_color(rgb(t.text_muted))
+                )
+            })
             .child(if show_placeholder {
                 div()
                     .text_color(rgb(t.text_muted))
@@ -277,9 +336,7 @@ impl Render for SimpleInputState {
                             .child(selected),
                     )
                     .child(after_sel)
-                    .when(is_focused, |this| {
-                        this.child(div().w(px(1.0)).h(px(14.0)).bg(rgb(t.text_primary)))
-                    })
+                    .child(cursor_element)
                     .into_any_element()
             } else {
                 // Normal rendering with cursor
@@ -288,9 +345,7 @@ impl Render for SimpleInputState {
                     .items_center()
                     .text_color(rgb(t.text_primary))
                     .child(before_cursor)
-                    .when(is_focused, |this| {
-                        this.child(div().w(px(1.0)).h(px(14.0)).bg(rgb(t.text_primary)))
-                    })
+                    .child(cursor_element)
                     .child(after_cursor)
                     .into_any_element()
             })
