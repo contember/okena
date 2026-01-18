@@ -59,6 +59,8 @@ pub struct TerminalPane {
     hovered_url_index: Option<usize>,
     /// Cursor blink state
     cursor_visible: bool,
+    /// Scroll accumulator for sub-line deltas (ensures smooth scrolling)
+    scroll_accumulator: f32,
 }
 
 impl TerminalPane {
@@ -111,6 +113,7 @@ impl TerminalPane {
             url_matches: Vec::new(),
             hovered_url_index: None,
             cursor_visible: true,
+            scroll_accumulator: 0.0,
         };
 
         // If we have an existing terminal ID, create terminal immediately
@@ -940,13 +943,18 @@ impl TerminalPane {
         }
     }
 
-    fn handle_scroll(&mut self, delta: f32, position: gpui::Point<Pixels>, cx: &mut Context<Self>) {
+    fn handle_scroll(&mut self, delta: f32, position: gpui::Point<Pixels>, touch_phase: TouchPhase, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
+            let (cell_width, cell_height) = terminal.cell_dimensions();
+
+            // Reset accumulator on new scroll gesture
+            if matches!(touch_phase, TouchPhase::Started) {
+                self.scroll_accumulator = 0.0;
+            }
+
             // Check if terminal is in mouse mode (tmux, vim, etc.)
             if terminal.is_mouse_mode() {
                 // Forward scroll to PTY as mouse wheel events
-                let (cell_width, cell_height) = terminal.cell_dimensions();
-
                 // Calculate cell position relative to terminal bounds
                 let (col, row) = if let Some(bounds) = self.element_bounds {
                     let x = (f32::from(position.x) - f32::from(bounds.origin.x)).max(0.0);
@@ -956,24 +964,35 @@ impl TerminalPane {
                     (0, 0)
                 };
 
-                // Convert pixel delta to scroll events
-                // Mouse button 64 = scroll up, 65 = scroll down
-                let lines = (delta.abs() / cell_height).max(1.0) as i32;
-                let button = if delta > 0.0 { 64u8 } else { 65u8 };
+                // Accumulate scroll delta for smooth sub-line scrolling
+                self.scroll_accumulator += delta / cell_height;
 
-                for _ in 0..lines {
-                    terminal.send_mouse_scroll(button, col, row);
+                // Only send events for whole lines
+                let lines = self.scroll_accumulator.trunc() as i32;
+                if lines != 0 {
+                    self.scroll_accumulator -= lines as f32;
+                    // Mouse button 64 = scroll up, 65 = scroll down
+                    let button = if lines > 0 { 64u8 } else { 65u8 };
+                    for _ in 0..lines.abs() {
+                        terminal.send_mouse_scroll(button, col, row);
+                    }
                 }
             } else {
-                // Normal scrollback scrolling
-                let (_, cell_height) = terminal.cell_dimensions();
-                let lines = (delta / cell_height) as i32;
-                if lines > 0 {
-                    terminal.scroll_up(lines);
-                } else if lines < 0 {
-                    terminal.scroll_down(-lines);
+                // Normal scrollback scrolling with accumulation
+                self.scroll_accumulator += delta / cell_height;
+
+                // Only scroll for whole lines, keep remainder
+                let lines = self.scroll_accumulator.trunc() as i32;
+                if lines != 0 {
+                    self.scroll_accumulator -= lines as f32;
+                    if lines > 0 {
+                        terminal.scroll_up(lines);
+                    } else {
+                        terminal.scroll_down(-lines);
+                    }
                 }
             }
+
             // Update scroll activity for auto-hide
             self.last_scroll_activity = std::time::Instant::now();
             self.scrollbar_visible = true;
@@ -1766,8 +1785,12 @@ impl TerminalPane {
                     this.handle_mouse_up(event, cx);
                 }))
                 .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                    let delta = event.delta.pixel_delta(px(17.0));
-                    this.handle_scroll(f32::from(delta.y), event.position, cx);
+                    // Use actual cell height from terminal, fallback to 17.0
+                    let cell_height = this.terminal.as_ref()
+                        .map(|t| t.cell_dimensions().1)
+                        .unwrap_or(17.0);
+                    let delta = event.delta.pixel_delta(px(cell_height));
+                    this.handle_scroll(f32::from(delta.y), event.position, event.touch_phase, cx);
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     // Right-click: show context menu
