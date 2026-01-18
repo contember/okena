@@ -7,6 +7,7 @@ mod settings;
 mod simple_root;
 mod terminal;
 mod theme;
+mod ui;
 mod views;
 mod workspace;
 

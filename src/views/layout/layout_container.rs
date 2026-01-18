@@ -35,6 +35,18 @@ struct TabDragView {
     label: String,
 }
 
+/// Context for tab action button closures.
+///
+/// This struct consolidates the common values needed by tab action buttons,
+/// reducing the number of clones needed in render_tabs().
+#[derive(Clone)]
+struct TabActionContext {
+    workspace: Entity<Workspace>,
+    project_id: String,
+    layout_path: Vec<usize>,
+    active_tab: usize,
+}
+
 impl Render for TabDragView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -723,6 +735,128 @@ impl LayoutContainer {
             })
     }
 
+    /// Render action buttons for the tab bar.
+    ///
+    /// This helper method extracts the action buttons from render_tabs() for better readability.
+    fn render_tab_action_buttons(
+        &self,
+        ctx: TabActionContext,
+        terminal_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let id_suffix = format!("tabs-{:?}", ctx.layout_path);
+
+        // Check if buffer capture is supported
+        let supports_buffer_capture = self.pty_manager.supports_buffer_capture();
+        let pty_manager_for_export = self.pty_manager.clone();
+        let terminal_id_for_export = terminal_id.clone();
+        let terminal_id_for_fullscreen = terminal_id;
+
+        // Clone context for each action - much cleaner than individual clones
+        let ctx_split_v = ctx.clone();
+        let ctx_split_h = ctx.clone();
+        let ctx_add_tab = ctx.clone();
+        let ctx_minimize = ctx.clone();
+        let ctx_fullscreen = ctx.clone();
+        let ctx_detach = ctx.clone();
+        let ctx_close = ctx.clone();
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.0))
+            .px(px(4.0))
+            // Split Vertical
+            .child(
+                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut child_path = ctx_split_v.layout_path.clone();
+                        child_path.push(ctx_split_v.active_tab);
+                        ctx_split_v.workspace.update(cx, |ws, cx| {
+                            ws.split_terminal(&ctx_split_v.project_id, &child_path, SplitDirection::Vertical, cx);
+                        });
+                    }),
+            )
+            // Split Horizontal
+            .child(
+                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut child_path = ctx_split_h.layout_path.clone();
+                        child_path.push(ctx_split_h.active_tab);
+                        ctx_split_h.workspace.update(cx, |ws, cx| {
+                            ws.split_terminal(&ctx_split_h.project_id, &child_path, SplitDirection::Horizontal, cx);
+                        });
+                    }),
+            )
+            // Add Tab
+            .child(
+                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        ctx_add_tab.workspace.update(cx, |ws, cx| {
+                            ws.add_tab_to_group(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
+                        });
+                    }),
+            )
+            // Minimize
+            .child(
+                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut full_path = ctx_minimize.layout_path.clone();
+                        full_path.push(ctx_minimize.active_tab);
+                        ctx_minimize.workspace.update(cx, |ws, cx| {
+                            ws.toggle_terminal_minimized(&ctx_minimize.project_id, &full_path, cx);
+                        });
+                    }),
+            )
+            // Export Buffer (conditional)
+            .when(supports_buffer_capture, |el| {
+                el.child(
+                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(ref tid) = terminal_id_for_export {
+                                if let Some(path) = pty_manager_for_export.capture_buffer(tid) {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+                                    log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                }
+                            }
+                        }),
+                )
+            })
+            // Fullscreen
+            .child(
+                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        if let Some(ref tid) = terminal_id_for_fullscreen {
+                            ctx_fullscreen.workspace.update(cx, |ws, cx| {
+                                ws.set_fullscreen_terminal(ctx_fullscreen.project_id.clone(), tid.clone(), cx);
+                            });
+                        }
+                    }),
+            )
+            // Detach
+            .child(
+                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut full_path = ctx_detach.layout_path.clone();
+                        full_path.push(ctx_detach.active_tab);
+                        ctx_detach.workspace.update(cx, |ws, cx| {
+                            ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
+                        });
+                    }),
+            )
+            // Close Tab
+            .child(
+                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
+                    .on_click(move |_, _window, cx| {
+                        ctx_close.workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx);
+                        });
+                    }),
+            )
+    }
+
     fn render_tabs(
         &mut self,
         children: &[LayoutNode],
@@ -924,134 +1058,19 @@ impl LayoutContainer {
             self.render_tab_context_menu(tab_idx, pos, num, cx)
         });
 
-        // Action buttons for the tab bar
-        // Clones for closures
-        let ws_for_split_v = self.workspace.clone();
-        let ws_for_split_h = self.workspace.clone();
-        let ws_for_add_tab = self.workspace.clone();
-        let ws_for_minimize = self.workspace.clone();
-        let ws_for_fullscreen = self.workspace.clone();
-        let ws_for_detach = self.workspace.clone();
-        let ws_for_close = self.workspace.clone();
-        let pid_for_split_v = self.project_id.clone();
-        let pid_for_split_h = self.project_id.clone();
-        let pid_for_add_tab = self.project_id.clone();
-        let pid_for_minimize = self.project_id.clone();
-        let pid_for_fullscreen = self.project_id.clone();
-        let pid_for_detach = self.project_id.clone();
-        let pid_for_close = self.project_id.clone();
-        let path_for_split_v = self.layout_path.clone();
-        let path_for_split_h = self.layout_path.clone();
-        let path_for_add_tab = self.layout_path.clone();
-        let path_for_minimize = self.layout_path.clone();
-        let path_for_detach = self.layout_path.clone();
-        let path_for_close = self.layout_path.clone();
-        let active_tab_for_actions = active_tab;
+        // Build action context for tab buttons
+        let action_ctx = TabActionContext {
+            workspace: self.workspace.clone(),
+            project_id: self.project_id.clone(),
+            layout_path: self.layout_path.clone(),
+            active_tab,
+        };
 
         // Get terminal_id for actions that need it
-        let terminal_id_for_fullscreen = self.get_active_terminal_id(active_tab, cx);
-        let terminal_id_for_export = terminal_id_for_fullscreen.clone();
+        let terminal_id_for_actions = self.get_active_terminal_id(active_tab, cx);
 
-        // Check if buffer capture is supported
-        let supports_buffer_capture = self.pty_manager.supports_buffer_capture();
-        let pty_manager_for_export = self.pty_manager.clone();
-
-        // Unique ID suffix for this tab bar
-        let id_suffix = format!("tabs-{:?}", self.layout_path);
-
-        let action_buttons = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(2.0))
-            .px(px(4.0))
-            // Split Vertical
-            .child(
-                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let mut child_path = path_for_split_v.clone();
-                        child_path.push(active_tab_for_actions);
-                        ws_for_split_v.update(cx, |ws, cx| {
-                            ws.split_terminal(&pid_for_split_v, &child_path, SplitDirection::Vertical, cx);
-                        });
-                    }),
-            )
-            // Split Horizontal
-            .child(
-                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let mut child_path = path_for_split_h.clone();
-                        child_path.push(active_tab_for_actions);
-                        ws_for_split_h.update(cx, |ws, cx| {
-                            ws.split_terminal(&pid_for_split_h, &child_path, SplitDirection::Horizontal, cx);
-                        });
-                    }),
-            )
-            // Add Tab
-            .child(
-                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        ws_for_add_tab.update(cx, |ws, cx| {
-                            ws.add_tab_to_group(&pid_for_add_tab, &path_for_add_tab, cx);
-                        });
-                    }),
-            )
-            // Minimize
-            .child(
-                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let mut full_path = path_for_minimize.clone();
-                        full_path.push(active_tab_for_actions);
-                        ws_for_minimize.update(cx, |ws, cx| {
-                            ws.toggle_terminal_minimized(&pid_for_minimize, &full_path, cx);
-                        });
-                    }),
-            )
-            // Export Buffer (conditional)
-            .when(supports_buffer_capture, |el| {
-                el.child(
-                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
-                        .on_click(move |_, _window, cx| {
-                            if let Some(ref tid) = terminal_id_for_export {
-                                if let Some(path) = pty_manager_for_export.capture_buffer(tid) {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-                                    log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
-                                }
-                            }
-                        }),
-                )
-            })
-            // Fullscreen
-            .child(
-                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_fullscreen {
-                            ws_for_fullscreen.update(cx, |ws, cx| {
-                                ws.set_fullscreen_terminal(pid_for_fullscreen.clone(), tid.clone(), cx);
-                            });
-                        }
-                    }),
-            )
-            // Detach
-            .child(
-                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let mut full_path = path_for_detach.clone();
-                        full_path.push(active_tab_for_actions);
-                        ws_for_detach.update(cx, |ws, cx| {
-                            ws.detach_terminal(&pid_for_detach, &full_path, cx);
-                        });
-                    }),
-            )
-            // Close Tab
-            .child(
-                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
-                    .on_click(move |_, _window, cx| {
-                        ws_for_close.update(cx, |ws, cx| {
-                            ws.close_tab(&pid_for_close, &path_for_close, active_tab_for_actions, cx);
-                        });
-                    }),
-            );
+        // Render action buttons using helper method
+        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions, cx);
 
         // Render shell indicator and dropdown
         let shell_indicator = self.render_shell_indicator(active_tab, cx);

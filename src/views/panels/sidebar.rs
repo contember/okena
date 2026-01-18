@@ -1,5 +1,6 @@
 use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
 use crate::theme::theme;
+use crate::ui::ClickDetector;
 use crate::views::root::TerminalsRegistry;
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::{ProjectData, Workspace};
@@ -52,14 +53,14 @@ pub struct Sidebar {
     renaming_terminal: Option<(String, String)>,
     /// Input for renaming terminal
     rename_input: Option<Entity<SimpleInputState>>,
-    /// Last click info for double-click detection: (terminal_id, timestamp)
-    last_click: Option<(String, std::time::Instant)>,
+    /// Double-click detector for terminals
+    terminal_click_detector: ClickDetector<String>,
     /// Project currently being renamed
     renaming_project: Option<String>,
     /// Input for renaming project
     project_rename_input: Option<Entity<SimpleInputState>>,
-    /// Last click info for project double-click detection: (project_id, timestamp)
-    last_project_click: Option<(String, std::time::Instant)>,
+    /// Double-click detector for projects
+    project_click_detector: ClickDetector<String>,
 }
 
 impl Sidebar {
@@ -76,29 +77,16 @@ impl Sidebar {
             terminals,
             renaming_terminal: None,
             rename_input: None,
-            last_click: None,
+            terminal_click_detector: ClickDetector::new(),
             renaming_project: None,
             project_rename_input: None,
-            last_project_click: None,
+            project_click_detector: ClickDetector::new(),
         }
     }
 
     /// Check for double-click on terminal and return true if detected
     fn check_double_click(&mut self, terminal_id: &str) -> bool {
-        let now = std::time::Instant::now();
-        let is_double = if let Some((last_id, last_time)) = &self.last_click {
-            last_id == terminal_id && now.duration_since(*last_time).as_millis() < 400
-        } else {
-            false
-        };
-
-        if is_double {
-            self.last_click = None;
-            true
-        } else {
-            self.last_click = Some((terminal_id.to_string(), now));
-            false
-        }
+        self.terminal_click_detector.check(terminal_id.to_string())
     }
 
     fn toggle_expanded(&mut self, project_id: &str) {
@@ -161,20 +149,7 @@ impl Sidebar {
 
     /// Check for double-click on project and return true if detected
     fn check_project_double_click(&mut self, project_id: &str) -> bool {
-        let now = std::time::Instant::now();
-        let is_double = if let Some((last_id, last_time)) = &self.last_project_click {
-            last_id == project_id && now.duration_since(*last_time).as_millis() < 400
-        } else {
-            false
-        };
-
-        if is_double {
-            self.last_project_click = None;
-            true
-        } else {
-            self.last_project_click = Some((project_id.to_string(), now));
-            false
-        }
+        self.project_click_detector.check(project_id.to_string())
     }
 
     fn start_project_rename(&mut self, project_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -919,7 +894,7 @@ impl Sidebar {
         // Check if this terminal is currently focused
         let is_focused = {
             let ws = self.workspace.read(cx);
-            ws.focused_terminal.as_ref().map_or(false, |ft| {
+            ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
                 if let Some(proj) = ws.project(&project_id) {
                     proj.layout.find_terminal_path(&terminal_id_for_focus)
                         .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)

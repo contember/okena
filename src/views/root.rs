@@ -401,7 +401,10 @@ impl RootView {
                             ws.data = data.clone();
                             ws.focused_project_id = None;
                             ws.fullscreen_terminal = None;
-                            ws.focused_terminal = None;
+                            // Clear focus state via FocusManager
+                            ws.focus_manager.clear_focus();
+                            ws.focus_manager.clear_stack();
+                            ws.focused_terminal = None; // Keep legacy field in sync
                             ws.detached_terminals.clear();
                             cx.notify();
                         });
@@ -837,8 +840,7 @@ impl RootView {
         // Get the focused project ID and info
         let project_info = {
             let ws = self.workspace.read(cx);
-            let project_id = ws.focused_terminal
-                .as_ref()
+            let project_id = ws.focus_manager.focused_terminal_state()
                 .map(|f| f.project_id.clone())
                 .or_else(|| {
                     // Fallback: use the first visible project

@@ -114,8 +114,11 @@ pub struct Workspace {
     pub data: WorkspaceData,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<FullscreenState>,
-    /// Currently focused terminal (for visual indicator)
-    /// Note: Managed by FocusManager, kept for backward compatibility
+    /// Currently focused terminal (for visual indicator).
+    ///
+    /// **DEPRECATED**: Use `focus_manager.focused_terminal_state()` instead.
+    /// This field is kept in sync with FocusManager for backward compatibility
+    /// but should not be accessed directly in new code.
     pub focused_terminal: Option<FocusedTerminalState>,
     /// Currently detached terminals (opened in separate windows)
     pub detached_terminals: Vec<DetachedTerminalState>,

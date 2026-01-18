@@ -6,6 +6,7 @@ use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::shell_config::{ShellType, available_shells, AvailableShell};
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
+use crate::ui::ClickDetector;
 use crate::views::navigation::{NavigationDirection, get_pane_map, register_pane_bounds};
 use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::root::TerminalsRegistry;
@@ -39,8 +40,8 @@ pub struct TerminalPane {
     /// Rename state
     is_renaming: bool,
     rename_input: Option<Entity<SimpleInputState>>,
-    /// Last click time for double-click detection
-    last_header_click: Option<std::time::Instant>,
+    /// Double-click detector for header rename
+    header_click_detector: ClickDetector<()>,
     /// Last click time and position for terminal double/triple click detection
     last_terminal_click: Option<(std::time::Instant, usize, i32)>,
     terminal_click_count: u8,
@@ -113,7 +114,7 @@ impl TerminalPane {
             context_menu_position: None,
             is_renaming: false,
             rename_input: None,
-            last_header_click: None,
+            header_click_detector: ClickDetector::new(),
             last_terminal_click: None,
             terminal_click_count: 0,
             is_searching: false,
@@ -264,20 +265,8 @@ impl TerminalPane {
 
     /// Check for double-click on header
     fn check_header_double_click(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        let is_double = if let Some(last_time) = self.last_header_click {
-            now.duration_since(last_time).as_millis() < 400
-        } else {
-            false
-        };
-
-        if is_double {
-            self.last_header_click = None;
-            true
-        } else {
-            self.last_header_click = Some(now);
-            false
-        }
+        // Use () as key since all header clicks are the same target
+        self.header_click_detector.check(())
     }
 
     fn start_rename(&mut self, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2158,7 +2147,7 @@ impl Render for TerminalPane {
             let ws = self.workspace.read(cx);
             let is_modal = ws.focus_manager.is_modal();
             if !self.is_renaming && !self.is_searching && !is_modal {
-                if let Some(ref focused) = ws.focused_terminal {
+                if let Some(focused) = ws.focus_manager.focused_terminal_state() {
                     if focused.project_id == self.project_id && focused.layout_path == self.layout_path {
                         // This terminal should be focused
                         if !focus_handle.is_focused(_window) {

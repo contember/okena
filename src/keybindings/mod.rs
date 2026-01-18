@@ -1,8 +1,7 @@
-#![allow(static_mut_refs)]
-
 mod config;
 
 use gpui::*;
+use parking_lot::RwLock;
 
 pub use config::{
     get_action_descriptions, get_keybindings_path, load_keybindings, save_keybindings,
@@ -54,34 +53,32 @@ actions!(
     ]
 );
 
-/// Global keybinding configuration
-static mut KEYBINDING_CONFIG: Option<KeybindingConfig> = None;
+/// Global keybinding configuration (thread-safe)
+static KEYBINDING_CONFIG: RwLock<Option<KeybindingConfig>> = RwLock::new(None);
 
-/// Get the current keybinding configuration
-pub fn get_config() -> &'static KeybindingConfig {
-    unsafe {
-        KEYBINDING_CONFIG
-            .as_ref()
-            .expect("Keybinding config not initialized")
-    }
+/// Get a read guard to the current keybinding configuration
+///
+/// Returns a guard that dereferences to KeybindingConfig.
+/// The guard must be held for the duration of access.
+pub fn get_config() -> impl std::ops::Deref<Target = KeybindingConfig> {
+    parking_lot::RwLockReadGuard::map(KEYBINDING_CONFIG.read(), |opt| {
+        opt.as_ref().expect("Keybinding config not initialized")
+    })
 }
 
-/// Get the current keybinding configuration mutably
+/// Get a write guard to the current keybinding configuration
 #[allow(dead_code)]
-pub fn get_config_mut() -> &'static mut KeybindingConfig {
-    unsafe {
-        KEYBINDING_CONFIG
-            .as_mut()
-            .expect("Keybinding config not initialized")
-    }
+pub fn get_config_mut() -> impl std::ops::DerefMut<Target = KeybindingConfig> {
+    parking_lot::RwLockWriteGuard::map(KEYBINDING_CONFIG.write(), |opt| {
+        opt.as_mut().expect("Keybinding config not initialized")
+    })
 }
 
 /// Reset keybindings to defaults and save
 pub fn reset_to_defaults() -> anyhow::Result<()> {
-    unsafe {
-        KEYBINDING_CONFIG = Some(KeybindingConfig::defaults());
-        save_keybindings(KEYBINDING_CONFIG.as_ref().unwrap())?;
-    }
+    let config = KeybindingConfig::defaults();
+    save_keybindings(&config)?;
+    *KEYBINDING_CONFIG.write() = Some(config);
     Ok(())
 }
 
@@ -89,9 +86,7 @@ pub fn reset_to_defaults() -> anyhow::Result<()> {
 #[allow(dead_code)]
 pub fn reload_keybindings() {
     let config = load_keybindings();
-    unsafe {
-        KEYBINDING_CONFIG = Some(config);
-    }
+    *KEYBINDING_CONFIG.write() = Some(config);
 }
 
 /// Register keybindings for the application from configuration
@@ -105,10 +100,8 @@ pub fn register_keybindings(cx: &mut App) {
         log::warn!("Keybinding conflict detected: {}", conflict);
     }
 
-    // Store config globally
-    unsafe {
-        KEYBINDING_CONFIG = Some(config.clone());
-    }
+    // Store config globally (thread-safe)
+    *KEYBINDING_CONFIG.write() = Some(config.clone());
 
     // Register bindings from config
     register_bindings_from_config(cx, &config);
