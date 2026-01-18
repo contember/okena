@@ -1,6 +1,7 @@
 pub mod command_palette;
 pub mod detached_terminal;
 pub mod fullscreen_terminal;
+pub mod header_buttons;
 pub mod keybindings_help;
 pub mod layout_container;
 pub mod navigation;

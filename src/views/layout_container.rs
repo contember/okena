@@ -1,12 +1,15 @@
 use crate::terminal::pty_manager::PtyManager;
+use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
+use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
+use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::root::TerminalsRegistry;
 use crate::views::split_pane::render_split_divider;
 use crate::views::terminal_pane::TerminalPane;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
+use gpui_component::tooltip::Tooltip;
 use gpui::*;
 use gpui::prelude::*;
-use gpui_component::tooltip::Tooltip;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -86,6 +89,10 @@ pub struct LayoutContainer {
     /// Animation state for recently dropped tab (tab_index, animation_progress)
     /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     drop_animation: Option<(usize, f32)>,
+    /// Shell dropdown state for tab groups
+    shell_dropdown_open: bool,
+    /// Available shells for switching
+    available_shells: Vec<AvailableShell>,
 }
 
 impl LayoutContainer {
@@ -112,6 +119,8 @@ impl LayoutContainer {
             })),
             tab_context_menu: None,
             drop_animation: None,
+            shell_dropdown_open: false,
+            available_shells: available_shells(),
         }
     }
 
@@ -205,6 +214,240 @@ impl LayoutContainer {
     fn get_layout<'a>(&self, workspace: &'a Workspace) -> Option<&'a LayoutNode> {
         let project = workspace.project(&self.project_id)?;
         project.layout.get_at_path(&self.layout_path)
+    }
+
+    /// Get the terminal_id for the active tab in this Tabs container.
+    fn get_active_terminal_id(&self, active_tab: usize, cx: &Context<Self>) -> Option<String> {
+        let ws = self.workspace.read(cx);
+        if let Some(LayoutNode::Tabs { children, .. }) = self.get_layout(&ws) {
+            if let Some(LayoutNode::Terminal { terminal_id, .. }) = children.get(active_tab) {
+                return terminal_id.clone();
+            }
+        }
+        None
+    }
+
+    /// Get the shell type for the active tab in this Tabs container.
+    fn get_active_shell_type(&self, active_tab: usize, cx: &Context<Self>) -> ShellType {
+        let ws = self.workspace.read(cx);
+        if let Some(LayoutNode::Tabs { children, .. }) = self.get_layout(&ws) {
+            if let Some(LayoutNode::Terminal { shell_type, .. }) = children.get(active_tab) {
+                return shell_type.clone();
+            }
+        }
+        ShellType::Default
+    }
+
+    /// Get the display name for a shell type.
+    fn get_shell_display_name(&self, shell_type: &ShellType) -> &'static str {
+        match shell_type {
+            ShellType::Default => "Default",
+            ShellType::Cmd => "CMD",
+            ShellType::PowerShell { core } => {
+                if *core { "pwsh" } else { "PowerShell" }
+            }
+            ShellType::Wsl { .. } => "WSL",
+            ShellType::Custom { .. } => "Custom",
+        }
+    }
+
+    /// Toggle the shell dropdown for tab groups.
+    fn toggle_shell_dropdown(&mut self, cx: &mut Context<Self>) {
+        self.shell_dropdown_open = !self.shell_dropdown_open;
+        cx.notify();
+    }
+
+    /// Switch the shell for the active tab.
+    fn switch_shell(&mut self, active_tab: usize, shell_type: ShellType, cx: &mut Context<Self>) {
+        self.shell_dropdown_open = false;
+
+        // Get the terminal_id for the active tab
+        let terminal_id = self.get_active_terminal_id(active_tab, cx);
+
+        // Get the current shell type
+        let current_shell = self.get_active_shell_type(active_tab, cx);
+        if current_shell == shell_type {
+            cx.notify();
+            return;
+        }
+
+        // Kill the old terminal if it exists
+        if let Some(ref tid) = terminal_id {
+            self.pty_manager.kill(tid);
+        }
+
+        // Update the shell type in workspace state
+        let mut full_path = self.layout_path.clone();
+        full_path.push(active_tab);
+        let project_id = self.project_id.clone();
+        let shell_for_save = shell_type.clone();
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_terminal_shell(&project_id, &full_path, shell_for_save, cx);
+        });
+
+        // Create a new terminal with the new shell
+        match self.pty_manager.create_terminal_with_shell(&self.project_path, Some(&shell_type)) {
+            Ok(new_terminal_id) => {
+                // Update the terminal_id in workspace state
+                let new_id = new_terminal_id.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_id(&project_id, &full_path, new_id.clone(), cx);
+                });
+
+                // Create Terminal wrapper and register it
+                let size = TerminalSize::default();
+                let terminal = Arc::new(Terminal::new(new_terminal_id.clone(), size, self.pty_manager.clone()));
+                self.terminals.lock().insert(new_terminal_id.clone(), terminal);
+
+                log::info!("Switched tab {} to shell {:?}, new terminal_id: {}", active_tab, shell_type, new_terminal_id);
+            }
+            Err(e) => {
+                log::error!("Failed to create terminal with new shell: {}", e);
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Render the shell indicator button for tab groups.
+    fn render_shell_indicator(&mut self, active_tab: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let shell_type = self.get_active_shell_type(active_tab, cx);
+        let shell_name = self.get_shell_display_name(&shell_type);
+        let id_suffix = format!("tabs-{:?}", self.layout_path);
+
+        div()
+            .id(format!("shell-indicator-{}", id_suffix))
+            .cursor_pointer()
+            .px(px(6.0))
+            .h(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_shell_dropdown(cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(t.text_secondary))
+                            .child(shell_name)
+                    )
+                    .child(
+                        svg()
+                            .path("icons/chevron-down.svg")
+                            .size(px(10.0))
+                            .text_color(rgb(t.text_secondary))
+                    )
+            )
+            .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
+    }
+
+    /// Render the shell dropdown modal for tab groups.
+    fn render_shell_dropdown(&mut self, active_tab: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        if !self.shell_dropdown_open {
+            return div().into_any_element();
+        }
+
+        let shells = self.available_shells.clone();
+        let current_shell = self.get_active_shell_type(active_tab, cx);
+
+        // Full-screen backdrop + centered modal
+        div()
+            .id("shell-modal-backdrop-tabs")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000088))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.shell_dropdown_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("shell-modal-tabs")
+                    .w(px(200.0))
+                    .bg(rgb(t.bg_secondary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        // Modal header
+                        div()
+                            .px(px(12.0))
+                            .py(px(8.0))
+                            .border_b_1()
+                            .border_color(rgb(t.border))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(t.text_primary))
+                                    .child("Switch Shell")
+                            )
+                    )
+                    .child(
+                        // Shell list
+                        div()
+                            .py(px(2.0))
+                            .children(shells.into_iter().filter(|s| s.available).map(|shell| {
+                                let shell_type = shell.shell_type.clone();
+                                let is_current = shell_type == current_shell;
+                                let name = shell.name.clone();
+
+                                div()
+                                    .id(format!("shell-option-tabs-{}", name.replace(" ", "-").to_lowercase()))
+                                    .w_full()
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .cursor_pointer()
+                                    .bg(if is_current { rgb(t.bg_hover) } else { rgb(t.bg_secondary) })
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                                        this.switch_shell(active_tab, shell_type.clone(), cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child(name)
+                                            )
+                                            .when(is_current, |d| {
+                                                d.child(
+                                                    svg()
+                                                        .path("icons/check.svg")
+                                                        .size(px(12.0))
+                                                        .text_color(rgb(t.success))
+                                                )
+                                            })
+                                    )
+                            }))
+                    )
+            )
+            .into_any_element()
     }
 
     fn render_terminal(
@@ -682,19 +925,39 @@ impl LayoutContainer {
         });
 
         // Action buttons for the tab bar
+        // Clones for closures
         let ws_for_split_v = self.workspace.clone();
         let ws_for_split_h = self.workspace.clone();
         let ws_for_add_tab = self.workspace.clone();
+        let ws_for_minimize = self.workspace.clone();
+        let ws_for_fullscreen = self.workspace.clone();
+        let ws_for_detach = self.workspace.clone();
         let ws_for_close = self.workspace.clone();
         let pid_for_split_v = self.project_id.clone();
         let pid_for_split_h = self.project_id.clone();
         let pid_for_add_tab = self.project_id.clone();
+        let pid_for_minimize = self.project_id.clone();
+        let pid_for_fullscreen = self.project_id.clone();
+        let pid_for_detach = self.project_id.clone();
         let pid_for_close = self.project_id.clone();
         let path_for_split_v = self.layout_path.clone();
         let path_for_split_h = self.layout_path.clone();
         let path_for_add_tab = self.layout_path.clone();
+        let path_for_minimize = self.layout_path.clone();
+        let path_for_detach = self.layout_path.clone();
         let path_for_close = self.layout_path.clone();
         let active_tab_for_actions = active_tab;
+
+        // Get terminal_id for actions that need it
+        let terminal_id_for_fullscreen = self.get_active_terminal_id(active_tab, cx);
+        let terminal_id_for_export = terminal_id_for_fullscreen.clone();
+
+        // Check if buffer capture is supported
+        let supports_buffer_capture = self.pty_manager.supports_buffer_capture();
+        let pty_manager_for_export = self.pty_manager.clone();
+
+        // Unique ID suffix for this tab bar
+        let id_suffix = format!("tabs-{:?}", self.layout_path);
 
         let action_buttons = div()
             .flex()
@@ -702,119 +965,103 @@ impl LayoutContainer {
             .items_center()
             .gap(px(2.0))
             .px(px(4.0))
+            // Split Vertical
             .child(
-                // Split vertical button
-                div()
-                    .id("tab-split-vertical")
-                    .cursor_pointer()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
                         let mut child_path = path_for_split_v.clone();
                         child_path.push(active_tab_for_actions);
                         ws_for_split_v.update(cx, |ws, cx| {
                             ws.split_terminal(&pid_for_split_v, &child_path, SplitDirection::Vertical, cx);
                         });
-                    })
-                    .child(
-                        svg()
-                            .path("icons/split-vertical.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Split Vertical").build(_window, cx)),
+                    }),
             )
+            // Split Horizontal
             .child(
-                // Split horizontal button
-                div()
-                    .id("tab-split-horizontal")
-                    .cursor_pointer()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
                         let mut child_path = path_for_split_h.clone();
                         child_path.push(active_tab_for_actions);
                         ws_for_split_h.update(cx, |ws, cx| {
                             ws.split_terminal(&pid_for_split_h, &child_path, SplitDirection::Horizontal, cx);
                         });
-                    })
-                    .child(
-                        svg()
-                            .path("icons/split-horizontal.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Split Horizontal").build(_window, cx)),
+                    }),
             )
+            // Add Tab
             .child(
-                // Add tab button
-                div()
-                    .id("tab-add-tab")
-                    .cursor_pointer()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
                         ws_for_add_tab.update(cx, |ws, cx| {
                             ws.add_tab_to_group(&pid_for_add_tab, &path_for_add_tab, cx);
                         });
-                    })
-                    .child(
-                        svg()
-                            .path("icons/tabs.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Add Tab").build(_window, cx)),
+                    }),
             )
+            // Minimize
             .child(
-                // Close tab button
-                div()
-                    .id("tab-close")
-                    .cursor_pointer()
-                    .w(px(20.0))
-                    .h(px(20.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut full_path = path_for_minimize.clone();
+                        full_path.push(active_tab_for_actions);
+                        ws_for_minimize.update(cx, |ws, cx| {
+                            ws.toggle_terminal_minimized(&pid_for_minimize, &full_path, cx);
+                        });
+                    }),
+            )
+            // Export Buffer (conditional)
+            .when(supports_buffer_capture, |el| {
+                el.child(
+                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(ref tid) = terminal_id_for_export {
+                                if let Some(path) = pty_manager_for_export.capture_buffer(tid) {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+                                    log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
+                                }
+                            }
+                        }),
+                )
+            })
+            // Fullscreen
+            .child(
+                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        if let Some(ref tid) = terminal_id_for_fullscreen {
+                            ws_for_fullscreen.update(cx, |ws, cx| {
+                                ws.set_fullscreen_terminal(pid_for_fullscreen.clone(), tid.clone(), cx);
+                            });
+                        }
+                    }),
+            )
+            // Detach
+            .child(
+                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut full_path = path_for_detach.clone();
+                        full_path.push(active_tab_for_actions);
+                        ws_for_detach.update(cx, |ws, cx| {
+                            ws.detach_terminal(&pid_for_detach, &full_path, cx);
+                        });
+                    }),
+            )
+            // Close Tab
+            .child(
+                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
                     .on_click(move |_, _window, cx| {
                         ws_for_close.update(cx, |ws, cx| {
                             ws.close_tab(&pid_for_close, &path_for_close, active_tab_for_actions, cx);
                         });
-                    })
-                    .child(
-                        svg()
-                            .path("icons/close.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Close Tab").build(_window, cx)),
+                    }),
             );
+
+        // Render shell indicator and dropdown
+        let shell_indicator = self.render_shell_indicator(active_tab, cx);
+        let shell_dropdown = self.render_shell_dropdown(active_tab, cx);
 
         div()
             .flex()
             .flex_col()
             .size_full()
+            .relative()
             // Close context menu on left-click anywhere in tabs area
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 if this.tab_context_menu.is_some() {
@@ -834,6 +1081,7 @@ impl LayoutContainer {
                     .border_color(rgb(t.border))
                     .children(tab_elements)
                     .child(end_drop_zone)
+                    .child(shell_indicator)
                     .child(action_buttons),
             )
             .children(context_menu)
@@ -860,6 +1108,8 @@ impl LayoutContainer {
                         .clone()
                 }),
             )
+            // Shell dropdown modal (rendered last to be on top)
+            .child(shell_dropdown)
     }
 }
 

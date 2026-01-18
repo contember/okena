@@ -7,6 +7,7 @@ use crate::terminal::shell_config::{ShellType, available_shells, AvailableShell}
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
 use crate::views::navigation::{NavigationDirection, get_pane_map, register_pane_bounds};
+use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::*;
@@ -1655,7 +1656,7 @@ impl TerminalPane {
             .child(
                 div()
                     .id("shell-modal")
-                    .w(px(280.0))
+                    .w(px(200.0))
                     .bg(rgb(t.bg_secondary))
                     .border_1()
                     .border_color(rgb(t.border))
@@ -1668,13 +1669,13 @@ impl TerminalPane {
                     .child(
                         // Modal header
                         div()
-                            .px(px(16.0))
-                            .py(px(12.0))
+                            .px(px(12.0))
+                            .py(px(8.0))
                             .border_b_1()
                             .border_color(rgb(t.border))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(px(12.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(t.text_primary))
                                     .child("Switch Shell")
@@ -1683,18 +1684,17 @@ impl TerminalPane {
                     .child(
                         // Shell list
                         div()
-                            .py(px(4.0))
+                            .py(px(2.0))
                             .children(shells.into_iter().filter(|s| s.available).map(|shell| {
                                 let shell_type = shell.shell_type.clone();
                                 let is_current = shell_type == current_shell;
                                 let name = shell.name.clone();
-                                let description = shell.description.clone();
 
                                 div()
                                     .id(format!("shell-option-{}", name.replace(" ", "-").to_lowercase()))
                                     .w_full()
-                                    .px(px(16.0))
-                                    .py(px(10.0))
+                                    .px(px(12.0))
+                                    .py(px(6.0))
                                     .cursor_pointer()
                                     .bg(if is_current { rgb(t.bg_hover) } else { rgb(t.bg_secondary) })
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
@@ -1706,31 +1706,18 @@ impl TerminalPane {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .justify_between()
+                                            .gap(px(8.0))
                                             .child(
                                                 div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(2.0))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(13.0))
-                                                            .text_color(rgb(t.text_primary))
-                                                            .font_weight(if is_current { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                                                            .child(name)
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(11.0))
-                                                            .text_color(rgb(t.text_secondary))
-                                                            .child(description)
-                                                    )
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child(name)
                                             )
                                             .when(is_current, |el| {
                                                 el.child(
                                                     svg()
                                                         .path("icons/check.svg")
-                                                        .size(px(16.0))
+                                                        .size(px(12.0))
                                                         .text_color(rgb(t.success))
                                                 )
                                             })
@@ -2090,222 +2077,62 @@ impl TerminalPane {
             .opacity(0.0)
             .group_hover("terminal-header", |s| s.opacity(1.0))
             .child(
-                // Split vertical button
-                div()
-                    .id(format!("split-vertical-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_split(SplitDirection::Vertical, cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/split-vertical.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Split Vertical").build(_window, cx)),
+                    })),
             )
             .child(
-                // Split horizontal button
-                div()
-                    .id(format!("split-horizontal-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_split(SplitDirection::Horizontal, cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/split-horizontal.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Split Horizontal").build(_window, cx)),
+                    })),
             )
             .child(
-                // Add tab button
-                div()
-                    .id(format!("add-tab-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_add_tab(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/tabs.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Add Tab").build(_window, cx)),
+                    })),
             )
             .child(
-                // Minimize button
-                div()
-                    .id(format!("minimize-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_minimize(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/minimize.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Minimize").build(_window, cx)),
+                    })),
             )
             .when(self.pty_manager.supports_buffer_capture(), |el| {
                 el.child(
-                    // Export buffer button
-                    div()
-                        .id(format!("export-buffer-btn-{}", id_suffix))
-                        .cursor_pointer()
-                        .w(px(22.0))
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
+                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::REGULAR, &t, None)
                         .on_click(cx.listener(|this, _, _window, cx| {
                             cx.stop_propagation();
                             this.handle_export_buffer(cx);
-                        }))
-                        .child(
-                            svg()
-                                .path("icons/copy.svg")
-                                .size(px(14.0))
-                                .text_color(rgb(t.text_secondary))
-                        )
-                        .tooltip(|_window, cx| Tooltip::new("Export Buffer to File").build(_window, cx)),
+                        })),
                 )
             })
             .child(
-                // Fullscreen button
-                div()
-                    .id(format!("fullscreen-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_fullscreen(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/fullscreen.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Fullscreen").build(_window, cx)),
+                    })),
             )
             .child(
-                // Detach button
-                div()
-                    .id(format!("detach-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_detach(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/detach.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Detach to Window").build(_window, cx)),
+                    })),
             )
             .child(
-                // Close button
-                div()
-                    .id(format!("close-btn-{}", id_suffix))
-                    .cursor_pointer()
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgba(0xf14c4c99)))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
+                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.stop_propagation();
                         this.handle_close(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/close.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Close").build(_window, cx)),
+                    })),
             )
     }
 }
