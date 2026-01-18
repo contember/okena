@@ -535,6 +535,48 @@ impl TerminalPane {
         }
     }
 
+    /// Handle file drop (drag & drop from external sources)
+    /// Pastes shell-escaped file paths, similar to how Ghostty handles drops
+    fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
+        let Some(ref terminal) = self.terminal else {
+            log::warn!("No terminal for file drop");
+            return;
+        };
+
+        for path in paths.paths() {
+            log::info!("File dropped: {}", path.display());
+
+            // Shell-escape the path (escape spaces and special characters with backslashes)
+            // This matches Ghostty's behavior for drag & drop
+            let escaped_path = Self::shell_escape_path(path);
+
+            // Add space after to make it easier to continue typing
+            terminal.send_input(&format!("{} ", escaped_path));
+        }
+    }
+
+    /// Shell-escape a path for safe pasting into terminal
+    /// Escapes spaces and special shell characters with backslashes
+    fn shell_escape_path(path: &std::path::Path) -> String {
+        let path_str = path.to_string_lossy();
+        let mut escaped = String::with_capacity(path_str.len() * 2);
+
+        for c in path_str.chars() {
+            match c {
+                // Characters that need escaping in shell
+                ' ' | '(' | ')' | '[' | ']' | '{' | '}' |
+                '\'' | '"' | '`' | '$' | '&' | '|' | ';' |
+                '<' | '>' | '*' | '?' | '!' | '#' | '~' | '\\' => {
+                    escaped.push('\\');
+                    escaped.push(c);
+                }
+                _ => escaped.push(c),
+            }
+        }
+
+        escaped
+    }
+
     /// Handle directional navigation to an adjacent pane
     fn handle_navigation(&mut self, direction: NavigationDirection, _window: &mut Window, cx: &mut Context<Self>) {
         // Get the pane map
@@ -2120,6 +2162,11 @@ impl Render for TerminalPane {
                 this.workspace.update(cx, |ws, cx| {
                     ws.set_focused_terminal(this.project_id.clone(), this.layout_path.clone(), cx);
                 });
+            }))
+            // Handle file drops (drag & drop from external sources)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                log::info!("Files dropped onto terminal pane");
+                this.handle_file_drop(paths, cx);
             }))
             .flex()
             .flex_col()
