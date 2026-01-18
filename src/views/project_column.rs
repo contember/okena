@@ -156,8 +156,12 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    fn render_git_status(&self, path: &str, t: ThemeColors) -> impl IntoElement {
-        let status = git::get_git_status(Path::new(path));
+    fn render_git_status(&self, project: &ProjectData, t: ThemeColors) -> impl IntoElement {
+        let status = git::get_git_status(Path::new(&project.path));
+        let is_worktree = project.worktree_info.is_some();
+        let main_repo_path = project.worktree_info.as_ref()
+            .map(|w| w.main_repo_path.clone())
+            .unwrap_or_default();
 
         match status {
             Some(status) if status.branch.is_some() => {
@@ -168,6 +172,22 @@ impl ProjectColumn {
                     .gap(px(6.0))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
+                    // Worktree indicator
+                    .when(is_worktree, |d| {
+                        let tooltip_text = format!("Worktree of {}", main_repo_path);
+                        d.child(
+                            div()
+                                .id("worktree-indicator")
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(t.border_active))
+                                .text_size(px(9.0))
+                                .text_color(rgb(0xffffff))
+                                .child("WT")
+                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+                        )
+                    })
                     // Branch name
                     .child(
                         div()
@@ -267,7 +287,7 @@ impl ProjectColumn {
                                     .overflow_hidden()
                                     .child(project.path.clone()),
                             )
-                            .child(self.render_git_status(&project.path, t)),
+                            .child(self.render_git_status(project, t)),
                     ),
             )
             .child(

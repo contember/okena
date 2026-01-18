@@ -1,5 +1,5 @@
 use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
-use crate::theme::{theme, ThemeColors};
+use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::{ProjectData, Workspace};
@@ -60,8 +60,6 @@ pub struct Sidebar {
     project_rename_input: Option<Entity<SimpleInputState>>,
     /// Last click info for project double-click detection: (project_id, timestamp)
     last_project_click: Option<(String, std::time::Instant)>,
-    /// Context menu state: (project_id, position)
-    context_menu: Option<(String, Point<Pixels>)>,
 }
 
 impl Sidebar {
@@ -82,7 +80,6 @@ impl Sidebar {
             renaming_project: None,
             project_rename_input: None,
             last_project_click: None,
-            context_menu: None,
         }
     }
 
@@ -229,131 +226,10 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn show_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.context_menu = Some((project_id, position));
-        cx.notify();
-    }
-
-    fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        cx.notify();
-    }
-
-    fn render_context_menu(&self, project_id: &str, position: Point<Pixels>, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let workspace = self.workspace.clone();
-        let workspace_for_add = self.workspace.clone();
-        let project_id_for_delete = project_id.to_string();
-        let project_id_for_rename = project_id.to_string();
-        let project_id_for_add = project_id.to_string();
-
-        // Get project name for rename
-        let project_name = self.workspace.read(cx)
-            .project(project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-
-        div()
-            .absolute()
-            .left(position.x)
-            .top(position.y)
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(4.0))
-            .shadow_lg()
-            .min_w(px(140.0))
-            .py(px(4.0))
-            .id("project-context-menu")
-            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
-                cx.stop_propagation();
-            })
-            .child(
-                // Add terminal option
-                div()
-                    .id("context-menu-add-terminal")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .child(
-                        svg()
-                            .path("icons/plus.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .child("Add Terminal")
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.hide_context_menu(cx);
-                        workspace_for_add.update(cx, |ws, cx| {
-                            ws.add_terminal(&project_id_for_add, cx);
-                        });
-                    })),
-            )
-            // Separator
-            .child(
-                div()
-                    .h(px(1.0))
-                    .mx(px(8.0))
-                    .my(px(4.0))
-                    .bg(rgb(t.border)),
-            )
-            .child(
-                // Rename option
-                div()
-                    .id("context-menu-rename")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .child(
-                        svg()
-                            .path("icons/edit.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .child("Rename Project")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.hide_context_menu(cx);
-                        this.start_project_rename(project_id_for_rename.clone(), project_name.clone(), window, cx);
-                    })),
-            )
-            .child(
-                // Delete option
-                div()
-                    .id("context-menu-delete")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.error))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .child(
-                        svg()
-                            .path("icons/trash.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.error))
-                    )
-                    .child("Delete Project")
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.hide_context_menu(cx);
-                        workspace.update(cx, |ws, cx| {
-                            ws.delete_project(&project_id_for_delete, cx);
-                        });
-                    })),
-            )
+    fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.request_context_menu(&project_id, position, cx);
+        });
     }
 
     fn ensure_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -832,7 +708,7 @@ impl Sidebar {
                     .on_mouse_down(MouseButton::Right, cx.listener({
                         let project_id = project_id_for_context_menu.clone();
                         move |this, event: &MouseDownEvent, _window, cx| {
-                            this.show_context_menu(project_id.clone(), event.position, cx);
+                            this.request_context_menu(project_id.clone(), event.position, cx);
                             cx.stop_propagation();
                         }
                     }))
@@ -1261,11 +1137,6 @@ impl Render for Sidebar {
             .collect();
         let show_add_dialog = self.show_add_dialog;
 
-        // Build context menu element if visible
-        let context_menu = self.context_menu.as_ref().map(|(project_id, position)| {
-            self.render_context_menu(project_id, *position, t, cx)
-        });
-
         div()
             .relative()
             .w(px(self.width))
@@ -1275,12 +1146,6 @@ impl Render for Sidebar {
             .bg(rgb(t.bg_secondary))
             .border_r_1()
             .border_color(rgb(t.border))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                // Close context menu on left click
-                if this.context_menu.is_some() {
-                    this.hide_context_menu(cx);
-                }
-            }))
             .child(self.render_header(cx))
             .when(show_add_dialog, |d| d.child(self.render_add_dialog(window, cx)))
             .child(self.render_projects_header(cx))
@@ -1297,6 +1162,5 @@ impl Render for Sidebar {
                     ),
             )
             .child(self.render_keybindings_hint(cx))
-            .children(context_menu)
     }
 }

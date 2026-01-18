@@ -280,6 +280,7 @@ impl Workspace {
             layout: LayoutNode::new_terminal(),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
+            worktree_info: None,
         };
         self.data.projects.push(project);
         self.data.project_order.push(id);
@@ -817,5 +818,112 @@ impl Workspace {
     #[allow(dead_code)] // API for detached terminal access
     pub fn get_detached_terminal(&self, terminal_id: &str) -> Option<&DetachedTerminalState> {
         self.detached_terminals.iter().find(|d| d.terminal_id == terminal_id)
+    }
+
+    /// Clear the worktree dialog request
+    pub fn clear_worktree_dialog_request(&mut self, cx: &mut Context<Self>) {
+        self.worktree_dialog_request = None;
+        cx.notify();
+    }
+
+    /// Request showing the context menu for a project
+    pub fn request_context_menu(&mut self, project_id: &str, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        self.context_menu_request = Some(crate::workspace::state::ContextMenuRequest {
+            project_id: project_id.to_string(),
+            position,
+        });
+        cx.notify();
+    }
+
+    /// Clear the context menu request
+    pub fn clear_context_menu_request(&mut self, cx: &mut Context<Self>) {
+        self.context_menu_request = None;
+        cx.notify();
+    }
+
+    /// Create a worktree project from an existing project
+    /// Returns the new project ID on success
+    pub fn create_worktree_project(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        target_path: &str,
+        create_branch: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        // Get parent project info
+        let parent = self.project(parent_project_id)
+            .ok_or_else(|| "Parent project not found".to_string())?;
+
+        let parent_path = parent.path.clone();
+        let parent_layout = parent.layout.clone();
+
+        // Determine the actual repo path (if parent is a worktree, use its main repo)
+        let repo_path = if let Some(ref wt_info) = parent.worktree_info {
+            std::path::PathBuf::from(&wt_info.main_repo_path)
+        } else {
+            std::path::PathBuf::from(&parent_path)
+        };
+
+        // Create the git worktree
+        let target = std::path::PathBuf::from(target_path);
+        crate::git::create_worktree(&repo_path, branch, &target, create_branch)?;
+
+        // Create new project with cloned layout
+        let id = uuid::Uuid::new_v4().to_string();
+        let project_name = format!("{} ({})",
+            std::path::Path::new(&parent_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Project"),
+            branch
+        );
+
+        let project = ProjectData {
+            id: id.clone(),
+            name: project_name,
+            path: target_path.to_string(),
+            is_visible: true,
+            layout: parent_layout.clone_structure(),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: Some(crate::workspace::state::WorktreeMetadata {
+                parent_project_id: parent_project_id.to_string(),
+                main_repo_path: repo_path.to_string_lossy().to_string(),
+            }),
+        };
+
+        // Insert after parent project in order
+        let parent_index = self.data.project_order
+            .iter()
+            .position(|pid| pid == parent_project_id)
+            .unwrap_or(self.data.project_order.len());
+
+        self.data.projects.push(project);
+        self.data.project_order.insert(parent_index + 1, id.clone());
+
+        cx.notify();
+        Ok(id)
+    }
+
+    /// Remove a worktree project and its git worktree
+    pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        let project = self.project(project_id)
+            .ok_or_else(|| "Project not found".to_string())?;
+
+        // Ensure it's a worktree project
+        if project.worktree_info.is_none() {
+            return Err("Not a worktree project".to_string());
+        }
+
+        let worktree_path = std::path::PathBuf::from(&project.path);
+
+        // Remove the git worktree
+        crate::git::remove_worktree(&worktree_path, force)?;
+
+        // Delete the project from workspace
+        self.delete_project(project_id, cx);
+
+        Ok(())
     }
 }

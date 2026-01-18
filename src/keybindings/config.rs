@@ -297,6 +297,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
+        "CreateWorktree",
+        ActionDescription {
+            name: "Create Worktree",
+            description: "Create a git worktree from the focused project",
+            category: "Project",
+        },
+    );
+    map.insert(
         "ShowKeybindings",
         ActionDescription {
             name: "Show Keybindings",

@@ -4,7 +4,7 @@ use crate::keybindings::{
     ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
     SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
     FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
-    Copy, Paste, ScrollUp, ScrollDown, Search,
+    Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
 };
 use crate::theme::theme;
 use gpui::*;
@@ -126,6 +126,7 @@ impl CommandPalette {
                 "ScrollUp" => window.dispatch_action(Box::new(ScrollUp), cx),
                 "ScrollDown" => window.dispatch_action(Box::new(ScrollDown), cx),
                 "Search" => window.dispatch_action(Box::new(Search), cx),
+                "CreateWorktree" => window.dispatch_action(Box::new(CreateWorktree), cx),
                 _ => {
                     log::warn!("Unknown action in command palette: {}", action);
                 }

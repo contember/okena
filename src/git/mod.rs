@@ -1,5 +1,11 @@
 mod repository;
 
+pub use repository::{
+    create_worktree,
+    remove_worktree,
+    get_available_branches_for_worktree,
+};
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

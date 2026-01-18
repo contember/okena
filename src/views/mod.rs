@@ -14,3 +14,4 @@ pub mod status_bar;
 pub mod terminal_pane;
 pub mod theme_selector;
 pub mod title_bar;
+pub mod worktree_dialog;

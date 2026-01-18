@@ -181,6 +181,7 @@ pub fn default_workspace() -> WorkspaceData {
             layout: LayoutNode::new_terminal(),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
+            worktree_info: None,
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
