@@ -111,17 +111,28 @@ fn main() {
         // Create the main window
         cx.open_window(
             WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Term Manager".into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
+                // On Windows, disable platform titlebar entirely for custom titlebar
+                // On macOS, use transparent titlebar with native traffic lights
+                titlebar: if cfg!(target_os = "windows") {
+                    None
+                } else {
+                    Some(TitlebarOptions {
+                        title: Some("Term Manager".into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    })
+                },
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
                     size: size(px(1200.0), px(800.0)),
                 })),
                 is_resizable: true,
-                window_decorations: Some(WindowDecorations::Server),
+                // On Windows, use client-side decorations for custom window controls
+                window_decorations: Some(if cfg!(target_os = "windows") {
+                    WindowDecorations::Client
+                } else {
+                    WindowDecorations::Server
+                }),
                 window_min_size: Some(Size {
                     width: px(400.0),
                     height: px(300.0),
