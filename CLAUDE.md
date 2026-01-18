@@ -33,6 +33,20 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 cargo build
 ```
 
+### Building from Claude Code (Bash tool)
+
+Use PowerShell to run cargo commands:
+```bash
+powershell.exe -Command "Set-Location 'C:\Users\matej\Documents\GitHub\term-manager'; & 'C:\Users\matej\.cargo\bin\cargo.exe' check 2>&1"
+```
+
+For build:
+```bash
+powershell.exe -Command "Set-Location 'C:\Users\matej\Documents\GitHub\term-manager'; & 'C:\Users\matej\.cargo\bin\cargo.exe' build 2>&1"
+```
+
+Note: Exit code 1 from PowerShell is normal if there are warnings - check for "Finished" in output to confirm success.
+
 ### Common Issues
 
 | Error | Cause | Solution |

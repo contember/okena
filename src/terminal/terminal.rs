@@ -33,17 +33,26 @@ impl Default for TerminalSize {
 }
 
 
-/// Event listener for alacritty_terminal that captures title changes and bell
+/// Event listener for alacritty_terminal that captures title changes, bell, and PTY write requests
 pub struct ZedEventListener {
     /// Shared title storage - OSC 0/1/2 sequences update this
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag
     has_bell: Arc<Mutex<bool>>,
+    /// PTY manager for writing responses back to the terminal
+    pty_manager: Arc<PtyManager>,
+    /// Terminal ID for PTY write operations
+    terminal_id: String,
 }
 
 impl ZedEventListener {
-    pub fn new(title: Arc<Mutex<Option<String>>>, has_bell: Arc<Mutex<bool>>) -> Self {
-        Self { title, has_bell }
+    pub fn new(
+        title: Arc<Mutex<Option<String>>>,
+        has_bell: Arc<Mutex<bool>>,
+        pty_manager: Arc<PtyManager>,
+        terminal_id: String,
+    ) -> Self {
+        Self { title, has_bell, pty_manager, terminal_id }
     }
 }
 
@@ -56,8 +65,13 @@ impl EventListener for ZedEventListener {
             TermEvent::Bell => {
                 *self.has_bell.lock() = true;
             }
+            TermEvent::PtyWrite(data) => {
+                // Write response back to PTY (e.g., cursor position report)
+                log::debug!("PtyWrite event: {:?}", data);
+                self.pty_manager.send_input(&self.terminal_id, data.as_bytes());
+            }
             _ => {
-                // Ignore other events - we handle them through our own channel
+                // Ignore other events
             }
         }
     }
@@ -117,7 +131,12 @@ impl Terminal {
         // Create shared storage for OSC sequence handling and bell
         let title = Arc::new(Mutex::new(None));
         let has_bell = Arc::new(Mutex::new(false));
-        let event_listener = ZedEventListener::new(title.clone(), has_bell.clone());
+        let event_listener = ZedEventListener::new(
+            title.clone(),
+            has_bell.clone(),
+            pty_manager.clone(),
+            terminal_id.clone(),
+        );
         let term = Term::new(config, &term_size, event_listener);
 
         // Create unbounded channel for dirty notifications (don't drop any updates)

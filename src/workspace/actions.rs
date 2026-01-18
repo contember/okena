@@ -1,3 +1,4 @@
+use crate::terminal::shell_config::ShellType;
 use crate::workspace::state::{DetachedTerminalState, FocusedTerminalState, LayoutNode, ProjectData, SplitDirection, Workspace};
 use gpui::*;
 use std::collections::HashMap;
@@ -57,6 +58,33 @@ impl Workspace {
             }
             false
         });
+    }
+
+    /// Set shell type for a terminal at a layout path
+    pub fn set_terminal_shell(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        shell_type: ShellType,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_layout_node(project_id, path, cx, |node| {
+            if let LayoutNode::Terminal { shell_type: st, .. } = node {
+                *st = shell_type;
+                return true;
+            }
+            false
+        });
+    }
+
+    /// Get shell type for a terminal at a layout path
+    pub fn get_terminal_shell(&self, project_id: &str, path: &[usize]) -> Option<ShellType> {
+        let project = self.project(project_id)?;
+        if let Some(LayoutNode::Terminal { shell_type, .. }) = project.layout.get_at_path(path) {
+            Some(shell_type.clone())
+        } else {
+            None
+        }
     }
 
     /// Split a terminal at a path

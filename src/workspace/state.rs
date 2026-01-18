@@ -39,6 +39,8 @@ pub struct ProjectData {
     pub worktree_info: Option<WorktreeMetadata>,
 }
 
+use crate::terminal::shell_config::ShellType;
+
 /// Recursive layout tree node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -49,6 +51,8 @@ pub enum LayoutNode {
         minimized: bool,
         #[serde(default)]
         detached: bool,
+        #[serde(default)]
+        shell_type: ShellType,
     },
     Split {
         direction: SplitDirection,
@@ -208,6 +212,7 @@ impl LayoutNode {
             terminal_id: None,
             minimized: false,
             detached: false,
+            shell_type: ShellType::Default,
         }
     }
 
@@ -265,7 +270,7 @@ impl LayoutNode {
     /// Also resets minimized and detached state since terminals need to be created first
     pub fn clear_terminal_ids(&mut self) {
         match self {
-            LayoutNode::Terminal { terminal_id, minimized, detached } => {
+            LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
                 *terminal_id = None;
                 *minimized = false;
                 *detached = false;
@@ -381,10 +386,11 @@ impl LayoutNode {
     /// Used when creating worktree projects to duplicate layout with fresh terminals
     pub fn clone_structure(&self) -> Self {
         match self {
-            LayoutNode::Terminal { .. } => LayoutNode::Terminal {
+            LayoutNode::Terminal { shell_type, .. } => LayoutNode::Terminal {
                 terminal_id: None,
                 minimized: false,
                 detached: false,
+                shell_type: shell_type.clone(),
             },
             LayoutNode::Split { direction, sizes, children } => LayoutNode::Split {
                 direction: *direction,

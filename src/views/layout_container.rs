@@ -895,6 +895,7 @@ impl Render for LayoutContainer {
                 terminal_id,
                 minimized,
                 detached,
+                ..
             }) => self
                 .render_terminal(terminal_id.clone(), minimized, detached, window, cx)
                 .into_any_element(),

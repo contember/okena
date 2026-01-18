@@ -119,6 +119,7 @@ impl Render for TitleBar {
             .id("title-bar")
             .h(px(32.0))
             .w_full()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()

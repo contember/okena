@@ -220,6 +220,7 @@ impl PtyManager {
                     break;
                 }
                 Ok(n) => {
+                    log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&buf[..n.min(100)]));
                     let _ = tx.send_blocking(PtyEvent::Data {
                         terminal_id: terminal_id.clone(),
                         data: buf[..n].to_vec(),

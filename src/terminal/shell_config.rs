@@ -130,6 +130,7 @@ impl ShellType {
 pub struct AvailableShell {
     pub shell_type: ShellType,
     pub name: String,
+    pub description: String,
     pub available: bool,
 }
 
@@ -138,6 +139,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
     let mut shells = vec![AvailableShell {
         shell_type: ShellType::Default,
         name: "System Default".to_string(),
+        description: "Use system default shell".to_string(),
         available: true,
     }];
 
@@ -147,6 +149,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
         shells.push(AvailableShell {
             shell_type: ShellType::Cmd,
             name: "Command Prompt".to_string(),
+            description: "cmd.exe".to_string(),
             available: true,
         });
 
@@ -154,6 +157,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
         shells.push(AvailableShell {
             shell_type: ShellType::PowerShell { core: false },
             name: "Windows PowerShell".to_string(),
+            description: "powershell.exe".to_string(),
             available: true,
         });
 
@@ -162,6 +166,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
         shells.push(AvailableShell {
             shell_type: ShellType::PowerShell { core: true },
             name: "PowerShell Core".to_string(),
+            description: "pwsh.exe".to_string(),
             available: pwsh_available,
         });
 
@@ -172,6 +177,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
             shells.push(AvailableShell {
                 shell_type: ShellType::Wsl { distro: None },
                 name: "WSL (Default)".to_string(),
+                description: "Linux subsystem".to_string(),
                 available: true,
             });
 
@@ -182,6 +188,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
                         distro: Some(distro.clone()),
                     },
                     name: format!("WSL ({})", distro),
+                    description: "Linux subsystem".to_string(),
                     available: true,
                 });
             }
@@ -192,13 +199,13 @@ pub fn available_shells() -> Vec<AvailableShell> {
     {
         // On Unix, check for common shells
         let unix_shells = [
-            ("/bin/bash", "Bash"),
-            ("/bin/zsh", "Zsh"),
-            ("/bin/fish", "Fish"),
-            ("/bin/sh", "sh"),
+            ("/bin/bash", "Bash", "Bourne Again Shell"),
+            ("/bin/zsh", "Zsh", "Z Shell"),
+            ("/bin/fish", "Fish", "Friendly Interactive Shell"),
+            ("/bin/sh", "sh", "Bourne Shell"),
         ];
 
-        for (path, name) in unix_shells {
+        for (path, name, desc) in unix_shells {
             if std::path::Path::new(path).exists() {
                 shells.push(AvailableShell {
                     shell_type: ShellType::Custom {
@@ -206,6 +213,7 @@ pub fn available_shells() -> Vec<AvailableShell> {
                         args: vec![],
                     },
                     name: name.to_string(),
+                    description: desc.to_string(),
                     available: true,
                 });
             }

@@ -3,6 +3,7 @@ use crate::keybindings::{CloseTerminal, AddTab, MinimizeTerminal, SplitHorizonta
 use crate::settings::settings;
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
+use crate::terminal::shell_config::{ShellType, available_shells, AvailableShell};
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
 use crate::views::navigation::{NavigationDirection, get_pane_map, register_pane_bounds};
@@ -64,6 +65,12 @@ pub struct TerminalPane {
     cursor_visible: bool,
     /// Scroll accumulator for sub-line deltas (ensures smooth scrolling)
     scroll_accumulator: f32,
+    /// Current shell type for this terminal
+    shell_type: ShellType,
+    /// Shell dropdown open state
+    shell_dropdown_open: bool,
+    /// Cached available shells
+    available_shells: Vec<AvailableShell>,
 }
 
 impl TerminalPane {
@@ -80,6 +87,12 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+
+        // Read shell_type from workspace state
+        let shell_type = workspace
+            .read(cx)
+            .get_terminal_shell(&project_id, &layout_path)
+            .unwrap_or(ShellType::Default);
 
         let mut pane = Self {
             workspace,
@@ -117,6 +130,9 @@ impl TerminalPane {
             hovered_url_index: None,
             cursor_visible: true,
             scroll_accumulator: 0.0,
+            shell_type,
+            shell_dropdown_open: false,
+            available_shells: available_shells(),
         };
 
         // If we have an existing terminal ID, create terminal immediately
@@ -212,15 +228,16 @@ impl TerminalPane {
 
         // PTY doesn't exist in current session - try to reconnect (for tmux/screen persistence)
         // or create new PTY with this ID
-        // Get the default shell from settings
-        let shell = settings(cx).default_shell;
+        // Use pane's shell_type, falling back to default_shell from settings
+        let shell = if self.shell_type == ShellType::Default {
+            settings(cx).default_shell.clone()
+        } else {
+            self.shell_type.clone()
+        };
         match self.pty_manager.create_or_reconnect_terminal_with_shell(Some(&terminal_id), &self.project_path, Some(&shell)) {
-            Ok(_) => {
-                log::info!("Reconnected to terminal: {}", terminal_id);
-            }
+            Ok(_) => {}
             Err(e) => {
                 log::error!("Failed to reconnect terminal {}: {}", terminal_id, e);
-                // Continue anyway - Terminal wrapper will be created but may not work
             }
         }
 
@@ -443,13 +460,15 @@ impl TerminalPane {
     }
 
     fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
-        log::info!("Creating new terminal for project path: {}", self.project_path);
-        // Get the default shell from settings
-        let shell = settings(cx).default_shell;
+        // Use pane's shell_type, falling back to default_shell from settings
+        let shell = if self.shell_type == ShellType::Default {
+            settings(cx).default_shell.clone()
+        } else {
+            self.shell_type.clone()
+        };
         // Create new PTY with the configured shell
         match self.pty_manager.create_terminal_with_shell(&self.project_path, Some(&shell)) {
             Ok(terminal_id) => {
-                log::info!("PTY created with ID: {}", terminal_id);
                 // Store terminal ID in workspace
                 self.terminal_id = Some(terminal_id.clone());
                 self.workspace.update(cx, |ws, cx| {
@@ -1487,6 +1506,241 @@ impl TerminalPane {
             )
     }
 
+    /// Get display name for the current shell type
+    fn get_shell_display_name(&self) -> &'static str {
+        match &self.shell_type {
+            ShellType::Default => "Default",
+            #[cfg(windows)]
+            ShellType::Cmd => "CMD",
+            #[cfg(windows)]
+            ShellType::PowerShell { core } => {
+                if *core { "pwsh" } else { "PS" }
+            }
+            #[cfg(windows)]
+            ShellType::Wsl { .. } => "WSL",
+            ShellType::Custom { .. } => "Custom",
+        }
+    }
+
+    /// Toggle shell dropdown visibility
+    fn toggle_shell_dropdown(&mut self, cx: &mut Context<Self>) {
+        self.shell_dropdown_open = !self.shell_dropdown_open;
+        cx.notify();
+    }
+
+    /// Switch to a different shell (kills current terminal and restarts)
+    fn switch_shell(&mut self, shell_type: ShellType, cx: &mut Context<Self>) {
+        self.shell_dropdown_open = false;
+
+        // Don't switch if already on the same shell
+        if self.shell_type == shell_type {
+            cx.notify();
+            return;
+        }
+
+        // Kill current terminal if it exists
+        if let Some(ref terminal_id) = self.terminal_id {
+            self.pty_manager.kill(terminal_id);
+            self.terminals.lock().remove(terminal_id);
+        }
+
+        // Update shell type BEFORE creating new terminal
+        self.shell_type = shell_type.clone();
+        self.terminal = None;
+        self.terminal_id = None;
+
+        // Save shell type to workspace state for persistence
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+        let shell_for_save = shell_type.clone();
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_terminal_shell(&project_id, &layout_path, shell_for_save, cx);
+        });
+
+        // Create new terminal with the selected shell
+        match self.pty_manager.create_terminal_with_shell(&self.project_path, Some(&shell_type)) {
+            Ok(new_id) => {
+                self.terminal_id = Some(new_id.clone());
+
+                // Update workspace layout with new terminal ID
+                let project_id = self.project_id.clone();
+                let layout_path = self.layout_path.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_id(&project_id, &layout_path, new_id.clone(), cx);
+                });
+
+                // Create Terminal wrapper and register it (PTY already created above)
+                let size = TerminalSize::default();
+                let terminal = Arc::new(Terminal::new(new_id.clone(), size, self.pty_manager.clone()));
+                self.terminals.lock().insert(new_id, terminal.clone());
+                self.terminal = Some(terminal);
+            }
+            Err(e) => {
+                log::error!("Failed to create terminal with shell: {}", e);
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Render the shell indicator button
+    fn render_shell_indicator(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let shell_name = self.get_shell_display_name();
+        let id_suffix = self
+            .terminal_id
+            .clone()
+            .unwrap_or_else(|| "new".to_string());
+
+        div()
+            .id(format!("shell-indicator-{}", id_suffix))
+            .cursor_pointer()
+            .px(px(6.0))
+            .h(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.toggle_shell_dropdown(cx);
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(t.text_secondary))
+                            .child(shell_name)
+                    )
+                    .child(
+                        svg()
+                            .path("icons/chevron-down.svg")
+                            .size(px(10.0))
+                            .text_color(rgb(t.text_secondary))
+                    )
+            )
+            .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
+    }
+
+    /// Render the shell dropdown as a modal overlay
+    fn render_shell_dropdown(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        if !self.shell_dropdown_open {
+            return div().into_any_element();
+        }
+
+        let shells = self.available_shells.clone();
+        let current_shell = self.shell_type.clone();
+
+        // Full-screen backdrop + centered modal
+        div()
+            .id("shell-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000088))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.shell_dropdown_open = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("shell-modal")
+                    .w(px(280.0))
+                    .bg(rgb(t.bg_secondary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        // Modal header
+                        div()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .border_b_1()
+                            .border_color(rgb(t.border))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(t.text_primary))
+                                    .child("Switch Shell")
+                            )
+                    )
+                    .child(
+                        // Shell list
+                        div()
+                            .py(px(4.0))
+                            .children(shells.into_iter().filter(|s| s.available).map(|shell| {
+                                let shell_type = shell.shell_type.clone();
+                                let is_current = shell_type == current_shell;
+                                let name = shell.name.clone();
+                                let description = shell.description.clone();
+
+                                div()
+                                    .id(format!("shell-option-{}", name.replace(" ", "-").to_lowercase()))
+                                    .w_full()
+                                    .px(px(16.0))
+                                    .py(px(10.0))
+                                    .cursor_pointer()
+                                    .bg(if is_current { rgb(t.bg_hover) } else { rgb(t.bg_secondary) })
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.switch_shell(shell_type.clone(), cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(2.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(13.0))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .font_weight(if is_current { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                                                            .child(name)
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(11.0))
+                                                            .text_color(rgb(t.text_secondary))
+                                                            .child(description)
+                                                    )
+                                            )
+                                            .when(is_current, |el| {
+                                                el.child(
+                                                    svg()
+                                                        .path("icons/check.svg")
+                                                        .size(px(16.0))
+                                                        .text_color(rgb(t.success))
+                                                )
+                                            })
+                                    )
+                            }))
+                    )
+            )
+            .into_any_element()
+    }
+
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         // Priority: custom name > OSC title > terminal ID prefix
@@ -1513,69 +1767,76 @@ impl TerminalPane {
 
         let terminal_name_for_rename = terminal_name.clone();
 
+        // Wrapper div with relative positioning for dropdown
         div()
-            .id("terminal-header")
-            .group("terminal-header")
-            .h(px(28.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(4.0))
-            .min_w_0()
-            .overflow_hidden()
-            .bg(rgb(t.bg_header))
+            .id("terminal-header-wrapper")
+            .relative()
             .child(
-                // Terminal name (or input if renaming)
-                if self.is_renaming {
-                    if let Some(ref input) = self.rename_input {
-                        div()
-                            .id("terminal-rename-input")
-                            .flex_1()
-                            .min_w_0()
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border_active))
-                            .rounded(px(4.0))
-                            .child(SimpleInput::new(input).text_size(px(12.0)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(|_, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_rename(cx),
-                                    "escape" => this.cancel_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().min_w_0().into_any_element()
-                    }
-                } else {
-                    div()
-                        .id("terminal-header-name")
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(px(12.0))
-                        .text_color(rgb(t.text_primary))
-                        .text_ellipsis()
-                        .child(terminal_name)
-                        .on_click(cx.listener({
-                            let name = terminal_name_for_rename;
-                            move |this, _, window, cx| {
-                                if this.check_header_double_click() {
-                                    this.start_rename(name.clone(), window, cx);
-                                }
+                div()
+                    .id("terminal-header")
+                    .group("terminal-header")
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .bg(rgb(t.bg_header))
+                    .child(
+                        // Terminal name (or input if renaming)
+                        if self.is_renaming {
+                            if let Some(ref input) = self.rename_input {
+                                div()
+                                    .id("terminal-rename-input")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .bg(rgb(t.bg_secondary))
+                                    .border_1()
+                                    .border_color(rgb(t.border_active))
+                                    .rounded(px(4.0))
+                                    .child(SimpleInput::new(input).text_size(px(12.0)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_click(|_, _window, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        match event.keystroke.key.as_str() {
+                                            "enter" => this.finish_rename(cx),
+                                            "escape" => this.cancel_rename(cx),
+                                            _ => {}
+                                        }
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div().flex_1().min_w_0().into_any_element()
                             }
-                        }))
-                        .into_any_element()
-                },
+                        } else {
+                            div()
+                                .id("terminal-header-name")
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text_primary))
+                                .text_ellipsis()
+                                .child(terminal_name)
+                                .on_click(cx.listener({
+                                    let name = terminal_name_for_rename;
+                                    move |this, _, window, cx| {
+                                        if this.check_header_double_click() {
+                                            this.start_rename(name.clone(), window, cx);
+                                        }
+                                    }
+                                }))
+                                .into_any_element()
+                        },
+                    )
+                    .child(self.render_shell_indicator(cx))
+                    .child(self.render_controls(cx))
             )
-            .child(self.render_controls(cx))
     }
 
     /// Render the scrollbar overlay
@@ -2122,6 +2383,10 @@ impl Render for TerminalPane {
             .track_focus(&focus_handle)
             .key_context("TerminalPane")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                // Close shell dropdown if open
+                if this.shell_dropdown_open {
+                    this.shell_dropdown_open = false;
+                }
                 window.focus(&this.focus_handle, cx);
                 // Update workspace focused terminal state
                 this.workspace.update(cx, |ws, cx| {
@@ -2225,10 +2490,10 @@ impl Render for TerminalPane {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .overflow_hidden()
             .bg(rgb(t.bg_primary))
             .when(show_border, |d| d.border_1().border_color(border_color))
             .group("terminal-pane")
+            .relative()
             .when(!in_tab_group, |el| el.child(self.render_header(cx)))
             .child(
                 div()
@@ -2241,6 +2506,8 @@ impl Render for TerminalPane {
             .when(self.is_searching, |el: Stateful<Div>| {
                 el.child(self.render_search_bar(cx))
             })
+            // Shell switch modal (rendered last to be on top)
+            .child(self.render_shell_dropdown(cx))
     }
 }
 

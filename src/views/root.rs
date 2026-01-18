@@ -185,7 +185,11 @@ impl RootView {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
+                            log::debug!("Processing {} bytes for terminal {}", data.len(), terminal_id);
                             terminal.process_output(data);
+                        } else {
+                            log::warn!("Terminal {} not found in registry, {} terminals registered",
+                                terminal_id, terminals_guard.len());
                         }
                     }
                     PtyEvent::Exit { terminal_id, .. } => {
