@@ -13,9 +13,11 @@
 pub mod chrome;
 pub mod components;
 pub mod layout;
+pub mod overlay_manager;
 pub mod overlays;
 pub mod panels;
 pub mod root;
+pub mod sidebar_controller;
 
 // Re-export everything for backward compatibility
 // These allow existing code to use `crate::views::Sidebar` instead of `crate::views::panels::Sidebar`
@@ -74,3 +76,9 @@ pub use chrome::{header_button_base, ButtonSize, HeaderAction, TitleBar};
 pub use components::simple_input;
 #[allow(unused_imports)]
 pub use components::{SimpleInput, SimpleInputState};
+
+#[allow(unused_imports)]
+pub use overlay_manager::{CloseEvent, OverlaySlot};
+
+#[allow(unused_imports)]
+pub use sidebar_controller::{SidebarController, AnimationTarget, SIDEBAR_WIDTH};

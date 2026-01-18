@@ -251,16 +251,8 @@ impl LayoutContainer {
     }
 
     /// Get the display name for a shell type.
-    fn get_shell_display_name(&self, shell_type: &ShellType) -> &'static str {
-        match shell_type {
-            ShellType::Default => "Default",
-            ShellType::Cmd => "CMD",
-            ShellType::PowerShell { core } => {
-                if *core { "pwsh" } else { "PowerShell" }
-            }
-            ShellType::Wsl { .. } => "WSL",
-            ShellType::Custom { .. } => "Custom",
-        }
+    fn get_shell_display_name(&self, shell_type: &ShellType) -> String {
+        shell_type.display_name()
     }
 
     /// Toggle the shell dropdown for tab groups.

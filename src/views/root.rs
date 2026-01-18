@@ -1,11 +1,15 @@
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
+use crate::toggle_overlay;
 use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
+use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
+use crate::views::overlay_manager::{CloseEvent, OverlaySlot};
 use crate::views::project_column::ProjectColumn;
+use crate::views::sidebar_controller::{SidebarController, AnimationTarget, SIDEBAR_WIDTH, FRAME_TIME_MS};
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider};
@@ -16,9 +20,8 @@ use crate::views::status_bar::StatusBar;
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::title_bar::TitleBar;
 use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::workspace::persistence::{load_settings, save_settings, AppSettings};
+use crate::workspace::persistence::{load_settings, AppSettings};
 use crate::workspace::state::{ContextMenuRequest, Workspace};
-use crate::git;
 use async_channel::Receiver;
 use gpui::*;
 use gpui::prelude::*;
@@ -31,22 +34,14 @@ use std::sync::Arc;
 /// Shared terminals registry for PTY event routing
 pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<Terminal>>>>;
 
-/// Sidebar width constant
-const SIDEBAR_WIDTH: f32 = 250.0;
-
 /// Root view of the application
 pub struct RootView {
     workspace: Entity<Workspace>,
     pty_manager: Arc<PtyManager>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
-    sidebar_open: bool,
-    /// Animation progress for sidebar (0.0 = collapsed, 1.0 = fully open)
-    sidebar_animation: f32,
-    /// Whether auto-hide mode is enabled
-    sidebar_auto_hide: bool,
-    /// Whether sidebar is temporarily shown in auto-hide mode
-    sidebar_hover_shown: bool,
+    /// Sidebar state controller
+    sidebar_ctrl: SidebarController,
     /// App settings for persistence
     app_settings: AppSettings,
     /// Stored project column entities (created once, not during render)
@@ -56,19 +51,19 @@ pub struct RootView {
     /// Status bar entity
     status_bar: Entity<StatusBar>,
     /// Keybindings help overlay
-    keybindings_help: Option<Entity<KeybindingsHelp>>,
-    /// Session manager overlay
+    keybindings_help: OverlaySlot<KeybindingsHelp>,
+    /// Session manager overlay (complex - has SwitchWorkspace event)
     session_manager: Option<Entity<SessionManager>>,
     /// Theme selector overlay
-    theme_selector: Option<Entity<ThemeSelector>>,
+    theme_selector: OverlaySlot<ThemeSelector>,
     /// Command palette overlay
-    command_palette: Option<Entity<CommandPalette>>,
+    command_palette: OverlaySlot<CommandPalette>,
     /// Settings panel overlay
-    settings_panel: Option<Entity<SettingsPanel>>,
+    settings_panel: OverlaySlot<SettingsPanel>,
     /// Worktree dialog overlay
     worktree_dialog: Option<Entity<WorktreeDialog>>,
-    /// Context menu state: (project_id, position)
-    context_menu: Option<ContextMenuRequest>,
+    /// Context menu overlay
+    context_menu: Option<Entity<ContextMenu>>,
     /// Fullscreen terminal overlay (stored to preserve animation state)
     fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
     /// Currently displayed fullscreen state (to detect changes)
@@ -84,10 +79,9 @@ impl RootView {
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
 
-        // Load app settings
+        // Load app settings and create sidebar controller
         let app_settings = load_settings();
-        let sidebar_open = app_settings.sidebar.is_open;
-        let sidebar_auto_hide = app_settings.sidebar.auto_hide;
+        let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
         let sidebar = cx.new(|_cx| Sidebar::new(workspace.clone(), SIDEBAR_WIDTH, terminals.clone()));
@@ -104,19 +98,16 @@ impl RootView {
             pty_manager,
             terminals,
             sidebar,
-            sidebar_open,
-            sidebar_animation: if sidebar_open { 1.0 } else { 0.0 },
-            sidebar_auto_hide,
-            sidebar_hover_shown: false,
+            sidebar_ctrl,
             app_settings,
             project_columns: HashMap::new(),
             title_bar,
             status_bar,
-            keybindings_help: None,
+            keybindings_help: OverlaySlot::new(),
             session_manager: None,
-            theme_selector: None,
-            command_palette: None,
-            settings_panel: None,
+            theme_selector: OverlaySlot::new(),
+            command_palette: OverlaySlot::new(),
+            settings_panel: OverlaySlot::new(),
             worktree_dialog: None,
             context_menu: None,
             fullscreen_terminal: None,
@@ -344,23 +335,7 @@ impl RootView {
     }
 
     fn show_keybindings_help(&mut self, cx: &mut Context<Self>) {
-        if self.keybindings_help.is_some() {
-            // Toggle off if already showing
-            self.keybindings_help = None;
-        } else {
-            let help = cx.new(|cx| KeybindingsHelp::new(cx));
-            cx.subscribe(&help, |this, _, event: &KeybindingsHelpEvent, cx| {
-                match event {
-                    KeybindingsHelpEvent::Close => {
-                        this.keybindings_help = None;
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
-            self.keybindings_help = Some(help);
-        }
-        cx.notify();
+        toggle_overlay!(self, cx, keybindings_help, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
     }
 
     fn show_session_manager(&mut self, cx: &mut Context<Self>) {
@@ -423,63 +398,15 @@ impl RootView {
     }
 
     fn show_theme_selector(&mut self, cx: &mut Context<Self>) {
-        if self.theme_selector.is_some() {
-            // Toggle off if already showing
-            self.theme_selector = None;
-        } else {
-            let selector = cx.new(|cx| ThemeSelector::new(cx));
-            cx.subscribe(&selector, |this, _, event: &ThemeSelectorEvent, cx| {
-                match event {
-                    ThemeSelectorEvent::Close => {
-                        this.theme_selector = None;
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
-            self.theme_selector = Some(selector);
-        }
-        cx.notify();
+        toggle_overlay!(self, cx, theme_selector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
     }
 
     fn show_command_palette(&mut self, cx: &mut Context<Self>) {
-        if self.command_palette.is_some() {
-            // Toggle off if already showing
-            self.command_palette = None;
-        } else {
-            let palette = cx.new(|cx| CommandPalette::new(cx));
-            cx.subscribe(&palette, |this, _, event: &CommandPaletteEvent, cx| {
-                match event {
-                    CommandPaletteEvent::Close => {
-                        this.command_palette = None;
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
-            self.command_palette = Some(palette);
-        }
-        cx.notify();
+        toggle_overlay!(self, cx, command_palette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
     }
 
     fn show_settings_panel(&mut self, cx: &mut Context<Self>) {
-        if self.settings_panel.is_some() {
-            // Toggle off if already showing
-            self.settings_panel = None;
-        } else {
-            let panel = cx.new(|cx| SettingsPanel::new(cx));
-            cx.subscribe(&panel, |this, _, event: &SettingsPanelEvent, cx| {
-                match event {
-                    SettingsPanelEvent::Close => {
-                        this.settings_panel = None;
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
-            self.settings_panel = Some(panel);
-        }
-        cx.notify();
+        toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
     }
 
     /// Show worktree dialog for a project
@@ -604,7 +531,49 @@ impl RootView {
 
     /// Show context menu for a project
     fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
-        self.context_menu = Some(request);
+        let workspace = self.workspace.clone();
+        let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
+
+        cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
+            match event {
+                ContextMenuEvent::Close => {
+                    this.hide_context_menu(cx);
+                }
+                ContextMenuEvent::AddTerminal { project_id } => {
+                    this.hide_context_menu(cx);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.add_terminal(project_id, cx);
+                    });
+                }
+                ContextMenuEvent::CreateWorktree { project_id, project_path } => {
+                    this.hide_context_menu(cx);
+                    this.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
+                }
+                ContextMenuEvent::RenameProject { project_id, project_name } => {
+                    this.hide_context_menu(cx);
+                    // For now, just log - rename requires sidebar state
+                    log::info!("Rename project: {} ({})", project_name, project_id);
+                }
+                ContextMenuEvent::CloseWorktree { project_id } => {
+                    this.hide_context_menu(cx);
+                    let result = this.workspace.update(cx, |ws, cx| {
+                        ws.remove_worktree_project(project_id, false, cx)
+                    });
+                    if let Err(e) = result {
+                        log::error!("Failed to close worktree: {}", e);
+                    }
+                }
+                ContextMenuEvent::DeleteProject { project_id } => {
+                    this.hide_context_menu(cx);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.delete_project(project_id, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.context_menu = Some(menu);
         cx.notify();
     }
 
@@ -615,224 +584,6 @@ impl RootView {
             ws.clear_context_menu_request(cx);
         });
         cx.notify();
-    }
-
-    /// Render context menu overlay
-    fn render_context_menu(&self, request: &ContextMenuRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let workspace = self.workspace.clone();
-        let project_id = request.project_id.clone();
-        let position = request.position;
-
-        // Get project info
-        let ws = self.workspace.read(cx);
-        let project = ws.project(&project_id);
-        let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
-        let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
-        let is_git_repo = git::get_git_status(std::path::Path::new(&project_path)).is_some();
-
-        let project_id_for_add = project_id.clone();
-        let project_id_for_worktree = project_id.clone();
-        let project_id_for_rename = project_id.clone();
-        let project_id_for_close_wt = project_id.clone();
-        let project_id_for_delete = project_id.clone();
-        let project_name_for_rename = project_name.clone();
-        let project_path_for_worktree = project_path.clone();
-
-        div()
-            .absolute()
-            .inset_0()
-            .id("context-menu-backdrop")
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.hide_context_menu(cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
-                this.hide_context_menu(cx);
-            }))
-            .child(
-                div()
-                    .absolute()
-                    .left(position.x)
-                    .top(position.y)
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(4.0))
-                    .shadow_xl()
-                    .min_w(px(160.0))
-                    .py(px(4.0))
-                    .id("project-context-menu")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .child(
-                        // Add terminal option
-                        div()
-                            .id("context-menu-add-terminal")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/plus.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .child("Add Terminal")
-                            .on_click({
-                                let workspace = workspace.clone();
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.hide_context_menu(cx);
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.add_terminal(&project_id_for_add, cx);
-                                    });
-                                })
-                            }),
-                    )
-                    // Create Worktree option (only for git repos that are not already worktrees)
-                    .when(is_git_repo && !is_worktree, |d| {
-                        d.child(
-                            div()
-                                .id("context-menu-create-worktree")
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.text_primary))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/git-branch.svg")
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.text_secondary))
-                                )
-                                .child("Create Worktree...")
-                                .on_click(cx.listener({
-                                    let project_id = project_id_for_worktree.clone();
-                                    let project_path = project_path_for_worktree.clone();
-                                    move |this, _, _window, cx| {
-                                        this.hide_context_menu(cx);
-                                        this.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
-                                    }
-                                }))
-                        )
-                    })
-                    // Separator
-                    .child(
-                        div()
-                            .h(px(1.0))
-                            .mx(px(8.0))
-                            .my(px(4.0))
-                            .bg(rgb(t.border)),
-                    )
-                    .child(
-                        // Rename option - note: rename is complex because it's in sidebar, just delete for now
-                        div()
-                            .id("context-menu-rename")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/edit.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .child("Rename Project")
-                            .on_click({
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.hide_context_menu(cx);
-                                    // For now, just log - rename requires sidebar state
-                                    log::info!("Rename project: {} ({})", project_name_for_rename, project_id_for_rename);
-                                })
-                            }),
-                    )
-                    // Close Worktree option (only for worktree projects)
-                    .when(is_worktree, |d| {
-                        d.child(
-                            div()
-                                .id("context-menu-close-worktree")
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.warning))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/git-branch.svg")
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.warning))
-                                )
-                                .child("Close Worktree")
-                                .on_click({
-                                    let workspace = workspace.clone();
-                                    let project_id = project_id_for_close_wt.clone();
-                                    cx.listener(move |this, _, _window, cx| {
-                                        this.hide_context_menu(cx);
-                                        let result = workspace.update(cx, |ws, cx| {
-                                            ws.remove_worktree_project(&project_id, false, cx)
-                                        });
-                                        if let Err(e) = result {
-                                            log::error!("Failed to close worktree: {}", e);
-                                        }
-                                    })
-                                })
-                        )
-                    })
-                    .child(
-                        // Delete option
-                        div()
-                            .id("context-menu-delete")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.error))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/trash.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.error))
-                            )
-                            .child("Delete Project")
-                            .on_click({
-                                let workspace = workspace.clone();
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.hide_context_menu(cx);
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.delete_project(&project_id_for_delete, cx);
-                                    });
-                                })
-                            }),
-                    ),
-            )
     }
 
     /// Create worktree from the focused project
@@ -870,81 +621,58 @@ impl RootView {
 
     /// Toggle sidebar visibility with animation
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        self.sidebar_hover_shown = false;
-
-        // Start animation
-        let target = if self.sidebar_open { 1.0 } else { 0.0 };
-        self.animate_sidebar(target, cx);
-
-        // Persist state
-        self.app_settings.sidebar.is_open = self.sidebar_open;
-        let _ = save_settings(&self.app_settings);
+        let target = self.sidebar_ctrl.toggle(&mut self.app_settings);
+        self.animate_sidebar_to(target, cx);
     }
 
     /// Toggle auto-hide mode
     fn toggle_sidebar_auto_hide(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_auto_hide = !self.sidebar_auto_hide;
-
-        // If auto-hide was just enabled, close the sidebar
-        if self.sidebar_auto_hide && self.sidebar_open {
-            self.sidebar_open = false;
-            self.animate_sidebar(0.0, cx);
-        }
-
-        // Persist state
-        self.app_settings.sidebar.auto_hide = self.sidebar_auto_hide;
-        self.app_settings.sidebar.is_open = self.sidebar_open;
-        let _ = save_settings(&self.app_settings);
-
+        let target = self.sidebar_ctrl.toggle_auto_hide(&mut self.app_settings);
+        self.animate_sidebar_to(target, cx);
         cx.notify();
     }
 
     /// Show sidebar temporarily in auto-hide mode
     fn show_sidebar_on_hover(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar_auto_hide && !self.sidebar_open && !self.sidebar_hover_shown {
-            self.sidebar_hover_shown = true;
-            self.animate_sidebar(1.0, cx);
-        }
+        let target = self.sidebar_ctrl.show_on_hover();
+        self.animate_sidebar_to(target, cx);
     }
 
     /// Hide sidebar when mouse leaves in auto-hide mode
     fn hide_sidebar_on_leave(&mut self, cx: &mut Context<Self>) {
-        if self.sidebar_auto_hide && self.sidebar_hover_shown {
-            self.sidebar_hover_shown = false;
-            self.animate_sidebar(0.0, cx);
+        let target = self.sidebar_ctrl.hide_on_leave();
+        self.animate_sidebar_to(target, cx);
+    }
+
+    /// Animate sidebar to target if needed
+    fn animate_sidebar_to(&mut self, target: AnimationTarget, cx: &mut Context<Self>) {
+        if let Some(target_value) = target.value() {
+            self.animate_sidebar(target_value, cx);
         }
     }
 
     /// Animate sidebar to target value (0.0 = collapsed, 1.0 = expanded)
-    /// Uses batched updates with fewer re-renders for smoother animation
     fn animate_sidebar(&mut self, target: f32, cx: &mut Context<Self>) {
-        let current = self.sidebar_animation;
+        let current = self.sidebar_ctrl.animation();
 
         // Skip animation if already at target
         if (current - target).abs() < 0.01 {
-            self.sidebar_animation = target;
+            self.sidebar_ctrl.set_animation(target);
             cx.notify();
             return;
         }
 
-        // Use eased animation with fewer steps but visual smoothness from easing
-        cx.spawn(async move |this: WeakEntity<RootView>, cx| {
-            let duration_ms = 150;
-            let frame_time_ms = 16; // ~60fps
-            let steps = duration_ms / frame_time_ms;
-            let step_duration = std::time::Duration::from_millis(frame_time_ms as u64);
+        let steps = SidebarController::animation_steps();
+        let step_duration = std::time::Duration::from_millis(FRAME_TIME_MS);
 
+        cx.spawn(async move |this: WeakEntity<RootView>, cx| {
             for i in 1..=steps {
                 smol::Timer::after(step_duration).await;
 
-                // Use ease-out cubic for smoother deceleration
-                let t = i as f32 / steps as f32;
-                let eased = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-                let progress = current + (target - current) * eased;
+                let progress = SidebarController::ease_progress(current, target, i, steps);
 
                 let result = this.update(cx, |this, cx| {
-                    this.sidebar_animation = progress.clamp(0.0, 1.0);
+                    this.sidebar_ctrl.set_animation(progress);
                     cx.notify();
                 });
                 if result.is_err() {
@@ -954,7 +682,7 @@ impl RootView {
 
             // Ensure we reach the target exactly
             let _ = this.update(cx, |this, cx| {
-                this.sidebar_animation = target;
+                this.sidebar_ctrl.set_animation(target);
                 cx.notify();
             });
         }).detach();
@@ -993,11 +721,11 @@ impl Render for RootView {
             log::info!("RootView render: has_fullscreen=true, fullscreen_terminal={:?}",
                 self.workspace.read(cx).fullscreen_terminal);
         }
-        let has_keybindings_help = self.keybindings_help.is_some();
+        let has_keybindings_help = self.keybindings_help.is_open();
         let has_session_manager = self.session_manager.is_some();
-        let has_theme_selector = self.theme_selector.is_some();
-        let has_command_palette = self.command_palette.is_some();
-        let has_settings_panel = self.settings_panel.is_some();
+        let has_theme_selector = self.theme_selector.is_open();
+        let has_command_palette = self.command_palette.is_open();
+        let has_settings_panel = self.settings_panel.is_open();
         let has_worktree_dialog = self.worktree_dialog.is_some();
         let has_context_menu = self.context_menu.is_some();
 
@@ -1009,10 +737,10 @@ impl Render for RootView {
         let active_drag = get_active_drag(cx);
         let workspace = self.workspace.clone();
 
-        // Capture state for mouse move handler
-        let sidebar_auto_hide = self.sidebar_auto_hide;
-        let sidebar_hover_shown = self.sidebar_hover_shown;
-        let current_sidebar_width = self.sidebar_animation * SIDEBAR_WIDTH;
+        // Capture sidebar state for mouse move handler
+        let sidebar_auto_hide = self.sidebar_ctrl.is_auto_hide();
+        let sidebar_hover_shown = self.sidebar_ctrl.is_hover_shown();
+        let current_sidebar_width = self.sidebar_ctrl.current_width();
 
         div()
             .id("root")
@@ -1106,7 +834,7 @@ impl Render for RootView {
                     .min_h_0()
                     .relative()
                     // Auto-hide hover zone (invisible strip on the left edge)
-                    .when(self.sidebar_auto_hide && !self.sidebar_open && !self.sidebar_hover_shown, |d| {
+                    .when(self.sidebar_ctrl.is_auto_hide() && !self.sidebar_ctrl.is_open() && !self.sidebar_ctrl.is_hover_shown(), |d| {
                         d.child(
                             div()
                                 .id("sidebar-hover-zone")
@@ -1127,8 +855,8 @@ impl Render for RootView {
                     .child(
                         // Sidebar container - animated width
                         {
-                            let sidebar_width = self.sidebar_animation * SIDEBAR_WIDTH;
-                            let show_sidebar = self.sidebar_animation > 0.01;
+                            let sidebar_width = self.sidebar_ctrl.current_width();
+                            let show_sidebar = self.sidebar_ctrl.should_render();
 
                             div()
                                 .id("sidebar-container")
@@ -1177,11 +905,7 @@ impl Render for RootView {
             .child(self.status_bar.clone())
             // Keybindings help overlay (renders on top of everything)
             .when(has_keybindings_help, |d| {
-                if let Some(help) = &self.keybindings_help {
-                    d.child(help.clone())
-                } else {
-                    d
-                }
+                d.children(self.keybindings_help.render())
             })
             // Session manager overlay (renders on top of everything)
             .when(has_session_manager, |d| {
@@ -1193,27 +917,15 @@ impl Render for RootView {
             })
             // Theme selector overlay (renders on top of everything)
             .when(has_theme_selector, |d| {
-                if let Some(selector) = &self.theme_selector {
-                    d.child(selector.clone())
-                } else {
-                    d
-                }
+                d.children(self.theme_selector.render())
             })
             // Command palette overlay (renders on top of everything)
             .when(has_command_palette, |d| {
-                if let Some(palette) = &self.command_palette {
-                    d.child(palette.clone())
-                } else {
-                    d
-                }
+                d.children(self.command_palette.render())
             })
             // Settings panel overlay (renders on top of everything)
             .when(has_settings_panel, |d| {
-                if let Some(panel) = &self.settings_panel {
-                    d.child(panel.clone())
-                } else {
-                    d
-                }
+                d.children(self.settings_panel.render())
             })
             // Worktree dialog overlay (renders on top of everything)
             .when(has_worktree_dialog, |d| {
@@ -1225,8 +937,8 @@ impl Render for RootView {
             })
             // Context menu overlay (renders on top of everything)
             .when(has_context_menu, |d| {
-                if let Some(request) = &self.context_menu {
-                    d.child(self.render_context_menu(request, cx))
+                if let Some(menu) = &self.context_menu {
+                    d.child(menu.clone())
                 } else {
                     d
                 }

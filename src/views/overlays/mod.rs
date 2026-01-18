@@ -4,6 +4,7 @@
 //! - Fullscreen terminal mode
 //! - Detached terminal windows
 //! - Command palette
+//! - Context menu
 //! - Keybindings help
 //! - Session manager
 //! - Settings panel
@@ -11,6 +12,7 @@
 //! - Worktree dialog
 
 pub mod command_palette;
+pub mod context_menu;
 pub mod detached_terminal;
 pub mod fullscreen_terminal;
 pub mod keybindings_help;
@@ -20,6 +22,7 @@ pub mod theme_selector;
 pub mod worktree_dialog;
 
 pub use command_palette::CommandPalette;
+pub use context_menu::{ContextMenu, ContextMenuEvent};
 pub use detached_terminal::DetachedTerminalView;
 pub use fullscreen_terminal::FullscreenTerminal;
 pub use keybindings_help::KeybindingsHelp;
