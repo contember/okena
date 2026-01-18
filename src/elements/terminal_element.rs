@@ -501,6 +501,7 @@ impl Element for TerminalElement {
             let grid = term.grid();
             let screen_lines = grid.screen_lines();
             let cols = grid.columns();
+            let display_offset = grid.display_offset() as i32;
 
             let origin = bounds.origin;
 
@@ -511,7 +512,11 @@ impl Element for TerminalElement {
             let mut current_rect: Option<LayoutRect> = None;
 
             for row in 0..screen_lines {
-                let line = row as i32;
+                // visual_line is the row position on screen for rendering
+                let visual_line = row as i32;
+                // buffer_line is the actual grid line to fetch (accounts for scroll)
+                // When display_offset > 0, we're scrolled up into history (negative lines)
+                let buffer_line = visual_line - display_offset;
 
                 // Flush batch at line boundaries
                 if let Some(batch) = current_batch.take() {
@@ -524,7 +529,7 @@ impl Element for TerminalElement {
 
                 for col in 0..cols {
                     let cell_point = alacritty_terminal::index::Point {
-                        line: Line(line),
+                        line: Line(buffer_line),
                         column: Column(col),
                     };
                     let cell = &grid[cell_point];
@@ -573,14 +578,14 @@ impl Element for TerminalElement {
 
                     if let Some(color) = bg_color {
                         if let Some(ref mut rect) = current_rect {
-                            if rect.line == line && rect.start_col + rect.num_cells as i32 == col_i32 && rect.color == color {
+                            if rect.line == visual_line && rect.start_col + rect.num_cells as i32 == col_i32 && rect.color == color {
                                 rect.extend();
                             } else {
                                 rects.push(current_rect.take().unwrap());
-                                current_rect = Some(LayoutRect::new(line, col_i32, color));
+                                current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                             }
                         } else {
-                            current_rect = Some(LayoutRect::new(line, col_i32, color));
+                            current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                         }
                     } else if let Some(rect) = current_rect.take() {
                         rects.push(rect);
@@ -637,14 +642,14 @@ impl Element for TerminalElement {
 
                     // Batch text runs
                     if let Some(ref mut batch) = current_batch {
-                        if batch.can_append(&text_style, line, col_i32) {
+                        if batch.can_append(&text_style, visual_line, col_i32) {
                             batch.append_char(cell.c);
                         } else {
                             batched_runs.push(current_batch.take().unwrap());
-                            current_batch = Some(BatchedTextRun::new(line, col_i32, cell.c, text_style));
+                            current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                         }
                     } else {
-                        current_batch = Some(BatchedTextRun::new(line, col_i32, cell.c, text_style));
+                        current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                     }
                 }
             }
@@ -758,25 +763,32 @@ impl Element for TerminalElement {
                 batch.paint(origin, cell_width, line_height, font_size, window, cx);
             }
 
-            // Phase 4: Paint cursor
+            // Phase 4: Paint cursor (only if visible within current viewport)
+            // When scrolled into history (display_offset > 0), the cursor is at the bottom
+            // of the active area and may be outside the visible viewport
             let cursor_point = term.grid().cursor.point;
-            let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
-            let cursor_y = px((f32::from(origin.y) + cursor_point.line.0 as f32 * line_height_f).floor());
+            let cursor_visual_line = cursor_point.line.0 + display_offset;
 
-            let cursor_bounds = Bounds {
-                origin: point(cursor_x, cursor_y),
-                size: size(cell_width, line_height),
-            };
+            // Only paint cursor if it's within the visible viewport
+            if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
+                let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
+                let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
 
-            // Block cursor with transparency
-            let cursor_rgba = rgb(t.cursor);
-            let cursor_color = Hsla::from(Rgba {
-                r: cursor_rgba.r,
-                g: cursor_rgba.g,
-                b: cursor_rgba.b,
-                a: 0.8,
-            });
-            window.paint_quad(fill(cursor_bounds, cursor_color));
+                let cursor_bounds = Bounds {
+                    origin: point(cursor_x, cursor_y),
+                    size: size(cell_width, line_height),
+                };
+
+                // Block cursor with transparency
+                let cursor_rgba = rgb(t.cursor);
+                let cursor_color = Hsla::from(Rgba {
+                    r: cursor_rgba.r,
+                    g: cursor_rgba.g,
+                    b: cursor_rgba.b,
+                    a: 0.8,
+                });
+                window.paint_quad(fill(cursor_bounds, cursor_color));
+            }
         });
     }
 }

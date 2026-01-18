@@ -222,7 +222,6 @@ impl LayoutContainer {
         div()
             .size_full()
             .min_h_0()
-            .overflow_hidden()
             .child(self.terminal_pane.clone().unwrap())
     }
 
@@ -324,10 +323,10 @@ impl LayoutContainer {
             }
 
             let child_element = div()
-                // Use flex-basis for split sizing to avoid overlapping hitboxes.
-                .flex_none()
-                .when(is_horizontal, |d| d.flex_basis(relative(effective_size / 100.0)).w_full())
-                .when(!is_horizontal, |d| d.flex_basis(relative(effective_size / 100.0)).h_full())
+                // Use flex_1 for equal sizing (accounts for divider space automatically)
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
                 .child(container)
                 .into_any_element();
 
@@ -354,7 +353,6 @@ impl LayoutContainer {
             .size_full()
             .min_h_0()
             .min_w_0()
-            .overflow_hidden()
             .children(elements)
     }
 

@@ -160,13 +160,26 @@ impl Terminal {
     }
 
     /// Send input to the PTY
+    /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
+        self.scroll_to_bottom();
         self.pty_manager.send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send raw bytes to the PTY
+    /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
+        self.scroll_to_bottom();
         self.pty_manager.send_input(&self.terminal_id, data);
+    }
+
+    /// Scroll to bottom (display_offset = 0)
+    pub fn scroll_to_bottom(&self) {
+        let mut term = self.term.lock();
+        let current = term.grid().display_offset();
+        if current > 0 {
+            term.scroll_display(Scroll::Delta(-(current as i32)));
+        }
     }
 
     /// Resize the terminal with debounced PTY resize

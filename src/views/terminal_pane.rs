@@ -1486,7 +1486,6 @@ impl TerminalPane {
     /// Render the scrollbar overlay
     fn render_scrollbar(&mut self, id_suffix: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let scrollbar_width = 10.0;
         let scrollbar_dragging = self.scrollbar_dragging;
 
         // Determine visibility and opacity
@@ -1514,91 +1513,79 @@ impl TerminalPane {
         // Opacity for auto-hide effect
         let opacity = if should_show { 1.0 } else { 0.0 };
 
+        // Clone terminal for canvas closure
+        let terminal_for_canvas = self.terminal.clone();
+
+        // Scrollbar with absolute positioning (overlay on terminal content)
         div()
             .id(format!("scrollbar-track-{}", id_suffix))
-            .group("scrollbar")
             .absolute()
-            .right_0()
             .top_0()
             .bottom_0()
-            .w(px(scrollbar_width))
+            .right_0()
+            .w(px(10.0))
+            .bg(rgba(0xFF000044)) // DEBUG: red background to see track position
             .opacity(opacity)
-            // Scrollbar track styling
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.last_scroll_activity = std::time::Instant::now();
+                this.scrollbar_visible = true;
+                if let Some(bounds) = this.element_bounds {
+                    let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+                    let content_height = f32::from(bounds.size.height);
+                    if let Some((thumb_y, thumb_height, _)) = this.calculate_scrollbar_geometry(content_height) {
+                        if relative_y >= thumb_y && relative_y <= thumb_height + thumb_y {
+                            this.start_scrollbar_drag(f32::from(event.position.y), cx);
+                        } else {
+                            this.handle_scrollbar_click(relative_y, content_height, cx);
+                        }
+                    }
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrollbar_dragging {
+                    if let Some(bounds) = this.element_bounds {
+                        let content_height = f32::from(bounds.size.height);
+                        this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
+                    }
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.end_scrollbar_drag(cx);
+            }))
+            // Canvas-based thumb rendering
             .child(
-                div()
-                    .id(format!("scrollbar-thumb-container-{}", id_suffix))
-                    .size_full()
-                    .relative()
-                    .cursor(CursorStyle::Arrow)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                        // Update scroll activity for auto-hide
-                        this.last_scroll_activity = std::time::Instant::now();
-                        this.scrollbar_visible = true;
-                        // Get content bounds for calculations
-                        if let Some(bounds) = this.element_bounds {
-                            let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
-                            let content_height = f32::from(bounds.size.height);
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |bounds: Bounds<Pixels>, _state: (), window: &mut Window, _cx: &mut App| {
+                        if let Some(ref terminal) = terminal_for_canvas {
+                            let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
+                            if total_lines > visible_lines {
+                                let track_height = f32::from(bounds.size.height);
+                                let scrollable_lines = total_lines - visible_lines;
+                                let thumb_height = (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+                                let available_scroll_space = track_height - thumb_height;
+                                let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
+                                let thumb_y = (1.0 - scroll_ratio) * available_scroll_space;
 
-                            // Check if click is on thumb or track
-                            if let Some((thumb_y, thumb_height, _)) = this.calculate_scrollbar_geometry(content_height) {
-                                if relative_y >= thumb_y && relative_y <= thumb_y + thumb_height {
-                                    // Click on thumb - start drag
-                                    this.start_scrollbar_drag(f32::from(event.position.y), cx);
+                                let thumb_color = if scrollbar_dragging {
+                                    scrollbar_hover_color
                                 } else {
-                                    // Click on track - jump to position
-                                    this.handle_scrollbar_click(relative_y, content_height, cx);
-                                }
+                                    scrollbar_color
+                                };
+
+                                // Paint thumb using bounds origin (absolute coordinates)
+                                let thumb_bounds = Bounds {
+                                    origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
+                                    size: size(px(6.0), px(thumb_height)),
+                                };
+                                window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(px(3.0)));
                             }
                         }
-                    }))
-                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                        if this.scrollbar_dragging {
-                            if let Some(bounds) = this.element_bounds {
-                                let content_height = f32::from(bounds.size.height);
-                                this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
-                            }
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                        this.end_scrollbar_drag(cx);
-                    }))
-                    // Render thumb using canvas
-                    .child({
-                        let entity = cx.entity().downgrade();
-                        canvas(
-                            move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
-                                // Prepaint: calculate geometry and return state for paint
-                                if let Some(entity) = entity.upgrade() {
-                                    entity.update(cx, |this, _cx| {
-                                        let content_height = f32::from(bounds.size.height);
-                                        this.calculate_scrollbar_geometry(content_height).map(|(thumb_y, thumb_height, _)| {
-                                            let color = if this.scrollbar_dragging {
-                                                scrollbar_hover_color
-                                            } else {
-                                                scrollbar_color
-                                            };
-                                            (thumb_y, thumb_height, color)
-                                        })
-                                    })
-                                } else {
-                                    None
-                                }
-                            },
-                            move |bounds: Bounds<Pixels>, state: Option<(f32, f32, Rgba)>, window: &mut Window, _cx: &mut App| {
-                                // Paint: use the pre-calculated state to paint the thumb
-                                if let Some((thumb_y, thumb_height, color)) = state {
-                                    let thumb_bounds = Bounds {
-                                        origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
-                                        size: size(px(6.0), px(thumb_height)),
-                                    };
-                                    window.paint_quad(fill(thumb_bounds, color).corner_radii(px(3.0)));
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                    })
+                    },
+                )
+                .size_full()
             )
             .into_any_element()
     }
@@ -1651,7 +1638,6 @@ impl TerminalPane {
                 .id(format!("terminal-content-wrapper-{}", id_suffix))
                 .size_full()
                 .min_h_0()
-                .overflow_hidden()
                 .relative()
                 .bg(rgb(t.bg_primary))
                 .cursor(CursorStyle::Arrow)
@@ -1714,6 +1700,7 @@ impl TerminalPane {
                                 .with_urls(Arc::new(self.url_matches.clone()), self.hovered_url_index)
                         )
                 )
+                // Scrollbar overlay
                 .child(scrollbar)
                 .children(context_menu)
                 .into_any_element()
