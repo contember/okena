@@ -37,10 +37,16 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         return Some(b"\t".to_vec());
     }
 
-    // Handle Enter/Return before the key_char check because on macOS,
-    // Enter has a key_char but the InputHandler may not receive it correctly
+    // Handle Enter/Return with modifiers
+    // Shift+Enter sends literal newline (for multi-line input in apps like Claude Code)
+    // Regular Enter sends carriage return (submit)
     match keystroke.key.as_str() {
-        "enter" | "return" | "kp_enter" => return Some(b"\r".to_vec()),
+        "enter" | "return" | "kp_enter" => {
+            if mods.shift {
+                return Some(b"\n".to_vec());
+            }
+            return Some(b"\r".to_vec());
+        }
         _ => {}
     }
 
