@@ -291,8 +291,4 @@ impl Render for DetachedTerminalView {
     }
 }
 
-impl Focusable for DetachedTerminalView {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(DetachedTerminalView);

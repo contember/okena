@@ -352,11 +352,7 @@ impl Render for SimpleInputState {
     }
 }
 
-impl Focusable for SimpleInputState {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(SimpleInputState);
 
 /// Simple input element builder for use in render functions
 pub struct SimpleInput {

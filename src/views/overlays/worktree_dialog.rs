@@ -239,11 +239,7 @@ impl WorktreeDialog {
     }
 }
 
-impl Focusable for WorktreeDialog {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(WorktreeDialog);
 
 impl Render for WorktreeDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

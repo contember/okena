@@ -443,8 +443,4 @@ impl Render for CommandPalette {
     }
 }
 
-impl Focusable for CommandPalette {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(CommandPalette);

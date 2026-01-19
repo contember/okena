@@ -869,8 +869,4 @@ impl Render for TerminalPane {
     }
 }
 
-impl Focusable for TerminalPane {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(TerminalPane);

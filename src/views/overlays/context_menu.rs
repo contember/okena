@@ -274,8 +274,4 @@ impl Render for ContextMenu {
     }
 }
 
-impl Focusable for ContextMenu {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(ContextMenu);

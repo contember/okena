@@ -909,8 +909,4 @@ impl Render for SessionManager {
     }
 }
 
-impl Focusable for SessionManager {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(SessionManager);
