@@ -109,6 +109,14 @@ pub struct ContextMenuRequest {
     pub position: gpui::Point<gpui::Pixels>,
 }
 
+/// Request to show shell selector overlay
+#[derive(Clone, Debug)]
+pub struct ShellSelectorRequest {
+    pub project_id: String,
+    pub terminal_id: String,
+    pub current_shell: crate::terminal::shell_config::ShellType,
+}
+
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
@@ -128,6 +136,8 @@ pub struct Workspace {
     pub worktree_dialog_request: Option<WorktreeDialogRequest>,
     /// Pending request to show context menu
     pub context_menu_request: Option<ContextMenuRequest>,
+    /// Pending request to show shell selector
+    pub shell_selector_request: Option<ShellSelectorRequest>,
 }
 
 impl Workspace {
@@ -141,6 +151,7 @@ impl Workspace {
             focus_manager: FocusManager::new(),
             worktree_dialog_request: None,
             context_menu_request: None,
+            shell_selector_request: None,
         }
     }
 

@@ -27,6 +27,8 @@ pub enum HeaderEvent {
     ExportBuffer,
     Renamed(String),
     ShellChanged(ShellType),
+    /// Request to open shell selector overlay
+    OpenShellSelector(ShellType),
 }
 
 impl EventEmitter<HeaderEvent> for TerminalHeader {}
@@ -66,10 +68,14 @@ impl TerminalHeader {
         let shell_selector = cx.new(|cx| ShellSelector::new(shell_type, id_suffix.clone(), cx));
 
         // Subscribe to shell selector events
-        cx.subscribe(&shell_selector, |_this, _, event: &ShellSelectorEvent, cx| {
+        cx.subscribe(&shell_selector, |this, _, event: &ShellSelectorEvent, cx| {
             match event {
                 ShellSelectorEvent::ShellChanged(shell_type) => {
                     cx.emit(HeaderEvent::ShellChanged(shell_type.clone()));
+                }
+                ShellSelectorEvent::OpenSelector => {
+                    let current_shell = this.shell_selector.read(cx).current_shell().clone();
+                    cx.emit(HeaderEvent::OpenShellSelector(current_shell));
                 }
             }
         })
@@ -250,7 +256,6 @@ impl Render for TerminalHeader {
 
         div()
             .id("terminal-header-wrapper")
-            .relative()
             .child(
                 div()
                     .id("terminal-header")

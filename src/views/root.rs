@@ -1,9 +1,11 @@
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
+use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::toggle_overlay;
 use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::{ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
@@ -60,6 +62,8 @@ pub struct RootView {
     command_palette: OverlaySlot<CommandPalette>,
     /// Settings panel overlay
     settings_panel: OverlaySlot<SettingsPanel>,
+    /// Shell selector overlay
+    shell_selector: OverlaySlot<ShellSelectorOverlay>,
     /// Worktree dialog overlay
     worktree_dialog: Option<Entity<WorktreeDialog>>,
     /// Context menu overlay
@@ -108,6 +112,7 @@ impl RootView {
             theme_selector: OverlaySlot::new(),
             command_palette: OverlaySlot::new(),
             settings_panel: OverlaySlot::new(),
+            shell_selector: OverlaySlot::new(),
             worktree_dialog: None,
             context_menu: None,
             fullscreen_terminal: None,
@@ -407,6 +412,34 @@ impl RootView {
 
     fn show_settings_panel(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
+    }
+
+    /// Show shell selector overlay for a terminal
+    pub fn show_shell_selector(&mut self, current_shell: ShellType, project_id: String, terminal_id: String, cx: &mut Context<Self>) {
+        let context = Some((project_id, terminal_id));
+        let entity = cx.new(|cx| ShellSelectorOverlay::new(current_shell, context, cx));
+        cx.subscribe(&entity, |this, _, event: &ShellSelectorOverlayEvent, cx| {
+            match event {
+                ShellSelectorOverlayEvent::Close => {
+                    this.shell_selector.close();
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    cx.notify();
+                }
+                ShellSelectorOverlayEvent::ShellSelected { shell_type, context } => {
+                    this.shell_selector.close();
+                    if let Some((project_id, terminal_id)) = context {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.set_terminal_shell_by_id(&project_id, &terminal_id, shell_type.clone(), cx);
+                        });
+                    }
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    cx.notify();
+                }
+            }
+        }).detach();
+        self.shell_selector.set(entity);
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
     }
 
     /// Show worktree dialog for a project
@@ -716,6 +749,21 @@ impl Render for RootView {
             }
         }
 
+        // Check for shell selector request from workspace
+        if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
+            if !self.shell_selector.is_open() {
+                self.show_shell_selector(
+                    request.current_shell,
+                    request.project_id,
+                    request.terminal_id,
+                    cx,
+                );
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_shell_selector_request(cx);
+                });
+            }
+        }
+
         let has_fullscreen = self.fullscreen_terminal.is_some();
         if has_fullscreen {
             log::info!("RootView render: has_fullscreen=true, fullscreen_terminal={:?}",
@@ -926,6 +974,10 @@ impl Render for RootView {
             // Settings panel overlay (renders on top of everything)
             .when(has_settings_panel, |d| {
                 d.children(self.settings_panel.render())
+            })
+            // Shell selector overlay (renders on top of everything)
+            .when(self.shell_selector.is_open(), |d| {
+                d.children(self.shell_selector.render())
             })
             // Worktree dialog overlay (renders on top of everything)
             .when(has_worktree_dialog, |d| {

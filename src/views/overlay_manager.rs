@@ -118,6 +118,7 @@ use crate::views::keybindings_help::KeybindingsHelpEvent;
 use crate::views::theme_selector::ThemeSelectorEvent;
 use crate::views::command_palette::CommandPaletteEvent;
 use crate::views::settings_panel::SettingsPanelEvent;
+use crate::views::overlays::ShellSelectorOverlayEvent;
 
 impl CloseEvent for KeybindingsHelpEvent {
     fn is_close(&self) -> bool {
@@ -140,5 +141,11 @@ impl CloseEvent for CommandPaletteEvent {
 impl CloseEvent for SettingsPanelEvent {
     fn is_close(&self) -> bool {
         matches!(self, SettingsPanelEvent::Close)
+    }
+}
+
+impl CloseEvent for ShellSelectorOverlayEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, ShellSelectorOverlayEvent::Close)
     }
 }

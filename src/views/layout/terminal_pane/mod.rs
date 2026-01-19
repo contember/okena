@@ -180,6 +180,18 @@ impl TerminalPane {
             HeaderEvent::ExportBuffer => self.handle_export_buffer(cx),
             HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
             HeaderEvent::ShellChanged(shell_type) => self.switch_shell(shell_type.clone(), cx),
+            HeaderEvent::OpenShellSelector(current_shell) => {
+                if let Some(ref terminal_id) = self.terminal_id {
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.request_shell_selector(
+                            &self.project_id,
+                            terminal_id,
+                            current_shell.clone(),
+                            cx,
+                        );
+                    });
+                }
+            }
         }
     }
 
