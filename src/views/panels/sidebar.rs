@@ -1,8 +1,11 @@
 use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
 use crate::theme::theme;
 use crate::ui::ClickDetector;
+use crate::views::components::{
+    cancel_rename, finish_rename, is_renaming, rename_input, start_rename_with_blur,
+    RenameState, SimpleInput, SimpleInputState,
+};
 use crate::views::root::TerminalsRegistry;
-use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -49,16 +52,12 @@ pub struct Sidebar {
     pending_name_value: Option<String>,
     pending_path_value: Option<String>,
     terminals: TerminalsRegistry,
-    /// Terminal currently being renamed: (project_id, terminal_id)
-    renaming_terminal: Option<(String, String)>,
-    /// Input for renaming terminal
-    rename_input: Option<Entity<SimpleInputState>>,
+    /// Terminal rename state: (project_id, terminal_id)
+    terminal_rename: Option<RenameState<(String, String)>>,
     /// Double-click detector for terminals
     terminal_click_detector: ClickDetector<String>,
-    /// Project currently being renamed
-    renaming_project: Option<String>,
-    /// Input for renaming project
-    project_rename_input: Option<Entity<SimpleInputState>>,
+    /// Project rename state
+    project_rename: Option<RenameState<String>>,
     /// Double-click detector for projects
     project_click_detector: ClickDetector<String>,
 }
@@ -75,11 +74,9 @@ impl Sidebar {
             pending_name_value: None,
             pending_path_value: None,
             terminals,
-            renaming_terminal: None,
-            rename_input: None,
+            terminal_rename: None,
             terminal_click_detector: ClickDetector::new(),
-            renaming_project: None,
-            project_rename_input: None,
+            project_rename: None,
             project_click_detector: ClickDetector::new(),
         }
     }
@@ -98,52 +95,31 @@ impl Sidebar {
     }
 
     fn start_rename(&mut self, project_id: String, terminal_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.renaming_terminal = Some((project_id, terminal_id));
-        let input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Terminal name...")
-                .default_value(&current_name)
-        });
-        // Set up blur handler to finish rename
-        let focus_handle = input.read(cx).focus_handle(cx);
-        let _ = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.finish_rename(cx);
-        });
-        self.rename_input = Some(input);
-        // Clear focused terminal to prevent TerminalPane from stealing focus
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
+        self.terminal_rename = Some(start_rename_with_blur(
+            (project_id, terminal_id),
+            &current_name,
+            "Terminal name...",
+            |this, _window, cx| this.finish_rename(cx),
+            window,
+            cx,
+        ));
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
     fn finish_rename(&mut self, cx: &mut Context<Self>) {
-        if let (Some((project_id, terminal_id)), Some(input)) = (&self.renaming_terminal, &self.rename_input) {
-            let new_name = input.read(cx).value().to_string();
-            if !new_name.is_empty() {
-                let project_id = project_id.clone();
-                let terminal_id = terminal_id.clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
-                });
-            }
+        if let Some(((project_id, terminal_id), new_name)) = finish_rename(&mut self.terminal_rename, cx) {
+            self.workspace.update(cx, |ws, cx| {
+                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
+            });
         }
-        self.renaming_terminal = None;
-        self.rename_input = None;
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.renaming_terminal = None;
-        self.rename_input = None;
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        cancel_rename(&mut self.terminal_rename);
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
@@ -153,51 +129,31 @@ impl Sidebar {
     }
 
     fn start_project_rename(&mut self, project_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.renaming_project = Some(project_id);
-        let input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Project name...")
-                .default_value(&current_name)
-        });
-        // Set up blur handler to finish rename
-        let focus_handle = input.read(cx).focus_handle(cx);
-        let _ = cx.on_blur(&focus_handle, window, |this, _window, cx| {
-            this.finish_project_rename(cx);
-        });
-        self.project_rename_input = Some(input);
-        // Clear focused terminal to prevent TerminalPane from stealing focus
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
+        self.project_rename = Some(start_rename_with_blur(
+            project_id,
+            &current_name,
+            "Project name...",
+            |this, _window, cx| this.finish_project_rename(cx),
+            window,
+            cx,
+        ));
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
     fn finish_project_rename(&mut self, cx: &mut Context<Self>) {
-        if let (Some(project_id), Some(input)) = (&self.renaming_project, &self.project_rename_input) {
-            let new_name = input.read(cx).value().to_string();
-            if !new_name.is_empty() {
-                let project_id = project_id.clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.rename_project(&project_id, new_name, cx);
-                });
-            }
+        if let Some((project_id, new_name)) = finish_rename(&mut self.project_rename, cx) {
+            self.workspace.update(cx, |ws, cx| {
+                ws.rename_project(&project_id, new_name, cx);
+            });
         }
-        self.renaming_project = None;
-        self.project_rename_input = None;
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
     fn cancel_project_rename(&mut self, cx: &mut Context<Self>) {
-        self.renaming_project = None;
-        self.project_rename_input = None;
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        cancel_rename(&mut self.project_rename);
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
@@ -643,7 +599,7 @@ impl Sidebar {
             ws.focused_project_id.as_ref() == Some(&project.id)
         };
 
-        let is_renaming = self.renaming_project.as_ref() == Some(&project.id);
+        let is_renaming = is_renaming(&self.project_rename, &project.id);
 
         let terminal_ids = project.layout.collect_terminal_ids();
         let terminal_count = terminal_ids.len();
@@ -726,7 +682,7 @@ impl Sidebar {
                     .child(
                         // Project name (or input if renaming)
                         if is_renaming {
-                            if let Some(ref input) = self.project_rename_input {
+                            if let Some(input) = rename_input(&self.project_rename) {
                                 div()
                                     .id("project-rename-input")
                                     .flex_1()
@@ -888,8 +844,7 @@ impl Sidebar {
         };
 
         // Check if this terminal is being renamed
-        let is_renaming = self.renaming_terminal.as_ref()
-            .map_or(false, |(pid, tid)| pid == &project_id && tid == terminal_id);
+        let is_renaming = is_renaming(&self.terminal_rename, &(project_id.clone(), terminal_id.to_string()));
 
         // Check if this terminal is currently focused
         let is_focused = {
@@ -961,7 +916,7 @@ impl Sidebar {
             .child(
                 // Terminal name (or input if renaming)
                 if is_renaming {
-                    if let Some(ref input) = self.rename_input {
+                    if let Some(input) = rename_input(&self.terminal_rename) {
                         div()
                             .id("terminal-rename-input")
                             .flex_1()

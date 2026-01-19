@@ -6,8 +6,8 @@ use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::ui::ClickDetector;
+use crate::views::components::{cancel_rename, finish_rename, start_rename, rename_input, RenameState, SimpleInput};
 use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
-use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -43,10 +43,8 @@ pub struct TerminalHeader {
     terminal: Option<Arc<Terminal>>,
     /// Shell selector child entity
     shell_selector: Entity<ShellSelector>,
-    /// Rename input state
-    rename_input: Option<Entity<SimpleInputState>>,
-    /// Whether currently renaming
-    is_renaming: bool,
+    /// Rename state
+    rename_state: Option<RenameState<()>>,
     /// Double-click detector for rename
     click_detector: ClickDetector<()>,
     /// Whether PTY manager supports buffer capture
@@ -83,8 +81,7 @@ impl TerminalHeader {
             terminal_id,
             terminal: None,
             shell_selector,
-            rename_input: None,
-            is_renaming: false,
+            rename_state: None,
             click_detector: ClickDetector::new(),
             supports_export,
             id_suffix,
@@ -110,7 +107,7 @@ impl TerminalHeader {
 
     /// Check if currently renaming.
     pub fn is_renaming(&self) -> bool {
-        self.is_renaming
+        self.rename_state.is_some()
     }
 
     /// Close shell dropdown if open.
@@ -145,51 +142,30 @@ impl TerminalHeader {
 
     /// Start renaming.
     fn start_rename(&mut self, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.is_renaming = true;
-        let input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Terminal name...")
-                .default_value(&current_name)
-        });
-        input.update(cx, |input, cx| {
-            input.focus(window, cx);
-        });
-        self.rename_input = Some(input);
-
-        // Clear focused terminal to prevent stealing focus back
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
+        self.rename_state = Some(start_rename(
+            (),
+            &current_name,
+            "Terminal name...",
+            window,
+            cx,
+        ));
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
     /// Finish renaming.
     fn finish_rename(&mut self, cx: &mut Context<Self>) {
-        if let (Some(ref _terminal_id), Some(ref input)) = (&self.terminal_id, &self.rename_input) {
-            let new_name = input.read(cx).value().to_string();
-            if !new_name.is_empty() {
-                cx.emit(HeaderEvent::Renamed(new_name));
-            }
+        if let Some(((), new_name)) = finish_rename(&mut self.rename_state, cx) {
+            cx.emit(HeaderEvent::Renamed(new_name));
         }
-        self.is_renaming = false;
-        self.rename_input = None;
-
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
     /// Cancel renaming.
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.is_renaming = false;
-        self.rename_input = None;
-
-        // Restore focus after modal dismissal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        cancel_rename(&mut self.rename_state);
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
     }
 
@@ -289,36 +265,32 @@ impl Render for TerminalHeader {
                     .overflow_hidden()
                     .bg(rgb(t.bg_header))
                     .child(
-                        if self.is_renaming {
-                            if let Some(ref input) = self.rename_input {
-                                div()
-                                    .id("terminal-rename-input")
-                                    .flex_1()
-                                    .min_w_0()
-                                    .bg(rgb(t.bg_secondary))
-                                    .border_1()
-                                    .border_color(rgb(t.border_active))
-                                    .rounded(px(4.0))
-                                    .child(SimpleInput::new(input).text_size(px(12.0)))
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click(|_, _window, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_key_down(cx.listener(
-                                        |this, event: &KeyDownEvent, _window, cx| {
-                                            match event.keystroke.key.as_str() {
-                                                "enter" => this.finish_rename(cx),
-                                                "escape" => this.cancel_rename(cx),
-                                                _ => {}
-                                            }
-                                        },
-                                    ))
-                                    .into_any_element()
-                            } else {
-                                div().flex_1().min_w_0().into_any_element()
-                            }
+                        if let Some(input) = rename_input(&self.rename_state) {
+                            div()
+                                .id("terminal-rename-input")
+                                .flex_1()
+                                .min_w_0()
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border_active))
+                                .rounded(px(4.0))
+                                .child(SimpleInput::new(input).text_size(px(12.0)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(|_, _window, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_key_down(cx.listener(
+                                    |this, event: &KeyDownEvent, _window, cx| {
+                                        match event.keystroke.key.as_str() {
+                                            "enter" => this.finish_rename(cx),
+                                            "escape" => this.cancel_rename(cx),
+                                            _ => {}
+                                        }
+                                    },
+                                ))
+                                .into_any_element()
                         } else {
                             div()
                                 .id("terminal-header-name")
