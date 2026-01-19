@@ -53,7 +53,9 @@ pub fn modal_content(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<D
         .flex()
         .flex_col()
         // Prevent clicks on content from closing modal
-        .on_mouse_down(MouseButton::Left, |_, _, _| {})
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
 }
 
 /// Create a modal header with title, optional subtitle, and close button.
