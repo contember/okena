@@ -4,7 +4,8 @@
 
 use crate::settings::{open_settings_file, settings_entity, SettingsState};
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
-use crate::theme::{theme, with_alpha, ThemeColors};
+use crate::theme::{theme, ThemeColors};
+use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay, modal_backdrop, modal_content, modal_header};
 use crate::workspace::persistence::get_settings_path;
 use gpui::*;
 use gpui::prelude::*;
@@ -263,34 +264,9 @@ impl SettingsPanel {
 
     fn render_font_dropdown_row(&mut self, current_family: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let dropdown_open = self.font_dropdown_open;
-        let current = current_family.to_string();
 
         settings_row("font-family".to_string(), "Font Family", &t, true).child(
-            div()
-                .id("font-family-btn")
-                .cursor_pointer()
-                .min_w(px(150.0))
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded(px(4.0))
-                .bg(rgb(t.bg_secondary))
-                .hover(|s| s.bg(rgb(t.bg_hover)))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(t.text_primary))
-                        .child(current.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_muted))
-                        .child(if dropdown_open { "▲" } else { "▼" }),
-                )
+            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.font_dropdown_open = !this.font_dropdown_open;
                     cx.notify();
@@ -300,45 +276,13 @@ impl SettingsPanel {
 
     fn render_font_dropdown_overlay(&self, current: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        div()
-            .id("font-family-dropdown-list")
-            .absolute()
-            // Position the dropdown inside the modal - needs to align with the button
-            .top(px(140.0))  // Approximate position below the font family row
-            .right(px(32.0))
-            .min_w(px(150.0))
-            .max_h(px(200.0))
-            .overflow_y_scroll()
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(4.0))
-            .shadow_xl()
-            .py(px(4.0))
+
+        dropdown_overlay("font-family-dropdown-list", 140.0, 32.0, &t)
             .children(FONT_FAMILIES.iter().map(|family| {
                 let is_selected = *family == current;
                 let family_str = family.to_string();
-                div()
-                    .id(ElementId::Name(format!("font-opt-{}", family).into()))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.text_primary))
-                    .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.2)))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(family.to_string())
-                    .when(is_selected, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.border_active))
-                                .child("✓"),
-                        )
-                    })
+
+                dropdown_option(format!("font-opt-{}", family), family, is_selected, &t)
                     .on_mouse_down(MouseButton::Left, cx.listener({
                         let family = family_str.clone();
                         move |this, _, _, cx| {
@@ -355,37 +299,12 @@ impl SettingsPanel {
 
     fn render_shell_dropdown_row(&mut self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let dropdown_open = self.shell_dropdown_open;
         let display_name = current_shell.display_name();
 
         settings_row("default-shell".to_string(), "Default Shell", &t, true).child(
-            div()
-                .id("default-shell-btn")
-                .cursor_pointer()
-                .min_w(px(150.0))
-                .h(px(28.0))
-                .px(px(10.0))
-                .rounded(px(4.0))
-                .bg(rgb(t.bg_secondary))
-                .hover(|s| s.bg(rgb(t.bg_hover)))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(t.text_primary))
-                        .child(display_name),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_muted))
-                        .child(if dropdown_open { "▲" } else { "▼" }),
-                )
+            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
-                    // Close font dropdown if open
                     this.font_dropdown_open = false;
                     cx.notify();
                 })),
@@ -395,51 +314,19 @@ impl SettingsPanel {
     fn render_shell_dropdown_overlay(&self, current_shell: &ShellType, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        // Filter to only show available shells
         let available: Vec<_> = self.available_shells.iter()
             .filter(|s| s.available)
             .collect();
 
-        div()
-            .id("shell-dropdown-list")
-            .absolute()
-            // Position the dropdown inside the modal - below the shell row in Terminal section
-            .top(px(290.0))  // Approximate position below the shell row
-            .right(px(32.0))
+        dropdown_overlay("shell-dropdown-list", 290.0, 32.0, &t)
             .min_w(px(180.0))
             .max_h(px(250.0))
-            .overflow_y_scroll()
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(4.0))
-            .shadow_xl()
-            .py(px(4.0))
             .children(available.into_iter().map(|shell_info| {
                 let is_selected = &shell_info.shell_type == current_shell;
                 let shell_type = shell_info.shell_type.clone();
                 let name = shell_info.name.clone();
-                div()
-                    .id(ElementId::Name(format!("shell-opt-{}", name).into()))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.text_primary))
-                    .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.2)))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(name)
-                    .when(is_selected, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.border_active))
-                                .child("✓"),
-                        )
-                    })
+
+                dropdown_option(format!("shell-opt-{}", name), &name, is_selected, &t)
                     .on_mouse_down(MouseButton::Left, cx.listener({
                         let shell_type = shell_type.clone();
                         move |this, _, _, cx| {
@@ -521,9 +408,10 @@ impl Render for SettingsPanel {
 
         window.focus(&focus_handle, cx);
 
-        div()
+        modal_backdrop("settings-panel-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("SettingsPanel")
+            .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key.as_str() == "escape" {
                     if this.font_dropdown_open {
@@ -537,13 +425,6 @@ impl Render for SettingsPanel {
                     }
                 }
             }))
-            .absolute()
-            .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
-            .flex()
-            .items_center()
-            .justify_center()
-            .id("settings-panel-backdrop")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if this.font_dropdown_open {
                     this.font_dropdown_open = false;
@@ -556,54 +437,16 @@ impl Render for SettingsPanel {
                 }
             }))
             .child(
-                div()
-                    .id("settings-panel-modal")
+                modal_content("settings-panel-modal", &t)
                     .relative()
                     .w(px(480.0))
                     .max_h(px(600.0))
-                    .bg(rgb(t.bg_primary))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .shadow_xl()
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    // Header
-                    .child(
-                        div()
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .text_size(px(16.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(t.text_primary))
-                                    .child("Settings"),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-close-btn")
-                                    .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(16.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("✕")
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        this.close(cx);
-                                    })),
-                            ),
-                    )
+                    .child(modal_header(
+                        "Settings",
+                        None::<&str>,
+                        &t,
+                        cx.listener(|this, _, _, cx| this.close(cx)),
+                    ))
                     // Content
                     .child(self.render_content(cx))
                     // Footer
