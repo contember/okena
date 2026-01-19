@@ -12,6 +12,8 @@ use gpui::*;
 use gpui::prelude::FluentBuilder;
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use gpui_component::tooltip::Tooltip;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A terminal pane view
@@ -29,7 +31,8 @@ pub struct TerminalPane {
     focus_handle: FocusHandle,
     pending_focus: bool,
     is_selecting: bool,
-    element_bounds: Option<Bounds<Pixels>>,
+    /// Element bounds captured during prepaint (using Rc<RefCell> for safe mutation during prepaint)
+    element_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     context_menu_position: Option<Point<Pixels>>,
     /// Rename state
     is_renaming: bool,
@@ -92,7 +95,7 @@ impl TerminalPane {
             focus_handle,
             pending_focus: false,
             is_selecting: false,
-            element_bounds: None,
+            element_bounds: Rc::new(RefCell::new(None)),
             context_menu_position: None,
             is_renaming: false,
             rename_input: None,
@@ -709,7 +712,7 @@ impl TerminalPane {
 
         // Calculate relative position within the terminal content area
         // and determine if menu should open upward
-        let (relative_pos, open_upward) = if let Some(bounds) = self.element_bounds {
+        let (relative_pos, open_upward) = if let Some(bounds) = *self.element_bounds.borrow() {
             let rel_x = position.x - bounds.origin.x;
             let rel_y = position.y - bounds.origin.y;
             let space_below = f32::from(bounds.size.height) - f32::from(rel_y);
@@ -932,7 +935,7 @@ impl TerminalPane {
         // Position menu: open upward if not enough space below
         if open_upward {
             // Position from bottom of click point
-            let bottom_offset = if let Some(bounds) = self.element_bounds {
+            let bottom_offset = if let Some(bounds) = *self.element_bounds.borrow() {
                 f32::from(bounds.size.height) - f32::from(relative_pos.y)
             } else {
                 0.0
@@ -956,7 +959,7 @@ impl TerminalPane {
             if terminal.is_mouse_mode() {
                 // Forward scroll to PTY as mouse wheel events
                 // Calculate cell position relative to terminal bounds
-                let (col, row) = if let Some(bounds) = self.element_bounds {
+                let (col, row) = if let Some(bounds) = *self.element_bounds.borrow() {
                     let x = (f32::from(position.x) - f32::from(bounds.origin.x)).max(0.0);
                     let y = (f32::from(position.y) - f32::from(bounds.origin.y)).max(0.0);
                     ((x / cell_width) as usize, (y / cell_height) as usize)
@@ -1114,7 +1117,7 @@ impl TerminalPane {
     }
 
     fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32)> {
-        let bounds = self.element_bounds?;
+        let bounds = (*self.element_bounds.borrow())?;
         let terminal = self.terminal.as_ref()?;
         let (cell_width, cell_height) = terminal.cell_dimensions();
 
@@ -1642,7 +1645,8 @@ impl TerminalPane {
                 cx.stop_propagation();
                 this.last_scroll_activity = std::time::Instant::now();
                 this.scrollbar_visible = true;
-                if let Some(bounds) = this.element_bounds {
+                let bounds_opt = *this.element_bounds.borrow();
+                if let Some(bounds) = bounds_opt {
                     let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
                     let content_height = f32::from(bounds.size.height);
                     if let Some((thumb_y, thumb_height, _)) = this.calculate_scrollbar_geometry(content_height) {
@@ -1656,7 +1660,8 @@ impl TerminalPane {
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.scrollbar_dragging {
-                    if let Some(bounds) = this.element_bounds {
+                    let bounds_opt = *this.element_bounds.borrow();
+                    if let Some(bounds) = bounds_opt {
                         let content_height = f32::from(bounds.size.height);
                         this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
                     }
@@ -1722,18 +1727,14 @@ impl TerminalPane {
             let terminal_clone = terminal.clone();
 
             let element_bounds_setter = {
-                let entity = cx.entity().downgrade();
+                let element_bounds = self.element_bounds.clone();
                 let project_id = self.project_id.clone();
                 let layout_path = self.layout_path.clone();
-                move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
+                move |bounds: Bounds<Pixels>, _window: &mut Window, _cx: &mut App| {
                     // Register bounds with the global navigation pane map
                     register_pane_bounds(project_id.clone(), layout_path.clone(), bounds);
 
-                    if let Some(entity) = entity.upgrade() {
-                        entity.update(cx, |this, _cx| {
-                            this.element_bounds = Some(bounds);
-                        });
-                    }
+                    *element_bounds.borrow_mut() = Some(bounds);
                 }
             };
 
@@ -1768,7 +1769,8 @@ impl TerminalPane {
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                     // Handle scrollbar drag first
                     if this.scrollbar_dragging {
-                        if let Some(bounds) = this.element_bounds {
+                        let bounds_opt = *this.element_bounds.borrow();
+                        if let Some(bounds) = bounds_opt {
                             let content_height = f32::from(bounds.size.height);
                             this.update_scrollbar_drag(f32::from(event.position.y), content_height, cx);
                         }
@@ -2075,7 +2077,6 @@ impl Render for TerminalPane {
             self.create_new_terminal(cx);
         }
 
-        log::debug!("TerminalPane::render - has terminal: {}", self.terminal.is_some());
         let focus_handle = self.focus_handle.clone();
         let id_suffix = self
             .terminal_id

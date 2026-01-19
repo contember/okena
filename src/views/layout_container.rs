@@ -869,21 +869,18 @@ impl Render for LayoutContainer {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
         let layout = self.get_layout(workspace).cloned();
-        log::debug!("LayoutContainer::render at path {:?}, layout: {:?}", self.layout_path, layout.as_ref().map(|l| std::mem::discriminant(l)));
 
         // Clean up stale entities when layout type changes
         match &layout {
             Some(LayoutNode::Terminal { .. }) => {
                 // When rendering a terminal, clear any cached child containers from previous split/tabs
                 if !self.child_containers.is_empty() {
-                    log::debug!("Clearing {} stale child_containers at path {:?}", self.child_containers.len(), self.layout_path);
                     self.child_containers.clear();
                 }
             }
             Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
                 // When rendering split/tabs, clear any cached terminal_pane from previous terminal
                 if self.terminal_pane.is_some() {
-                    log::debug!("Clearing stale terminal_pane at path {:?}", self.layout_path);
                     self.terminal_pane = None;
                 }
             }
