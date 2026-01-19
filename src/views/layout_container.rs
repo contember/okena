@@ -228,7 +228,7 @@ impl LayoutContainer {
     fn render_split(
         &mut self,
         direction: SplitDirection,
-        _sizes: &[f32],
+        sizes: &[f32],
         children: &[LayoutNode],
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -251,30 +251,33 @@ impl LayoutContainer {
         // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
 
-        // Check which children are hidden (minimized or detached)
-        let mut hidden_flags: Vec<bool> = Vec::new();
-        for child in children {
+        // Check which children are hidden (minimized or detached) and collect sizes for visible ones
+        let mut visible_children_info: Vec<(usize, f32)> = Vec::new();
+        for (i, child) in children.iter().enumerate() {
             let is_hidden = match child {
                 LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
                 _ => false,
             };
-            hidden_flags.push(is_hidden);
+            if !is_hidden {
+                let size = sizes.get(i).copied().unwrap_or(100.0 / num_children as f32);
+                visible_children_info.push((i, size));
+            }
         }
+
+        // Normalize visible sizes to sum to 100%
+        let total_visible_size: f32 = visible_children_info.iter().map(|(_, s)| s).sum();
+        let normalized_sizes: Vec<f32> = if total_visible_size > 0.0 {
+            visible_children_info.iter().map(|(_, s)| s / total_visible_size * 100.0).collect()
+        } else {
+            vec![100.0 / visible_children_info.len().max(1) as f32; visible_children_info.len()]
+        };
 
         // Build interleaved children and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
-        let mut visible_child_count = 0;
 
-        for i in 0..num_children {
+        for (visible_idx, (original_idx, _)) in visible_children_info.iter().enumerate() {
             let mut child_path = self.layout_path.clone();
-            child_path.push(i);
-
-            let is_hidden = hidden_flags[i];
-
-            // Skip hidden (minimized or detached) children entirely - they get 0 space
-            if is_hidden {
-                continue;
-            }
+            child_path.push(*original_idx);
 
             let container = self
                 .child_containers
@@ -294,10 +297,10 @@ impl LayoutContainer {
                 .clone();
 
             // Add divider before this child (if not first visible child)
-            if visible_child_count > 0 {
+            if visible_idx > 0 {
                 let divider = render_split_divider(
                     self.project_id.clone(),
-                    visible_child_count - 1,
+                    visible_idx - 1,
                     direction,
                     self.layout_path.clone(),
                     container_bounds_ref.clone(),
@@ -306,16 +309,15 @@ impl LayoutContainer {
                 elements.push(divider.into_any_element());
             }
 
+            let size_percent = normalized_sizes[visible_idx];
             let child_element = div()
-                // Use flex_1 for equal sizing (accounts for divider space automatically)
-                .flex_1()
+                .flex_basis(relative(size_percent / 100.0))
                 .min_w_0()
                 .min_h_0()
                 .child(container)
                 .into_any_element();
 
             elements.push(child_element);
-            visible_child_count += 1;
         }
 
         div()
