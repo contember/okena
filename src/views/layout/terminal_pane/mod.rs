@@ -13,10 +13,9 @@ mod shell_selector;
 mod search_bar;
 mod header;
 mod content;
-pub mod context_menu;
 
 // Internal imports
-use content::TerminalContent;
+use content::{ContextMenuEvent, TerminalContent};
 use search_bar::{SearchBar, SearchBarEvent};
 use header::{TerminalHeader, HeaderEvent};
 
@@ -131,6 +130,9 @@ impl TerminalPane {
         // Subscribe to search bar events
         cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
 
+        // Subscribe to content events (context menu actions)
+        cx.subscribe(&content, Self::handle_content_event).detach();
+
         let mut pane = Self {
             workspace,
             project_id,
@@ -213,6 +215,23 @@ impl TerminalPane {
                 });
                 cx.notify();
             }
+        }
+    }
+
+    /// Handle events from content (context menu actions).
+    fn handle_content_event(
+        &mut self,
+        _: Entity<TerminalContent>,
+        event: &ContextMenuEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ContextMenuEvent::Copy => self.handle_copy(cx),
+            ContextMenuEvent::Paste => self.handle_paste(cx),
+            ContextMenuEvent::Clear => self.handle_clear(cx),
+            ContextMenuEvent::SelectAll => self.handle_select_all(cx),
+            ContextMenuEvent::Split(dir) => self.handle_split(*dir, cx),
+            ContextMenuEvent::Close => self.handle_close(cx),
         }
     }
 
@@ -498,6 +517,19 @@ impl TerminalPane {
                     terminal.send_input(&text);
                 }
             }
+        }
+    }
+
+    fn handle_clear(&mut self, _cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.clear();
+        }
+    }
+
+    fn handle_select_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal {
+            terminal.select_all();
+            cx.notify();
         }
     }
 

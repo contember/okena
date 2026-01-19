@@ -192,6 +192,42 @@ impl Terminal {
         self.pty_manager.send_input(&self.terminal_id, data);
     }
 
+    /// Clear the terminal screen by sending the clear sequence
+    pub fn clear(&self) {
+        // Send ANSI escape sequence to clear screen and move cursor to home
+        // \x1b[2J = clear entire screen
+        // \x1b[H = move cursor to home position (0,0)
+        self.pty_manager.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.scroll_to_bottom();
+    }
+
+    /// Select all visible text in the terminal
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let grid = term.grid();
+        let rows = grid.screen_lines() as i32;
+        let cols = grid.columns();
+        let history = grid.history_size() as i32;
+
+        // Clear any existing selection
+        term.selection = None;
+        drop(term);
+
+        // Create selection from start of history to end of screen
+        // Start at top-left of history
+        let start_row = -history;
+        let start_col = 0;
+
+        // End at bottom-right of visible area
+        let end_row = rows - 1;
+        let end_col = cols.saturating_sub(1);
+
+        // Use the existing selection infrastructure
+        self.start_selection(start_col, start_row);
+        self.update_selection(end_col, end_row);
+        self.end_selection();
+    }
+
     /// Scroll to bottom (display_offset = 0)
     pub fn scroll_to_bottom(&self) {
         let mut term = self.term.lock();
