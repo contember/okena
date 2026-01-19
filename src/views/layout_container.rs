@@ -172,7 +172,6 @@ impl LayoutContainer {
         };
 
         if needs_new_pane {
-            log::debug!("Creating new terminal_pane at path {:?} with terminal_id {:?}", self.layout_path, terminal_id);
             let workspace = self.workspace.clone();
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();

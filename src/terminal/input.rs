@@ -5,17 +5,6 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
     let keystroke = &event.keystroke;
     let mods = &keystroke.modifiers;
 
-    // Debug: log all key events to help diagnose input issues
-    log::debug!(
-        "key_to_bytes: key={:?}, key_char={:?}, mods=(ctrl={}, shift={}, alt={}, platform={})",
-        keystroke.key,
-        keystroke.key_char,
-        mods.control,
-        mods.shift,
-        mods.alt,
-        mods.platform
-    );
-
     // Handle Ctrl+key combinations for letters (produces control characters)
     if mods.control && !mods.shift && !mods.alt && !mods.platform {
         let key = keystroke.key.as_str();
@@ -55,14 +44,8 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     if mods.platform && !mods.alt && !mods.control {
         match keystroke.key.as_str() {
-            "left" => {
-                log::debug!("macOS Cmd+Left -> Ctrl+A (0x01)");
-                return Some(vec![0x01]);
-            }
-            "right" => {
-                log::debug!("macOS Cmd+Right -> Ctrl+E (0x05)");
-                return Some(vec![0x05]);
-            }
+            "left" => return Some(vec![0x01]),
+            "right" => return Some(vec![0x05]),
             "up" => return Some(b"\x1b[1;5A".to_vec()),
             "down" => return Some(b"\x1b[1;5B".to_vec()),
             "backspace" => return Some(vec![0x15]),
@@ -75,14 +58,8 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     if mods.alt && !mods.platform && !mods.control {
         match keystroke.key.as_str() {
-            "left" => {
-                log::debug!("macOS Option+Left -> ESC b");
-                return Some(b"\x1bb".to_vec());
-            }
-            "right" => {
-                log::debug!("macOS Option+Right -> ESC f");
-                return Some(b"\x1bf".to_vec());
-            }
+            "left" => return Some(b"\x1bb".to_vec()),
+            "right" => return Some(b"\x1bf".to_vec()),
             "backspace" => return Some(vec![0x17]),
             _ => {}
         }

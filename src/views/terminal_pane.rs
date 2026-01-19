@@ -634,27 +634,15 @@ impl TerminalPane {
         // Find our current pane in the map
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),
-            None => {
-                log::debug!("Navigation: current pane not found in pane map");
-                return;
-            }
+            None => return,
         };
 
         // Find the nearest pane in the requested direction
         if let Some(target) = pane_map.find_nearest_in_direction(&source, direction) {
-            log::debug!(
-                "Navigation {:?}: from {:?} to {:?}",
-                direction,
-                self.layout_path,
-                target.layout_path
-            );
-
             // Update workspace focused terminal state
             self.workspace.update(cx, |ws, cx| {
                 ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
             });
-        } else {
-            log::debug!("Navigation {:?}: no target found (at boundary)", direction);
         }
     }
 
@@ -664,10 +652,7 @@ impl TerminalPane {
 
         let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
             Some(pane) => pane.clone(),
-            None => {
-                log::debug!("Sequential navigation: current pane not found in pane map");
-                return;
-            }
+            None => return,
         };
 
         let target = if next {
@@ -677,18 +662,9 @@ impl TerminalPane {
         };
 
         if let Some(target) = target {
-            log::debug!(
-                "Sequential navigation {}: from {:?} to {:?}",
-                if next { "next" } else { "prev" },
-                self.layout_path,
-                target.layout_path
-            );
-
             self.workspace.update(cx, |ws, cx| {
                 ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
             });
-        } else {
-            log::debug!("Sequential navigation: no target found (only one pane)");
         }
     }
 
@@ -2142,7 +2118,6 @@ impl Render for TerminalPane {
             .track_focus(&focus_handle)
             .key_context("TerminalPane")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                log::debug!("TerminalPane mouse_down, focusing...");
                 window.focus(&this.focus_handle, cx);
                 // Update workspace focused terminal state
                 this.workspace.update(cx, |ws, cx| {
@@ -2227,11 +2202,9 @@ impl Render for TerminalPane {
                 }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                log::debug!("on_key_down TRIGGERED! keystroke: {:?}", event.keystroke);
                 this.handle_key(event, cx);
             }))
             .on_click(cx.listener(|this, _, window, cx| {
-                log::debug!("TerminalPane clicked, focusing...");
                 window.focus(&this.focus_handle, cx);
                 // Update workspace focused terminal state
                 this.workspace.update(cx, |ws, cx| {
