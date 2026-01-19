@@ -1,16 +1,10 @@
 use crate::theme::{
-    get_themes_dir, load_custom_themes, theme, theme_entity, ThemeColors, ThemeInfo, ThemeMode,
+    get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
 use gpui::prelude::*;
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
-}
 
 /// Theme selection entry with preview and info
 #[derive(Clone)]

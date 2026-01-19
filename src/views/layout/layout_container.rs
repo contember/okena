@@ -1,7 +1,7 @@
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::root::TerminalsRegistry;
 use crate::views::split_pane::render_split_divider;
@@ -14,12 +14,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
-}
 
 /// Drag payload for tab reordering
 #[derive(Clone)]

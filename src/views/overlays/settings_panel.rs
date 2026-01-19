@@ -4,7 +4,7 @@
 
 use crate::settings::{open_settings_file, settings_entity, SettingsState};
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
-use crate::theme::{theme, ThemeColors};
+use crate::theme::{theme, with_alpha, ThemeColors};
 use crate::workspace::persistence::get_settings_path;
 use gpui::*;
 use gpui::prelude::*;
@@ -125,12 +125,6 @@ fn toggle_switch(id: impl Into<SharedString>, enabled: bool, t: &ThemeColors) ->
                 .bg(rgb(t.text_primary))
                 .ml(if enabled { px(20.0) } else { px(2.0) }),
         )
-}
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
 }
 
 // ============================================================================
