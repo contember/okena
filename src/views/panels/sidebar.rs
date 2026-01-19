@@ -43,7 +43,6 @@ impl Render for ProjectDragView {
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
     workspace: Entity<Workspace>,
-    width: f32,
     expanded_projects: HashSet<String>,
     show_add_dialog: bool,
     name_input: Option<Entity<SimpleInputState>>,
@@ -63,10 +62,9 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, width: f32, terminals: TerminalsRegistry) -> Self {
+    pub fn new(workspace: Entity<Workspace>, terminals: TerminalsRegistry) -> Self {
         Self {
             workspace,
-            width,
             expanded_projects: HashSet::new(),
             show_add_dialog: false,
             name_input: None,
@@ -1069,7 +1067,7 @@ impl Render for Sidebar {
 
         div()
             .relative()
-            .w(px(self.width))
+            .w_full()
             .h_full()
             .flex()
             .flex_col()

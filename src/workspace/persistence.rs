@@ -7,6 +7,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Default sidebar width in pixels.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 250.0;
+/// Minimum sidebar width in pixels.
+pub const MIN_SIDEBAR_WIDTH: f32 = 150.0;
+/// Maximum sidebar width in pixels.
+pub const MAX_SIDEBAR_WIDTH: f32 = 500.0;
+
+fn default_sidebar_width() -> f32 {
+    DEFAULT_SIDEBAR_WIDTH
+}
+
 /// Sidebar settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarSettings {
@@ -16,6 +27,9 @@ pub struct SidebarSettings {
     /// Whether auto-hide mode is enabled
     #[serde(default)]
     pub auto_hide: bool,
+    /// Sidebar width in pixels
+    #[serde(default = "default_sidebar_width")]
+    pub width: f32,
 }
 
 impl Default for SidebarSettings {
@@ -23,6 +37,7 @@ impl Default for SidebarSettings {
         Self {
             is_open: false,
             auto_hide: false,
+            width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 }
@@ -68,6 +83,9 @@ pub struct AppSettings {
     /// Default shell type for new terminals
     #[serde(default)]
     pub default_shell: ShellType,
+    /// Show shell selector in terminal header (default: false)
+    #[serde(default)]
+    pub show_shell_selector: bool,
 }
 
 impl Default for AppSettings {
@@ -84,6 +102,7 @@ impl Default for AppSettings {
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
             default_shell: ShellType::default(),
+            show_shell_selector: false,
         }
     }
 }

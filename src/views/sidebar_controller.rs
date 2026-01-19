@@ -3,10 +3,7 @@
 //! Manages sidebar visibility, auto-hide behavior, and animation state.
 //! The actual animation spawning is handled by the parent view.
 
-use crate::workspace::persistence::{save_settings, AppSettings};
-
-/// Default sidebar width in pixels.
-pub const SIDEBAR_WIDTH: f32 = 250.0;
+use crate::workspace::persistence::{save_settings, AppSettings, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
 
 /// Animation duration in milliseconds.
 pub const ANIMATION_DURATION_MS: u64 = 150;
@@ -43,6 +40,7 @@ impl AnimationTarget {
 /// - Animation progress (0.0 = closed, 1.0 = open)
 /// - Auto-hide mode
 /// - Hover state for auto-hide
+/// - Configurable width
 ///
 /// The parent view is responsible for:
 /// - Spawning animations when `AnimationTarget` is returned
@@ -56,18 +54,34 @@ pub struct SidebarController {
     auto_hide: bool,
     /// Whether sidebar is temporarily shown in auto-hide mode (mouse hover)
     hover_shown: bool,
+    /// Configured sidebar width in pixels
+    width: f32,
 }
 
 impl SidebarController {
     /// Create a new sidebar controller from app settings.
     pub fn new(settings: &AppSettings) -> Self {
         let open = settings.sidebar.is_open;
+        let width = settings.sidebar.width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         Self {
             open,
             animation: if open { 1.0 } else { 0.0 },
             auto_hide: settings.sidebar.auto_hide,
             hover_shown: false,
+            width,
         }
+    }
+
+    /// Get the configured sidebar width.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// Set the sidebar width (clamped to min/max bounds).
+    pub fn set_width(&mut self, width: f32, settings: &mut AppSettings) {
+        self.width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        settings.sidebar.width = self.width;
+        let _ = save_settings(settings);
     }
 
     /// Check if sidebar is logically open.
@@ -97,7 +111,7 @@ impl SidebarController {
 
     /// Get current rendered width in pixels.
     pub fn current_width(&self) -> f32 {
-        self.animation * SIDEBAR_WIDTH
+        self.animation * self.width
     }
 
     /// Check if sidebar content should be rendered (animation > threshold).

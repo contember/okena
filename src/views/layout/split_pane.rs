@@ -24,6 +24,8 @@ pub enum DragState {
         project_ids: Vec<String>,
         container_bounds: Bounds<Pixels>,
     },
+    /// Resizing sidebar width
+    Sidebar,
 }
 
 pub type ActiveDrag = Rc<RefCell<Option<DragState>>>;
@@ -125,6 +127,9 @@ pub fn compute_resize(
                 ws.update_project_widths(new_widths, cx);
             });
         }
+        DragState::Sidebar => {
+            // Sidebar resize is handled directly in RootView
+        }
     }
 }
 
@@ -221,5 +226,36 @@ pub fn render_project_divider(
                 .h_full()
                 .bg(rgb(t.border))
                 .group_hover("project-divider", |s| s.bg(rgb(t.border_active))),
+        )
+}
+
+/// Render the sidebar resize divider
+pub fn render_sidebar_divider(cx: &App) -> impl IntoElement {
+    let t = theme(cx);
+    let active_drag = get_active_drag(cx);
+
+    div()
+        .id("sidebar-divider")
+        .group("sidebar-divider")
+        .w(px(5.0))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor(CursorStyle::ResizeLeftRight)
+        .on_mouse_down(MouseButton::Left, {
+            let active_drag = active_drag.clone();
+            move |_event, _window, cx| {
+                *active_drag.borrow_mut() = Some(DragState::Sidebar);
+                cx.stop_propagation();
+            }
+        })
+        .child(
+            div()
+                .w(px(1.0))
+                .h_full()
+                .bg(rgb(t.border))
+                .group_hover("sidebar-divider", |s| s.bg(rgb(t.border_active))),
         )
 }

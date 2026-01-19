@@ -374,6 +374,10 @@ impl SettingsPanel {
                 section_container(&t)
                     .child(self.render_shell_dropdown_row(&s.default_shell, cx))
                     .child(self.render_toggle(
+                        "show-shell-selector", "Show Shell Selector", s.show_shell_selector, true,
+                        |state, val, cx| state.set_show_shell_selector(val, cx), cx,
+                    ))
+                    .child(self.render_toggle(
                         "cursor-blink", "Cursor Blink", s.cursor_blink, true,
                         |state, val, cx| state.set_cursor_blink(val, cx), cx,
                     ))

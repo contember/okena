@@ -2,6 +2,7 @@
 //!
 //! An Entity with Render that displays terminal name, shell selector, and controls.
 
+use crate::settings::settings;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
@@ -305,7 +306,14 @@ impl Render for TerminalHeader {
                                 .into_any_element()
                         },
                     )
-                    .child(self.shell_selector.clone())
+                    .when(settings(cx).show_shell_selector, |el| {
+                        el.child(
+                            div()
+                                .opacity(0.0)
+                                .group_hover("terminal-header", |s| s.opacity(1.0))
+                                .child(self.shell_selector.clone()),
+                        )
+                    })
                     .child(self.render_controls(cx)),
             )
     }

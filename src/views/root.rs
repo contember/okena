@@ -11,10 +11,10 @@ use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
 use crate::views::overlay_manager::{CloseEvent, OverlaySlot};
 use crate::views::project_column::ProjectColumn;
-use crate::views::sidebar_controller::{SidebarController, AnimationTarget, SIDEBAR_WIDTH, FRAME_TIME_MS};
+use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
-use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider};
+use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::open_settings_file;
 use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
@@ -88,7 +88,7 @@ impl RootView {
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|_cx| Sidebar::new(workspace.clone(), SIDEBAR_WIDTH, terminals.clone()));
+        let sidebar = cx.new(|_cx| Sidebar::new(workspace.clone(), terminals.clone()));
 
         // Create title bar entity
         let workspace_for_title = workspace.clone();
@@ -803,7 +803,18 @@ impl Render for RootView {
                 move |this, event: &MouseMoveEvent, _window, cx| {
                     // Handle resize drag
                     if let Some(ref state) = *active_drag.borrow() {
-                        compute_resize(event.position, state, &workspace, cx);
+                        match state {
+                            DragState::Sidebar => {
+                                // Handle sidebar resize
+                                let new_width = f32::from(event.position.x);
+                                this.sidebar_ctrl.set_width(new_width, &mut this.app_settings);
+                                cx.notify();
+                            }
+                            _ => {
+                                // Handle split and project column resize
+                                compute_resize(event.position, state, &workspace, cx);
+                            }
+                        }
                     }
 
                     // Handle auto-hide: check if mouse left the sidebar area
@@ -904,6 +915,7 @@ impl Render for RootView {
                         // Sidebar container - animated width
                         {
                             let sidebar_width = self.sidebar_ctrl.current_width();
+                            let configured_width = self.sidebar_ctrl.width();
                             let show_sidebar = self.sidebar_ctrl.should_render();
 
                             div()
@@ -916,13 +928,17 @@ impl Render for RootView {
                                     d.child(
                                         // Inner wrapper to maintain sidebar at full width for clipping effect
                                         div()
-                                            .w(px(SIDEBAR_WIDTH))
+                                            .w(px(configured_width))
                                             .h_full()
                                             .child(self.sidebar.clone())
                                     )
                                 })
                         }
                     )
+                    // Sidebar resize divider (only when sidebar is visible)
+                    .when(self.sidebar_ctrl.should_render(), |d| {
+                        d.child(render_sidebar_divider(cx))
+                    })
                     .child(
                         // Main area
                         div()

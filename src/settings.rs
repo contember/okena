@@ -73,6 +73,7 @@ impl SettingsState {
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
+    setting_setter!(set_show_shell_selector, show_shell_selector, bool);
 
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {

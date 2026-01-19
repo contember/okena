@@ -81,4 +81,4 @@ pub use components::{SimpleInput, SimpleInputState};
 pub use overlay_manager::{CloseEvent, OverlaySlot};
 
 #[allow(unused_imports)]
-pub use sidebar_controller::{SidebarController, AnimationTarget, SIDEBAR_WIDTH};
+pub use sidebar_controller::{SidebarController, AnimationTarget};
