@@ -5,7 +5,10 @@ use crate::workspace::persistence;
 use crate::workspace::state::{Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
+#[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
+#[cfg(target_os = "linux")]
+use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +32,7 @@ impl TermManager {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Create workspace entity
@@ -74,6 +77,13 @@ impl TermManager {
 
         // Get terminals registry from root view
         let terminals = root_view.read(cx).terminals().clone();
+
+        // Observe window bounds changes to force re-render
+        // This fixes Linux maximize issue where canvas bounds in LayoutContainer become stale
+        cx.observe_window_bounds(window, |_this, _window, cx| {
+            cx.notify();
+        })
+        .detach();
 
         let manager = Self {
             root_view,

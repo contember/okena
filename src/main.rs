@@ -4,6 +4,7 @@ mod elements;
 mod git;
 mod keybindings;
 mod settings;
+mod simple_root;
 mod terminal;
 mod theme;
 mod views;
@@ -11,7 +12,10 @@ mod workspace;
 
 use gpui::*;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
+#[cfg(not(target_os = "linux"))]
 use gpui_component::Root;
+#[cfg(target_os = "linux")]
+use crate::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
 use crate::app::TermManager;
