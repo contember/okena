@@ -170,18 +170,6 @@ impl SidebarController {
         }
     }
 
-    /// Check if mouse position is outside sidebar area (for auto-hide).
-    ///
-    /// Returns true if mouse X is beyond the hide threshold.
-    pub fn should_hide_at_position(&self, mouse_x: f32) -> bool {
-        if !self.auto_hide || !self.hover_shown {
-            return false;
-        }
-        // Add small margin for smoother interaction
-        let hide_threshold = self.current_width() + 10.0;
-        mouse_x > hide_threshold
-    }
-
     /// Calculate eased animation progress.
     ///
     /// Uses ease-out cubic for smooth deceleration.

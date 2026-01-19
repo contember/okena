@@ -24,7 +24,6 @@ pub mod theme_selector;
 pub mod worktree_dialog;
 
 pub use command_palette::CommandPalette;
-pub use context_menu::{ContextMenu, ContextMenuEvent};
 pub use detached_terminal::DetachedTerminalView;
 pub use fullscreen_terminal::FullscreenTerminal;
 pub use keybindings_help::KeybindingsHelp;

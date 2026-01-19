@@ -10,8 +10,6 @@ use gpui_component::tooltip::Tooltip;
 /// Event emitted by ShellSelector.
 #[derive(Clone)]
 pub enum ShellSelectorEvent {
-    /// Shell was changed (kept for compatibility)
-    ShellChanged(ShellType),
     /// Request to open shell selector overlay
     OpenSelector,
 }
@@ -37,11 +35,6 @@ impl ShellSelector {
     /// Get current shell type.
     pub fn current_shell(&self) -> &ShellType {
         &self.current_shell
-    }
-
-    /// Set current shell type (used when restoring from workspace state).
-    pub fn set_shell(&mut self, shell_type: ShellType) {
-        self.current_shell = shell_type;
     }
 
     /// Close the dropdown (no-op now, kept for API compatibility).

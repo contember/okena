@@ -40,11 +40,6 @@ impl<T: 'static> OverlaySlot<T> {
         self.entity.is_some()
     }
 
-    /// Get a reference to the entity if open.
-    pub fn get(&self) -> Option<&Entity<T>> {
-        self.entity.as_ref()
-    }
-
     /// Close the overlay.
     pub fn close(&mut self) {
         self.entity = None;
@@ -54,11 +49,6 @@ impl<T: 'static> OverlaySlot<T> {
     pub fn set(&mut self, entity: Entity<T>) {
         self.entity = Some(entity);
     }
-
-    /// Take the entity out of the slot.
-    pub fn take(&mut self) -> Option<Entity<T>> {
-        self.entity.take()
-    }
 }
 
 impl<T: 'static + Render> OverlaySlot<T> {
@@ -67,18 +57,6 @@ impl<T: 'static + Render> OverlaySlot<T> {
     /// Returns the entity clone if open, None otherwise.
     /// Use with `.when()` and `.child()` in your render method.
     pub fn render(&self) -> Option<Entity<T>> {
-        self.entity.clone()
-    }
-
-    /// Render helper - returns child if open.
-    ///
-    /// Usage in render():
-    /// ```ignore
-    /// .when(self.keybindings_help.is_open(), |d| {
-    ///     d.child(self.keybindings_help.render().unwrap())
-    /// })
-    /// ```
-    pub fn child(&self) -> Option<impl IntoElement> {
         self.entity.clone()
     }
 }
@@ -109,8 +87,7 @@ macro_rules! toggle_overlay {
     };
 }
 
-// Re-export the macro at crate level
-pub use toggle_overlay;
+// Macro is exported at crate level via #[macro_export]
 
 // Implement CloseEvent for existing overlay events
 

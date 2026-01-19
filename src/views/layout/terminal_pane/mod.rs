@@ -179,7 +179,6 @@ impl TerminalPane {
             HeaderEvent::Detach => self.handle_detach(cx),
             HeaderEvent::ExportBuffer => self.handle_export_buffer(cx),
             HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
-            HeaderEvent::ShellChanged(shell_type) => self.switch_shell(shell_type.clone(), cx),
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.workspace.update(cx, |ws, cx| {
@@ -529,60 +528,6 @@ impl TerminalPane {
         }
 
         escaped
-    }
-
-    fn switch_shell(&mut self, shell_type: ShellType, cx: &mut Context<Self>) {
-        if self.shell_type == shell_type {
-            return;
-        }
-
-        // Kill current terminal
-        if let Some(ref terminal_id) = self.terminal_id {
-            self.pty_manager.kill(terminal_id);
-            self.terminals.lock().remove(terminal_id);
-        }
-
-        self.shell_type = shell_type.clone();
-        self.terminal = None;
-        self.terminal_id = None;
-
-        // Save shell type to workspace
-        let project_id = self.project_id.clone();
-        let layout_path = self.layout_path.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.set_terminal_shell(&project_id, &layout_path, shell_type.clone(), cx);
-        });
-
-        // Create new terminal
-        match self
-            .pty_manager
-            .create_terminal_with_shell(&self.project_path, Some(&shell_type))
-        {
-            Ok(new_id) => {
-                self.terminal_id = Some(new_id.clone());
-
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_id(&self.project_id, &self.layout_path, new_id.clone(), cx);
-                });
-
-                let size = TerminalSize::default();
-                let terminal = Arc::new(Terminal::new(new_id.clone(), size, self.pty_manager.clone()));
-                self.terminals.lock().insert(new_id.clone(), terminal.clone());
-                self.terminal = Some(terminal.clone());
-
-                // Update child entities
-                self.update_child_terminals(terminal, cx);
-                self.header.update(cx, |header, cx| {
-                    header.set_terminal_id(Some(new_id));
-                    header.set_shell_type(shell_type, cx);
-                });
-            }
-            Err(e) => {
-                log::error!("Failed to create terminal with shell: {}", e);
-            }
-        }
-
-        cx.notify();
     }
 
     // === Navigation ===

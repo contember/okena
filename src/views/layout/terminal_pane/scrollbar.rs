@@ -41,11 +41,6 @@ impl Scrollbar {
         self.terminal = terminal;
     }
 
-    /// Set element bounds for drag calculations.
-    pub fn set_bounds(&mut self, bounds: Bounds<Pixels>) {
-        self.element_bounds = Some(bounds);
-    }
-
     /// Check if currently dragging.
     pub fn is_dragging(&self) -> bool {
         self.dragging

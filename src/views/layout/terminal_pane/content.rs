@@ -106,16 +106,6 @@ impl TerminalContent {
         self.is_focused = focused;
     }
 
-    /// Get element bounds.
-    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
-        self.element_bounds
-    }
-
-    /// Check if scrollbar is dragging.
-    pub fn is_scrollbar_dragging(&self, cx: &App) -> bool {
-        self.scrollbar.read(cx).is_dragging()
-    }
-
     /// Mark scroll activity.
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.scrollbar.update(cx, |scrollbar, _| {

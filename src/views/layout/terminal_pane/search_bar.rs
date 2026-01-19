@@ -66,16 +66,6 @@ impl SearchBar {
         self.is_active
     }
 
-    /// Get current matches.
-    pub fn matches(&self) -> Arc<Vec<SearchMatch>> {
-        self.matches.clone()
-    }
-
-    /// Get current match index.
-    pub fn current_index(&self) -> Option<usize> {
-        self.current_match_index
-    }
-
     /// Open search bar.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_active = true;

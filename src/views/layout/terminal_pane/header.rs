@@ -26,7 +26,6 @@ pub enum HeaderEvent {
     Detach,
     ExportBuffer,
     Renamed(String),
-    ShellChanged(ShellType),
     /// Request to open shell selector overlay
     OpenShellSelector(ShellType),
 }
@@ -70,9 +69,6 @@ impl TerminalHeader {
         // Subscribe to shell selector events
         cx.subscribe(&shell_selector, |this, _, event: &ShellSelectorEvent, cx| {
             match event {
-                ShellSelectorEvent::ShellChanged(shell_type) => {
-                    cx.emit(HeaderEvent::ShellChanged(shell_type.clone()));
-                }
                 ShellSelectorEvent::OpenSelector => {
                     let current_shell = this.shell_selector.read(cx).current_shell().clone();
                     cx.emit(HeaderEvent::OpenShellSelector(current_shell));
@@ -102,13 +98,6 @@ impl TerminalHeader {
     /// Set terminal ID.
     pub fn set_terminal_id(&mut self, terminal_id: Option<String>) {
         self.terminal_id = terminal_id;
-    }
-
-    /// Update shell type in selector.
-    pub fn set_shell_type(&mut self, shell_type: ShellType, cx: &mut Context<Self>) {
-        self.shell_selector.update(cx, |selector, _| {
-            selector.set_shell(shell_type);
-        });
     }
 
     /// Check if currently renaming.

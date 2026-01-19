@@ -6,18 +6,6 @@ use crate::theme::ThemeColors;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-/// Actions that can be triggered from the context menu.
-#[derive(Clone, Debug)]
-pub enum ContextMenuAction {
-    Copy,
-    Paste,
-    Clear,
-    SelectAll,
-    SplitHorizontal,
-    SplitVertical,
-    Close,
-}
-
 /// Render the context menu at the given position.
 /// Note: This creates the visual elements only. Event handlers must be added
 /// by the caller since we cannot capture mutable callbacks in Fn closures.
