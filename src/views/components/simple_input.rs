@@ -4,6 +4,9 @@ use gpui::*;
 use std::ops::Range;
 use std::time::Duration;
 
+/// Event emitted when input value changes
+pub struct InputChangedEvent;
+
 /// A simple text input state that doesn't rely on gpui-component's Root entity
 pub struct SimpleInputState {
     focus_handle: FocusHandle,
@@ -71,9 +74,13 @@ impl SimpleInputState {
 
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
         let v = value.into();
-        self.cursor_position = v.len();
+        let changed = v != self.value;
+        self.cursor_position = v.chars().count();
         self.value = v;
         self.selection = None;
+        if changed {
+            cx.emit(InputChangedEvent);
+        }
         cx.notify();
     }
 
@@ -101,10 +108,12 @@ impl SimpleInputState {
         self.value.insert_str(byte_pos, text);
         self.cursor_position += text.chars().count();
         self.reset_cursor_blink();
+        cx.emit(InputChangedEvent);
         cx.notify();
     }
 
     fn delete_backward(&mut self, cx: &mut Context<Self>) {
+        let had_content = !self.value.is_empty() || self.selection.is_some();
         if let Some(range) = self.selection.take() {
             // Delete selection
             self.value
@@ -118,10 +127,14 @@ impl SimpleInputState {
             self.cursor_position = prev_pos;
         }
         self.reset_cursor_blink();
+        if had_content {
+            cx.emit(InputChangedEvent);
+        }
         cx.notify();
     }
 
     fn delete_forward(&mut self, cx: &mut Context<Self>) {
+        let had_content = !self.value.is_empty() || self.selection.is_some();
         if let Some(range) = self.selection.take() {
             // Delete selection
             self.value
@@ -136,6 +149,9 @@ impl SimpleInputState {
             }
         }
         self.reset_cursor_blink();
+        if had_content {
+            cx.emit(InputChangedEvent);
+        }
         cx.notify();
     }
 
@@ -353,6 +369,8 @@ impl Render for SimpleInputState {
 }
 
 impl_focusable!(SimpleInputState);
+
+impl EventEmitter<InputChangedEvent> for SimpleInputState {}
 
 /// Simple input element builder for use in render functions
 pub struct SimpleInput {

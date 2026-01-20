@@ -63,8 +63,12 @@ impl ProjectColumn {
     }
 
     fn render_hidden_taskbar(&self, project: &ProjectData, t: ThemeColors) -> impl IntoElement {
-        let minimized_terminals = project.layout.collect_minimized_terminals();
-        let detached_terminals = project.layout.collect_detached_terminals();
+        let minimized_terminals = project.layout.as_ref()
+            .map(|l| l.collect_minimized_terminals())
+            .unwrap_or_default();
+        let detached_terminals = project.layout.as_ref()
+            .map(|l| l.collect_detached_terminals())
+            .unwrap_or_default();
 
         if minimized_terminals.is_empty() && detached_terminals.is_empty() {
             return div().into_any_element();
@@ -366,6 +370,75 @@ impl ProjectColumn {
                     ),
             )
     }
+
+    /// Render empty state for bookmark projects (no terminal)
+    fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .gap(px(16.0))
+            .bg(rgb(t.bg_primary))
+            .child(
+                // Folder icon
+                svg()
+                    .path("icons/folder.svg")
+                    .size(px(48.0))
+                    .text_color(rgb(t.text_muted))
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(rgb(t.text_muted))
+                    .child("No terminal attached")
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(t.text_muted))
+                    .max_w(px(200.0))
+                    .text_center()
+                    .child("This project is saved as a bookmark. Start a terminal to begin working.")
+            )
+            .child(
+                // Start Terminal button
+                div()
+                    .id("start-terminal-btn")
+                    .cursor_pointer()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .rounded(px(6.0))
+                    .bg(rgb(t.button_primary_bg))
+                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        svg()
+                            .path("icons/terminal.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.button_primary_fg))
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(t.button_primary_fg))
+                            .child("Start Terminal")
+                    )
+                    .on_click(move |_, _window, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.start_terminal(&project_id, cx);
+                        });
+                    })
+            )
+    }
 }
 
 impl Render for ProjectColumn {
@@ -376,8 +449,24 @@ impl Render for ProjectColumn {
 
         match project {
             Some(project) => {
-                // Ensure layout container exists (created once, not every render)
-                self.ensure_layout_container(project.path.clone(), cx);
+                let has_layout = project.layout.is_some();
+
+                // Content: either layout container or empty state
+                let content = if has_layout {
+                    // Ensure layout container exists (created once, not every render)
+                    self.ensure_layout_container(project.path.clone(), cx);
+
+                    div()
+                        .id("project-column-content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .child(self.layout_container.clone().unwrap())
+                        .into_any_element()
+                } else {
+                    // Empty state for bookmark projects
+                    self.render_empty_state(cx).into_any_element()
+                };
 
                 div()
                     .id("project-column-main")
@@ -387,14 +476,7 @@ impl Render for ProjectColumn {
                     .min_h_0()
                     .bg(rgb(t.bg_primary))
                     .child(self.render_header(&project, cx))
-                    .child(
-                        div()
-                            .id("project-column-content")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .child(self.layout_container.clone().unwrap()),
-                    )
+                    .child(content)
                     .into_any_element()
             }
 

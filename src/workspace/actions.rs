@@ -23,37 +23,39 @@ impl Workspace {
         let tid = terminal_id.clone();
         self.with_project(project_id, cx, |project| {
             // Set terminal ID in layout node
-            if let Some(node) = project.layout.get_at_path_mut(path) {
-                if let LayoutNode::Terminal { terminal_id: id, .. } = node {
-                    *id = Some(terminal_id);
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    if let LayoutNode::Terminal { terminal_id: id, .. } = node {
+                        *id = Some(terminal_id);
 
-                    // Set default name based on directory if not already set
-                    if !project.terminal_names.contains_key(&tid) {
-                        let base_name = std::path::Path::new(&project.path)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Terminal")
-                            .to_string();
+                        // Set default name based on directory if not already set
+                        if !project.terminal_names.contains_key(&tid) {
+                            let base_name = std::path::Path::new(&project.path)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Terminal")
+                                .to_string();
 
-                        // Check if name already exists and add counter if needed
-                        let existing_names: Vec<_> = project.terminal_names.values().collect();
-                        let default_name = if existing_names.contains(&&base_name) {
-                            // Find next available number
-                            let mut counter = 2;
-                            loop {
-                                let candidate = format!("{} ({})", base_name, counter);
-                                if !existing_names.contains(&&candidate) {
-                                    break candidate;
+                            // Check if name already exists and add counter if needed
+                            let existing_names: Vec<_> = project.terminal_names.values().collect();
+                            let default_name = if existing_names.contains(&&base_name) {
+                                // Find next available number
+                                let mut counter = 2;
+                                loop {
+                                    let candidate = format!("{} ({})", base_name, counter);
+                                    if !existing_names.contains(&&candidate) {
+                                        break candidate;
+                                    }
+                                    counter += 1;
                                 }
-                                counter += 1;
-                            }
-                        } else {
-                            base_name
-                        };
+                            } else {
+                                base_name
+                            };
 
-                        project.terminal_names.insert(tid, default_name);
+                            project.terminal_names.insert(tid, default_name);
+                        }
+                        return true;
                     }
-                    return true;
                 }
             }
             false
@@ -80,7 +82,7 @@ impl Workspace {
     /// Get shell type for a terminal at a layout path
     pub fn get_terminal_shell(&self, project_id: &str, path: &[usize]) -> Option<ShellType> {
         let project = self.project(project_id)?;
-        if let Some(LayoutNode::Terminal { shell_type, .. }) = project.layout.get_at_path(path) {
+        if let Some(LayoutNode::Terminal { shell_type, .. }) = project.layout.as_ref().and_then(|l| l.get_at_path(path)) {
             Some(shell_type.clone())
         } else {
             None
@@ -96,7 +98,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(project) = self.project(project_id) {
-            if let Some(path) = project.layout.find_terminal_path(terminal_id) {
+            if let Some(path) = project.layout.as_ref().and_then(|l| l.find_terminal_path(terminal_id)) {
                 self.set_terminal_shell(project_id, &path, shell_type, cx);
             }
         }
@@ -137,10 +139,12 @@ impl Workspace {
         if path.len() >= 1 {
             let parent_path = &path[..path.len() - 1];
             if let Some(project) = self.project(project_id) {
-                if let Some(LayoutNode::Tabs { .. }) = project.layout.get_at_path(parent_path) {
-                    // Parent is Tabs - add new tab to the group
-                    self.add_tab_to_group(project_id, parent_path, cx);
-                    return;
+                if let Some(ref layout) = project.layout {
+                    if let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
+                        // Parent is Tabs - add new tab to the group
+                        self.add_tab_to_group(project_id, parent_path, cx);
+                        return;
+                    }
                 }
             }
         }
@@ -179,32 +183,34 @@ impl Workspace {
     /// Close a terminal at a path
     pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(project_id) {
-            if path.is_empty() {
-                // Closing root - replace with empty terminal
-                project.layout = LayoutNode::new_terminal();
-                cx.notify();
-                return;
-            }
+            if let Some(ref mut layout) = project.layout {
+                if path.is_empty() {
+                    // Closing root - remove layout entirely (project becomes bookmark)
+                    project.layout = None;
+                    cx.notify();
+                    return;
+                }
 
-            let parent_path = &path[..path.len() - 1];
-            let child_index = path[path.len() - 1];
+                let parent_path = &path[..path.len() - 1];
+                let child_index = path[path.len() - 1];
 
-            if let Some(parent) = project.layout.get_at_path_mut(parent_path) {
-                match parent {
-                    LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-                        if children.len() <= 2 {
-                            // Replace parent with remaining child
-                            let remaining_index = if child_index == 0 { 1 } else { 0 };
-                            if let Some(remaining) = children.get(remaining_index).cloned() {
-                                *parent = remaining;
+                if let Some(parent) = layout.get_at_path_mut(parent_path) {
+                    match parent {
+                        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                            if children.len() <= 2 {
+                                // Replace parent with remaining child
+                                let remaining_index = if child_index == 0 { 1 } else { 0 };
+                                if let Some(remaining) = children.get(remaining_index).cloned() {
+                                    *parent = remaining;
+                                }
+                            } else {
+                                // Just remove the child
+                                children.remove(child_index);
                             }
-                        } else {
-                            // Just remove the child
-                            children.remove(child_index);
+                            cx.notify();
                         }
-                        cx.notify();
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -214,52 +220,57 @@ impl Workspace {
     /// Focuses the previous sibling, or the next one if closing the first child
     pub fn close_terminal_and_focus_sibling(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
         if path.is_empty() {
-            // Closing root - just replace with empty terminal and focus it
+            // Closing root - remove layout (project becomes bookmark)
             self.close_terminal(project_id, path, cx);
-            self.set_focused_terminal(project_id.to_string(), vec![], cx);
+            // Clear focused terminal since there's nothing to focus
+            self.focused_terminal = None;
             return;
         }
 
         // Calculate the sibling to focus before closing
         let focus_path = if let Some(project) = self.project(project_id) {
-            let parent_path = &path[..path.len() - 1];
-            let child_index = path[path.len() - 1];
+            if let Some(ref layout) = project.layout {
+                let parent_path = &path[..path.len() - 1];
+                let child_index = path[path.len() - 1];
 
-            if let Some(parent) = project.layout.get_at_path(parent_path) {
-                match parent {
-                    LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-                        if children.len() <= 2 {
-                            // Parent will dissolve - sibling moves to parent_path
-                            let sibling_index = if child_index == 0 { 1 } else { 0 };
-                            if let Some(sibling) = children.get(sibling_index) {
-                                // Find first terminal within the sibling
-                                let relative_path = sibling.find_first_terminal_path();
-                                let mut full_path = parent_path.to_vec();
-                                full_path.extend(relative_path);
-                                Some(full_path)
-                            } else {
-                                Some(parent_path.to_vec())
-                            }
-                        } else {
-                            // Parent keeps multiple children
-                            // Focus previous sibling, or next if closing first
-                            let sibling_index = if child_index > 0 { child_index - 1 } else { 1 };
-                            if let Some(sibling) = children.get(sibling_index) {
-                                let relative_path = sibling.find_first_terminal_path();
-                                let mut full_path = parent_path.to_vec();
-                                full_path.push(sibling_index);
-                                full_path.extend(relative_path);
-                                // Adjust index if sibling comes after closed terminal
-                                if sibling_index > child_index {
-                                    full_path[parent_path.len()] -= 1;
+                if let Some(parent) = layout.get_at_path(parent_path) {
+                    match parent {
+                        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                            if children.len() <= 2 {
+                                // Parent will dissolve - sibling moves to parent_path
+                                let sibling_index = if child_index == 0 { 1 } else { 0 };
+                                if let Some(sibling) = children.get(sibling_index) {
+                                    // Find first terminal within the sibling
+                                    let relative_path = sibling.find_first_terminal_path();
+                                    let mut full_path = parent_path.to_vec();
+                                    full_path.extend(relative_path);
+                                    Some(full_path)
+                                } else {
+                                    Some(parent_path.to_vec())
                                 }
-                                Some(full_path)
                             } else {
-                                None
+                                // Parent keeps multiple children
+                                // Focus previous sibling, or next if closing first
+                                let sibling_index = if child_index > 0 { child_index - 1 } else { 1 };
+                                if let Some(sibling) = children.get(sibling_index) {
+                                    let relative_path = sibling.find_first_terminal_path();
+                                    let mut full_path = parent_path.to_vec();
+                                    full_path.push(sibling_index);
+                                    full_path.extend(relative_path);
+                                    // Adjust index if sibling comes after closed terminal
+                                    if sibling_index > child_index {
+                                        full_path[parent_path.len()] -= 1;
+                                    }
+                                    Some(full_path)
+                                } else {
+                                    None
+                                }
                             }
                         }
+                        _ => None,
                     }
-                    _ => None,
+                } else {
+                    None
                 }
             } else {
                 None
@@ -313,14 +324,15 @@ impl Workspace {
     }
 
     /// Add a new project
-    pub fn add_project(&mut self, name: String, path: String, cx: &mut Context<Self>) {
+    /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
+    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) {
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
             id: id.clone(),
             name,
             path,
             is_visible: true,
-            layout: LayoutNode::new_terminal(),
+            layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -330,15 +342,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Start a terminal for a project that doesn't have one (bookmark -> active project)
+    pub fn start_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(project) = self.project_mut(project_id) {
+            if project.layout.is_none() {
+                project.layout = Some(LayoutNode::new_terminal());
+                cx.notify();
+            }
+        }
+    }
+
     /// Add a new terminal to a project by splitting the root layout
     pub fn add_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(project_id) {
-            let old_layout = project.layout.clone();
-            project.layout = LayoutNode::Split {
-                direction: SplitDirection::Vertical,
-                sizes: vec![50.0, 50.0],
-                children: vec![old_layout, LayoutNode::new_terminal()],
-            };
+            if let Some(ref old_layout) = project.layout {
+                let old_layout = old_layout.clone();
+                project.layout = Some(LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![old_layout, LayoutNode::new_terminal()],
+                });
+            } else {
+                // Project has no layout - create one with a terminal
+                project.layout = Some(LayoutNode::new_terminal());
+            }
             cx.notify();
         }
     }
@@ -362,7 +389,8 @@ impl Workspace {
 
         // Find the layout path for this terminal
         let layout_path = self.project(&project_id)
-            .and_then(|p| p.layout.find_terminal_path(&terminal_id))
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.find_terminal_path(&terminal_id))
             .unwrap_or_default();
 
         log::info!("layout_path for terminal: {:?}", layout_path);
@@ -392,7 +420,9 @@ impl Workspace {
     /// Enter fullscreen mode for the first terminal in a project
     pub fn fullscreen_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         if let Some(project) = self.project(&project_id) {
-            let terminal_ids = project.layout.collect_terminal_ids();
+            let terminal_ids = project.layout.as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default();
             if let Some(first_id) = terminal_ids.first().cloned() {
                 self.set_fullscreen_terminal(project_id, first_id, cx);
             }
@@ -677,11 +707,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(project) = self.project(project_id) {
-            if let Some(path) = project.layout.find_terminal_path(terminal_id) {
-                // Switch to the terminal's project so it becomes visible
-                self.set_focused_project(Some(project_id.to_string()), cx);
-                // Use the unified focus method for consistent propagation
-                self.set_focused_terminal(project_id.to_string(), path, cx);
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    // Switch to the terminal's project so it becomes visible
+                    self.set_focused_project(Some(project_id.to_string()), cx);
+                    // Use the unified focus method for consistent propagation
+                    self.set_focused_terminal(project_id.to_string(), path, cx);
+                }
             }
         }
     }
@@ -706,11 +738,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(project) = self.project_mut(project_id) {
-            if let Some(path) = project.layout.find_terminal_path(terminal_id) {
-                if let Some(node) = project.layout.get_at_path_mut(&path) {
-                    if let LayoutNode::Terminal { minimized, .. } = node {
-                        *minimized = !*minimized;
-                        cx.notify();
+            if let Some(ref mut layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    if let Some(node) = layout.get_at_path_mut(&path) {
+                        if let LayoutNode::Terminal { minimized, .. } = node {
+                            *minimized = !*minimized;
+                            cx.notify();
+                        }
                     }
                 }
             }
@@ -720,9 +754,11 @@ impl Workspace {
     /// Check if a terminal is minimized by ID
     pub fn is_terminal_minimized(&self, project_id: &str, terminal_id: &str) -> bool {
         if let Some(project) = self.project(project_id) {
-            if let Some(path) = project.layout.find_terminal_path(terminal_id) {
-                if let Some(LayoutNode::Terminal { minimized, .. }) = project.layout.get_at_path(&path) {
-                    return *minimized;
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    if let Some(LayoutNode::Terminal { minimized, .. }) = layout.get_at_path(&path) {
+                        return *minimized;
+                    }
                 }
             }
         }
@@ -741,6 +777,49 @@ impl Workspace {
             .get(project_id)
             .copied()
             .unwrap_or_else(|| 100.0 / visible_count as f32)
+    }
+
+    /// Close all terminals in a project
+    /// Returns the list of terminal IDs that were closed (for PTY cleanup)
+    /// The project becomes a bookmark (no terminals) after this operation
+    pub fn close_all_terminals(&mut self, project_id: &str, cx: &mut Context<Self>) -> Vec<String> {
+        let terminal_ids = if let Some(project) = self.project(project_id) {
+            project.layout.as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default()
+        } else {
+            return vec![];
+        };
+
+        // Clear the layout entirely (project becomes a bookmark)
+        if let Some(project) = self.project_mut(project_id) {
+            project.layout = None;
+            // Clear terminal names for removed terminals
+            for tid in &terminal_ids {
+                project.terminal_names.remove(tid);
+                project.hidden_terminals.remove(tid);
+            }
+        }
+
+        // Clear focused terminal if it was in this project
+        if let Some(ref focused) = self.focused_terminal {
+            if focused.project_id == project_id {
+                self.focused_terminal = None;
+            }
+        }
+
+        // Exit fullscreen if a terminal from this project was in fullscreen
+        if let Some(ref fs) = self.fullscreen_terminal {
+            if fs.project_id == project_id {
+                self.fullscreen_terminal = None;
+            }
+        }
+
+        // Remove any detached terminals from this project
+        self.detached_terminals.retain(|d| d.project_id != project_id);
+
+        cx.notify();
+        terminal_ids
     }
 
     /// Delete a project
@@ -774,8 +853,12 @@ impl Workspace {
     ) -> Option<DetachedTerminalState> {
         // Get terminal ID from the layout node
         let terminal_id = if let Some(project) = self.project(project_id) {
-            if let Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) = project.layout.get_at_path(path) {
-                id.clone()
+            if let Some(ref layout) = project.layout {
+                if let Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) = layout.get_at_path(path) {
+                    id.clone()
+                } else {
+                    return None;
+                }
             } else {
                 return None;
             }
@@ -934,7 +1017,7 @@ impl Workspace {
         let target = std::path::PathBuf::from(target_path);
         crate::git::create_worktree(&repo_path, branch, &target, create_branch)?;
 
-        // Create new project with cloned layout
+        // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
         let project_name = format!("{} ({})",
             std::path::Path::new(&parent_path)
@@ -944,12 +1027,16 @@ impl Workspace {
             branch
         );
 
+        let new_layout = parent_layout
+            .as_ref()
+            .map(|l| l.clone_structure());
+
         let project = ProjectData {
             id: id.clone(),
             name: project_name,
             path: target_path.to_string(),
             is_visible: true,
-            layout: parent_layout.clone_structure(),
+            layout: new_layout,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {

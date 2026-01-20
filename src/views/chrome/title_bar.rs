@@ -196,9 +196,10 @@ impl Render for TitleBar {
                                     .px(px(6.0))
                                     .py(px(2.0))
                                     .rounded(px(4.0))
-                                    .bg(rgb(t.border_active))
+                                    .border_1()
+                                    .border_color(rgb(t.border_focused))
                                     .text_size(px(11.0))
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(rgb(t.text_primary))
                                     .child(name),
                             )
                             .child(
