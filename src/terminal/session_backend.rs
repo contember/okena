@@ -146,11 +146,25 @@ impl ResolvedBackend {
         match self {
             Self::None => {}
             Self::Tmux => {
+                #[cfg(target_os = "macos")]
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", session_name])
+                    .env("PATH", get_extended_path())
+                    .output();
+
+                #[cfg(all(unix, not(target_os = "macos")))]
                 let _ = Command::new("tmux")
                     .args(["kill-session", "-t", session_name])
                     .output();
             }
             Self::Screen => {
+                #[cfg(target_os = "macos")]
+                let _ = Command::new("screen")
+                    .args(["-S", session_name, "-X", "quit"])
+                    .env("PATH", get_extended_path())
+                    .output();
+
+                #[cfg(all(unix, not(target_os = "macos")))]
                 let _ = Command::new("screen")
                     .args(["-S", session_name, "-X", "quit"])
                     .output();
@@ -176,6 +190,28 @@ fn extract_dir_name(path: &str) -> String {
         .to_string()
 }
 
+/// Get extended PATH for macOS app bundles
+/// App bundles start with minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+/// and don't include Homebrew or MacPorts paths where tmux/screen are typically installed
+#[cfg(target_os = "macos")]
+pub fn get_extended_path() -> String {
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let extra_paths = [
+        "/opt/homebrew/bin",      // Homebrew on Apple Silicon
+        "/usr/local/bin",         // Homebrew on Intel / manual installs
+        "/opt/local/bin",         // MacPorts
+        "/usr/local/sbin",
+        "/opt/homebrew/sbin",
+    ];
+
+    // Prepend extra paths to current PATH
+    let mut paths: Vec<&str> = extra_paths.iter().copied().collect();
+    if !current_path.is_empty() {
+        paths.push(&current_path);
+    }
+    paths.join(":")
+}
+
 /// Check if tmux is available on the system
 /// Always returns false on Windows as tmux is not natively available
 fn is_tmux_available() -> bool {
@@ -184,7 +220,17 @@ fn is_tmux_available() -> bool {
         false
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("tmux")
+            .arg("-V")
+            .env("PATH", get_extended_path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("tmux")
             .arg("-V")
@@ -202,7 +248,17 @@ fn is_screen_available() -> bool {
         false
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("screen")
+            .arg("-v")
+            .env("PATH", get_extended_path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("screen")
             .arg("-v")

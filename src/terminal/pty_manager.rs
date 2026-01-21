@@ -1,4 +1,6 @@
 use crate::terminal::session_backend::{ResolvedBackend, SessionBackend};
+#[cfg(target_os = "macos")]
+use crate::terminal::session_backend::get_extended_path;
 use crate::terminal::shell_config::ShellType;
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
@@ -197,6 +199,11 @@ impl PtyManager {
         cmd.env("TERM", "xterm-256color");
         // COLORTERM enables 24-bit truecolor support in many applications
         cmd.env("COLORTERM", "truecolor");
+
+        // On macOS, extend PATH to include Homebrew/MacPorts paths
+        // App bundles start with minimal PATH and won't find tmux/screen otherwise
+        #[cfg(target_os = "macos")]
+        cmd.env("PATH", get_extended_path());
 
         cmd
     }
