@@ -131,11 +131,15 @@ impl FullscreenTerminal {
             }
         };
 
-        // Update workspace fullscreen state
+        // Update workspace fullscreen state (preserve previous_focused_project_id)
         self.workspace.update(cx, |ws, cx| {
+            let previous_focused_project_id = ws.fullscreen_terminal
+                .as_ref()
+                .and_then(|fs| fs.previous_focused_project_id.clone());
             ws.fullscreen_terminal = Some(crate::workspace::state::FullscreenState {
                 project_id: self.project_id.clone(),
                 terminal_id: new_terminal_id.clone(),
+                previous_focused_project_id,
             });
             cx.notify();
         });
@@ -353,12 +357,6 @@ impl Render for FullscreenTerminal {
                                     .w(px(1.0))
                                     .h(px(20.0))
                                     .bg(rgb(t.border)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("ESC to exit"),
                             )
                             .child(
                                 div()

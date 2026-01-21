@@ -398,10 +398,14 @@ impl Workspace {
         // Use FocusManager for fullscreen entry
         self.focus_manager.enter_fullscreen(project_id.clone(), layout_path.clone());
 
+        // Save previous focused_project_id before changing it
+        let previous_focused_project_id = self.focused_project_id.clone();
+
         // Update legacy state for compatibility
         self.fullscreen_terminal = Some(crate::workspace::state::FullscreenState {
             project_id: project_id.clone(),
             terminal_id: terminal_id.clone(),
+            previous_focused_project_id,
         });
         log::info!("fullscreen_terminal set to Some with terminal_id={}", terminal_id);
 
@@ -431,8 +435,13 @@ impl Workspace {
 
     /// Exit fullscreen mode
     ///
-    /// Restores focus to the previously focused terminal if one was saved.
+    /// Restores focus to the previously focused terminal and project view mode.
     pub fn exit_fullscreen(&mut self, cx: &mut Context<Self>) {
+        // Restore previous focused_project_id before clearing fullscreen state
+        if let Some(ref fs) = self.fullscreen_terminal {
+            self.focused_project_id = fs.previous_focused_project_id.clone();
+        }
+
         self.fullscreen_terminal = None;
 
         // Use FocusManager for focus restoration

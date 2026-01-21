@@ -79,6 +79,8 @@ pub enum SplitDirection {
 pub struct FullscreenState {
     pub project_id: String,
     pub terminal_id: String,
+    /// Previous focused project ID to restore when exiting fullscreen
+    pub previous_focused_project_id: Option<String>,
 }
 
 /// State for a detached terminal (opened in separate window)
