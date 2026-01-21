@@ -118,6 +118,13 @@ pub struct ShellSelectorRequest {
     pub current_shell: crate::terminal::shell_config::ShellType,
 }
 
+/// Request to rename a project (triggered from context menu)
+#[derive(Clone, Debug)]
+pub struct ProjectRenameRequest {
+    pub project_id: String,
+    pub project_name: String,
+}
+
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
@@ -139,6 +146,8 @@ pub struct Workspace {
     pub context_menu_request: Option<ContextMenuRequest>,
     /// Pending request to show shell selector
     pub shell_selector_request: Option<ShellSelectorRequest>,
+    /// Pending request to rename a project
+    pub pending_project_rename: Option<ProjectRenameRequest>,
 }
 
 impl Workspace {
@@ -153,6 +162,7 @@ impl Workspace {
             worktree_dialog_request: None,
             context_menu_request: None,
             shell_selector_request: None,
+            pending_project_rename: None,
         }
     }
 

@@ -989,6 +989,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Request renaming a project (from context menu)
+    pub fn request_project_rename(
+        &mut self,
+        project_id: &str,
+        project_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_project_rename = Some(crate::workspace::state::ProjectRenameRequest {
+            project_id: project_id.to_string(),
+            project_name: project_name.to_string(),
+        });
+        cx.notify();
+    }
+
+    /// Clear the project rename request
+    pub fn clear_project_rename_request(&mut self, cx: &mut Context<Self>) {
+        self.pending_project_rename = None;
+        cx.notify();
+    }
+
     /// Create a worktree project from an existing project
     /// Returns the new project ID on success
     pub fn create_worktree_project(
