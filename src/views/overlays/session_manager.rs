@@ -1,3 +1,4 @@
+use crate::settings::settings_entity;
 use crate::theme::{theme, with_alpha};
 use crate::workspace::persistence::{
     config_dir, delete_session, export_workspace, import_workspace, list_sessions,
@@ -91,7 +92,8 @@ impl SessionManager {
     }
 
     fn load_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        match load_session(name) {
+        let backend = settings_entity(cx).read(cx).settings.session_backend;
+        match load_session(name, backend) {
             Ok(data) => {
                 // Emit event to notify parent to switch workspace
                 cx.emit(SessionManagerEvent::SwitchWorkspace(data));

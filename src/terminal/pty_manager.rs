@@ -41,10 +41,10 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
-    /// Create a new PTY manager
-    pub fn new() -> (Self, Receiver<PtyEvent>) {
+    /// Create a new PTY manager with the specified session backend
+    pub fn new(backend: SessionBackend) -> (Self, Receiver<PtyEvent>) {
         let (tx, rx) = async_channel::unbounded();
-        let session_backend = SessionBackend::from_env().resolve();
+        let session_backend = backend.resolve();
 
         if session_backend.supports_persistence() {
             log::info!("Session persistence enabled with {:?}", session_backend);

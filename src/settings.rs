@@ -3,6 +3,7 @@
 //! Provides app-wide access to settings through the GlobalSettings global.
 //! Settings are automatically persisted to disk with debouncing.
 
+use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
@@ -78,6 +79,12 @@ impl SettingsState {
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
         self.settings.default_shell = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the session backend for terminal persistence
+    pub fn set_session_backend(&mut self, value: SessionBackend, cx: &mut Context<Self>) {
+        self.settings.session_backend = value;
         self.save_and_notify(cx);
     }
 

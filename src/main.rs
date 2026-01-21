@@ -93,22 +93,22 @@ fn main() {
         // Initialize split drag context for resize handling
         init_split_drag_context(cx);
 
+        // Initialize global settings entity (must be before workspace load)
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
         // Load or create workspace
-        let workspace_data = persistence::load_workspace().unwrap_or_else(|e| {
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::warn!("Failed to load workspace: {}, using default", e);
             persistence::default_workspace()
         });
-
-        // Initialize global settings entity
-        let settings_entity = settings::init_settings(cx);
-        let app_settings = settings_entity.read(cx).get().clone();
 
         // Create theme entity from settings
         let theme_entity = cx.new(|_cx| AppTheme::new(app_settings.theme_mode, true)); // Default to dark for initial
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
-        // Create PTY manager
-        let (pty_manager, pty_events) = PtyManager::new();
+        // Create PTY manager with session backend from settings
+        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
 
         // Create the main window

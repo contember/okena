@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 /// Backend for persistent terminal sessions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SessionBackend {
     /// No persistence - direct shell
     None,
@@ -15,7 +16,8 @@ pub enum SessionBackend {
 }
 
 impl SessionBackend {
-    /// Parse from string (for env variable)
+    /// Parse from string (for env variable override)
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "tmux" => Self::Tmux,
@@ -28,6 +30,7 @@ impl SessionBackend {
 
     /// Load from environment variable TERM_MANAGER_SESSION_BACKEND
     /// Defaults to Auto if not set
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         std::env::var("TERM_MANAGER_SESSION_BACKEND")
             .map(|s| Self::from_str(&s))
@@ -67,6 +70,26 @@ impl SessionBackend {
                 }
             }
         }
+    }
+
+    /// Get display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None (Direct Shell)",
+            Self::Auto => "Auto (tmux > screen)",
+            Self::Tmux => "tmux",
+            Self::Screen => "screen",
+        }
+    }
+
+    /// Get all variants for UI dropdown
+    pub fn all_variants() -> &'static [SessionBackend] {
+        &[
+            SessionBackend::Auto,
+            SessionBackend::Tmux,
+            SessionBackend::Screen,
+            SessionBackend::None,
+        ]
     }
 }
 

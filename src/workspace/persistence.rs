@@ -86,6 +86,11 @@ pub struct AppSettings {
     /// Show shell selector in terminal header (default: false)
     #[serde(default)]
     pub show_shell_selector: bool,
+
+    // Session persistence settings
+    /// Session backend for terminal persistence (tmux/screen/none/auto)
+    #[serde(default)]
+    pub session_backend: SessionBackend,
 }
 
 impl Default for AppSettings {
@@ -103,6 +108,7 @@ impl Default for AppSettings {
             scrollback_lines: default_scrollback_lines(),
             default_shell: ShellType::default(),
             show_shell_selector: false,
+            session_backend: SessionBackend::default(),
         }
     }
 }
@@ -211,7 +217,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
 }
 
 /// Load workspace from disk
-pub fn load_workspace() -> Result<WorkspaceData> {
+pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     if path.exists() {
@@ -220,7 +226,7 @@ pub fn load_workspace() -> Result<WorkspaceData> {
 
         // Only clear terminal IDs if session persistence is not enabled
         // With tmux/screen backend, sessions survive app restarts
-        let session_backend = SessionBackend::from_env().resolve();
+        let session_backend = backend.resolve();
         if !session_backend.supports_persistence() {
             for project in &mut data.projects {
                 project.layout.clear_terminal_ids();
@@ -348,7 +354,7 @@ pub fn save_session(name: &str, data: &WorkspaceData) -> Result<()> {
 }
 
 /// Load a named session
-pub fn load_session(name: &str) -> Result<WorkspaceData> {
+pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_session_path(name);
 
     if !path.exists() {
@@ -361,7 +367,7 @@ pub fn load_session(name: &str) -> Result<WorkspaceData> {
         .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
 
     // Only clear terminal IDs if session persistence is not enabled
-    let session_backend = SessionBackend::from_env().resolve();
+    let session_backend = backend.resolve();
     if !session_backend.supports_persistence() {
         for project in &mut data.projects {
             project.layout.clear_terminal_ids();

@@ -3,6 +3,7 @@
 //! Provides a Zed-style settings dialog with sections for font, terminal, and appearance settings.
 
 use crate::settings::{open_settings_file, settings_entity, SettingsState};
+use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::theme::{theme, ThemeColors};
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay, modal_backdrop, modal_content, modal_header};
@@ -137,6 +138,7 @@ pub struct SettingsPanel {
     focus_handle: FocusHandle,
     font_dropdown_open: bool,
     shell_dropdown_open: bool,
+    session_backend_dropdown_open: bool,
     /// Cache of available shells (detected once)
     available_shells: Vec<AvailableShell>,
 }
@@ -147,6 +149,7 @@ impl SettingsPanel {
             focus_handle: cx.focus_handle(),
             font_dropdown_open: false,
             shell_dropdown_open: false,
+            session_backend_dropdown_open: false,
             available_shells: available_shells(),
         }
     }
@@ -341,6 +344,42 @@ impl SettingsPanel {
             }))
     }
 
+    fn render_session_backend_dropdown_row(&mut self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let display_name = current_backend.display_name();
+
+        settings_row("session-backend".to_string(), "Session Backend", &t, true).child(
+            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
+                    this.font_dropdown_open = false;
+                    this.shell_dropdown_open = false;
+                    cx.notify();
+                })),
+        )
+    }
+
+    fn render_session_backend_dropdown_overlay(&self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        dropdown_overlay("session-backend-dropdown-list", 290.0, 70.0, &t)
+            .min_w(px(180.0))
+            .children(SessionBackend::all_variants().iter().map(|backend| {
+                let is_selected = backend == current_backend;
+                let backend_copy = *backend;
+                let name = backend.display_name();
+
+                dropdown_option(format!("backend-opt-{:?}", backend), name, is_selected, &t)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                        settings_entity(cx).update(cx, |state, cx| {
+                            state.set_session_backend(backend_copy, cx);
+                        });
+                        this.session_backend_dropdown_open = false;
+                        cx.notify();
+                    }))
+            }))
+    }
+
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let settings = settings_entity(cx);
@@ -373,6 +412,7 @@ impl SettingsPanel {
             .child(
                 section_container(&t)
                     .child(self.render_shell_dropdown_row(&s.default_shell, cx))
+                    .child(self.render_session_backend_dropdown_row(&s.session_backend, cx))
                     .child(self.render_toggle(
                         "show-shell-selector", "Show Shell Selector", s.show_shell_selector, true,
                         |state, val, cx| state.set_show_shell_selector(val, cx), cx,
@@ -424,6 +464,9 @@ impl Render for SettingsPanel {
                     } else if this.shell_dropdown_open {
                         this.shell_dropdown_open = false;
                         cx.notify();
+                    } else if this.session_backend_dropdown_open {
+                        this.session_backend_dropdown_open = false;
+                        cx.notify();
                     } else {
                         this.close(cx);
                     }
@@ -435,6 +478,9 @@ impl Render for SettingsPanel {
                     cx.notify();
                 } else if this.shell_dropdown_open {
                     this.shell_dropdown_open = false;
+                    cx.notify();
+                } else if this.session_backend_dropdown_open {
+                    this.session_backend_dropdown_open = false;
                     cx.notify();
                 } else {
                     this.close(cx);
@@ -511,6 +557,12 @@ impl Render for SettingsPanel {
                         let settings = settings_entity(cx);
                         let current = settings.read(cx).settings.default_shell.clone();
                         modal.child(self.render_shell_dropdown_overlay(&current, cx))
+                    })
+                    // Session backend dropdown overlay
+                    .when(self.session_backend_dropdown_open, |modal| {
+                        let settings = settings_entity(cx);
+                        let current = settings.read(cx).settings.session_backend;
+                        modal.child(self.render_session_backend_dropdown_overlay(&current, cx))
                     }),
             )
     }
