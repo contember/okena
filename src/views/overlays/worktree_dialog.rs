@@ -32,6 +32,7 @@ pub struct WorktreeDialog {
     error_message: Option<String>,
     focus_handle: FocusHandle,
     initialized: bool,
+    last_search_query: String,
 }
 
 impl WorktreeDialog {
@@ -87,11 +88,19 @@ impl WorktreeDialog {
             error_message: None,
             focus_handle,
             initialized: false,
+            last_search_query: String::new(),
         }
     }
 
     fn filter_branches(&mut self, cx: &App) {
         let query = self.branch_search_input.read(cx).value().to_lowercase();
+
+        // Only re-filter and reset selection if the query actually changed
+        if query == self.last_search_query {
+            return;
+        }
+        self.last_search_query = query.clone();
+
         if query.is_empty() {
             self.filtered_branches = (0..self.branches.len()).collect();
         } else {
@@ -102,7 +111,7 @@ impl WorktreeDialog {
                 .map(|(i, _)| i)
                 .collect();
         }
-        // Reset selection
+        // Reset selection only when filter changes
         self.selected_branch_index = None;
     }
 
