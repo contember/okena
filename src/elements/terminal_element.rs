@@ -37,9 +37,55 @@ pub struct TerminalElement {
     cursor_visible: bool,
 }
 
+/// ASCII DEL character - what terminals expect for backspace
+const DEL: u8 = 0x7f;
+
+/// macOS function key character range (U+F700-U+F8FF)
+/// GPUI sends these for arrow keys, function keys, etc.
+/// but we handle those separately via on_key_down -> key_to_bytes
+const MACOS_FUNCTION_KEY_RANGE: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
+
 /// Input handler for terminal text input
 struct TerminalInputHandler {
     terminal: Arc<Terminal>,
+}
+
+impl TerminalInputHandler {
+    /// Send text input to terminal, filtering macOS function keys and handling control characters
+    fn send_filtered_input(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        // Filter out macOS function key characters
+        let filtered: String = text
+            .chars()
+            .filter(|&c| !MACOS_FUNCTION_KEY_RANGE.contains(&c))
+            .collect();
+
+        if filtered.is_empty() {
+            return;
+        }
+
+        // Fast path: no control characters, send entire string at once
+        if !filtered.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}')) {
+            self.terminal.send_input(&filtered);
+            return;
+        }
+
+        // Slow path: handle control characters individually
+        for c in filtered.chars() {
+            match c {
+                '\u{8}' => self.terminal.send_bytes(&[DEL]),
+                '\n' | '\r' => self.terminal.send_bytes(&[b'\r']),
+                _ => {
+                    let mut buf = [0u8; 4];
+                    let s = c.encode_utf8(&mut buf);
+                    self.terminal.send_input(s);
+                }
+            }
+        }
+    }
 }
 
 impl InputHandler for TerminalInputHandler {
@@ -76,27 +122,7 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         _cx: &mut App,
     ) {
-        if text.is_empty() {
-            return;
-        }
-
-        let has_controls = text.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}'));
-        if !has_controls {
-            self.terminal.send_input(text);
-            return;
-        }
-
-        for c in text.chars() {
-            match c {
-                '\u{8}' => self.terminal.send_bytes(&[0x7f]),
-                '\n' | '\r' => self.terminal.send_bytes(&[b'\r']),
-                _ => {
-                    let mut buf = [0u8; 4];
-                    let s = c.encode_utf8(&mut buf);
-                    self.terminal.send_input(s);
-                }
-            }
-        }
+        self.send_filtered_input(text);
     }
 
     fn replace_and_mark_text_in_range(
@@ -107,27 +133,7 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         _cx: &mut App,
     ) {
-        if new_text.is_empty() {
-            return;
-        }
-
-        let has_controls = new_text.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}'));
-        if !has_controls {
-            self.terminal.send_input(new_text);
-            return;
-        }
-
-        for c in new_text.chars() {
-            match c {
-                '\u{8}' => self.terminal.send_bytes(&[0x7f]),
-                '\n' | '\r' => self.terminal.send_bytes(&[b'\r']),
-                _ => {
-                    let mut buf = [0u8; 4];
-                    let s = c.encode_utf8(&mut buf);
-                    self.terminal.send_input(s);
-                }
-            }
-        }
+        self.send_filtered_input(new_text);
     }
 
     fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
