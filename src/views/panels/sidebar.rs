@@ -751,13 +751,18 @@ impl Sidebar {
                 div()
                     .id(ElementId::Name(format!("project-row-{}", project.id).into()))
                     .h(px(24.0))
-                    .px(px(8.0))
+                    .pl(px(6.0))  // Left padding (reduced to account for border)
+                    .pr(px(8.0))  // Right padding
                     .flex()
                     .items_center()
                     .gap(px(4.0))
                     .cursor_pointer()
+                    .border_l_2()
                     .when(is_focused, |d| {
-                        d.border_l_2().border_color(rgb(t.border_active))
+                        d.border_color(rgb(t.border_active))
+                    })
+                    .when(!is_focused, |d| {
+                        d.border_color(rgba(0x00000000))  // Transparent border to reserve space
                     })
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     // Drag source
@@ -786,6 +791,7 @@ impl Sidebar {
                         // Expand arrow
                         div()
                             .id(ElementId::Name(format!("expand-{}", project.id).into()))
+                            .flex_shrink_0()
                             .w(px(16.0))
                             .h(px(16.0))
                             .flex()
@@ -862,6 +868,8 @@ impl Sidebar {
                             div()
                                 .id(ElementId::Name(format!("project-name-{}", project.id).into()))
                                 .flex_1()
+                                .min_w_0()  // Allow shrinking below content size
+                                .overflow_hidden()
                                 .text_size(px(12.0))
                                 .text_color(rgb(t.text_primary))
                                 .text_ellipsis()
@@ -889,6 +897,7 @@ impl Sidebar {
                         // Terminal count badge or bookmark indicator
                         if has_layout {
                             div()
+                                .flex_shrink_0()
                                 .px(px(4.0))
                                 .py(px(1.0))
                                 .rounded(px(4.0))
@@ -900,6 +909,7 @@ impl Sidebar {
                         } else {
                             // Bookmark badge for terminal-less projects
                             div()
+                                .flex_shrink_0()
                                 .px(px(4.0))
                                 .py(px(1.0))
                                 .rounded(px(4.0))
@@ -924,6 +934,7 @@ impl Sidebar {
                             let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
                             div()
                                 .id(ElementId::Name(format!("visibility-{}", project.id).into()))
+                                .flex_shrink_0()
                                 .cursor_pointer()
                                 .w(px(18.0))
                                 .h(px(18.0))
