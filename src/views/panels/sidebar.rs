@@ -1,5 +1,5 @@
 use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
-use crate::theme::theme;
+use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
     cancel_rename, finish_rename, is_renaming, rename_input, start_rename_with_blur,
@@ -61,6 +61,8 @@ pub struct Sidebar {
     project_click_detector: ClickDetector<String>,
     /// Whether to create project without terminal (bookmark mode)
     create_without_terminal: bool,
+    /// Project ID for which color picker is shown
+    color_picker_project_id: Option<String>,
 }
 
 impl Sidebar {
@@ -79,6 +81,7 @@ impl Sidebar {
             project_rename: None,
             project_click_detector: ClickDetector::new(),
             create_without_terminal: false,
+            color_picker_project_id: None,
         }
     }
 
@@ -156,6 +159,23 @@ impl Sidebar {
         cancel_rename(&mut self.project_rename);
         self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
+    }
+
+    fn show_color_picker(&mut self, project_id: String, cx: &mut Context<Self>) {
+        self.color_picker_project_id = Some(project_id);
+        cx.notify();
+    }
+
+    fn hide_color_picker(&mut self, cx: &mut Context<Self>) {
+        self.color_picker_project_id = None;
+        cx.notify();
+    }
+
+    fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_folder_color(project_id, color, cx);
+        });
+        self.hide_color_picker(cx);
     }
 
     fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -782,22 +802,31 @@ impl Sidebar {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        // Project folder icon
+                    .child({
+                        // Project folder icon - clickable for color picker
+                        let folder_color = t.get_folder_color(project.folder_color);
+                        let project_id_for_color = project.id.clone();
                         div()
+                            .id(ElementId::Name(format!("folder-icon-{}", project.id).into()))
                             .flex_shrink_0()
                             .w(px(16.0))
                             .h(px(16.0))
                             .flex()
                             .items_center()
                             .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.7))
                             .child(
                                 svg()
                                     .path("icons/folder.svg")
                                     .size(px(14.0))
-                                    .text_color(rgb(t.border_active))
-                            ),
-                    )
+                                    .text_color(rgb(folder_color))
+                            )
+                            .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                                this.show_color_picker(project_id_for_color.clone(), cx);
+                                cx.stop_propagation();
+                            }))
+                    })
                     .child(
                         // Project name (or input if renaming)
                         if is_renaming {
@@ -1194,6 +1223,65 @@ impl Sidebar {
                     ),
             )
     }
+
+    fn render_color_picker(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        // Get current color for this project
+        let current_color = self.workspace.read(cx)
+            .project(project_id)
+            .map(|p| p.folder_color)
+            .unwrap_or_default();
+
+        let project_id_owned = project_id.to_string();
+
+        // Build color swatches
+        let colors: Vec<(FolderColor, u32)> = FolderColor::all()
+            .iter()
+            .map(|&color| (color, t.get_folder_color(color)))
+            .collect();
+
+        div()
+            .absolute()
+            .top(px(60.0))
+            .left(px(30.0))
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(6.0))
+            .shadow_lg()
+            .p(px(8.0))
+            .child(
+                // Grid of color swatches (2 rows x 4 columns)
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.0))
+                    .w(px(126.0))  // 4 swatches * 24px + 3 gaps * 6px + padding
+                    .children(colors.into_iter().map(|(color, hex)| {
+                        let is_selected = color == current_color;
+                        let project_id_clone = project_id_owned.clone();
+
+                        div()
+                            .id(ElementId::Name(format!("color-{:?}", color).into()))
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(hex))
+                            .cursor_pointer()
+                            .when(is_selected, |d| {
+                                d.border_2().border_color(rgb(t.text_primary))
+                            })
+                            .when(!is_selected, |d| {
+                                d.border_1().border_color(rgb(t.border))
+                            })
+                            .hover(|s| s.opacity(0.8))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                                this.set_folder_color(&project_id_clone, color, cx);
+                            }))
+                    }))
+            )
+    }
 }
 
 impl Render for Sidebar {
@@ -1206,6 +1294,7 @@ impl Render for Sidebar {
             .filter_map(|id| workspace.data.projects.iter().find(|p| &p.id == id).cloned())
             .collect();
         let show_add_dialog = self.show_add_dialog;
+        let color_picker_project_id = self.color_picker_project_id.clone();
 
         // Check if we have suggestions to show (must be checked before dialog renders)
         let has_suggestions = self.path_input.as_ref()
@@ -1240,6 +1329,21 @@ impl Render for Sidebar {
             // Path suggestions overlay - rendered LAST to appear on top of everything
             .when(show_add_dialog && has_suggestions, |d| {
                 d.child(self.render_path_suggestions(cx))
+            })
+            // Color picker overlay
+            .when(color_picker_project_id.is_some(), |d| {
+                let project_id = color_picker_project_id.unwrap();
+                d.child(
+                    // Backdrop to close picker when clicking outside
+                    div()
+                        .id("color-picker-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.hide_color_picker(cx);
+                        }))
+                )
+                .child(self.render_color_picker(&project_id, cx))
             })
     }
 }

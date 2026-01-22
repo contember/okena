@@ -1,4 +1,5 @@
 use crate::terminal::shell_config::ShellType;
+use crate::theme::FolderColor;
 use crate::workspace::state::{DetachedTerminalState, FocusedTerminalState, LayoutNode, ProjectData, SplitDirection, Workspace};
 use gpui::*;
 use std::collections::HashMap;
@@ -336,6 +337,7 @@ impl Workspace {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            folder_color: FolderColor::default(),
         };
         self.data.projects.push(project);
         self.data.project_order.push(id);
@@ -451,6 +453,14 @@ impl Workspace {
     pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut Context<Self>) {
         self.with_project(project_id, cx, |project| {
             project.name = new_name;
+            true
+        });
+    }
+
+    /// Set the folder color for a project
+    pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            project.folder_color = color;
             true
         });
     }
@@ -1043,6 +1053,7 @@ impl Workspace {
                 parent_project_id: parent_project_id.to_string(),
                 main_repo_path: repo_path.to_string_lossy().to_string(),
             }),
+            folder_color: FolderColor::default(),
         };
 
         // Insert after parent project in order
