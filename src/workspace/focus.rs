@@ -78,6 +78,19 @@ impl FocusManager {
         self.current_focus.as_ref()
     }
 
+    /// Get the current focus as FocusedTerminalState for backward compatibility.
+    ///
+    /// This is the primary method for checking which terminal is focused.
+    /// Returns None if no terminal is focused.
+    pub fn focused_terminal_state(&self) -> Option<crate::workspace::state::FocusedTerminalState> {
+        self.current_focus.as_ref().map(|target| {
+            crate::workspace::state::FocusedTerminalState {
+                project_id: target.project_id.clone(),
+                layout_path: target.layout_path.clone(),
+            }
+        })
+    }
+
     /// Get the current focus context
     #[allow(dead_code)]
     pub fn context(&self) -> &FocusContext {

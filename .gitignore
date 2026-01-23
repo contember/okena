@@ -16,3 +16,6 @@ Thumbs.db
 .ralph-tui/
 
 dist
+
+# claude
+.claude/settings.local.json

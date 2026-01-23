@@ -39,6 +39,8 @@ pub struct ProjectData {
     pub worktree_info: Option<WorktreeMetadata>,
 }
 
+use crate::terminal::shell_config::ShellType;
+
 /// Recursive layout tree node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -49,6 +51,8 @@ pub enum LayoutNode {
         minimized: bool,
         #[serde(default)]
         detached: bool,
+        #[serde(default)]
+        shell_type: ShellType,
     },
     Split {
         direction: SplitDirection,
@@ -105,13 +109,24 @@ pub struct ContextMenuRequest {
     pub position: gpui::Point<gpui::Pixels>,
 }
 
+/// Request to show shell selector overlay
+#[derive(Clone, Debug)]
+pub struct ShellSelectorRequest {
+    pub project_id: String,
+    pub terminal_id: String,
+    pub current_shell: crate::terminal::shell_config::ShellType,
+}
+
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<FullscreenState>,
-    /// Currently focused terminal (for visual indicator)
-    /// Note: Managed by FocusManager, kept for backward compatibility
+    /// Currently focused terminal (for visual indicator).
+    ///
+    /// **DEPRECATED**: Use `focus_manager.focused_terminal_state()` instead.
+    /// This field is kept in sync with FocusManager for backward compatibility
+    /// but should not be accessed directly in new code.
     pub focused_terminal: Option<FocusedTerminalState>,
     /// Currently detached terminals (opened in separate windows)
     pub detached_terminals: Vec<DetachedTerminalState>,
@@ -121,6 +136,8 @@ pub struct Workspace {
     pub worktree_dialog_request: Option<WorktreeDialogRequest>,
     /// Pending request to show context menu
     pub context_menu_request: Option<ContextMenuRequest>,
+    /// Pending request to show shell selector
+    pub shell_selector_request: Option<ShellSelectorRequest>,
 }
 
 impl Workspace {
@@ -134,6 +151,7 @@ impl Workspace {
             focus_manager: FocusManager::new(),
             worktree_dialog_request: None,
             context_menu_request: None,
+            shell_selector_request: None,
         }
     }
 
@@ -208,6 +226,7 @@ impl LayoutNode {
             terminal_id: None,
             minimized: false,
             detached: false,
+            shell_type: ShellType::Default,
         }
     }
 
@@ -265,7 +284,7 @@ impl LayoutNode {
     /// Also resets minimized and detached state since terminals need to be created first
     pub fn clear_terminal_ids(&mut self) {
         match self {
-            LayoutNode::Terminal { terminal_id, minimized, detached } => {
+            LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
                 *terminal_id = None;
                 *minimized = false;
                 *detached = false;
@@ -381,10 +400,11 @@ impl LayoutNode {
     /// Used when creating worktree projects to duplicate layout with fresh terminals
     pub fn clone_structure(&self) -> Self {
         match self {
-            LayoutNode::Terminal { .. } => LayoutNode::Terminal {
+            LayoutNode::Terminal { shell_type, .. } => LayoutNode::Terminal {
                 terminal_id: None,
                 minimized: false,
                 detached: false,
+                shell_type: shell_type.clone(),
             },
             LayoutNode::Split { direction, sizes, children } => LayoutNode::Split {
                 direction: *direction,

@@ -1,3 +1,4 @@
+use crate::terminal::shell_config::ShellType;
 use crate::workspace::state::{DetachedTerminalState, FocusedTerminalState, LayoutNode, ProjectData, SplitDirection, Workspace};
 use gpui::*;
 use std::collections::HashMap;
@@ -57,6 +58,48 @@ impl Workspace {
             }
             false
         });
+    }
+
+    /// Set shell type for a terminal at a layout path
+    pub fn set_terminal_shell(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        shell_type: ShellType,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_layout_node(project_id, path, cx, |node| {
+            if let LayoutNode::Terminal { shell_type: st, .. } = node {
+                *st = shell_type;
+                return true;
+            }
+            false
+        });
+    }
+
+    /// Get shell type for a terminal at a layout path
+    pub fn get_terminal_shell(&self, project_id: &str, path: &[usize]) -> Option<ShellType> {
+        let project = self.project(project_id)?;
+        if let Some(LayoutNode::Terminal { shell_type, .. }) = project.layout.get_at_path(path) {
+            Some(shell_type.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Set shell type for a terminal by its ID
+    pub fn set_terminal_shell_by_id(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        shell_type: ShellType,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project(project_id) {
+            if let Some(path) = project.layout.find_terminal_path(terminal_id) {
+                self.set_terminal_shell(project_id, &path, shell_type, cx);
+            }
+        }
     }
 
     /// Split a terminal at a path
@@ -838,6 +881,28 @@ impl Workspace {
     /// Clear the context menu request
     pub fn clear_context_menu_request(&mut self, cx: &mut Context<Self>) {
         self.context_menu_request = None;
+        cx.notify();
+    }
+
+    /// Request showing the shell selector for a terminal
+    pub fn request_shell_selector(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        current_shell: crate::terminal::shell_config::ShellType,
+        cx: &mut Context<Self>,
+    ) {
+        self.shell_selector_request = Some(crate::workspace::state::ShellSelectorRequest {
+            project_id: project_id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            current_shell,
+        });
+        cx.notify();
+    }
+
+    /// Clear the shell selector request
+    pub fn clear_shell_selector_request(&mut self, cx: &mut Context<Self>) {
+        self.shell_selector_request = None;
         cx.notify();
     }
 

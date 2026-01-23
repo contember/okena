@@ -33,17 +33,26 @@ impl Default for TerminalSize {
 }
 
 
-/// Event listener for alacritty_terminal that captures title changes and bell
+/// Event listener for alacritty_terminal that captures title changes, bell, and PTY write requests
 pub struct ZedEventListener {
     /// Shared title storage - OSC 0/1/2 sequences update this
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag
     has_bell: Arc<Mutex<bool>>,
+    /// PTY manager for writing responses back to the terminal
+    pty_manager: Arc<PtyManager>,
+    /// Terminal ID for PTY write operations
+    terminal_id: String,
 }
 
 impl ZedEventListener {
-    pub fn new(title: Arc<Mutex<Option<String>>>, has_bell: Arc<Mutex<bool>>) -> Self {
-        Self { title, has_bell }
+    pub fn new(
+        title: Arc<Mutex<Option<String>>>,
+        has_bell: Arc<Mutex<bool>>,
+        pty_manager: Arc<PtyManager>,
+        terminal_id: String,
+    ) -> Self {
+        Self { title, has_bell, pty_manager, terminal_id }
     }
 }
 
@@ -56,8 +65,13 @@ impl EventListener for ZedEventListener {
             TermEvent::Bell => {
                 *self.has_bell.lock() = true;
             }
+            TermEvent::PtyWrite(data) => {
+                // Write response back to PTY (e.g., cursor position report)
+                log::debug!("PtyWrite event: {:?}", data);
+                self.pty_manager.send_input(&self.terminal_id, data.as_bytes());
+            }
             _ => {
-                // Ignore other events - we handle them through our own channel
+                // Ignore other events
             }
         }
     }
@@ -117,7 +131,12 @@ impl Terminal {
         // Create shared storage for OSC sequence handling and bell
         let title = Arc::new(Mutex::new(None));
         let has_bell = Arc::new(Mutex::new(false));
-        let event_listener = ZedEventListener::new(title.clone(), has_bell.clone());
+        let event_listener = ZedEventListener::new(
+            title.clone(),
+            has_bell.clone(),
+            pty_manager.clone(),
+            terminal_id.clone(),
+        );
         let term = Term::new(config, &term_size, event_listener);
 
         // Create unbounded channel for dirty notifications (don't drop any updates)
@@ -171,6 +190,42 @@ impl Terminal {
     pub fn send_bytes(&self, data: &[u8]) {
         self.scroll_to_bottom();
         self.pty_manager.send_input(&self.terminal_id, data);
+    }
+
+    /// Clear the terminal screen by sending the clear sequence
+    pub fn clear(&self) {
+        // Send ANSI escape sequence to clear screen and move cursor to home
+        // \x1b[2J = clear entire screen
+        // \x1b[H = move cursor to home position (0,0)
+        self.pty_manager.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.scroll_to_bottom();
+    }
+
+    /// Select all visible text in the terminal
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let grid = term.grid();
+        let rows = grid.screen_lines() as i32;
+        let cols = grid.columns();
+        let history = grid.history_size() as i32;
+
+        // Clear any existing selection
+        term.selection = None;
+        drop(term);
+
+        // Create selection from start of history to end of screen
+        // Start at top-left of history
+        let start_row = -history;
+        let start_col = 0;
+
+        // End at bottom-right of visible area
+        let end_row = rows - 1;
+        let end_col = cols.saturating_sub(1);
+
+        // Use the existing selection infrastructure
+        self.start_selection(start_col, start_row);
+        self.update_selection(end_col, end_row);
+        self.end_selection();
     }
 
     /// Scroll to bottom (display_offset = 0)

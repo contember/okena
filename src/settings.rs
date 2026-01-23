@@ -3,6 +3,8 @@
 //! Provides app-wide access to settings through the GlobalSettings global.
 //! Settings are automatically persisted to disk with debouncing.
 
+use crate::terminal::session_backend::SessionBackend;
+use crate::terminal::shell_config::ShellType;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,6 +74,19 @@ impl SettingsState {
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
+    setting_setter!(set_show_shell_selector, show_shell_selector, bool);
+
+    /// Set the default shell type for new terminals
+    pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
+        self.settings.default_shell = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the session backend for terminal persistence
+    pub fn set_session_backend(&mut self, value: SessionBackend, cx: &mut Context<Self>) {
+        self.settings.session_backend = value;
+        self.save_and_notify(cx);
+    }
 
     /// Save and notify - common logic for all setters
     fn save_and_notify(&mut self, cx: &mut Context<Self>) {

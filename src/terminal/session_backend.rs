@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 /// Backend for persistent terminal sessions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SessionBackend {
     /// No persistence - direct shell
     None,
@@ -15,7 +16,8 @@ pub enum SessionBackend {
 }
 
 impl SessionBackend {
-    /// Parse from string (for env variable)
+    /// Parse from string (for env variable override)
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "tmux" => Self::Tmux,
@@ -28,6 +30,7 @@ impl SessionBackend {
 
     /// Load from environment variable TERM_MANAGER_SESSION_BACKEND
     /// Defaults to Auto if not set
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         std::env::var("TERM_MANAGER_SESSION_BACKEND")
             .map(|s| Self::from_str(&s))
@@ -68,6 +71,26 @@ impl SessionBackend {
             }
         }
     }
+
+    /// Get display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None (Direct Shell)",
+            Self::Auto => "Auto (tmux > screen)",
+            Self::Tmux => "tmux",
+            Self::Screen => "screen",
+        }
+    }
+
+    /// Get all variants for UI dropdown
+    pub fn all_variants() -> &'static [SessionBackend] {
+        &[
+            SessionBackend::Auto,
+            SessionBackend::Tmux,
+            SessionBackend::Screen,
+            SessionBackend::None,
+        ]
+    }
 }
 
 /// Resolved (concrete) backend - no Auto variant
@@ -98,6 +121,7 @@ impl ResolvedBackend {
 
     /// Build the command to create or attach to a session
     /// Returns (program, args) tuple
+    #[allow(dead_code)] // Used only on Unix
     pub fn build_command(&self, session_name: &str, cwd: &str) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
@@ -145,11 +169,25 @@ impl ResolvedBackend {
         match self {
             Self::None => {}
             Self::Tmux => {
+                #[cfg(target_os = "macos")]
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", session_name])
+                    .env("PATH", get_extended_path())
+                    .output();
+
+                #[cfg(all(unix, not(target_os = "macos")))]
                 let _ = Command::new("tmux")
                     .args(["kill-session", "-t", session_name])
                     .output();
             }
             Self::Screen => {
+                #[cfg(target_os = "macos")]
+                let _ = Command::new("screen")
+                    .args(["-S", session_name, "-X", "quit"])
+                    .env("PATH", get_extended_path())
+                    .output();
+
+                #[cfg(all(unix, not(target_os = "macos")))]
                 let _ = Command::new("screen")
                     .args(["-S", session_name, "-X", "quit"])
                     .output();
@@ -159,12 +197,14 @@ impl ResolvedBackend {
 }
 
 /// Escape a string for safe use in shell commands
+#[allow(dead_code)] // Used only on Unix for tmux/screen commands
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any existing single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Extract directory name from a path for use as window name
+#[allow(dead_code)] // Used only on Unix for tmux window naming
 fn extract_dir_name(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
@@ -173,22 +213,82 @@ fn extract_dir_name(path: &str) -> String {
         .to_string()
 }
 
+/// Get extended PATH for macOS app bundles
+/// App bundles start with minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+/// and don't include Homebrew or MacPorts paths where tmux/screen are typically installed
+#[cfg(target_os = "macos")]
+pub fn get_extended_path() -> String {
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let extra_paths = [
+        "/opt/homebrew/bin",      // Homebrew on Apple Silicon
+        "/usr/local/bin",         // Homebrew on Intel / manual installs
+        "/opt/local/bin",         // MacPorts
+        "/usr/local/sbin",
+        "/opt/homebrew/sbin",
+    ];
+
+    // Prepend extra paths to current PATH
+    let mut paths: Vec<&str> = extra_paths.iter().copied().collect();
+    if !current_path.is_empty() {
+        paths.push(&current_path);
+    }
+    paths.join(":")
+}
+
 /// Check if tmux is available on the system
+/// Always returns false on Windows as tmux is not natively available
 fn is_tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("tmux")
+            .arg("-V")
+            .env("PATH", get_extended_path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Check if screen is available on the system
+/// Always returns false on Windows as screen is not natively available
 fn is_screen_available() -> bool {
-    Command::new("screen")
-        .arg("-v")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("screen")
+            .arg("-v")
+            .env("PATH", get_extended_path())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("screen")
+            .arg("-v")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

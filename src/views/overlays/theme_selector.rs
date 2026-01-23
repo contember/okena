@@ -1,16 +1,11 @@
 use crate::theme::{
-    get_themes_dir, load_custom_themes, theme, theme_entity, ThemeColors, ThemeInfo, ThemeMode,
+    get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
+use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
 use gpui::prelude::*;
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
-}
 
 /// Theme selection entry with preview and info
 #[derive(Clone)]
@@ -356,17 +351,15 @@ impl Render for ThemeSelector {
         let themes = self.themes.clone();
         let themes_dir = get_themes_dir();
 
-        // Focus on first render
         window.focus(&focus_handle, cx);
 
-        div()
+        modal_backdrop("theme-selector-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("ThemeSelector")
+            .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.close(cx);
-                    }
+                    "escape" => this.close(cx),
                     "up" => {
                         if this.selected_index > 0 {
                             this.selected_index -= 1;
@@ -388,81 +381,19 @@ impl Render for ThemeSelector {
                     _ => {}
                 }
             }))
-            .absolute()
-            .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
-            .flex()
-            .items_center()
-            .justify_center()
-            .id("theme-selector-backdrop")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.close(cx);
-                }),
-            )
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.close(cx);
+            }))
             .child(
-                // Modal content
-                div()
-                    .id("theme-selector-modal")
+                modal_content("theme-selector-modal", &t)
                     .w(px(480.0))
                     .max_h(px(550.0))
-                    .bg(rgb(t.bg_primary))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .shadow_xl()
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(
-                        // Header
-                        div()
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(16.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(t.text_primary))
-                                            .child("Theme"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Select a color theme for the application"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("theme-selector-close-btn")
-                                    .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(16.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("✕")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _window, cx| {
-                                            this.close(cx);
-                                        }),
-                                    ),
-                            ),
-                    )
+                    .child(modal_header(
+                        "Theme",
+                        Some("Select a color theme for the application"),
+                        &t,
+                        cx.listener(|this, _, _window, cx| this.close(cx)),
+                    ))
                     .child(
                         // Theme list
                         div()
@@ -504,8 +435,4 @@ impl Render for ThemeSelector {
     }
 }
 
-impl Focusable for ThemeSelector {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(ThemeSelector);

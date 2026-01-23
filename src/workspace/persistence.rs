@@ -1,10 +1,22 @@
 use crate::terminal::session_backend::SessionBackend;
+use crate::terminal::shell_config::ShellType;
 use crate::theme::ThemeMode;
 use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Default sidebar width in pixels.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 250.0;
+/// Minimum sidebar width in pixels.
+pub const MIN_SIDEBAR_WIDTH: f32 = 150.0;
+/// Maximum sidebar width in pixels.
+pub const MAX_SIDEBAR_WIDTH: f32 = 500.0;
+
+fn default_sidebar_width() -> f32 {
+    DEFAULT_SIDEBAR_WIDTH
+}
 
 /// Sidebar settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,6 +27,9 @@ pub struct SidebarSettings {
     /// Whether auto-hide mode is enabled
     #[serde(default)]
     pub auto_hide: bool,
+    /// Sidebar width in pixels
+    #[serde(default = "default_sidebar_width")]
+    pub width: f32,
 }
 
 impl Default for SidebarSettings {
@@ -22,6 +37,7 @@ impl Default for SidebarSettings {
         Self {
             is_open: false,
             auto_hide: false,
+            width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 }
@@ -62,6 +78,19 @@ pub struct AppSettings {
     /// Number of scrollback lines (default: 10000)
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: u32,
+
+    // Shell settings
+    /// Default shell type for new terminals
+    #[serde(default)]
+    pub default_shell: ShellType,
+    /// Show shell selector in terminal header (default: false)
+    #[serde(default)]
+    pub show_shell_selector: bool,
+
+    // Session persistence settings
+    /// Session backend for terminal persistence (tmux/screen/none/auto)
+    #[serde(default)]
+    pub session_backend: SessionBackend,
 }
 
 impl Default for AppSettings {
@@ -77,6 +106,9 @@ impl Default for AppSettings {
             ui_font_size: default_ui_font_size(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
+            default_shell: ShellType::default(),
+            show_shell_selector: false,
+            session_backend: SessionBackend::default(),
         }
     }
 }
@@ -185,7 +217,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
 }
 
 /// Load workspace from disk
-pub fn load_workspace() -> Result<WorkspaceData> {
+pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     if path.exists() {
@@ -194,7 +226,7 @@ pub fn load_workspace() -> Result<WorkspaceData> {
 
         // Only clear terminal IDs if session persistence is not enabled
         // With tmux/screen backend, sessions survive app restarts
-        let session_backend = SessionBackend::from_env().resolve();
+        let session_backend = backend.resolve();
         if !session_backend.supports_persistence() {
             for project in &mut data.projects {
                 project.layout.clear_terminal_ids();
@@ -322,7 +354,7 @@ pub fn save_session(name: &str, data: &WorkspaceData) -> Result<()> {
 }
 
 /// Load a named session
-pub fn load_session(name: &str) -> Result<WorkspaceData> {
+pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_session_path(name);
 
     if !path.exists() {
@@ -335,7 +367,7 @@ pub fn load_session(name: &str) -> Result<WorkspaceData> {
         .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
 
     // Only clear terminal IDs if session persistence is not enabled
-    let session_backend = SessionBackend::from_env().resolve();
+    let session_backend = backend.resolve();
     if !session_backend.supports_persistence() {
         for project in &mut data.projects {
             project.layout.clear_terminal_ids();

@@ -2,6 +2,12 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Create an hsla color from a hex color with custom alpha
+pub fn with_alpha(hex: u32, alpha: f32) -> Hsla {
+    let rgba = rgb(hex);
+    Hsla::from(Rgba { a: alpha, ..rgba })
+}
+
 /// Theme mode preference
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]

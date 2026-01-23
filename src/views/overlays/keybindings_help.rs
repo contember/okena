@@ -437,8 +437,4 @@ impl Render for KeybindingsHelp {
     }
 }
 
-impl Focusable for KeybindingsHelp {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(KeybindingsHelp);

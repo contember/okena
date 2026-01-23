@@ -1,3 +1,5 @@
+#[macro_use]
+mod macros;
 mod app;
 mod assets;
 mod elements;
@@ -7,6 +9,7 @@ mod settings;
 mod simple_root;
 mod terminal;
 mod theme;
+mod ui;
 mod views;
 mod workspace;
 
@@ -90,38 +93,49 @@ fn main() {
         // Initialize split drag context for resize handling
         init_split_drag_context(cx);
 
+        // Initialize global settings entity (must be before workspace load)
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
         // Load or create workspace
-        let workspace_data = persistence::load_workspace().unwrap_or_else(|e| {
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::warn!("Failed to load workspace: {}, using default", e);
             persistence::default_workspace()
         });
-
-        // Initialize global settings entity
-        let settings_entity = settings::init_settings(cx);
-        let app_settings = settings_entity.read(cx).get().clone();
 
         // Create theme entity from settings
         let theme_entity = cx.new(|_cx| AppTheme::new(app_settings.theme_mode, true)); // Default to dark for initial
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
-        // Create PTY manager
-        let (pty_manager, pty_events) = PtyManager::new();
+        // Create PTY manager with session backend from settings
+        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
 
         // Create the main window
         cx.open_window(
             WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Term Manager".into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
+                // On Windows, disable platform titlebar entirely for custom titlebar
+                // On macOS, use transparent titlebar with native traffic lights
+                titlebar: if cfg!(target_os = "windows") {
+                    None
+                } else {
+                    Some(TitlebarOptions {
+                        title: Some("Term Manager".into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    })
+                },
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
                     size: size(px(1200.0), px(800.0)),
                 })),
                 is_resizable: true,
-                window_decorations: Some(WindowDecorations::Server),
+                // On Windows, use client-side decorations for custom window controls
+                window_decorations: Some(if cfg!(target_os = "windows") {
+                    WindowDecorations::Client
+                } else {
+                    WindowDecorations::Server
+                }),
                 window_min_size: Some(Size {
                     width: px(400.0),
                     height: px(300.0),

@@ -1,4 +1,5 @@
-use crate::theme::theme;
+use crate::settings::settings_entity;
+use crate::theme::{theme, with_alpha};
 use crate::workspace::persistence::{
     config_dir, delete_session, export_workspace, import_workspace, list_sessions,
     load_session, rename_session, save_session, session_exists, SessionInfo,
@@ -6,12 +7,6 @@ use crate::workspace::persistence::{
 use crate::workspace::state::{Workspace, WorkspaceData};
 use gpui::*;
 use gpui::prelude::*;
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
-}
 
 /// Session Manager overlay for managing multiple workspaces
 pub struct SessionManager {
@@ -97,7 +92,8 @@ impl SessionManager {
     }
 
     fn load_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        match load_session(name) {
+        let backend = settings_entity(cx).read(cx).settings.session_backend;
+        match load_session(name, backend) {
             Ok(data) => {
                 // Emit event to notify parent to switch workspace
                 cx.emit(SessionManagerEvent::SwitchWorkspace(data));
@@ -915,8 +911,4 @@ impl Render for SessionManager {
     }
 }
 
-impl Focusable for SessionManager {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(SessionManager);

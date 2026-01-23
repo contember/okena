@@ -6,15 +6,9 @@ use crate::keybindings::{
     FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
     Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
 };
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use gpui::*;
 use gpui::prelude::*;
-
-/// Create an hsla color from a hex color with custom alpha
-fn with_alpha(hex: u32, alpha: f32) -> Hsla {
-    let rgba = rgb(hex);
-    Hsla::from(Rgba { a: alpha, ..rgba })
-}
 
 /// Command entry for the palette
 #[derive(Clone)]
@@ -449,8 +443,4 @@ impl Render for CommandPalette {
     }
 }
 
-impl Focusable for CommandPalette {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(CommandPalette);

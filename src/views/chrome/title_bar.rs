@@ -49,13 +49,12 @@ impl TitleBar {
         div()
             .id(ElementId::Name(format!("window-control-{:?}", control_type).into()))
             .cursor_pointer()
-            .w(px(28.0))
-            .h(px(28.0))
+            .w(px(46.0)) // Windows standard caption button width
+            .h(px(32.0)) // Match titlebar height
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(4.0))
-            .text_size(px(12.0))
+            .text_size(px(10.0))
             .text_color(rgb(t.text_secondary))
             .when(is_close, |d| {
                 d.hover(|s| s.bg(rgb(0xE81123)).text_color(rgb(0xffffff)))
@@ -64,6 +63,7 @@ impl TitleBar {
                 d.hover(|s| s.bg(rgb(t.bg_hover)))
             })
             .child(icon)
+            // Stop propagation to prevent titlebar drag from capturing the click
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -74,7 +74,7 @@ impl TitleBar {
                     match control_type {
                         WindowControlType::Minimize => window.minimize_window(),
                         WindowControlType::Maximize | WindowControlType::Restore => {
-                            window.zoom_window()
+                            window.zoom_window();
                         }
                         WindowControlType::Close => {
                             cx.quit();
@@ -89,16 +89,20 @@ impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_maximized = window.is_maximized();
-        let decorations = window.window_decorations();
-
-        // Check if we need client-side decorations
-        let needs_controls = match decorations {
-            Decorations::Server => false,
-            Decorations::Client { .. } => true,
+        // On Windows, always show custom window controls since we use a custom titlebar
+        // On macOS, use native traffic lights (server decorations)
+        // On Linux, check runtime decorations
+        let needs_controls = if cfg!(target_os = "windows") {
+            true
+        } else if cfg!(target_os = "macos") {
+            false
+        } else {
+            // Linux: check runtime decorations
+            matches!(window.window_decorations(), Decorations::Client { .. })
         };
 
         // On macOS with server decorations, we need to leave space for traffic lights
-        let traffic_light_padding = if cfg!(target_os = "macos") && !needs_controls {
+        let traffic_light_padding = if cfg!(target_os = "macos") {
             px(80.0) // Space for macOS traffic lights (close, minimize, fullscreen)
         } else {
             px(8.0)
@@ -119,17 +123,15 @@ impl Render for TitleBar {
             .id("title-bar")
             .h(px(32.0))
             .w_full()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_between()
             .bg(rgb(t.bg_header))
             .border_b_1()
             .border_color(rgb(t.border))
-            // Make title bar draggable for window move
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.start_window_move();
-                cx.stop_propagation();
-            })
+            // Mark titlebar as drag region - platform handles window move
+            .window_control_area(WindowControlArea::Drag)
             .child(
                 // Left side - sidebar toggle + title
                 div()

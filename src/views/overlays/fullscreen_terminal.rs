@@ -393,8 +393,4 @@ impl Render for FullscreenTerminal {
     }
 }
 
-impl Focusable for FullscreenTerminal {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
+impl_focusable!(FullscreenTerminal);
