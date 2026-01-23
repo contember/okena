@@ -675,6 +675,14 @@ impl Terminal {
         term.mode().contains(TermMode::MOUSE_MODE)
     }
 
+    /// Check if terminal is in application cursor keys mode (DECCKM)
+    /// When enabled, arrow keys should send SS3 sequences (\x1bOA) instead of CSI (\x1b[A)
+    /// This is used by applications like less, vim, htop, etc.
+    pub fn is_app_cursor_mode(&self) -> bool {
+        let term = self.term.lock();
+        term.mode().contains(TermMode::APP_CURSOR)
+    }
+
     /// Send scroll event to PTY
     /// For tmux backend: sends SGR mouse wheel sequences (tmux with mouse on expects these)
     /// For other mouse mode apps: checks terminal mode for format

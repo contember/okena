@@ -1,7 +1,11 @@
 use gpui::KeyDownEvent;
 
 /// Convert a GPUI key event to terminal input bytes
-pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
+///
+/// `app_cursor_mode`: When true, arrow keys send SS3 sequences (\x1bOA) instead of CSI (\x1b[A).
+/// This should be true when the terminal is in application cursor keys mode (DECCKM),
+/// which is used by applications like less, vim, htop, etc.
+pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u8>> {
     let keystroke = &event.keystroke;
     let mods = &keystroke.modifiers;
 
@@ -71,8 +75,10 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
         + (if mods.alt { 2 } else { 0 })
         + (if mods.control { 4 } else { 0 });
 
-    // Handle arrow keys with modifiers (CSI 1;mod X format)
-    // On non-macOS, or when macOS handlers above didn't match
+    // Handle arrow keys with modifiers
+    // In application cursor mode (DECCKM): use SS3 sequences (\x1bOA)
+    // In normal mode: use CSI sequences (\x1b[A)
+    // With modifiers: always use CSI 1;mod X format
     match keystroke.key.as_str() {
         "up" | "down" | "right" | "left" => {
             let arrow_char = match keystroke.key.as_str() {
@@ -83,7 +89,12 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
                 _ => unreachable!(),
             };
             if modifier_code > 1 {
+                // Modifiers always use CSI format
                 return Some(format!("\x1b[1;{}{}", modifier_code, arrow_char).into_bytes());
+            }
+            // No modifiers: use SS3 in app cursor mode, CSI otherwise
+            if app_cursor_mode {
+                return Some(format!("\x1bO{}", arrow_char).into_bytes());
             }
             return Some(format!("\x1b[{}", arrow_char).into_bytes());
         }

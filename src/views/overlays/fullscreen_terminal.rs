@@ -237,7 +237,9 @@ impl FullscreenTerminal {
 
     fn key_to_input(&self, event: &KeyDownEvent) -> Option<Vec<u8>> {
         // Use the shared key_to_bytes function for consistent key handling
-        key_to_bytes(event)
+        // Pass app_cursor_mode so arrow keys work correctly in less, vim, etc.
+        let app_cursor_mode = self.terminal.is_app_cursor_mode();
+        key_to_bytes(event, app_cursor_mode)
     }
 }
 

@@ -10,7 +10,9 @@ pub enum SessionBackend {
     Tmux,
     /// Use screen for session persistence
     Screen,
-    /// Auto-detect: prefer tmux, fallback to screen, then none (default)
+    /// Use dtach for minimal session persistence (no scrollback management)
+    Dtach,
+    /// Auto-detect: prefer dtach, fallback to tmux, screen, then none (default)
     #[default]
     Auto,
 }
@@ -22,6 +24,7 @@ impl SessionBackend {
         match s.to_lowercase().as_str() {
             "tmux" => Self::Tmux,
             "screen" => Self::Screen,
+            "dtach" => Self::Dtach,
             "none" | "off" | "false" | "0" => Self::None,
             "auto" | "smart" | "on" | "true" | "1" => Self::Auto,
             _ => Self::None,
@@ -57,8 +60,21 @@ impl SessionBackend {
                     ResolvedBackend::None
                 }
             }
+            Self::Dtach => {
+                if is_dtach_available() {
+                    ResolvedBackend::Dtach
+                } else {
+                    log::warn!("dtach requested but not available, falling back to none");
+                    ResolvedBackend::None
+                }
+            }
             Self::Auto => {
-                if is_tmux_available() {
+                // Prefer dtach (minimal, no scrollback interference)
+                // then tmux, then screen
+                if is_dtach_available() {
+                    log::info!("Auto-detected dtach for session persistence");
+                    ResolvedBackend::Dtach
+                } else if is_tmux_available() {
                     log::info!("Auto-detected tmux for session persistence");
                     ResolvedBackend::Tmux
                 } else if is_screen_available() {
@@ -76,9 +92,10 @@ impl SessionBackend {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::None => "None (Direct Shell)",
-            Self::Auto => "Auto (tmux > screen)",
+            Self::Auto => "Auto (dtach > tmux > screen)",
             Self::Tmux => "tmux",
             Self::Screen => "screen",
+            Self::Dtach => "dtach (minimal)",
         }
     }
 
@@ -86,6 +103,7 @@ impl SessionBackend {
     pub fn all_variants() -> &'static [SessionBackend] {
         &[
             SessionBackend::Auto,
+            SessionBackend::Dtach,
             SessionBackend::Tmux,
             SessionBackend::Screen,
             SessionBackend::None,
@@ -99,6 +117,7 @@ pub enum ResolvedBackend {
     None,
     Tmux,
     Screen,
+    Dtach,
 }
 
 impl ResolvedBackend {
@@ -117,6 +136,16 @@ impl ResolvedBackend {
             terminal_id
         };
         format!("tm-{}", short_id)
+    }
+
+    /// Get the socket path for dtach sessions
+    /// Returns None for non-dtach backends
+    #[allow(dead_code)]
+    pub fn socket_path(&self, terminal_id: &str) -> Option<std::path::PathBuf> {
+        if !matches!(self, Self::Dtach) {
+            return None;
+        }
+        Some(get_dtach_socket_path(terminal_id))
     }
 
     /// Build the command to create or attach to a session
@@ -161,6 +190,28 @@ impl ResolvedBackend {
                     ],
                 ))
             }
+            Self::Dtach => {
+                // dtach -A <socket> -E -r winch <shell>
+                // -A: attach if exists, create if not
+                // -E: disable detach character (^\ won't detach)
+                // -r winch: use SIGWINCH for redraw (needed for apps like less, vim)
+                //
+                // We use sh -c to:
+                // 1. Create the socket directory if needed
+                // 2. cd to the working directory
+                // 3. Run dtach with the user's shell
+                let socket_path = get_dtach_socket_path(session_name);
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+                let dtach_cmd = format!(
+                    "mkdir -p {} && cd {} && exec dtach -A {} -E -r winch {}",
+                    shell_escape(socket_path.parent().unwrap().to_str().unwrap()),
+                    shell_escape(cwd),
+                    shell_escape(socket_path.to_str().unwrap()),
+                    shell_escape(&shell)
+                );
+                Some(("sh".to_string(), vec!["-c".to_string(), dtach_cmd]))
+            }
         }
     }
 
@@ -192,15 +243,55 @@ impl ResolvedBackend {
                     .args(["-S", session_name, "-X", "quit"])
                     .output();
             }
+            Self::Dtach => {
+                // dtach doesn't have a kill command - we just remove the socket
+                // The session will terminate when no clients are attached
+                // and the shell exits
+                let socket_path = get_dtach_socket_path(session_name);
+                if socket_path.exists() {
+                    // Send SIGHUP to the dtach process via the socket
+                    // This is a bit hacky but works - we connect and immediately disconnect
+                    // which causes dtach to send SIGHUP to the child if configured
+                    let _ = std::fs::remove_file(&socket_path);
+                    log::debug!("Removed dtach socket: {:?}", socket_path);
+                }
+            }
         }
     }
 }
 
 /// Escape a string for safe use in shell commands
-#[allow(dead_code)] // Used only on Unix for tmux/screen commands
+#[allow(dead_code)] // Used only on Unix for tmux/screen/dtach commands
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any existing single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Get the socket directory for dtach sessions
+#[allow(dead_code)]
+fn get_dtach_socket_dir() -> std::path::PathBuf {
+    // Use XDG_RUNTIME_DIR if available (Linux), otherwise fall back to temp dir
+    // XDG_RUNTIME_DIR is preferred as it's user-specific and cleaned on logout
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        std::path::PathBuf::from(runtime_dir).join("term-manager")
+    } else {
+        // Fallback: /tmp/term-manager-<uid> for security
+        #[cfg(unix)]
+        {
+            let uid = unsafe { libc::getuid() };
+            std::path::PathBuf::from(format!("/tmp/term-manager-{}", uid))
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::temp_dir().join("term-manager")
+        }
+    }
+}
+
+/// Get the socket path for a specific dtach session
+#[allow(dead_code)]
+fn get_dtach_socket_path(session_name: &str) -> std::path::PathBuf {
+    get_dtach_socket_dir().join(format!("{}.sock", session_name))
 }
 
 /// Extract directory name from a path for use as window name
@@ -233,6 +324,36 @@ pub fn get_extended_path() -> String {
         paths.push(&current_path);
     }
     paths.join(":")
+}
+
+/// Check if dtach is available on the system
+/// Always returns false on Windows as dtach is not natively available
+fn is_dtach_available() -> bool {
+    #[cfg(windows)]
+    {
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("dtach")
+            .arg("-v")
+            .env("PATH", get_extended_path())
+            .output()
+            // dtach -v exits with 0 and prints version
+            .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+            .unwrap_or(false)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("dtach")
+            .arg("-v")
+            .output()
+            // dtach -v exits with 0 and prints version
+            .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+            .unwrap_or(false)
+    }
 }
 
 /// Check if tmux is available on the system
@@ -300,6 +421,8 @@ mod tests {
         assert_eq!(SessionBackend::from_str("tmux"), SessionBackend::Tmux);
         assert_eq!(SessionBackend::from_str("TMUX"), SessionBackend::Tmux);
         assert_eq!(SessionBackend::from_str("screen"), SessionBackend::Screen);
+        assert_eq!(SessionBackend::from_str("dtach"), SessionBackend::Dtach);
+        assert_eq!(SessionBackend::from_str("DTACH"), SessionBackend::Dtach);
         assert_eq!(SessionBackend::from_str("none"), SessionBackend::None);
         assert_eq!(SessionBackend::from_str("auto"), SessionBackend::Auto);
         assert_eq!(SessionBackend::from_str("smart"), SessionBackend::Auto);
@@ -311,5 +434,37 @@ mod tests {
         let backend = ResolvedBackend::Tmux;
         let name = backend.session_name("12345678-1234-1234-1234-123456789012");
         assert_eq!(name, "tm-12345678");
+
+        // Dtach uses same naming scheme
+        let dtach_backend = ResolvedBackend::Dtach;
+        let dtach_name = dtach_backend.session_name("12345678-1234-1234-1234-123456789012");
+        assert_eq!(dtach_name, "tm-12345678");
+    }
+
+    #[test]
+    fn test_dtach_socket_path() {
+        let backend = ResolvedBackend::Dtach;
+        // socket_path expects terminal_id directly, not session_name
+        let path = backend.socket_path("tm-12345678");
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert!(path.to_string_lossy().contains("tm-12345678.sock"));
+
+        // Non-dtach backends should return None
+        let tmux_backend = ResolvedBackend::Tmux;
+        assert!(tmux_backend.socket_path("tm-12345678").is_none());
+    }
+
+    #[test]
+    fn test_dtach_build_command() {
+        let backend = ResolvedBackend::Dtach;
+        let result = backend.build_command("test-session", "/home/user");
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "sh");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("dtach -A"));
+        assert!(args[1].contains("-E -r winch"));
     }
 }

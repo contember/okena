@@ -646,7 +646,8 @@ impl TerminalPane {
 
     fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
-            if let Some(input) = key_to_bytes(event) {
+            let app_cursor_mode = terminal.is_app_cursor_mode();
+            if let Some(input) = key_to_bytes(event, app_cursor_mode) {
                 terminal.send_bytes(&input);
             }
         }

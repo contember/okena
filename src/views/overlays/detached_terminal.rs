@@ -148,7 +148,9 @@ impl DetachedTerminalView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
         // Forward keys to terminal
-        if let Some(input) = key_to_bytes(event) {
+        // Pass app_cursor_mode so arrow keys work correctly in less, vim, etc.
+        let app_cursor_mode = self.terminal.is_app_cursor_mode();
+        if let Some(input) = key_to_bytes(event, app_cursor_mode) {
             self.terminal.send_bytes(&input);
         }
     }
