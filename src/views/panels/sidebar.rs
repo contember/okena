@@ -953,7 +953,7 @@ impl Sidebar {
                                         .path(if is_visible { "icons/eye.svg" } else { "icons/eye-off.svg" })
                                         .size(px(12.0))
                                         .text_color(if is_visible {
-                                            rgb(t.text_secondary)
+                                            rgb(t.term_blue)
                                         } else {
                                             rgb(t.text_muted)
                                         })
