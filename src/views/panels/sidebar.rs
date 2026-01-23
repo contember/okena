@@ -586,6 +586,12 @@ impl Sidebar {
             .max_h(px(200.0))
             .overflow_y_scroll()
             .track_scroll(&scroll_handle)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(
                 div()
                     .flex()
@@ -1262,6 +1268,12 @@ impl Sidebar {
             .rounded(px(6.0))
             .shadow_lg()
             .p(px(8.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_scroll_wheel(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(
                 // Grid of color swatches (2 rows x 4 columns)
                 div()
@@ -1363,6 +1375,9 @@ impl Render for Sidebar {
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.hide_color_picker(cx);
                         }))
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
                 )
                 .child(self.render_color_picker(&project_id, cx))
             })

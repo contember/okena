@@ -56,6 +56,10 @@ pub fn modal_content(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<D
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
+        // Prevent scroll events from propagating to terminal underneath
+        .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
 }
 
 /// Create a modal header with title, optional subtitle, and close button.

@@ -87,6 +87,10 @@ pub fn dropdown_overlay(
         .rounded(px(4.0))
         .shadow_xl()
         .py(px(4.0))
+        // Prevent scroll events from propagating to terminal underneath
+        .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
 }
 
 /// Create a single dropdown option row.
