@@ -575,19 +575,21 @@ impl Element for TerminalElement {
                     }
 
                     // Check if selected
+                    // Use buffer_line (not visual row) to compare against selection bounds
+                    // since selection is stored in buffer coordinates
                     let is_selected = if let Some(((start_col, start_row), (end_col, end_row))) = selection {
                         let (start_row, start_col, end_row, end_col) = if start_row < end_row || (start_row == end_row && start_col <= end_col) {
                             (start_row, start_col, end_row, end_col)
                         } else {
                             (end_row, end_col, start_row, start_col)
                         };
-                        let row_usize = row;
-                        if row_usize >= start_row && row_usize <= end_row {
+                        // Compare buffer_line (which accounts for scroll) against selection bounds
+                        if buffer_line >= start_row && buffer_line <= end_row {
                             if start_row == end_row {
                                 col >= start_col && col <= end_col
-                            } else if row_usize == start_row {
+                            } else if buffer_line == start_row {
                                 col >= start_col
-                            } else if row_usize == end_row {
+                            } else if buffer_line == end_row {
                                 col <= end_col
                             } else {
                                 true

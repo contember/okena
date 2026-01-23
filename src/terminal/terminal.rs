@@ -324,29 +324,44 @@ impl Terminal {
     }
 
     /// Start selection with a specific type
+    /// Note: row is the visual row on screen (0 to screen_lines-1)
+    /// We convert it to buffer coordinates by accounting for display_offset
     fn start_selection_with_type(&self, col: usize, row: i32, selection_type: SelectionType) {
+        let mut term = self.term.lock();
+
+        // Convert visual row to buffer row
+        // When scrolled up (display_offset > 0), visual row 0 shows history (negative buffer lines)
+        let display_offset = term.grid().display_offset() as i32;
+        let buffer_row = row - display_offset;
+
         let mut state = self.selection_state.lock();
-        state.start = Some((col, row as usize));
-        state.end = Some((col, row as usize));
+        state.start = Some((col, buffer_row as usize));
+        state.end = Some((col, buffer_row as usize));
         state.is_selecting = true;
 
-        // Also set selection in the terminal
-        let mut term = self.term.lock();
-        let point = Point::new(Line(row), Column(col));
+        // Set selection in the terminal using buffer coordinates
+        let point = Point::new(Line(buffer_row), Column(col));
         let selection = Selection::new(selection_type, point, Side::Left);
         term.selection = Some(selection);
     }
 
     /// Update selection to a new point
+    /// Note: row is the visual row on screen (0 to screen_lines-1)
+    /// We convert it to buffer coordinates by accounting for display_offset
     pub fn update_selection(&self, col: usize, row: i32) {
         let mut state = self.selection_state.lock();
         if state.is_selecting {
-            state.end = Some((col, row as usize));
-
             // Update terminal selection
             let mut term = self.term.lock();
+
+            // Convert visual row to buffer row
+            let display_offset = term.grid().display_offset() as i32;
+            let buffer_row = row - display_offset;
+
+            state.end = Some((col, buffer_row as usize));
+
             if let Some(ref mut selection) = term.selection {
-                let point = Point::new(Line(row), Column(col));
+                let point = Point::new(Line(buffer_row), Column(col));
                 selection.update(point, Side::Right);
             }
         }
@@ -383,12 +398,13 @@ impl Terminal {
 
     /// Get selection bounds for rendering
     /// Uses alacritty's selection which properly handles semantic (word) and line selection
-    pub fn selection_bounds(&self) -> Option<((usize, usize), (usize, usize))> {
+    /// Returns ((start_col, start_row), (end_col, end_row)) where rows are buffer coordinates (can be negative for history)
+    pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
         let term = self.term.lock();
         if let Some(ref selection) = term.selection {
             if let Some(range) = selection.to_range(&*term) {
-                let start = (range.start.column.0, range.start.line.0 as usize);
-                let end = (range.end.column.0, range.end.line.0 as usize);
+                let start = (range.start.column.0, range.start.line.0);
+                let end = (range.end.column.0, range.end.line.0);
                 return Some((start, end));
             }
         }
