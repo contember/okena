@@ -348,15 +348,42 @@ impl SettingsPanel {
         let t = theme(cx);
         let display_name = current_backend.display_name();
 
-        settings_row("session-backend".to_string(), "Session Backend", &t, true).child(
-            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
-                    this.font_dropdown_open = false;
-                    this.shell_dropdown_open = false;
-                    cx.notify();
-                })),
-        )
+        div()
+            .id("session-backend")
+            .px(px(12.0))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(t.text_primary))
+                            .child("Session Backend"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(t.text_muted))
+                            .child("Requires restart"),
+                    ),
+            )
+            .child(
+                dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
+                        this.font_dropdown_open = false;
+                        this.shell_dropdown_open = false;
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_session_backend_dropdown_overlay(&self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
