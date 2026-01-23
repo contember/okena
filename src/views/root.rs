@@ -1,4 +1,4 @@
-use crate::terminal::pty_manager::{PtyEvent, PtyManager};
+use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
@@ -24,7 +24,6 @@ use crate::views::title_bar::TitleBar;
 use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::workspace::persistence::{load_settings, AppSettings};
 use crate::workspace::state::{ContextMenuRequest, Workspace};
-use async_channel::Receiver;
 use gpui::*;
 use gpui::prelude::*;
 use parking_lot::Mutex;
@@ -78,7 +77,6 @@ impl RootView {
     pub fn new(
         workspace: Entity<Workspace>,
         pty_manager: Arc<PtyManager>,
-        pty_events: Receiver<PtyEvent>,
         cx: &mut Context<Self>,
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -122,9 +120,6 @@ impl RootView {
         // Initialize project columns
         view.sync_project_columns(cx);
 
-        // Start PTY event loop
-        view.start_pty_event_loop(pty_events, cx);
-
         view
     }
 
@@ -158,63 +153,6 @@ impl RootView {
                 self.project_columns.insert(project_id.clone(), entity);
             }
         }
-    }
-
-    fn start_pty_event_loop(
-        &mut self,
-        pty_events: Receiver<PtyEvent>,
-        cx: &mut Context<Self>,
-    ) {
-        let terminals = self.terminals.clone();
-
-        // PTY event loop - processes all events and notifies once per batch
-        cx.spawn(async move |this: WeakEntity<RootView>, cx| {
-            loop {
-                // Wait for an event
-                let event = match pty_events.recv().await {
-                    Ok(event) => event,
-                    Err(_) => break, // Channel closed
-                };
-
-                // Process first event
-                match &event {
-                    PtyEvent::Data { terminal_id, data } => {
-                        let terminals_guard = terminals.lock();
-                        if let Some(terminal) = terminals_guard.get(terminal_id) {
-                            log::debug!("Processing {} bytes for terminal {}", data.len(), terminal_id);
-                            terminal.process_output(data);
-                        } else {
-                            log::warn!("Terminal {} not found in registry, {} terminals registered",
-                                terminal_id, terminals_guard.len());
-                        }
-                    }
-                    PtyEvent::Exit { terminal_id, .. } => {
-                        terminals.lock().remove(terminal_id);
-                    }
-                }
-
-                // Drain any additional pending events (batch processing)
-                while let Ok(event) = pty_events.try_recv() {
-                    match &event {
-                        PtyEvent::Data { terminal_id, data } => {
-                            let terminals_guard = terminals.lock();
-                            if let Some(terminal) = terminals_guard.get(terminal_id) {
-                                terminal.process_output(data);
-                            }
-                        }
-                        PtyEvent::Exit { terminal_id, .. } => {
-                            terminals.lock().remove(terminal_id);
-                        }
-                    }
-                }
-
-                // Notify once after processing the batch
-                let _ = this.update(cx, |_this, cx| {
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
     }
 
     fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

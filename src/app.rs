@@ -72,7 +72,7 @@ impl TermManager {
         // Create root view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
         let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), pty_manager_clone, pty_events, cx)
+            RootView::new(workspace.clone(), pty_manager_clone, cx)
         });
 
         // Get terminals registry from root view
@@ -85,7 +85,7 @@ impl TermManager {
         })
         .detach();
 
-        let manager = Self {
+        let mut manager = Self {
             root_view,
             workspace: workspace.clone(),
             pty_manager,
@@ -94,6 +94,9 @@ impl TermManager {
             save_pending,
         };
 
+        // Start PTY event loop (centralized for all windows)
+        manager.start_pty_event_loop(pty_events, cx);
+
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
             this.handle_detached_terminals_changed(workspace, cx);
@@ -101,6 +104,59 @@ impl TermManager {
         .detach();
 
         manager
+    }
+
+    /// Centralized PTY event loop - notifies all windows (main and detached)
+    fn start_pty_event_loop(
+        &mut self,
+        pty_events: Receiver<PtyEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let terminals = self.terminals.clone();
+
+        cx.spawn(async move |this: WeakEntity<TermManager>, cx| {
+            loop {
+                // Wait for an event
+                let event = match pty_events.recv().await {
+                    Ok(event) => event,
+                    Err(_) => break, // Channel closed
+                };
+
+                // Process first event
+                match &event {
+                    PtyEvent::Data { terminal_id, data } => {
+                        let terminals_guard = terminals.lock();
+                        if let Some(terminal) = terminals_guard.get(terminal_id) {
+                            terminal.process_output(data);
+                        }
+                    }
+                    PtyEvent::Exit { terminal_id, .. } => {
+                        terminals.lock().remove(terminal_id);
+                    }
+                }
+
+                // Drain any additional pending events (batch processing)
+                while let Ok(event) = pty_events.try_recv() {
+                    match &event {
+                        PtyEvent::Data { terminal_id, data } => {
+                            let terminals_guard = terminals.lock();
+                            if let Some(terminal) = terminals_guard.get(terminal_id) {
+                                terminal.process_output(data);
+                            }
+                        }
+                        PtyEvent::Exit { terminal_id, .. } => {
+                            terminals.lock().remove(terminal_id);
+                        }
+                    }
+                }
+
+                // Notify main window after processing the batch
+                let _ = this.update(cx, |this, cx| {
+                    this.root_view.update(cx, |_, cx| cx.notify());
+                });
+            }
+        })
+        .detach();
     }
 
     fn handle_detached_terminals_changed(

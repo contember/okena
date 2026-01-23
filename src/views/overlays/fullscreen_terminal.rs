@@ -292,10 +292,7 @@ impl Render for FullscreenTerminal {
                     ws.exit_fullscreen(cx);
                 });
             }))
-            .absolute()
-            .inset_0()
             .size_full()
-            .min_h_0()
             .bg(rgb(t.bg_primary))
             .opacity(opacity)
             .flex()
@@ -429,11 +426,8 @@ impl Render for FullscreenTerminal {
             .child(
                 // Terminal content (reuses TerminalContent for selection, context menu, etc.)
                 div()
-                    .id("fullscreen-content-wrapper")
                     .flex_1()
                     .min_h_0()
-                    .size_full()
-                    .overflow_hidden()
                     .child(self.content.clone()),
             )
             .id("fullscreen-terminal-main")

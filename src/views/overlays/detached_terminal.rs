@@ -1,8 +1,8 @@
-use crate::elements::terminal_element::TerminalElement;
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
+use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -19,6 +19,8 @@ pub struct DetachedTerminalView {
     pending_focus: bool,
     /// Flag to track if we should close the window
     should_close: bool,
+    /// Terminal content view (handles selection, context menu, etc.)
+    content: Entity<TerminalContent>,
 }
 
 impl DetachedTerminalView {
@@ -31,18 +33,27 @@ impl DetachedTerminalView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Get terminal name from workspace
-        let terminal_name = {
+        // Get terminal name and project_id from workspace
+        let (terminal_name, project_id, layout_path) = {
             let ws = workspace.read(cx);
-            // Find project and terminal name
             let mut name = terminal_id.chars().take(8).collect::<String>();
+            let mut found_project_id = String::new();
+            let mut found_layout_path = vec![];
+
             for project in ws.projects() {
                 if let Some(custom_name) = project.terminal_names.get(&terminal_id) {
                     name = custom_name.clone();
-                    break;
+                }
+                // Find layout path for this terminal
+                if let Some(layout) = &project.layout {
+                    if let Some(path) = layout.find_terminal_path(&terminal_id) {
+                        found_project_id = project.id.clone();
+                        found_layout_path = path;
+                        break;
+                    }
                 }
             }
-            name
+            (name, found_project_id, found_layout_path)
         };
 
         // Try to get existing terminal from registry
@@ -64,6 +75,20 @@ impl DetachedTerminalView {
             }
         };
 
+        // Create terminal content view
+        let content = cx.new(|cx| {
+            let mut content = TerminalContent::new(
+                focus_handle.clone(),
+                project_id,
+                layout_path,
+                workspace.clone(),
+                cx,
+            );
+            content.set_terminal(Some(terminal.clone()), cx);
+            content.set_focused(true);
+            content
+        });
+
         // Observe workspace for changes (to detect when re-attached)
         let terminal_id_for_observer = terminal_id.clone();
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -78,6 +103,37 @@ impl DetachedTerminalView {
         })
         .detach();
 
+        // Refresh timer - checks terminal dirty flag and notifies only when content changed
+        let terminal_for_refresh = terminal.clone();
+        cx.spawn(async move |this: WeakEntity<DetachedTerminalView>, cx| {
+            loop {
+                smol::Timer::after(std::time::Duration::from_millis(16)).await; // ~60fps check rate
+
+                // Only notify if terminal has new content
+                if terminal_for_refresh.take_dirty() {
+                    let should_continue = this.update(cx, |this, cx| {
+                        if this.should_close {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    });
+                    match should_continue {
+                        Ok(true) => continue,
+                        _ => break,
+                    }
+                } else {
+                    // Check if view still exists
+                    let should_continue = this.update(cx, |this, _| !this.should_close);
+                    match should_continue {
+                        Ok(true) => continue,
+                        _ => break,
+                    }
+                }
+            }
+        })
+        .detach();
+
         Self {
             workspace,
             terminal,
@@ -86,6 +142,7 @@ impl DetachedTerminalView {
             focus_handle,
             pending_focus: true,
             should_close: false,
+            content,
         }
     }
 
@@ -276,12 +333,11 @@ impl Render for DetachedTerminalView {
                     ),
             )
             .child(
-                // Terminal content
+                // Terminal content (reuses TerminalContent for selection, context menu, etc.)
                 div()
                     .flex_1()
                     .min_h_0()
-                    .p(px(4.0))
-                    .child(TerminalElement::new(self.terminal.clone(), self.focus_handle.clone())),
+                    .child(self.content.clone()),
             )
             .id("detached-terminal-main")
             .on_click(cx.listener(|this, _, window, cx| {
