@@ -356,7 +356,7 @@ impl ProjectColumn {
                                     .on_click(move |_, _window, cx| {
                                         cx.stop_propagation();
                                         workspace.update(cx, |ws, cx| {
-                                            ws.fullscreen_project(project_id.clone(), cx);
+                                            ws.set_focused_project(Some(project_id.clone()), cx);
                                         });
                                     })
                                     .child(
@@ -365,7 +365,7 @@ impl ProjectColumn {
                                             .size(px(14.0))
                                             .text_color(rgb(t.text_secondary))
                                     )
-                                    .tooltip(|_window, cx| Tooltip::new("Fullscreen").build(_window, cx)),
+                                    .tooltip(|_window, cx| Tooltip::new("Focus Project").build(_window, cx)),
                             ),
                     ),
             )

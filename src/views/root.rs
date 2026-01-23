@@ -605,8 +605,9 @@ impl RootView {
                 }
                 ContextMenuEvent::RenameProject { project_id, project_name } => {
                     this.hide_context_menu(cx);
-                    // For now, just log - rename requires sidebar state
-                    log::info!("Rename project: {} ({})", project_name, project_id);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.request_project_rename(project_id, project_name, cx);
+                    });
                 }
                 ContextMenuEvent::CloseWorktree { project_id } => {
                     this.hide_context_menu(cx);

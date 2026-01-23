@@ -1199,6 +1199,16 @@ impl Sidebar {
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+
+        // Check for pending project rename request from context menu
+        let pending_rename = self.workspace.read(cx).pending_project_rename.clone();
+        if let Some(request) = pending_rename {
+            self.workspace.update(cx, |ws, cx| {
+                ws.clear_project_rename_request(cx);
+            });
+            self.start_project_rename(request.project_id, request.project_name, window, cx);
+        }
+
         let workspace = self.workspace.read(cx);
         // Get projects in order from project_order
         let ordered_projects: Vec<ProjectData> = workspace.data.project_order
