@@ -1,0 +1,161 @@
+//! Focus and fullscreen workspace actions
+//!
+//! Actions for managing terminal and project focus, including fullscreen mode.
+
+use crate::workspace::state::{FocusedTerminalState, Workspace};
+use gpui::*;
+
+impl Workspace {
+    /// Set focused project (focus mode)
+    pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        self.focused_project_id = project_id;
+        // Exit fullscreen when changing focus
+        self.fullscreen_terminal = None;
+        cx.notify();
+    }
+
+    /// Enter fullscreen mode for a terminal
+    pub fn set_fullscreen_terminal(
+        &mut self,
+        project_id: String,
+        terminal_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        log::info!("set_fullscreen_terminal called with project_id={}, terminal_id={}", project_id, terminal_id);
+
+        // Find the layout path for this terminal
+        let layout_path = self.project(&project_id)
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.find_terminal_path(&terminal_id))
+            .unwrap_or_default();
+
+        log::info!("layout_path for terminal: {:?}", layout_path);
+
+        // Use FocusManager for fullscreen entry
+        self.focus_manager.enter_fullscreen(project_id.clone(), layout_path.clone());
+
+        // Save previous focused_project_id before changing it
+        let previous_focused_project_id = self.focused_project_id.clone();
+
+        // Update legacy state for compatibility
+        self.fullscreen_terminal = Some(crate::workspace::state::FullscreenState {
+            project_id: project_id.clone(),
+            terminal_id: terminal_id.clone(),
+            previous_focused_project_id,
+        });
+        log::info!("fullscreen_terminal set to Some with terminal_id={}", terminal_id);
+
+        // Also focus the project
+        self.focused_project_id = Some(project_id.clone());
+
+        // Sync focused_terminal for visual indicator
+        self.focused_terminal = Some(FocusedTerminalState {
+            project_id,
+            layout_path,
+        });
+
+        cx.notify();
+    }
+
+    /// Enter fullscreen mode for the first terminal in a project
+    pub fn fullscreen_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        if let Some(project) = self.project(&project_id) {
+            let terminal_ids = project.layout.as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default();
+            if let Some(first_id) = terminal_ids.first().cloned() {
+                self.set_fullscreen_terminal(project_id, first_id, cx);
+            }
+        }
+    }
+
+    /// Exit fullscreen mode
+    ///
+    /// Restores focus to the previously focused terminal and project view mode.
+    pub fn exit_fullscreen(&mut self, cx: &mut Context<Self>) {
+        // Restore previous focused_project_id before clearing fullscreen state
+        if let Some(ref fs) = self.fullscreen_terminal {
+            self.focused_project_id = fs.previous_focused_project_id.clone();
+        }
+
+        self.fullscreen_terminal = None;
+
+        // Use FocusManager for focus restoration
+        if let Some(restored) = self.focus_manager.exit_fullscreen() {
+            // Restore the focused terminal state for visual indicator
+            self.focused_terminal = Some(FocusedTerminalState {
+                project_id: restored.project_id,
+                layout_path: restored.layout_path,
+            });
+        }
+
+        cx.notify();
+    }
+
+    /// Set focused terminal (for visual indicator)
+    ///
+    /// This updates both the FocusManager and the legacy focused_terminal state.
+    /// Focus events propagate: terminal focus -> pane focus -> project awareness
+    pub fn set_focused_terminal(
+        &mut self,
+        project_id: String,
+        layout_path: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        // Update FocusManager
+        self.focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
+
+        // Update legacy state for compatibility
+        self.focused_terminal = Some(FocusedTerminalState {
+            project_id,
+            layout_path,
+        });
+        cx.notify();
+    }
+
+    /// Clear focused terminal
+    ///
+    /// This is typically called when entering a modal context (search, rename, etc.)
+    /// The current focus is saved for restoration when the modal closes.
+    pub fn clear_focused_terminal(&mut self, cx: &mut Context<Self>) {
+        // Use FocusManager to save focus for restoration
+        self.focus_manager.enter_modal();
+        // Don't clear focused_terminal - visual indicator remains during modal
+        cx.notify();
+    }
+
+    /// Restore focused terminal after modal dismissal
+    ///
+    /// Called when exiting a modal context to restore the previous focus.
+    pub fn restore_focused_terminal(&mut self, cx: &mut Context<Self>) {
+        // Use FocusManager to restore focus
+        if let Some(restored) = self.focus_manager.exit_modal() {
+            self.focused_terminal = Some(FocusedTerminalState {
+                project_id: restored.project_id,
+                layout_path: restored.layout_path,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Focus a terminal by its ID (finds path automatically)
+    ///
+    /// This is a convenience method that looks up the layout path and calls set_focused_terminal.
+    pub fn focus_terminal_by_id(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project(project_id) {
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    // Switch to the terminal's project so it becomes visible
+                    self.set_focused_project(Some(project_id.to_string()), cx);
+                    // Use the unified focus method for consistent propagation
+                    self.set_focused_terminal(project_id.to_string(), path, cx);
+                }
+            }
+        }
+    }
+}
