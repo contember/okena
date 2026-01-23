@@ -184,6 +184,6 @@ fn main() {
                 cx.new(|cx| Root::new(term_manager, window, cx))
             },
         )
-        .unwrap();
+        .expect("Failed to create main window");
     });
 }

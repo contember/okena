@@ -8,9 +8,8 @@ pub fn key_to_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
     // Handle Ctrl+key combinations for letters (produces control characters)
     if mods.control && !mods.shift && !mods.alt && !mods.platform {
         let key = keystroke.key.as_str();
-        if key.len() == 1 {
-            let c = key.chars().next().unwrap();
-            if c.is_ascii_alphabetic() {
+        if let Some(c) = key.chars().next() {
+            if key.len() == 1 && c.is_ascii_alphabetic() {
                 let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
                 return Some(vec![ctrl_char]);
             }

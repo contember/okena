@@ -274,9 +274,13 @@ pub fn windows_path_to_wsl(windows_path: &str) -> String {
 
     // Check for drive letter (e.g., C:/)
     if path.len() >= 2 && path.chars().nth(1) == Some(':') {
-        let drive = path.chars().next().unwrap().to_ascii_lowercase();
-        let rest = &path[2..];
-        format!("/mnt/{}{}", drive, rest)
+        if let Some(drive) = path.chars().next() {
+            let rest = &path[2..];
+            format!("/mnt/{}{}", drive.to_ascii_lowercase(), rest)
+        } else {
+            // Fallback: should not happen if len >= 2, but return path as-is
+            path
+        }
     } else {
         // Relative path or already Unix-style
         path
