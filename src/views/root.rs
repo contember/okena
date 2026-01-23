@@ -1,29 +1,19 @@
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
-use crate::toggle_overlay;
-use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
-use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
-use crate::views::overlays::{ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::fullscreen_terminal::FullscreenTerminal;
-use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::navigation::clear_pane_map;
-use crate::views::overlay_manager::{CloseEvent, OverlaySlot};
+use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
-use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::open_settings_file;
-use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::status_bar::StatusBar;
-use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::title_bar::TitleBar;
-use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::workspace::persistence::{load_settings, AppSettings};
-use crate::workspace::state::{ContextMenuRequest, Workspace};
+use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
 use parking_lot::Mutex;
@@ -51,23 +41,9 @@ pub struct RootView {
     title_bar: Entity<TitleBar>,
     /// Status bar entity
     status_bar: Entity<StatusBar>,
-    /// Keybindings help overlay
-    keybindings_help: OverlaySlot<KeybindingsHelp>,
-    /// Session manager overlay (complex - has SwitchWorkspace event)
-    session_manager: Option<Entity<SessionManager>>,
-    /// Theme selector overlay
-    theme_selector: OverlaySlot<ThemeSelector>,
-    /// Command palette overlay
-    command_palette: OverlaySlot<CommandPalette>,
-    /// Settings panel overlay
-    settings_panel: OverlaySlot<SettingsPanel>,
-    /// Shell selector overlay
-    shell_selector: OverlaySlot<ShellSelectorOverlay>,
-    /// Worktree dialog overlay
-    worktree_dialog: Option<Entity<WorktreeDialog>>,
-    /// Context menu overlay
-    context_menu: Option<Entity<ContextMenu>>,
-    /// Fullscreen terminal overlay (stored to preserve animation state)
+    /// Centralized overlay manager
+    overlay_manager: Entity<OverlayManager>,
+    /// Fullscreen terminal overlay (synced from workspace state)
     fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
     /// Currently displayed fullscreen state (to detect changes)
     fullscreen_state: Option<(String, String)>,
@@ -93,7 +69,13 @@ impl RootView {
         let title_bar = cx.new(|_cx| TitleBar::new("Term Manager", workspace_for_title));
 
         // Create status bar entity
-        let status_bar = cx.new(|cx| StatusBar::new(cx));
+        let status_bar = cx.new(StatusBar::new);
+
+        // Create overlay manager
+        let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone()));
+
+        // Subscribe to overlay manager events
+        cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
         let mut view = Self {
             workspace,
@@ -105,14 +87,7 @@ impl RootView {
             project_columns: HashMap::new(),
             title_bar,
             status_bar,
-            keybindings_help: OverlaySlot::new(),
-            session_manager: None,
-            theme_selector: OverlaySlot::new(),
-            command_palette: OverlaySlot::new(),
-            settings_panel: OverlaySlot::new(),
-            shell_selector: OverlaySlot::new(),
-            worktree_dialog: None,
-            context_menu: None,
+            overlay_manager,
             fullscreen_terminal: None,
             fullscreen_state: None,
         };
@@ -121,6 +96,93 @@ impl RootView {
         view.sync_project_columns(cx);
 
         view
+    }
+
+    /// Handle events from the OverlayManager that require RootView access.
+    fn handle_overlay_manager_event(
+        &mut self,
+        _: Entity<OverlayManager>,
+        event: &OverlayManagerEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            OverlayManagerEvent::SwitchWorkspace(data) => {
+                self.handle_switch_workspace(data.clone(), cx);
+            }
+            OverlayManagerEvent::WorktreeCreated(new_project_id) => {
+                self.spawn_terminals_for_project(new_project_id.clone(), cx);
+            }
+            OverlayManagerEvent::ShellSelected { shell_type, project_id, terminal_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_shell_by_id(project_id, terminal_id, shell_type.clone(), cx);
+                });
+            }
+            OverlayManagerEvent::AddTerminal { project_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.add_terminal(project_id, cx);
+                });
+            }
+            OverlayManagerEvent::CreateWorktree { project_id, project_path } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
+                });
+            }
+            OverlayManagerEvent::RenameProject { project_id, project_name } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.request_project_rename(project_id, project_name, cx);
+                });
+            }
+            OverlayManagerEvent::CloseWorktree { project_id } => {
+                let result = self.workspace.update(cx, |ws, cx| {
+                    ws.remove_worktree_project(project_id, false, cx)
+                });
+                if let Err(e) = result {
+                    log::error!("Failed to close worktree: {}", e);
+                }
+            }
+            OverlayManagerEvent::DeleteProject { project_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.delete_project(project_id, cx);
+                });
+            }
+        }
+    }
+
+    /// Handle workspace switch from session manager.
+    fn handle_switch_workspace(&mut self, data: crate::workspace::state::WorkspaceData, cx: &mut Context<Self>) {
+        // Kill all existing terminals
+        {
+            let terminals = self.terminals.lock();
+            for terminal in terminals.values() {
+                self.pty_manager.kill(&terminal.terminal_id);
+            }
+        }
+        self.terminals.lock().clear();
+
+        // Clear project columns (will be recreated)
+        self.project_columns.clear();
+
+        // Clear fullscreen state
+        self.fullscreen_terminal = None;
+        self.fullscreen_state = None;
+
+        // Update workspace with new data
+        self.workspace.update(cx, |ws, cx| {
+            ws.data = data;
+            ws.focused_project_id = None;
+            ws.fullscreen_terminal = None;
+            // Clear focus state via FocusManager
+            ws.focus_manager.clear_focus();
+            ws.focus_manager.clear_stack();
+            ws.focused_terminal = None; // Keep legacy field in sync
+            ws.detached_terminals.clear();
+            cx.notify();
+        });
+
+        // Sync project columns for new data
+        self.sync_project_columns(cx);
+
+        cx.notify();
     }
 
     /// Get the terminals registry (for sharing with detached windows)
@@ -277,146 +339,6 @@ impl RootView {
         }
     }
 
-    fn show_keybindings_help(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, keybindings_help, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
-    }
-
-    fn show_session_manager(&mut self, cx: &mut Context<Self>) {
-        if self.session_manager.is_some() {
-            // Toggle off if already showing
-            self.session_manager = None;
-        } else {
-            let workspace = self.workspace.clone();
-            let manager = cx.new(|cx| SessionManager::new(workspace, cx));
-            cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
-                match event {
-                    SessionManagerEvent::Close => {
-                        this.session_manager = None;
-                        cx.notify();
-                    }
-                    SessionManagerEvent::SwitchWorkspace(data) => {
-                        // Close the session manager
-                        this.session_manager = None;
-
-                        // Kill all existing terminals
-                        {
-                            let terminals = this.terminals.lock();
-                            for terminal in terminals.values() {
-                                this.pty_manager.kill(&terminal.terminal_id);
-                            }
-                        }
-                        this.terminals.lock().clear();
-
-                        // Clear project columns (will be recreated)
-                        this.project_columns.clear();
-
-                        // Clear fullscreen state
-                        this.fullscreen_terminal = None;
-                        this.fullscreen_state = None;
-
-                        // Update workspace with new data
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.data = data.clone();
-                            ws.focused_project_id = None;
-                            ws.fullscreen_terminal = None;
-                            // Clear focus state via FocusManager
-                            ws.focus_manager.clear_focus();
-                            ws.focus_manager.clear_stack();
-                            ws.focused_terminal = None; // Keep legacy field in sync
-                            ws.detached_terminals.clear();
-                            cx.notify();
-                        });
-
-                        // Sync project columns for new data
-                        this.sync_project_columns(cx);
-
-                        cx.notify();
-                    }
-                }
-            })
-            .detach();
-            self.session_manager = Some(manager);
-        }
-        cx.notify();
-    }
-
-    fn show_theme_selector(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, theme_selector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
-    }
-
-    fn show_command_palette(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, command_palette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
-    }
-
-    fn show_settings_panel(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
-    }
-
-    /// Show shell selector overlay for a terminal
-    pub fn show_shell_selector(&mut self, current_shell: ShellType, project_id: String, terminal_id: String, cx: &mut Context<Self>) {
-        let context = Some((project_id, terminal_id));
-        let entity = cx.new(|cx| ShellSelectorOverlay::new(current_shell, context, cx));
-        cx.subscribe(&entity, |this, _, event: &ShellSelectorOverlayEvent, cx| {
-            match event {
-                ShellSelectorOverlayEvent::Close => {
-                    this.shell_selector.close();
-                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                    cx.notify();
-                }
-                ShellSelectorOverlayEvent::ShellSelected { shell_type, context } => {
-                    this.shell_selector.close();
-                    if let Some((project_id, terminal_id)) = context {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.set_terminal_shell_by_id(&project_id, &terminal_id, shell_type.clone(), cx);
-                        });
-                    }
-                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                    cx.notify();
-                }
-            }
-        }).detach();
-        self.shell_selector.set(entity);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
-        cx.notify();
-    }
-
-    /// Show worktree dialog for a project
-    pub fn show_worktree_dialog(&mut self, project_id: String, project_path: String, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        let dialog = cx.new(|cx| {
-            WorktreeDialog::new(workspace, project_id, project_path, cx)
-        });
-        cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
-            match event {
-                WorktreeDialogEvent::Close => {
-                    this.close_worktree_dialog(cx);
-                }
-                WorktreeDialogEvent::Created(new_project_id) => {
-                    // Spawn terminals for the new worktree project
-                    this.spawn_terminals_for_project(new_project_id.clone(), cx);
-                    this.close_worktree_dialog(cx);
-                }
-            }
-        })
-        .detach();
-        self.worktree_dialog = Some(dialog);
-        // Clear focused terminal during modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
-    /// Close worktree dialog
-    fn close_worktree_dialog(&mut self, cx: &mut Context<Self>) {
-        self.worktree_dialog = None;
-        // Restore focus after modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
     /// Spawn terminals for all layout slots in a project that have terminal_id: None
     /// Used after creating a worktree project to immediately populate terminals
     fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
@@ -504,81 +426,6 @@ impl RootView {
         }
     }
 
-    /// Close all terminals in a project (kills PTY processes and updates workspace)
-    fn close_all_terminals_in_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        // Get terminal IDs and update workspace state
-        let terminal_ids = self.workspace.update(cx, |ws, cx| {
-            ws.close_all_terminals(project_id, cx)
-        });
-
-        // Kill PTY processes and remove from registry
-        for terminal_id in terminal_ids {
-            self.pty_manager.kill(&terminal_id);
-            self.terminals.lock().remove(&terminal_id);
-        }
-
-        // Sync project columns (the project column will spawn a new terminal for the empty slot)
-        self.sync_project_columns(cx);
-    }
-
-    /// Show context menu for a project
-    fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
-
-        cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
-            match event {
-                ContextMenuEvent::Close => {
-                    this.hide_context_menu(cx);
-                }
-                ContextMenuEvent::AddTerminal { project_id } => {
-                    this.hide_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.add_terminal(project_id, cx);
-                    });
-                }
-                ContextMenuEvent::CreateWorktree { project_id, project_path } => {
-                    this.hide_context_menu(cx);
-                    this.show_worktree_dialog(project_id.clone(), project_path.clone(), cx);
-                }
-                ContextMenuEvent::RenameProject { project_id, project_name } => {
-                    this.hide_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.request_project_rename(project_id, project_name, cx);
-                    });
-                }
-                ContextMenuEvent::CloseWorktree { project_id } => {
-                    this.hide_context_menu(cx);
-                    let result = this.workspace.update(cx, |ws, cx| {
-                        ws.remove_worktree_project(project_id, false, cx)
-                    });
-                    if let Err(e) = result {
-                        log::error!("Failed to close worktree: {}", e);
-                    }
-                }
-                ContextMenuEvent::DeleteProject { project_id } => {
-                    this.hide_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.delete_project(project_id, cx);
-                    });
-                }
-            }
-        })
-        .detach();
-
-        self.context_menu = Some(menu);
-        cx.notify();
-    }
-
-    /// Hide context menu
-    fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_context_menu_request(cx);
-        });
-        cx.notify();
-    }
-
     /// Create worktree from the focused project
     fn create_worktree_from_focus(&mut self, cx: &mut Context<Self>) {
         // Get the focused project ID and info
@@ -605,7 +452,9 @@ impl RootView {
 
         if let Some((project_id, project_path, is_git, is_worktree)) = project_info {
             if is_git && !is_worktree {
-                self.show_worktree_dialog(project_id, project_path, cx);
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_worktree_dialog(project_id, project_path, cx);
+                });
             } else {
                 log::info!("Cannot create worktree: project is not a git repo or is already a worktree");
             }
@@ -628,13 +477,15 @@ impl RootView {
     /// Process pending overlay requests from workspace state.
     ///
     /// This handles requests that are set in workspace state and need to trigger
-    /// overlay creation in the RootView. Each request is processed once and then
+    /// overlay creation in the OverlayManager. Each request is processed once and then
     /// cleared from the workspace.
     fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
         // Check for worktree dialog request
         if let Some(request) = self.workspace.read(cx).worktree_dialog_request.clone() {
-            if self.worktree_dialog.is_none() {
-                self.show_worktree_dialog(request.project_id, request.project_path, cx);
+            if !self.overlay_manager.read(cx).has_worktree_dialog() {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_worktree_dialog(request.project_id, request.project_path, cx);
+                });
                 self.workspace.update(cx, |ws, cx| {
                     ws.clear_worktree_dialog_request(cx);
                 });
@@ -643,8 +494,10 @@ impl RootView {
 
         // Check for context menu request
         if let Some(request) = self.workspace.read(cx).context_menu_request.clone() {
-            if self.context_menu.is_none() {
-                self.show_context_menu(request.clone(), cx);
+            if !self.overlay_manager.read(cx).has_context_menu() {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_context_menu(request.clone(), cx);
+                });
                 self.workspace.update(cx, |ws, cx| {
                     ws.clear_context_menu_request(cx);
                 });
@@ -653,13 +506,15 @@ impl RootView {
 
         // Check for shell selector request
         if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
-            if !self.shell_selector.is_open() {
-                self.show_shell_selector(
-                    request.current_shell,
-                    request.project_id,
-                    request.terminal_id,
-                    cx,
-                );
+            if !self.overlay_manager.read(cx).has_shell_selector() {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_shell_selector(
+                        request.current_shell,
+                        request.project_id,
+                        request.terminal_id,
+                        cx,
+                    );
+                });
                 self.workspace.update(cx, |ws, cx| {
                     ws.clear_shell_selector_request(cx);
                 });
@@ -739,13 +594,17 @@ impl Render for RootView {
             log::info!("RootView render: has_fullscreen=true, fullscreen_terminal={:?}",
                 self.workspace.read(cx).fullscreen_terminal);
         }
-        let has_keybindings_help = self.keybindings_help.is_open();
-        let has_session_manager = self.session_manager.is_some();
-        let has_theme_selector = self.theme_selector.is_open();
-        let has_command_palette = self.command_palette.is_open();
-        let has_settings_panel = self.settings_panel.is_open();
-        let has_worktree_dialog = self.worktree_dialog.is_some();
-        let has_context_menu = self.context_menu.is_some();
+
+        // Get overlay visibility state from overlay manager
+        let om = self.overlay_manager.read(cx);
+        let has_keybindings_help = om.has_keybindings_help();
+        let has_session_manager = om.has_session_manager();
+        let has_theme_selector = om.has_theme_selector();
+        let has_command_palette = om.has_command_palette();
+        let has_settings_panel = om.has_settings_panel();
+        let has_shell_selector = om.has_shell_selector();
+        let has_worktree_dialog = om.has_worktree_dialog();
+        let has_context_menu = om.has_context_menu();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -759,6 +618,9 @@ impl Render for RootView {
         let sidebar_auto_hide = self.sidebar_ctrl.is_auto_hide();
         let sidebar_hover_shown = self.sidebar_ctrl.is_hover_shown();
         let current_sidebar_width = self.sidebar_ctrl.current_width();
+
+        // Clone overlay_manager for action handlers
+        let overlay_manager = self.overlay_manager.clone();
 
         div()
             .id("root")
@@ -825,24 +687,39 @@ impl Render for RootView {
                 this.toggle_sidebar_auto_hide(cx);
             }))
             // Handle show keybindings action
-            .on_action(cx.listener(|this, _: &ShowKeybindings, _window, cx| {
-                this.show_keybindings_help(cx);
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowKeybindings, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_keybindings_help(cx));
+                }
             }))
             // Handle show session manager action
-            .on_action(cx.listener(|this, _: &ShowSessionManager, _window, cx| {
-                this.show_session_manager(cx);
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowSessionManager, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_session_manager(cx));
+                }
             }))
             // Handle show theme selector action
-            .on_action(cx.listener(|this, _: &ShowThemeSelector, _window, cx| {
-                this.show_theme_selector(cx);
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowThemeSelector, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_theme_selector(cx));
+                }
             }))
             // Handle show command palette action
-            .on_action(cx.listener(|this, _: &ShowCommandPalette, _window, cx| {
-                this.show_command_palette(cx);
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowCommandPalette, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_command_palette(cx));
+                }
             }))
             // Handle show settings panel action
-            .on_action(cx.listener(|this, _: &ShowSettings, _window, cx| {
-                this.show_settings_panel(cx);
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowSettings, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(cx));
+                }
             }))
             // Handle open settings file action
             .on_action(cx.listener(|_this, _: &OpenSettingsFile, _window, _cx| {
@@ -941,44 +818,44 @@ impl Render for RootView {
             .child(self.status_bar.clone())
             // Keybindings help overlay (renders on top of everything)
             .when(has_keybindings_help, |d| {
-                d.children(self.keybindings_help.render())
+                d.children(self.overlay_manager.read(cx).render_keybindings_help())
             })
             // Session manager overlay (renders on top of everything)
             .when(has_session_manager, |d| {
-                if let Some(manager) = &self.session_manager {
-                    d.child(manager.clone())
+                if let Some(manager) = self.overlay_manager.read(cx).render_session_manager() {
+                    d.child(manager)
                 } else {
                     d
                 }
             })
             // Theme selector overlay (renders on top of everything)
             .when(has_theme_selector, |d| {
-                d.children(self.theme_selector.render())
+                d.children(self.overlay_manager.read(cx).render_theme_selector())
             })
             // Command palette overlay (renders on top of everything)
             .when(has_command_palette, |d| {
-                d.children(self.command_palette.render())
+                d.children(self.overlay_manager.read(cx).render_command_palette())
             })
             // Settings panel overlay (renders on top of everything)
             .when(has_settings_panel, |d| {
-                d.children(self.settings_panel.render())
+                d.children(self.overlay_manager.read(cx).render_settings_panel())
             })
             // Shell selector overlay (renders on top of everything)
-            .when(self.shell_selector.is_open(), |d| {
-                d.children(self.shell_selector.render())
+            .when(has_shell_selector, |d| {
+                d.children(self.overlay_manager.read(cx).render_shell_selector())
             })
             // Worktree dialog overlay (renders on top of everything)
             .when(has_worktree_dialog, |d| {
-                if let Some(dialog) = &self.worktree_dialog {
-                    d.child(dialog.clone())
+                if let Some(dialog) = self.overlay_manager.read(cx).render_worktree_dialog() {
+                    d.child(dialog)
                 } else {
                     d
                 }
             })
             // Context menu overlay (renders on top of everything)
             .when(has_context_menu, |d| {
-                if let Some(menu) = &self.context_menu {
-                    d.child(menu.clone())
+                if let Some(menu) = self.overlay_manager.read(cx).render_context_menu() {
+                    d.child(menu)
                 } else {
                     d
                 }

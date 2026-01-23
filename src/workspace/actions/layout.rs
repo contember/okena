@@ -376,6 +376,7 @@ impl Workspace {
     /// Close all terminals in a project
     /// Returns the list of terminal IDs that were closed (for PTY cleanup)
     /// The project becomes a bookmark (no terminals) after this operation
+    #[allow(dead_code)]
     pub fn close_all_terminals(&mut self, project_id: &str, cx: &mut Context<Self>) -> Vec<String> {
         let terminal_ids = if let Some(project) = self.project(project_id) {
             project.layout.as_ref()

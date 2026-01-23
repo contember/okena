@@ -1,9 +1,20 @@
-//! Overlay management utilities.
+//! Overlay management utilities and OverlayManager Entity.
 //!
-//! Provides traits and helpers for managing modal overlay components
+//! Provides traits, helpers, and a centralized manager for modal overlay components
 //! with consistent toggle and close behavior.
 
 use gpui::*;
+
+use crate::terminal::shell_config::ShellType;
+use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
+use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::{ShellSelectorOverlay, ShellSelectorOverlayEvent};
+use crate::views::session_manager::{SessionManager, SessionManagerEvent};
+use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
+use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use crate::workspace::state::{ContextMenuRequest, Workspace, WorkspaceData};
 
 /// Trait for overlay events that support closing.
 ///
@@ -87,15 +98,7 @@ macro_rules! toggle_overlay {
     };
 }
 
-// Macro is exported at crate level via #[macro_export]
-
 // Implement CloseEvent for existing overlay events
-
-use crate::views::keybindings_help::KeybindingsHelpEvent;
-use crate::views::theme_selector::ThemeSelectorEvent;
-use crate::views::command_palette::CommandPaletteEvent;
-use crate::views::settings_panel::SettingsPanelEvent;
-use crate::views::overlays::ShellSelectorOverlayEvent;
 
 impl CloseEvent for KeybindingsHelpEvent {
     fn is_close(&self) -> bool {
@@ -126,3 +129,372 @@ impl CloseEvent for ShellSelectorOverlayEvent {
         matches!(self, ShellSelectorOverlayEvent::Close)
     }
 }
+
+// ============================================================================
+// OverlayManager Entity
+// ============================================================================
+
+/// Events emitted by OverlayManager that require handling by RootView.
+///
+/// These events are forwarded from individual overlays when they require
+/// actions that need access to RootView's state (terminals, PTY manager, etc.)
+#[derive(Clone)]
+pub enum OverlayManagerEvent {
+    /// Session manager requested workspace switch
+    SwitchWorkspace(WorkspaceData),
+
+    /// Worktree dialog created a new project
+    WorktreeCreated(String),
+
+    /// Shell selector selected a shell for a terminal
+    ShellSelected {
+        shell_type: ShellType,
+        project_id: String,
+        terminal_id: String,
+    },
+
+    /// Context menu: Add terminal to project
+    AddTerminal { project_id: String },
+
+    /// Context menu: Create worktree from project
+    CreateWorktree { project_id: String, project_path: String },
+
+    /// Context menu: Rename project
+    RenameProject { project_id: String, project_name: String },
+
+    /// Context menu: Close worktree project
+    CloseWorktree { project_id: String },
+
+    /// Context menu: Delete project
+    DeleteProject { project_id: String },
+}
+
+/// Centralized overlay manager that handles all modal overlays.
+///
+/// This entity owns all overlay state and provides methods for showing/hiding
+/// overlays. Complex events that require RootView interaction are forwarded
+/// via OverlayManagerEvent.
+pub struct OverlayManager {
+    workspace: Entity<Workspace>,
+
+    // Simple toggle overlays
+    keybindings_help: OverlaySlot<KeybindingsHelp>,
+    theme_selector: OverlaySlot<ThemeSelector>,
+    command_palette: OverlaySlot<CommandPalette>,
+    settings_panel: OverlaySlot<SettingsPanel>,
+
+    // Parametric overlays
+    shell_selector: OverlaySlot<ShellSelectorOverlay>,
+    worktree_dialog: Option<Entity<WorktreeDialog>>,
+    context_menu: Option<Entity<ContextMenu>>,
+    session_manager: Option<Entity<SessionManager>>,
+}
+
+impl OverlayManager {
+    /// Create a new OverlayManager.
+    pub fn new(workspace: Entity<Workspace>) -> Self {
+        Self {
+            workspace,
+            keybindings_help: OverlaySlot::new(),
+            theme_selector: OverlaySlot::new(),
+            command_palette: OverlaySlot::new(),
+            settings_panel: OverlaySlot::new(),
+            shell_selector: OverlaySlot::new(),
+            worktree_dialog: None,
+            context_menu: None,
+            session_manager: None,
+        }
+    }
+
+    // ========================================================================
+    // Visibility checks
+    // ========================================================================
+
+    /// Check if keybindings help is open.
+    pub fn has_keybindings_help(&self) -> bool {
+        self.keybindings_help.is_open()
+    }
+
+    /// Check if session manager is open.
+    pub fn has_session_manager(&self) -> bool {
+        self.session_manager.is_some()
+    }
+
+    /// Check if theme selector is open.
+    pub fn has_theme_selector(&self) -> bool {
+        self.theme_selector.is_open()
+    }
+
+    /// Check if command palette is open.
+    pub fn has_command_palette(&self) -> bool {
+        self.command_palette.is_open()
+    }
+
+    /// Check if settings panel is open.
+    pub fn has_settings_panel(&self) -> bool {
+        self.settings_panel.is_open()
+    }
+
+    /// Check if shell selector is open.
+    pub fn has_shell_selector(&self) -> bool {
+        self.shell_selector.is_open()
+    }
+
+    /// Check if worktree dialog is open.
+    pub fn has_worktree_dialog(&self) -> bool {
+        self.worktree_dialog.is_some()
+    }
+
+    /// Check if context menu is open.
+    pub fn has_context_menu(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    // ========================================================================
+    // Simple toggle overlays
+    // ========================================================================
+
+    /// Toggle keybindings help overlay.
+    pub fn toggle_keybindings_help(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, keybindings_help, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
+    }
+
+    /// Toggle theme selector overlay.
+    pub fn toggle_theme_selector(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, theme_selector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
+    }
+
+    /// Toggle command palette overlay.
+    pub fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, command_palette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
+    }
+
+    /// Toggle settings panel overlay.
+    pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
+    }
+
+    // ========================================================================
+    // Session manager (complex - emits SwitchWorkspace event)
+    // ========================================================================
+
+    /// Toggle session manager overlay.
+    pub fn toggle_session_manager(&mut self, cx: &mut Context<Self>) {
+        if self.session_manager.is_some() {
+            self.session_manager = None;
+        } else {
+            let workspace = self.workspace.clone();
+            let manager = cx.new(|cx| SessionManager::new(workspace, cx));
+            cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
+                match event {
+                    SessionManagerEvent::Close => {
+                        this.session_manager = None;
+                        cx.notify();
+                    }
+                    SessionManagerEvent::SwitchWorkspace(data) => {
+                        this.session_manager = None;
+                        cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.session_manager = Some(manager);
+        }
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Shell selector (parametric)
+    // ========================================================================
+
+    /// Show shell selector overlay for a terminal.
+    pub fn show_shell_selector(
+        &mut self,
+        current_shell: ShellType,
+        project_id: String,
+        terminal_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let context = Some((project_id.clone(), terminal_id.clone()));
+        let entity = cx.new(|cx| ShellSelectorOverlay::new(current_shell, context, cx));
+        cx.subscribe(&entity, move |this, _, event: &ShellSelectorOverlayEvent, cx| {
+            match event {
+                ShellSelectorOverlayEvent::Close => {
+                    this.shell_selector.close();
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    cx.notify();
+                }
+                ShellSelectorOverlayEvent::ShellSelected { shell_type, context } => {
+                    this.shell_selector.close();
+                    if let Some((project_id, terminal_id)) = context {
+                        cx.emit(OverlayManagerEvent::ShellSelected {
+                            shell_type: shell_type.clone(),
+                            project_id: project_id.clone(),
+                            terminal_id: terminal_id.clone(),
+                        });
+                    }
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    cx.notify();
+                }
+            }
+        }).detach();
+        self.shell_selector.set(entity);
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Worktree dialog (parametric)
+    // ========================================================================
+
+    /// Show worktree dialog for a project.
+    pub fn show_worktree_dialog(
+        &mut self,
+        project_id: String,
+        project_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let dialog = cx.new(|cx| {
+            WorktreeDialog::new(workspace, project_id, project_path, cx)
+        });
+        cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
+            match event {
+                WorktreeDialogEvent::Close => {
+                    this.hide_worktree_dialog(cx);
+                }
+                WorktreeDialogEvent::Created(new_project_id) => {
+                    cx.emit(OverlayManagerEvent::WorktreeCreated(new_project_id.clone()));
+                    this.hide_worktree_dialog(cx);
+                }
+            }
+        })
+        .detach();
+        self.worktree_dialog = Some(dialog);
+        // Clear focused terminal during modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Close worktree dialog.
+    pub fn hide_worktree_dialog(&mut self, cx: &mut Context<Self>) {
+        self.worktree_dialog = None;
+        // Restore focus after modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Context menu (parametric)
+    // ========================================================================
+
+    /// Show context menu for a project.
+    pub fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
+
+        cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
+            match event {
+                ContextMenuEvent::Close => {
+                    this.hide_context_menu(cx);
+                }
+                ContextMenuEvent::AddTerminal { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::AddTerminal {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::CreateWorktree { project_id, project_path } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::CreateWorktree {
+                        project_id: project_id.clone(),
+                        project_path: project_path.clone(),
+                    });
+                }
+                ContextMenuEvent::RenameProject { project_id, project_name } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RenameProject {
+                        project_id: project_id.clone(),
+                        project_name: project_name.clone(),
+                    });
+                }
+                ContextMenuEvent::CloseWorktree { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::CloseWorktree {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::DeleteProject { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::DeleteProject {
+                        project_id: project_id.clone(),
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.context_menu = Some(menu);
+        cx.notify();
+    }
+
+    /// Hide context menu.
+    pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_context_menu_request(cx);
+        });
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Render helpers
+    // ========================================================================
+
+    /// Get keybindings help entity for rendering.
+    pub fn render_keybindings_help(&self) -> Option<Entity<KeybindingsHelp>> {
+        self.keybindings_help.render()
+    }
+
+    /// Get session manager entity for rendering.
+    pub fn render_session_manager(&self) -> Option<Entity<SessionManager>> {
+        self.session_manager.clone()
+    }
+
+    /// Get theme selector entity for rendering.
+    pub fn render_theme_selector(&self) -> Option<Entity<ThemeSelector>> {
+        self.theme_selector.render()
+    }
+
+    /// Get command palette entity for rendering.
+    pub fn render_command_palette(&self) -> Option<Entity<CommandPalette>> {
+        self.command_palette.render()
+    }
+
+    /// Get settings panel entity for rendering.
+    pub fn render_settings_panel(&self) -> Option<Entity<SettingsPanel>> {
+        self.settings_panel.render()
+    }
+
+    /// Get shell selector entity for rendering.
+    pub fn render_shell_selector(&self) -> Option<Entity<ShellSelectorOverlay>> {
+        self.shell_selector.render()
+    }
+
+    /// Get worktree dialog entity for rendering.
+    pub fn render_worktree_dialog(&self) -> Option<Entity<WorktreeDialog>> {
+        self.worktree_dialog.clone()
+    }
+
+    /// Get context menu entity for rendering.
+    pub fn render_context_menu(&self) -> Option<Entity<ContextMenu>> {
+        self.context_menu.clone()
+    }
+}
+
+impl EventEmitter<OverlayManagerEvent> for OverlayManager {}

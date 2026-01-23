@@ -58,6 +58,7 @@ impl Workspace {
     }
 
     /// Enter fullscreen mode for the first terminal in a project
+    #[allow(dead_code)]
     pub fn fullscreen_project(&mut self, project_id: String, cx: &mut Context<Self>) {
         if let Some(project) = self.project(&project_id) {
             let terminal_ids = project.layout.as_ref()
