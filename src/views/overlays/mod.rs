@@ -5,6 +5,8 @@
 //! - Detached terminal windows
 //! - Command palette
 //! - Context menu
+//! - File search
+//! - File viewer
 //! - Keybindings help
 //! - Session manager
 //! - Settings panel
@@ -15,6 +17,8 @@
 pub mod command_palette;
 pub mod context_menu;
 pub mod detached_terminal;
+pub mod file_search;
+pub mod file_viewer;
 pub mod fullscreen_terminal;
 pub mod keybindings_help;
 pub mod session_manager;
@@ -25,6 +29,8 @@ pub mod worktree_dialog;
 
 pub use command_palette::CommandPalette;
 pub use detached_terminal::DetachedTerminalView;
+pub use file_search::{FileSearchDialog, FileSearchDialogEvent};
+pub use file_viewer::{FileViewer, FileViewerEvent};
 pub use fullscreen_terminal::FullscreenTerminal;
 pub use keybindings_help::KeybindingsHelp;
 pub use session_manager::SessionManager;

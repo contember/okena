@@ -352,6 +352,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             category: "Global",
         },
     );
+    map.insert(
+        "ShowFileSearch",
+        ActionDescription {
+            name: "Go to File",
+            description: "Quick file search in the active project",
+            category: "Global",
+        },
+    );
 
     map
 }
@@ -443,6 +451,13 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-alt-,", None),
                 KeybindingEntry::new("ctrl-alt-,", None),
+            ],
+        );
+        bindings.insert(
+            "ShowFileSearch".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-p", None),
+                KeybindingEntry::new("ctrl-p", None),
             ],
         );
 

@@ -5,10 +5,14 @@
 
 use gpui::*;
 
+use std::path::PathBuf;
+
 use crate::terminal::shell_config::ShellType;
 use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
+use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
 use crate::views::overlays::{ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
@@ -130,6 +134,18 @@ impl CloseEvent for ShellSelectorOverlayEvent {
     }
 }
 
+impl CloseEvent for FileSearchDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, FileSearchDialogEvent::Close)
+    }
+}
+
+impl CloseEvent for FileViewerEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, FileViewerEvent::Close)
+    }
+}
+
 // ============================================================================
 // OverlayManager Entity
 // ============================================================================
@@ -188,6 +204,10 @@ pub struct OverlayManager {
     worktree_dialog: Option<Entity<WorktreeDialog>>,
     context_menu: Option<Entity<ContextMenu>>,
     session_manager: Option<Entity<SessionManager>>,
+
+    // File search and viewer
+    file_search: Option<Entity<FileSearchDialog>>,
+    file_viewer: Option<Entity<FileViewer>>,
 }
 
 impl OverlayManager {
@@ -203,6 +223,8 @@ impl OverlayManager {
             worktree_dialog: None,
             context_menu: None,
             session_manager: None,
+            file_search: None,
+            file_viewer: None,
         }
     }
 
@@ -248,6 +270,16 @@ impl OverlayManager {
     /// Check if context menu is open.
     pub fn has_context_menu(&self) -> bool {
         self.context_menu.is_some()
+    }
+
+    /// Check if file search is open.
+    pub fn has_file_search(&self) -> bool {
+        self.file_search.is_some()
+    }
+
+    /// Check if file viewer is open.
+    pub fn has_file_viewer(&self) -> bool {
+        self.file_viewer.is_some()
     }
 
     // ========================================================================
@@ -453,6 +485,91 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // File search (parametric)
+    // ========================================================================
+
+    /// Toggle file search dialog for a project.
+    pub fn toggle_file_search(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
+        if self.file_search.is_some() {
+            self.hide_file_search(cx);
+        } else {
+            self.show_file_search(project_path, cx);
+        }
+    }
+
+    /// Show file search dialog for a project.
+    pub fn show_file_search(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| FileSearchDialog::new(project_path, cx));
+
+        cx.subscribe(&dialog, |this, _, event: &FileSearchDialogEvent, cx| {
+            match event {
+                FileSearchDialogEvent::Close => {
+                    this.hide_file_search(cx);
+                }
+                FileSearchDialogEvent::FileSelected(path) => {
+                    let path = path.clone();
+                    this.hide_file_search(cx);
+                    // Open the file viewer
+                    this.show_file_viewer(path, cx);
+                }
+            }
+        })
+        .detach();
+
+        self.file_search = Some(dialog);
+        // Clear focused terminal during modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Hide file search dialog.
+    pub fn hide_file_search(&mut self, cx: &mut Context<Self>) {
+        self.file_search = None;
+        // Restore focus after modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    // ========================================================================
+    // File viewer (parametric)
+    // ========================================================================
+
+    /// Show file viewer for a file.
+    pub fn show_file_viewer(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+        let viewer = cx.new(|cx| FileViewer::new(file_path, cx));
+
+        cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
+            match event {
+                FileViewerEvent::Close => {
+                    this.hide_file_viewer(cx);
+                }
+            }
+        })
+        .detach();
+
+        self.file_viewer = Some(viewer);
+        // Clear focused terminal during modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Hide file viewer.
+    pub fn hide_file_viewer(&mut self, cx: &mut Context<Self>) {
+        self.file_viewer = None;
+        // Restore focus after modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    // ========================================================================
     // Render helpers
     // ========================================================================
 
@@ -494,6 +611,16 @@ impl OverlayManager {
     /// Get context menu entity for rendering.
     pub fn render_context_menu(&self) -> Option<Entity<ContextMenu>> {
         self.context_menu.clone()
+    }
+
+    /// Get file search dialog entity for rendering.
+    pub fn render_file_search(&self) -> Option<Entity<FileSearchDialog>> {
+        self.file_search.clone()
+    }
+
+    /// Get file viewer entity for rendering.
+    pub fn render_file_viewer(&self) -> Option<Entity<FileViewer>> {
+        self.file_viewer.clone()
     }
 }
 

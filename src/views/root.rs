@@ -8,7 +8,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::open_settings_file;
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -605,6 +605,8 @@ impl Render for RootView {
         let has_shell_selector = om.has_shell_selector();
         let has_worktree_dialog = om.has_worktree_dialog();
         let has_context_menu = om.has_context_menu();
+        let has_file_search = om.has_file_search();
+        let has_file_viewer = om.has_file_viewer();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -728,6 +730,30 @@ impl Render for RootView {
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
                 this.create_worktree_from_focus(cx);
+            }))
+            // Handle show file search action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                let workspace = workspace.clone();
+                move |_this, _: &ShowFileSearch, _window, cx| {
+                    // Get the focused or first visible project path
+                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                        .map(|f| f.project_id.clone())
+                        .or_else(|| {
+                            workspace.read(cx).visible_projects()
+                                .first()
+                                .map(|p| p.id.clone())
+                        })
+                        .and_then(|id| {
+                            workspace.read(cx).project(&id).map(|p| p.path.clone())
+                        });
+
+                    if let Some(path) = project_path {
+                        overlay_manager.update(cx, |om, cx| {
+                            om.toggle_file_search(std::path::PathBuf::from(path), cx);
+                        });
+                    }
+                }
             }))
             // Title bar at the top (with window controls)
             .child(self.title_bar.clone())
@@ -856,6 +882,22 @@ impl Render for RootView {
             .when(has_context_menu, |d| {
                 if let Some(menu) = self.overlay_manager.read(cx).render_context_menu() {
                     d.child(menu)
+                } else {
+                    d
+                }
+            })
+            // File search overlay (renders on top of everything)
+            .when(has_file_search, |d| {
+                if let Some(dialog) = self.overlay_manager.read(cx).render_file_search() {
+                    d.child(dialog)
+                } else {
+                    d
+                }
+            })
+            // File viewer overlay (renders on top of everything)
+            .when(has_file_viewer, |d| {
+                if let Some(viewer) = self.overlay_manager.read(cx).render_file_viewer() {
+                    d.child(viewer)
                 } else {
                     d
                 }
