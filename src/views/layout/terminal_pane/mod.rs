@@ -15,9 +15,12 @@ mod header;
 mod content;
 
 // Internal imports
-use content::{ContextMenuEvent, TerminalContent};
+use content::ContextMenuEvent;
 use search_bar::{SearchBar, SearchBarEvent};
 use header::{TerminalHeader, HeaderEvent};
+
+// Re-export TerminalContent for use in fullscreen view
+pub use content::TerminalContent;
 
 use crate::keybindings::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,

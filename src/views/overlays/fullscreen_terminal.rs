@@ -1,8 +1,8 @@
-use crate::elements::terminal_element::TerminalElement;
 use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
+use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -21,6 +21,8 @@ pub struct FullscreenTerminal {
     pending_focus: bool,
     /// Animation progress (0.0 to 1.0)
     animation_progress: f32,
+    /// Terminal content view (handles selection, context menu, etc.)
+    content: Entity<TerminalContent>,
 }
 
 impl FullscreenTerminal {
@@ -53,6 +55,19 @@ impl FullscreenTerminal {
             }
         };
 
+        // Create terminal content view
+        let content = cx.new(|cx| {
+            let mut content = TerminalContent::new(
+                focus_handle.clone(),
+                project_id.clone(),
+                vec![], // Empty layout path for fullscreen
+                cx,
+            );
+            content.set_terminal(Some(terminal.clone()), cx);
+            content.set_focused(true);
+            content
+        });
+
         // Start fade-in animation
         let animation_progress = 0.0;
         cx.spawn(async move |this: WeakEntity<FullscreenTerminal>, cx| {
@@ -79,6 +94,7 @@ impl FullscreenTerminal {
             focus_handle,
             pending_focus: true,
             animation_progress,
+            content,
         }
     }
 
@@ -144,8 +160,14 @@ impl FullscreenTerminal {
             cx.notify();
         });
 
-        self.terminal = terminal;
+        self.terminal = terminal.clone();
         self.terminal_id = new_terminal_id;
+
+        // Update content's terminal
+        self.content.update(cx, |content, cx| {
+            content.set_terminal(Some(terminal), cx);
+        });
+
         cx.notify();
     }
 
@@ -383,16 +405,12 @@ impl Render for FullscreenTerminal {
                     ),
             )
             .child(
-                // Terminal content
+                // Terminal content (reuses TerminalContent for selection, context menu, etc.)
                 div()
                     .flex_1()
-                    .p(px(8.0))
-                    .child(TerminalElement::new(self.terminal.clone(), self.focus_handle.clone())),
+                    .child(self.content.clone()),
             )
             .id("fullscreen-terminal-main")
-            .on_click(cx.listener(|this, _, window, cx| {
-                window.focus(&this.focus_handle, cx);
-            }))
     }
 }
 
