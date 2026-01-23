@@ -970,19 +970,21 @@ impl Render for RootView {
                             .flex_col()
                             .min_h_0()
                             .child(
-                                // Projects grid or fullscreen
+                                // Projects grid OR fullscreen (mutually exclusive)
                                 div()
                                     .id("projects-container")
                                     .flex_1()
                                     .min_h_0()
-                                    .relative()
-                                    .child(self.render_projects_grid(cx))
+                                    .size_full()
                                     .when(has_fullscreen, |d| {
                                         if let Some(fullscreen) = &self.fullscreen_terminal {
                                             d.child(fullscreen.clone())
                                         } else {
-                                            d
+                                            d.child(self.render_projects_grid(cx))
                                         }
+                                    })
+                                    .when(!has_fullscreen, |d| {
+                                        d.child(self.render_projects_grid(cx))
                                     }),
                             ),
                     ),

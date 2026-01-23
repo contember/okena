@@ -55,12 +55,21 @@ impl FullscreenTerminal {
             }
         };
 
+        // Find the actual layout path for this terminal (needed for zoom)
+        let layout_path = {
+            let ws = workspace.read(cx);
+            ws.project(&project_id)
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|l| l.find_terminal_path(&terminal_id))
+                .unwrap_or_default()
+        };
+
         // Create terminal content view
         let content = cx.new(|cx| {
             let mut content = TerminalContent::new(
                 focus_handle.clone(),
                 project_id.clone(),
-                vec![], // Empty layout path for fullscreen
+                layout_path,
                 workspace.clone(),
                 cx,
             );
@@ -69,8 +78,9 @@ impl FullscreenTerminal {
             content
         });
 
-        // Start fade-in animation
-        let animation_progress = 0.0;
+        // Start fade-in animation with minimal opacity to ensure first paint runs
+        // (GPUI may skip paint for elements with opacity 0)
+        let animation_progress = 0.01;
         cx.spawn(async move |this: WeakEntity<FullscreenTerminal>, cx| {
             // Animate from 0 to 1 over ~150ms
             for i in 1..=6 {
@@ -162,11 +172,21 @@ impl FullscreenTerminal {
         });
 
         self.terminal = terminal.clone();
-        self.terminal_id = new_terminal_id;
+        self.terminal_id = new_terminal_id.clone();
 
-        // Update content's terminal
+        // Find layout path for the new terminal (needed for zoom)
+        let new_layout_path = {
+            let ws = self.workspace.read(cx);
+            ws.project(&self.project_id)
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|l| l.find_terminal_path(&new_terminal_id))
+                .unwrap_or_default()
+        };
+
+        // Update content's terminal and layout path
         self.content.update(cx, |content, cx| {
             content.set_terminal(Some(terminal), cx);
+            content.set_layout_path(new_layout_path);
         });
 
         cx.notify();
@@ -223,7 +243,6 @@ impl FullscreenTerminal {
 
 impl Render for FullscreenTerminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        log::info!("FullscreenTerminal::render called, terminal_id={}, opacity={}", self.terminal_id, self.animation_progress);
         let t = theme(cx);
 
         if self.pending_focus {
@@ -275,6 +294,8 @@ impl Render for FullscreenTerminal {
             }))
             .absolute()
             .inset_0()
+            .size_full()
+            .min_h_0()
             .bg(rgb(t.bg_primary))
             .opacity(opacity)
             .flex()
@@ -408,7 +429,11 @@ impl Render for FullscreenTerminal {
             .child(
                 // Terminal content (reuses TerminalContent for selection, context menu, etc.)
                 div()
+                    .id("fullscreen-content-wrapper")
                     .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .overflow_hidden()
                     .child(self.content.clone()),
             )
             .id("fullscreen-terminal-main")

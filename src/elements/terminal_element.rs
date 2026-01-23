@@ -497,13 +497,6 @@ impl Element for TerminalElement {
         let available_width = f32::from(bounds.size.width);
         let available_height = f32::from(bounds.size.height);
 
-        // Debug: log bounds issues
-        if available_height < 50.0 {
-            log::warn!(
-                "Terminal element has very small height: {}x{} (cell: {}x{})",
-                available_width, available_height, cell_width_f, line_height_f
-            );
-        }
 
         // Calculate columns and rows, ensuring we have at least 1 of each
         // Use floor to ensure we never overflow the container bounds
