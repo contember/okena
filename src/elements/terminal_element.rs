@@ -35,6 +35,7 @@ pub struct TerminalElement {
     url_matches: Arc<Vec<URLMatch>>,
     hovered_url_index: Option<usize>,
     cursor_visible: bool,
+    zoom_level: f32,
 }
 
 /// ASCII DEL character - what terminals expect for backspace
@@ -171,7 +172,13 @@ impl TerminalElement {
             url_matches: Arc::new(Vec::new()),
             hovered_url_index: None,
             cursor_visible: true,
+            zoom_level: 1.0,
         }
+    }
+
+    pub fn with_zoom(mut self, zoom_level: f32) -> Self {
+        self.zoom_level = zoom_level;
+        self
     }
 
     pub fn with_search(
@@ -360,9 +367,9 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // Get font settings from global settings
+        // Get font settings from global settings, apply per-terminal zoom
         let app_settings = settings(cx);
-        let font_size = px(app_settings.font_size);
+        let font_size = px(app_settings.font_size * self.zoom_level);
         let line_height_multiplier = app_settings.line_height;
         let font_family = app_settings.font_family.clone();
 

@@ -121,6 +121,7 @@ impl TerminalPane {
                 focus_handle.clone(),
                 project_id.clone(),
                 layout_path.clone(),
+                workspace.clone(),
                 cx,
             )
         });

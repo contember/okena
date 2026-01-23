@@ -940,6 +940,40 @@ impl Workspace {
         self.detached_terminals.iter().any(|d| d.terminal_id == terminal_id)
     }
 
+    /// Get the zoom level for a terminal at the given path
+    pub fn get_terminal_zoom(&self, project_id: &str, path: &[usize]) -> f32 {
+        self.project(project_id)
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.get_at_path(path))
+            .and_then(|node| {
+                if let LayoutNode::Terminal { zoom_level, .. } = node {
+                    Some(*zoom_level)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1.0)
+    }
+
+    /// Set the zoom level for a terminal at the given path
+    pub fn set_terminal_zoom(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        zoom: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let clamped = zoom.clamp(0.5, 3.0);
+        self.with_layout_node(project_id, path, cx, |node| {
+            if let LayoutNode::Terminal { zoom_level, .. } = node {
+                *zoom_level = clamped;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     /// Move a project to a new position in the order
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
         // Find current index

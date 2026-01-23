@@ -61,6 +61,7 @@ impl FullscreenTerminal {
                 focus_handle.clone(),
                 project_id.clone(),
                 vec![], // Empty layout path for fullscreen
+                workspace.clone(),
                 cx,
             );
             content.set_terminal(Some(terminal.clone()), cx);

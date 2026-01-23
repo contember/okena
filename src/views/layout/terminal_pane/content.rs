@@ -6,7 +6,7 @@ use crate::elements::terminal_element::{SearchMatch, TerminalElement};
 use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::navigation::register_pane_bounds;
-use crate::workspace::state::SplitDirection;
+use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::sync::Arc;
@@ -57,6 +57,8 @@ pub struct TerminalContent {
     project_id: String,
     /// Layout path for pane registration
     layout_path: Vec<usize>,
+    /// Workspace entity for accessing per-terminal zoom
+    workspace: Entity<Workspace>,
 }
 
 impl TerminalContent {
@@ -64,6 +66,7 @@ impl TerminalContent {
         focus_handle: FocusHandle,
         project_id: String,
         layout_path: Vec<usize>,
+        workspace: Entity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         let scrollbar = cx.new(|cx| Scrollbar::new(cx));
@@ -84,6 +87,7 @@ impl TerminalContent {
             is_focused: false,
             project_id,
             layout_path,
+            workspace,
         }
     }
 
@@ -609,6 +613,7 @@ impl Render for TerminalContent {
         let terminal_clone = terminal.clone();
         let focus_handle = self.focus_handle.clone();
         let has_selection = terminal.has_selection();
+        let zoom_level = self.workspace.read(cx).get_terminal_zoom(&self.project_id, &self.layout_path);
 
         let element_bounds_setter = {
             let entity = cx.entity().downgrade();
@@ -665,7 +670,19 @@ impl Render for TerminalContent {
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
-                this.handle_scroll(f32::from(delta.y), event.position, cx);
+                if event.modifiers.control {
+                    // Ctrl+scroll = per-terminal zoom
+                    let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
+                    let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
+                    let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);
+                    let project_id = this.project_id.clone();
+                    let layout_path = this.layout_path.clone();
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
+                    });
+                } else {
+                    this.handle_scroll(f32::from(delta.y), event.position, cx);
+                }
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -682,6 +699,7 @@ impl Render for TerminalContent {
                     .bg(rgb(term_bg))
                     .child(
                         TerminalElement::new(terminal_clone, focus_handle)
+                            .with_zoom(zoom_level)
                             .with_search(self.search_matches.clone(), self.search_current_index)
                             .with_urls(
                                 self.url_detector.matches_arc(),

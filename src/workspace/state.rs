@@ -46,6 +46,10 @@ pub struct ProjectData {
 
 use crate::terminal::shell_config::ShellType;
 
+fn default_zoom_level() -> f32 {
+    1.0
+}
+
 /// Recursive layout tree node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -58,6 +62,8 @@ pub enum LayoutNode {
         detached: bool,
         #[serde(default)]
         shell_type: ShellType,
+        #[serde(default = "default_zoom_level")]
+        zoom_level: f32,
     },
     Split {
         direction: SplitDirection,
@@ -246,6 +252,7 @@ impl LayoutNode {
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
+            zoom_level: 1.0,
         }
     }
 
@@ -419,11 +426,12 @@ impl LayoutNode {
     /// Used when creating worktree projects to duplicate layout with fresh terminals
     pub fn clone_structure(&self) -> Self {
         match self {
-            LayoutNode::Terminal { shell_type, .. } => LayoutNode::Terminal {
+            LayoutNode::Terminal { shell_type, zoom_level, .. } => LayoutNode::Terminal {
                 terminal_id: None,
                 minimized: false,
                 detached: false,
                 shell_type: shell_type.clone(),
+                zoom_level: *zoom_level,
             },
             LayoutNode::Split { direction, sizes, children } => LayoutNode::Split {
                 direction: *direction,
