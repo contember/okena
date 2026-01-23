@@ -370,7 +370,11 @@ impl Render for FullscreenTerminal {
                                     .text_size(px(12.0))
                                     .text_color(rgb(t.text_primary))
                                     .child("✕ Close")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
                                     .on_click(move |_, _window, cx| {
+                                        cx.stop_propagation();
                                         workspace.update(cx, |ws, cx| {
                                             ws.exit_fullscreen(cx);
                                         });
