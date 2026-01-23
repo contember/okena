@@ -625,6 +625,48 @@ impl RootView {
         cx.notify();
     }
 
+    /// Process pending overlay requests from workspace state.
+    ///
+    /// This handles requests that are set in workspace state and need to trigger
+    /// overlay creation in the RootView. Each request is processed once and then
+    /// cleared from the workspace.
+    fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
+        // Check for worktree dialog request
+        if let Some(request) = self.workspace.read(cx).worktree_dialog_request.clone() {
+            if self.worktree_dialog.is_none() {
+                self.show_worktree_dialog(request.project_id, request.project_path, cx);
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_worktree_dialog_request(cx);
+                });
+            }
+        }
+
+        // Check for context menu request
+        if let Some(request) = self.workspace.read(cx).context_menu_request.clone() {
+            if self.context_menu.is_none() {
+                self.show_context_menu(request.clone(), cx);
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_context_menu_request(cx);
+                });
+            }
+        }
+
+        // Check for shell selector request
+        if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
+            if !self.shell_selector.is_open() {
+                self.show_shell_selector(
+                    request.current_shell,
+                    request.project_id,
+                    request.terminal_id,
+                    cx,
+                );
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_shell_selector_request(cx);
+                });
+            }
+        }
+    }
+
     /// Show sidebar temporarily in auto-hide mode
     fn show_sidebar_on_hover(&mut self, cx: &mut Context<Self>) {
         let target = self.sidebar_ctrl.show_on_hover();
@@ -689,40 +731,8 @@ impl Render for RootView {
         // Sync fullscreen entity with workspace state (creates entity only when state changes)
         self.sync_fullscreen(cx);
 
-        // Check for worktree dialog request from workspace
-        if let Some(request) = self.workspace.read(cx).worktree_dialog_request.clone() {
-            if self.worktree_dialog.is_none() {
-                self.show_worktree_dialog(request.project_id, request.project_path, cx);
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_worktree_dialog_request(cx);
-                });
-            }
-        }
-
-        // Check for context menu request from workspace
-        if let Some(request) = self.workspace.read(cx).context_menu_request.clone() {
-            if self.context_menu.is_none() {
-                self.show_context_menu(request.clone(), cx);
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_context_menu_request(cx);
-                });
-            }
-        }
-
-        // Check for shell selector request from workspace
-        if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
-            if !self.shell_selector.is_open() {
-                self.show_shell_selector(
-                    request.current_shell,
-                    request.project_id,
-                    request.terminal_id,
-                    cx,
-                );
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_shell_selector_request(cx);
-                });
-            }
-        }
+        // Process any pending overlay requests from workspace
+        self.process_pending_requests(cx);
 
         let has_fullscreen = self.fullscreen_terminal.is_some();
         if has_fullscreen {
