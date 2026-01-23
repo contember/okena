@@ -9,6 +9,7 @@
 pub mod layout_container;
 pub mod navigation;
 pub mod split_pane;
+mod tabs;
 pub mod terminal_pane;
 
 pub use layout_container::LayoutContainer;
