@@ -836,8 +836,6 @@ impl Render for TerminalPane {
             .min_h_0()
             .min_w_0()
             .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(if show_border { border_color } else { gpui::transparent_black().into() })
             .group("terminal-pane")
             .relative()
             // Header (hidden in tab groups)
@@ -858,6 +856,16 @@ impl Render for TerminalPane {
             // Search bar (when active)
             .when(search_active, |el: Stateful<Div>| {
                 el.child(self.search_bar.clone())
+            })
+            // Focus/bell border overlay (absolute positioned to avoid layout shift)
+            .when(show_border, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(border_color),
+                )
             })
     }
 }
