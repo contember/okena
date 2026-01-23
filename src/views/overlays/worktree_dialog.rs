@@ -589,10 +589,10 @@ impl Render for WorktreeDialog {
                                     .px(px(16.0))
                                     .py(px(8.0))
                                     .rounded(px(4.0))
-                                    .bg(rgb(t.border_active))
-                                    .hover(|s| s.bg(rgb(0x0078d4)))
+                                    .bg(rgb(t.button_primary_bg))
+                                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
                                     .text_size(px(12.0))
-                                    .text_color(rgb(0xffffff))
+                                    .text_color(rgb(t.button_primary_fg))
                                     .child("Create Worktree")
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.create_worktree(cx);

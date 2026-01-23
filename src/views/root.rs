@@ -492,7 +492,11 @@ impl RootView {
         };
 
         let (project_path, layout) = match project_info {
-            Some(info) => info,
+            Some((path, Some(layout))) => (path, layout),
+            Some((_, None)) => {
+                log::info!("spawn_terminals_for_project: Project {} has no layout (bookmark)", project_id);
+                return;
+            }
             None => {
                 log::error!("spawn_terminals_for_project: Project {} not found", project_id);
                 return;
@@ -560,6 +564,23 @@ impl RootView {
                 }
             }
         }
+    }
+
+    /// Close all terminals in a project (kills PTY processes and updates workspace)
+    fn close_all_terminals_in_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // Get terminal IDs and update workspace state
+        let terminal_ids = self.workspace.update(cx, |ws, cx| {
+            ws.close_all_terminals(project_id, cx)
+        });
+
+        // Kill PTY processes and remove from registry
+        for terminal_id in terminal_ids {
+            self.pty_manager.kill(&terminal_id);
+            self.terminals.lock().remove(&terminal_id);
+        }
+
+        // Sync project columns (the project column will spawn a new terminal for the empty slot)
+        self.sync_project_columns(cx);
     }
 
     /// Show context menu for a project

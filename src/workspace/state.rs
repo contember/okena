@@ -29,7 +29,8 @@ pub struct ProjectData {
     pub name: String,
     pub path: String,
     pub is_visible: bool,
-    pub layout: LayoutNode,
+    /// Layout tree for terminal panes. None means project is a bookmark without terminals.
+    pub layout: Option<LayoutNode>,
     #[serde(default)]
     pub terminal_names: HashMap<String, String>,
     #[serde(default)]
@@ -193,10 +194,12 @@ impl Workspace {
         F: FnOnce(&mut LayoutNode) -> bool,
     {
         if let Some(project) = self.project_mut(project_id) {
-            if let Some(node) = project.layout.get_at_path_mut(path) {
-                if f(node) {
-                    cx.notify();
-                    return true;
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    if f(node) {
+                        cx.notify();
+                        return true;
+                    }
                 }
             }
         }

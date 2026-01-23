@@ -6,6 +6,7 @@ mod elements;
 mod git;
 mod keybindings;
 mod settings;
+#[cfg(target_os = "linux")]
 mod simple_root;
 mod terminal;
 mod theme;

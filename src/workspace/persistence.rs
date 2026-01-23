@@ -42,9 +42,15 @@ impl Default for SidebarSettings {
     }
 }
 
+/// Current settings schema version - increment when making breaking changes
+pub const SETTINGS_VERSION: u32 = 1;
+
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// Settings schema version for migration support
+    #[serde(default = "default_settings_version")]
+    pub version: u32,
     #[serde(default)]
     pub theme_mode: ThemeMode,
     /// Name of the currently active session (None = default workspace.json)
@@ -96,6 +102,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            version: SETTINGS_VERSION,
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
@@ -111,6 +118,11 @@ impl Default for AppSettings {
             session_backend: SessionBackend::default(),
         }
     }
+}
+
+fn default_settings_version() -> u32 {
+    // Return 0 for settings files without version field (pre-versioning)
+    0
 }
 
 fn default_show_focused_border() -> bool {
@@ -192,17 +204,160 @@ fn sanitize_session_name(name: &str) -> String {
         .collect()
 }
 
-/// Load app settings from disk
+/// Load app settings from disk with robust error handling and migration support
 pub fn load_settings() -> AppSettings {
     let path = get_settings_path();
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(settings) = serde_json::from_str(&content) {
-                return settings;
-            }
+
+    if !path.exists() {
+        log::info!("Settings file not found at {}, using defaults", path.display());
+        return AppSettings::default();
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) => {
+            log::error!("Failed to read settings file {}: {}", path.display(), e);
+            return AppSettings::default();
+        }
+    };
+
+    // First, try direct deserialization (fast path for valid settings)
+    match serde_json::from_str::<AppSettings>(&content) {
+        Ok(mut settings) => {
+            // Run migrations if needed
+            settings = migrate_settings(settings);
+            return settings;
+        }
+        Err(e) => {
+            log::warn!("Failed to parse settings directly: {}, attempting partial recovery", e);
         }
     }
-    AppSettings::default()
+
+    // Fallback: partial recovery using serde_json::Value
+    match recover_settings_from_json(&content) {
+        Ok(mut settings) => {
+            log::info!("Successfully recovered settings with partial data");
+            settings = migrate_settings(settings);
+            // Save the recovered settings to fix the file
+            if let Err(e) = save_settings(&settings) {
+                log::warn!("Failed to save recovered settings: {}", e);
+            }
+            settings
+        }
+        Err(e) => {
+            log::error!("Failed to recover settings from {}: {}", path.display(), e);
+            log::error!("Using default settings. Your old settings file has been preserved.");
+            AppSettings::default()
+        }
+    }
+}
+
+/// Attempt to recover settings from a potentially malformed JSON file
+/// This extracts valid fields and uses defaults for invalid/missing ones
+fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
+    let value: serde_json::Value = serde_json::from_str(content)
+        .context("Settings file is not valid JSON")?;
+
+    let obj = value.as_object()
+        .context("Settings file root is not a JSON object")?;
+
+    let mut settings = AppSettings::default();
+
+    // Try to recover each field individually
+    if let Some(v) = obj.get("version").and_then(|v| v.as_u64()) {
+        settings.version = v as u32;
+    }
+
+    if let Some(v) = obj.get("theme_mode") {
+        if let Ok(theme) = serde_json::from_value::<ThemeMode>(v.clone()) {
+            settings.theme_mode = theme;
+        } else {
+            log::warn!("Could not parse theme_mode, using default");
+        }
+    }
+
+    if let Some(v) = obj.get("active_session") {
+        if let Ok(session) = serde_json::from_value::<Option<String>>(v.clone()) {
+            settings.active_session = session;
+        }
+    }
+
+    if let Some(v) = obj.get("sidebar") {
+        if let Ok(sidebar) = serde_json::from_value::<SidebarSettings>(v.clone()) {
+            settings.sidebar = sidebar;
+        } else {
+            log::warn!("Could not parse sidebar settings, using default");
+        }
+    }
+
+    if let Some(v) = obj.get("show_focused_border").and_then(|v| v.as_bool()) {
+        settings.show_focused_border = v;
+    }
+
+    if let Some(v) = obj.get("font_size").and_then(|v| v.as_f64()) {
+        settings.font_size = (v as f32).clamp(8.0, 48.0);
+    }
+
+    if let Some(v) = obj.get("font_family").and_then(|v| v.as_str()) {
+        settings.font_family = v.to_string();
+    }
+
+    if let Some(v) = obj.get("line_height").and_then(|v| v.as_f64()) {
+        settings.line_height = (v as f32).clamp(1.0, 3.0);
+    }
+
+    if let Some(v) = obj.get("ui_font_size").and_then(|v| v.as_f64()) {
+        settings.ui_font_size = (v as f32).clamp(8.0, 24.0);
+    }
+
+    if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {
+        settings.cursor_blink = v;
+    }
+
+    if let Some(v) = obj.get("scrollback_lines").and_then(|v| v.as_u64()) {
+        settings.scrollback_lines = (v as u32).clamp(100, 100000);
+    }
+
+    Ok(settings)
+}
+
+/// Migrate settings from older versions to the current version
+fn migrate_settings(mut settings: AppSettings) -> AppSettings {
+    let original_version = settings.version;
+
+    // Migration from version 0 (pre-versioning) to version 1
+    if settings.version == 0 {
+        log::info!("Migrating settings from pre-versioning (v0) to v1");
+        // No structural changes needed for v0 -> v1, just mark as migrated
+        settings.version = 1;
+    }
+
+    // Future migrations would go here:
+    // if settings.version == 1 {
+    //     log::info!("Migrating settings from v1 to v2");
+    //     // Perform v1 -> v2 migration
+    //     settings.version = 2;
+    // }
+
+    // Ensure version is current
+    if settings.version < SETTINGS_VERSION {
+        log::warn!(
+            "Settings version {} is older than current version {}, some settings may use defaults",
+            original_version,
+            SETTINGS_VERSION
+        );
+        settings.version = SETTINGS_VERSION;
+    }
+
+    // Save if we migrated
+    if original_version != settings.version {
+        log::info!("Settings migrated from v{} to v{}", original_version, settings.version);
+        if let Err(e) = save_settings(&settings) {
+            log::warn!("Failed to save migrated settings: {}", e);
+        }
+    }
+
+    settings
 }
 
 /// Save app settings to disk
@@ -229,7 +384,9 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let session_backend = backend.resolve();
         if !session_backend.supports_persistence() {
             for project in &mut data.projects {
-                project.layout.clear_terminal_ids();
+                if let Some(ref mut layout) = project.layout {
+                    layout.clear_terminal_ids();
+                }
             }
         }
 
@@ -273,7 +430,7 @@ pub fn default_workspace() -> WorkspaceData {
             name: "Default".to_string(),
             path: home_dir,
             is_visible: true,
-            layout: LayoutNode::new_terminal(),
+            layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
@@ -370,7 +527,9 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
     let session_backend = backend.resolve();
     if !session_backend.supports_persistence() {
         for project in &mut data.projects {
-            project.layout.clear_terminal_ids();
+            if let Some(ref mut layout) = project.layout {
+                layout.clear_terminal_ids();
+            }
         }
     }
 
@@ -447,7 +606,9 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
 
         // Clear terminal IDs
         for project in &mut data.projects {
-            project.layout.clear_terminal_ids();
+            if let Some(ref mut layout) = project.layout {
+                layout.clear_terminal_ids();
+            }
         }
 
         // Ensure project_order contains all project IDs
@@ -466,7 +627,9 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
 
     // Clear terminal IDs
     for project in &mut data.projects {
-        project.layout.clear_terminal_ids();
+        if let Some(ref mut layout) = project.layout {
+            layout.clear_terminal_ids();
+        }
     }
 
     // Ensure project_order contains all project IDs

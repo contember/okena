@@ -3,7 +3,7 @@ use crate::theme::theme;
 use crate::ui::ClickDetector;
 use crate::views::components::{
     cancel_rename, finish_rename, is_renaming, rename_input, start_rename_with_blur,
-    RenameState, SimpleInput, SimpleInputState,
+    RenameState, SimpleInput, SimpleInputState, PathAutoCompleteState,
 };
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{ProjectData, Workspace};
@@ -46,7 +46,7 @@ pub struct Sidebar {
     expanded_projects: HashSet<String>,
     show_add_dialog: bool,
     name_input: Option<Entity<SimpleInputState>>,
-    path_input: Option<Entity<SimpleInputState>>,
+    path_input: Option<Entity<PathAutoCompleteState>>,
     /// Pending values to set on inputs (for async updates)
     pending_name_value: Option<String>,
     pending_path_value: Option<String>,
@@ -59,6 +59,8 @@ pub struct Sidebar {
     project_rename: Option<RenameState<String>>,
     /// Double-click detector for projects
     project_click_detector: ClickDetector<String>,
+    /// Whether to create project without terminal (bookmark mode)
+    create_without_terminal: bool,
 }
 
 impl Sidebar {
@@ -76,6 +78,7 @@ impl Sidebar {
             terminal_click_detector: ClickDetector::new(),
             project_rename: None,
             project_click_detector: ClickDetector::new(),
+            create_without_terminal: false,
         }
     }
 
@@ -170,19 +173,19 @@ impl Sidebar {
         }
         if self.path_input.is_none() {
             self.path_input = Some(cx.new(|cx| {
-                SimpleInputState::new(cx)
-                    .placeholder("Enter project path...")
+                PathAutoCompleteState::new(cx)
             }));
         }
     }
 
     fn add_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
-        let path = self.path_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
+        let path = self.path_input.as_ref().map(|i| i.read(cx).value(cx)).unwrap_or_default();
 
         if !name.is_empty() && !path.is_empty() {
+            let with_terminal = !self.create_without_terminal;
             self.workspace.update(cx, |ws, cx| {
-                ws.add_project(name, path, cx);
+                ws.add_project(name, path, with_terminal, cx);
             });
             // Clear inputs
             if let Some(ref input) = self.name_input {
@@ -192,6 +195,7 @@ impl Sidebar {
                 input.update(cx, |i, cx| i.set_value("", cx));
             }
             self.show_add_dialog = false;
+            self.create_without_terminal = false;
             // Exit modal mode to restore terminal focus
             self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
             cx.notify();
@@ -199,13 +203,13 @@ impl Sidebar {
     }
 
     fn set_quick_path(&mut self, name: &str, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let name = name.to_string();
-        let path = path.to_string();
+        let name_str = name.to_string();
+        let path_str = path.to_string();
         if let Some(ref input) = self.name_input {
-            input.update(cx, |i, cx| i.set_value(&name, cx));
+            input.update(cx, |i, cx| i.set_value(&name_str, cx));
         }
         if let Some(ref input) = self.path_input {
-            input.update(cx, |i, cx| i.set_value(&path, cx));
+            input.update(cx, |i, cx| i.set_value(&path_str, cx));
         }
         cx.notify();
     }
@@ -302,6 +306,7 @@ impl Sidebar {
         let path_input = self.path_input.clone().expect("path_input should exist after ensure_inputs");
 
         div()
+            .relative()
             .p(px(12.0))
             .flex()
             .flex_col()
@@ -343,7 +348,7 @@ impl Sidebar {
                     ),
             )
             .child(
-                // Path input
+                // Path input with auto-complete
                 div()
                     .flex()
                     .flex_col()
@@ -352,19 +357,9 @@ impl Sidebar {
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(t.text_muted))
-                            .child("Path:"),
+                            .child("Path (Tab to complete):"),
                     )
-                    .child(
-                        div()
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border))
-                            .rounded(px(4.0))
-                            .child(
-                                SimpleInput::new(&path_input)
-                                    .text_size(px(12.0))
-                            )
-                    ),
+                    .child(path_input),
             )
             .child(
                 // Browse button
@@ -445,6 +440,49 @@ impl Sidebar {
                     ),
             )
             .child(
+                // Create without terminal checkbox
+                {
+                    let is_checked = self.create_without_terminal;
+                    div()
+                        .id("create-without-terminal")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .py(px(4.0))
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.create_without_terminal = !this.create_without_terminal;
+                            cx.notify();
+                        }))
+                        .child(
+                            // Checkbox
+                            div()
+                                .size(px(14.0))
+                                .rounded(px(2.0))
+                                .border_1()
+                                .border_color(rgb(t.border))
+                                .bg(if is_checked { rgb(t.border_active) } else { rgb(t.bg_secondary) })
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(is_checked, |d| {
+                                    d.child(
+                                        svg()
+                                            .path("icons/check.svg")
+                                            .size(px(10.0))
+                                            .text_color(rgb(0xffffff))
+                                    )
+                                })
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.text_secondary))
+                                .child("Create as bookmark (no terminal)")
+                        )
+                }
+            )
+            .child(
                 // Action buttons
                 div()
                     .flex()
@@ -464,6 +502,7 @@ impl Sidebar {
                             .child("Cancel")
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.show_add_dialog = false;
+                                this.create_without_terminal = false;
                                 if let Some(ref input) = this.name_input {
                                     input.update(cx, |i, cx| i.set_value("", cx));
                                 }
@@ -482,16 +521,95 @@ impl Sidebar {
                             .px(px(12.0))
                             .py(px(6.0))
                             .rounded(px(4.0))
-                            .bg(rgb(t.border_active))
-                            .hover(|s| s.bg(rgb(0x0078d4)))
+                            .bg(rgb(t.button_primary_bg))
+                            .hover(|s| s.bg(rgb(t.button_primary_hover)))
                             .text_size(px(12.0))
-                            .text_color(rgb(0xffffff))
+                            .text_color(rgb(t.button_primary_fg))
                             .child("Add")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
                     ),
             )
+    }
+
+    /// Render path auto-complete suggestions dropdown
+    fn render_path_suggestions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let path_input = match &self.path_input {
+            Some(input) => input.clone(),
+            None => return div().into_any_element(),
+        };
+
+        let state = path_input.read(cx);
+        let suggestions: Vec<_> = state.suggestions().to_vec();
+        let selected_index = state.selected_index();
+        let scroll_handle = state.suggestions_scroll().clone();
+
+        if suggestions.is_empty() {
+            return div().into_any_element();
+        }
+
+        div()
+            .absolute()
+            // Position below the path input (approximately)
+            // Header(35) + dialog margin(8) + padding(12) + title(20) + gap(8) + name section(48) + gap(8) + path section(48) + gap(4)
+            .top(px(191.0))
+            .left(px(20.0))
+            .right(px(20.0))
+            .id("path-suggestions-container")
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(4.0))
+            .shadow_xl()
+            .max_h(px(200.0))
+            .overflow_y_scroll()
+            .track_scroll(&scroll_handle)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .children(
+                        suggestions.iter().enumerate().map(|(i, suggestion)| {
+                            let is_selected = i == selected_index;
+                            let path_input = path_input.clone();
+
+                            div()
+                                .id(ElementId::Name(format!("path-suggestion-{}", i).into()))
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .cursor_pointer()
+                                .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    svg()
+                                        .path(if suggestion.is_directory { "icons/folder.svg" } else { "icons/file.svg" })
+                                        .size(px(14.0))
+                                        .text_color(if suggestion.is_directory {
+                                            rgb(t.border_active)
+                                        } else {
+                                            rgb(t.text_muted)
+                                        })
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(t.text_primary))
+                                        .child(suggestion.display_name.clone())
+                                )
+                                .on_click(move |_, _window, cx| {
+                                    path_input.update(cx, |state, cx| {
+                                        state.select_and_complete(i, cx);
+                                    });
+                                })
+                        })
+                    )
+            )
+            .into_any_element()
     }
 
     fn render_keybindings_hint(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -599,8 +717,11 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_ids = project.layout.collect_terminal_ids();
+        let terminal_ids = project.layout.as_ref()
+            .map(|l| l.collect_terminal_ids())
+            .unwrap_or_default();
         let terminal_count = terminal_ids.len();
+        let has_layout = project.layout.is_some();
 
         div()
             .flex()
@@ -736,15 +857,35 @@ impl Sidebar {
                         },
                     )
                     .child(
-                        // Terminal count badge
-                        div()
-                            .px(px(4.0))
-                            .py(px(1.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_muted))
-                            .child(format!("{}", terminal_count)),
+                        // Terminal count badge or bookmark indicator
+                        if has_layout {
+                            div()
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(t.bg_secondary))
+                                .text_size(px(10.0))
+                                .text_color(rgb(t.text_muted))
+                                .child(format!("{}", terminal_count))
+                                .into_any_element()
+                        } else {
+                            // Bookmark badge for terminal-less projects
+                            div()
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(t.bg_secondary))
+                                .flex()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(
+                                    svg()
+                                        .path("icons/bookmark.svg")
+                                        .size(px(10.0))
+                                        .text_color(rgb(t.text_muted))
+                                )
+                                .into_any_element()
+                        },
                     )
                     .child(
                         // Visibility toggle
@@ -849,7 +990,8 @@ impl Sidebar {
             let ws = self.workspace.read(cx);
             ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
                 if let Some(proj) = ws.project(&project_id) {
-                    proj.layout.find_terminal_path(&terminal_id_for_focus)
+                    proj.layout.as_ref()
+                        .and_then(|l| l.find_terminal_path(&terminal_id_for_focus))
                         .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
                 } else {
                     false
@@ -1065,6 +1207,11 @@ impl Render for Sidebar {
             .collect();
         let show_add_dialog = self.show_add_dialog;
 
+        // Check if we have suggestions to show (must be checked before dialog renders)
+        let has_suggestions = self.path_input.as_ref()
+            .map(|input| input.read(cx).has_suggestions())
+            .unwrap_or(false);
+
         div()
             .relative()
             .w_full()
@@ -1090,5 +1237,9 @@ impl Render for Sidebar {
                     ),
             )
             .child(self.render_keybindings_hint(cx))
+            // Path suggestions overlay - rendered LAST to appear on top of everything
+            .when(show_add_dialog && has_suggestions, |d| {
+                d.child(self.render_path_suggestions(cx))
+            })
     }
 }

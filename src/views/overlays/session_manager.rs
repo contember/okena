@@ -346,9 +346,10 @@ impl SessionManager {
                                 .px(px(10.0))
                                 .py(px(4.0))
                                 .rounded(px(4.0))
-                                .bg(rgb(t.border_active))
+                                .bg(rgb(t.button_primary_bg))
+                                .hover(|s| s.bg(rgb(t.button_primary_hover)))
                                 .text_size(px(12.0))
-                                .text_color(rgb(0xFFFFFF))
+                                .text_color(rgb(t.button_primary_fg))
                                 .child("Load")
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -431,9 +432,10 @@ impl SessionManager {
                                         .px(px(10.0))
                                         .py(px(4.0))
                                         .rounded(px(4.0))
-                                        .bg(rgb(t.border_active))
+                                        .bg(rgb(t.button_primary_bg))
+                                        .hover(|s| s.bg(rgb(t.button_primary_hover)))
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0xFFFFFF))
+                                        .text_color(rgb(t.button_primary_fg))
                                         .child("Save")
                                         .on_mouse_down(
                                             MouseButton::Left,
@@ -516,9 +518,10 @@ impl SessionManager {
                                     .px(px(12.0))
                                     .py(px(8.0))
                                     .rounded(px(4.0))
-                                    .bg(rgb(t.border_active))
+                                    .bg(rgb(t.button_primary_bg))
+                                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
                                     .text_size(px(13.0))
-                                    .text_color(rgb(0xFFFFFF))
+                                    .text_color(rgb(t.button_primary_fg))
                                     .child("Save Current")
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -615,9 +618,10 @@ impl SessionManager {
                                     .px(px(12.0))
                                     .py(px(8.0))
                                     .rounded(px(4.0))
-                                    .bg(rgb(t.border_active))
+                                    .bg(rgb(t.button_primary_bg))
+                                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
                                     .text_size(px(13.0))
-                                    .text_color(rgb(0xFFFFFF))
+                                    .text_color(rgb(t.button_primary_fg))
                                     .child("Export")
                                     .on_mouse_down(
                                         MouseButton::Left,

@@ -428,7 +428,7 @@ impl TerminalPane {
         let ws = self.workspace.read(cx);
         if let Some(project) = ws.project(&self.project_id) {
             if let Some(crate::workspace::state::LayoutNode::Tabs { .. }) =
-                project.layout.get_at_path(parent_path)
+                project.layout.as_ref().and_then(|l| l.get_at_path(parent_path))
             {
                 return true;
             }

@@ -219,7 +219,7 @@ impl LayoutContainer {
 
     fn get_layout<'a>(&self, workspace: &'a Workspace) -> Option<&'a LayoutNode> {
         let project = workspace.project(&self.project_id)?;
-        project.layout.get_at_path(&self.layout_path)
+        project.layout.as_ref()?.get_at_path(&self.layout_path)
     }
 
     /// Get the terminal_id for the active tab in this Tabs container.

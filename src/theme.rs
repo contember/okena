@@ -133,6 +133,11 @@ pub struct ThemeColors {
     pub warning: u32,
     #[allow(dead_code)] // Reserved for future status indicators
     pub error: u32,
+
+    // Button colors
+    pub button_primary_bg: u32,
+    pub button_primary_fg: u32,
+    pub button_primary_hover: u32,
 }
 
 /// Dark theme (VSCode-like)
@@ -193,6 +198,11 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     success: 0x4ec9b0,
     warning: 0xdcdcaa,
     error: 0xf44747,
+
+    // Button colors
+    button_primary_bg: 0x007acc,
+    button_primary_fg: 0xffffff,
+    button_primary_hover: 0x005a9e,
 };
 
 /// Light theme (VSCode Light-like)
@@ -253,6 +263,11 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     success: 0x008000,
     warning: 0x795e26,
     error: 0xa31515,
+
+    // Button colors
+    button_primary_bg: 0x007acc,
+    button_primary_fg: 0xffffff,
+    button_primary_hover: 0x005a9e,
 };
 
 /// Pastel Dark theme (Ghostty Builtin Pastel Dark)
@@ -268,7 +283,7 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     // Border colors - subtle but visible
     border: 0x404040,
     border_active: 0x96cbfe,
-    border_focused: 0x96cbfe,
+    border_focused: 0x4a4a4a,
     border_bell: 0xffa560,
 
     // Text colors
@@ -314,6 +329,11 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     success: 0xa8ff60,
     warning: 0xffffb6,
     error: 0xff6c60,
+
+    // Button colors - dark background with electric blue text
+    button_primary_bg: 0x1e3a5f,
+    button_primary_fg: 0x4db8ff,
+    button_primary_hover: 0x0d1520,
 };
 
 /// High Contrast theme for accessibility
@@ -374,6 +394,11 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     success: 0x00ff00,
     warning: 0xffff00,
     error: 0xff0000,
+
+    // Button colors
+    button_primary_bg: 0x0066cc,
+    button_primary_fg: 0xffffff,
+    button_primary_hover: 0x0055aa,
 };
 
 /// Global theme state
@@ -710,6 +735,14 @@ pub struct CustomThemeColors {
     pub warning: String,
     #[serde(default = "default_error")]
     pub error: String,
+
+    // Button colors
+    #[serde(default = "default_button_primary_bg")]
+    pub button_primary_bg: String,
+    #[serde(default = "default_button_primary_fg")]
+    pub button_primary_fg: String,
+    #[serde(default = "default_button_primary_hover")]
+    pub button_primary_hover: String,
 }
 
 // Default color functions for serde (based on dark theme)
@@ -754,6 +787,9 @@ fn default_scrollbar_hover() -> String { "#7a7a7a".to_string() }
 fn default_success() -> String { "#4ec9b0".to_string() }
 fn default_warning() -> String { "#dcdcaa".to_string() }
 fn default_error() -> String { "#f44747".to_string() }
+fn default_button_primary_bg() -> String { "#007acc".to_string() }
+fn default_button_primary_fg() -> String { "#ffffff".to_string() }
+fn default_button_primary_hover() -> String { "#005a9e".to_string() }
 
 impl CustomThemeColors {
     /// Parse a hex color string (e.g., "#1e1e1e" or "1e1e1e") to u32
@@ -806,6 +842,9 @@ impl CustomThemeColors {
             success: Self::parse_hex(&self.success),
             warning: Self::parse_hex(&self.warning),
             error: Self::parse_hex(&self.error),
+            button_primary_bg: Self::parse_hex(&self.button_primary_bg),
+            button_primary_fg: Self::parse_hex(&self.button_primary_fg),
+            button_primary_hover: Self::parse_hex(&self.button_primary_hover),
         }
     }
 }
@@ -877,6 +916,9 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 success: "#a8ff60".to_string(),
                 warning: "#ffffb6".to_string(),
                 error: "#ff6c60".to_string(),
+                button_primary_bg: "#1e3a5f".to_string(),
+                button_primary_fg: "#4db8ff".to_string(),
+                button_primary_hover: "#0d1520".to_string(),
             },
         };
 

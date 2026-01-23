@@ -106,7 +106,8 @@ impl FullscreenTerminal {
     fn get_project_terminals(&self, cx: &Context<Self>) -> Vec<String> {
         let ws = self.workspace.read(cx);
         ws.project(&self.project_id)
-            .map(|p| p.layout.collect_terminal_ids())
+            .and_then(|p| p.layout.as_ref())
+            .map(|l| l.collect_terminal_ids())
             .unwrap_or_default()
     }
 
