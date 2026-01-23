@@ -1,3 +1,4 @@
+use crate::theme::FolderColor;
 use crate::workspace::focus::FocusManager;
 use gpui::*;
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,9 @@ pub struct ProjectData {
     /// Optional worktree metadata (only set for worktree projects)
     #[serde(default)]
     pub worktree_info: Option<WorktreeMetadata>,
+    /// Folder icon color for this project
+    #[serde(default)]
+    pub folder_color: FolderColor,
 }
 
 use crate::terminal::shell_config::ShellType;

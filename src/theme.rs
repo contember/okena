@@ -22,6 +22,37 @@ pub enum ThemeMode {
     Custom,
 }
 
+/// Folder color options for projects
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FolderColor {
+    #[default]
+    Default,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl FolderColor {
+    /// Get all folder color variants for UI
+    pub fn all() -> &'static [FolderColor] {
+        &[
+            FolderColor::Default,
+            FolderColor::Red,
+            FolderColor::Orange,
+            FolderColor::Yellow,
+            FolderColor::Green,
+            FolderColor::Blue,
+            FolderColor::Purple,
+            FolderColor::Pink,
+        ]
+    }
+}
+
 /// Available built-in themes
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeInfo {
@@ -138,6 +169,16 @@ pub struct ThemeColors {
     pub button_primary_bg: u32,
     pub button_primary_fg: u32,
     pub button_primary_hover: u32,
+
+    // Folder colors (8 distinct colors for project folders)
+    pub folder_default: u32,
+    pub folder_red: u32,
+    pub folder_orange: u32,
+    pub folder_yellow: u32,
+    pub folder_green: u32,
+    pub folder_blue: u32,
+    pub folder_purple: u32,
+    pub folder_pink: u32,
 }
 
 /// Dark theme (VSCode-like)
@@ -203,6 +244,16 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     button_primary_bg: 0x007acc,
     button_primary_fg: 0xffffff,
     button_primary_hover: 0x005a9e,
+
+    // Folder colors (distinct colors for project folders)
+    folder_default: 0x8a9199,  // Gray/steel - neutral default
+    folder_red: 0xe06c75,
+    folder_orange: 0xd19a66,
+    folder_yellow: 0xe5c07b,
+    folder_green: 0x98c379,
+    folder_blue: 0x61afef,     // Vibrant blue
+    folder_purple: 0xc678dd,
+    folder_pink: 0xe06c9f,
 };
 
 /// Light theme (VSCode Light-like)
@@ -268,6 +319,16 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     button_primary_bg: 0x007acc,
     button_primary_fg: 0xffffff,
     button_primary_hover: 0x005a9e,
+
+    // Folder colors (distinct colors for project folders)
+    folder_default: 0x6a737d,  // Gray - neutral default
+    folder_red: 0xd73a49,
+    folder_orange: 0xe36209,
+    folder_yellow: 0xb08800,
+    folder_green: 0x22863a,
+    folder_blue: 0x0366d6,     // Vibrant blue
+    folder_purple: 0x6f42c1,
+    folder_pink: 0xdb2777,
 };
 
 /// Pastel Dark theme (Ghostty Builtin Pastel Dark)
@@ -334,6 +395,16 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     button_primary_bg: 0x1e3a5f,
     button_primary_fg: 0x4db8ff,
     button_primary_hover: 0x0d1520,
+
+    // Folder colors (distinct colors for project folders)
+    folder_default: 0xa9b1d6,  // Lavender gray - neutral default
+    folder_red: 0xf7768e,
+    folder_orange: 0xff9e64,
+    folder_yellow: 0xe0af68,
+    folder_green: 0x9ece6a,
+    folder_blue: 0x7dcfff,     // Bright cyan-blue
+    folder_purple: 0xbb9af7,
+    folder_pink: 0xf472b6,
 };
 
 /// High Contrast theme for accessibility
@@ -399,6 +470,16 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     button_primary_bg: 0x0066cc,
     button_primary_fg: 0xffffff,
     button_primary_hover: 0x0055aa,
+
+    // Folder colors (distinct colors for project folders)
+    folder_default: 0xcccccc,  // Silver/gray - neutral default
+    folder_red: 0xff5555,
+    folder_orange: 0xffaa00,
+    folder_yellow: 0xffff00,
+    folder_green: 0x55ff55,
+    folder_blue: 0x55aaff,     // Bright blue
+    folder_purple: 0xff55ff,
+    folder_pink: 0xff77aa,
 };
 
 /// Global theme state
@@ -520,6 +601,20 @@ impl ThemeColors {
             ((hex >> 8) & 0xFF) as u8,
             (hex & 0xFF) as u8,
         )
+    }
+
+    /// Get the actual color value for a folder color option
+    pub fn get_folder_color(&self, color: FolderColor) -> u32 {
+        match color {
+            FolderColor::Default => self.folder_default,
+            FolderColor::Red => self.folder_red,
+            FolderColor::Orange => self.folder_orange,
+            FolderColor::Yellow => self.folder_yellow,
+            FolderColor::Green => self.folder_green,
+            FolderColor::Blue => self.folder_blue,
+            FolderColor::Purple => self.folder_purple,
+            FolderColor::Pink => self.folder_pink,
+        }
     }
 
     /// Get terminal color by ANSI name
@@ -743,6 +838,24 @@ pub struct CustomThemeColors {
     pub button_primary_fg: String,
     #[serde(default = "default_button_primary_hover")]
     pub button_primary_hover: String,
+
+    // Folder colors
+    #[serde(default = "default_folder_default")]
+    pub folder_default: String,
+    #[serde(default = "default_folder_red")]
+    pub folder_red: String,
+    #[serde(default = "default_folder_orange")]
+    pub folder_orange: String,
+    #[serde(default = "default_folder_yellow")]
+    pub folder_yellow: String,
+    #[serde(default = "default_folder_green")]
+    pub folder_green: String,
+    #[serde(default = "default_folder_blue")]
+    pub folder_blue: String,
+    #[serde(default = "default_folder_purple")]
+    pub folder_purple: String,
+    #[serde(default = "default_folder_pink")]
+    pub folder_pink: String,
 }
 
 // Default color functions for serde (based on dark theme)
@@ -790,6 +903,14 @@ fn default_error() -> String { "#f44747".to_string() }
 fn default_button_primary_bg() -> String { "#007acc".to_string() }
 fn default_button_primary_fg() -> String { "#ffffff".to_string() }
 fn default_button_primary_hover() -> String { "#005a9e".to_string() }
+fn default_folder_default() -> String { "#8a9199".to_string() }
+fn default_folder_red() -> String { "#e06c75".to_string() }
+fn default_folder_orange() -> String { "#d19a66".to_string() }
+fn default_folder_yellow() -> String { "#e5c07b".to_string() }
+fn default_folder_green() -> String { "#98c379".to_string() }
+fn default_folder_blue() -> String { "#61afef".to_string() }
+fn default_folder_purple() -> String { "#c678dd".to_string() }
+fn default_folder_pink() -> String { "#e06c9f".to_string() }
 
 impl CustomThemeColors {
     /// Parse a hex color string (e.g., "#1e1e1e" or "1e1e1e") to u32
@@ -845,6 +966,14 @@ impl CustomThemeColors {
             button_primary_bg: Self::parse_hex(&self.button_primary_bg),
             button_primary_fg: Self::parse_hex(&self.button_primary_fg),
             button_primary_hover: Self::parse_hex(&self.button_primary_hover),
+            folder_default: Self::parse_hex(&self.folder_default),
+            folder_red: Self::parse_hex(&self.folder_red),
+            folder_orange: Self::parse_hex(&self.folder_orange),
+            folder_yellow: Self::parse_hex(&self.folder_yellow),
+            folder_green: Self::parse_hex(&self.folder_green),
+            folder_blue: Self::parse_hex(&self.folder_blue),
+            folder_purple: Self::parse_hex(&self.folder_purple),
+            folder_pink: Self::parse_hex(&self.folder_pink),
         }
     }
 }
@@ -919,6 +1048,14 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 button_primary_bg: "#1e3a5f".to_string(),
                 button_primary_fg: "#4db8ff".to_string(),
                 button_primary_hover: "#0d1520".to_string(),
+                folder_default: "#a9b1d6".to_string(),
+                folder_red: "#f7768e".to_string(),
+                folder_orange: "#ff9e64".to_string(),
+                folder_yellow: "#e0af68".to_string(),
+                folder_green: "#9ece6a".to_string(),
+                folder_blue: "#7dcfff".to_string(),
+                folder_purple: "#bb9af7".to_string(),
+                folder_pink: "#f472b6".to_string(),
             },
         };
 

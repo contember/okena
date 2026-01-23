@@ -1,6 +1,6 @@
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
-use crate::theme::ThemeMode;
+use crate::theme::{FolderColor, ThemeMode};
 use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -434,6 +434,7 @@ pub fn default_workspace() -> WorkspaceData {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            folder_color: FolderColor::default(),
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
