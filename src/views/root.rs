@@ -8,7 +8,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::open_settings_file;
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -47,6 +47,8 @@ pub struct RootView {
     fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
     /// Currently displayed fullscreen state (to detect changes)
     fullscreen_state: Option<(String, String)>,
+    /// Focus handle for capturing global keybindings
+    focus_handle: FocusHandle,
 }
 
 impl RootView {
@@ -77,6 +79,9 @@ impl RootView {
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
+        // Create focus handle for global keybindings
+        let focus_handle = cx.focus_handle();
+
         let mut view = Self {
             workspace,
             pty_manager,
@@ -90,6 +95,7 @@ impl RootView {
             overlay_manager,
             fullscreen_terminal: None,
             fullscreen_state: None,
+            focus_handle,
         };
 
         // Initialize project columns
@@ -143,6 +149,17 @@ impl RootView {
             OverlayManagerEvent::DeleteProject { project_id } => {
                 self.workspace.update(cx, |ws, cx| {
                     ws.delete_project(project_id, cx);
+                });
+            }
+            OverlayManagerEvent::FocusProject(project_id) => {
+                self.workspace.update(cx, |ws, cx| {
+                    // Focus the project (like clicking on it in sidebar)
+                    ws.set_focused_project(Some(project_id.clone()), cx);
+                });
+            }
+            OverlayManagerEvent::ToggleProjectVisibility(project_id) => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_project_visibility(project_id, cx);
                 });
             }
         }
@@ -580,7 +597,7 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
         // Sync fullscreen entity with workspace state (creates entity only when state changes)
@@ -602,6 +619,7 @@ impl Render for RootView {
         let has_theme_selector = om.has_theme_selector();
         let has_command_palette = om.has_command_palette();
         let has_settings_panel = om.has_settings_panel();
+        let has_project_switcher = om.has_project_switcher();
         let has_shell_selector = om.has_shell_selector();
         let has_worktree_dialog = om.has_worktree_dialog();
         let has_context_menu = om.has_context_menu();
@@ -624,12 +642,20 @@ impl Render for RootView {
         // Clone overlay_manager for action handlers
         let overlay_manager = self.overlay_manager.clone();
 
+        let focus_handle = self.focus_handle.clone();
+
+        // Focus root if nothing else is focused (allows global keybindings to work)
+        if window.focused(cx).is_none() {
+            window.focus(&focus_handle, cx);
+        }
+
         div()
             .id("root")
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(t.bg_primary))
+            .track_focus(&focus_handle)
             // Global mouse move handler for resize and auto-hide
             .on_mouse_move(cx.listener({
                 let active_drag = active_drag.clone();
@@ -755,6 +781,13 @@ impl Render for RootView {
                     }
                 }
             }))
+            // Handle show project switcher action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowProjectSwitcher, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_project_switcher(cx));
+                }
+            }))
             // Title bar at the top (with window controls)
             .child(self.title_bar.clone())
             // Main content area
@@ -866,6 +899,10 @@ impl Render for RootView {
             .when(has_settings_panel, |d| {
                 d.children(self.overlay_manager.read(cx).render_settings_panel())
             })
+            // Project switcher overlay (renders on top of everything)
+            .when(has_project_switcher, |d| {
+                d.children(self.overlay_manager.read(cx).render_project_switcher())
+            })
             // Shell selector overlay (renders on top of everything)
             .when(has_shell_selector, |d| {
                 d.children(self.overlay_manager.read(cx).render_shell_selector())
@@ -904,3 +941,5 @@ impl Render for RootView {
             })
     }
 }
+
+impl_focusable!(RootView);

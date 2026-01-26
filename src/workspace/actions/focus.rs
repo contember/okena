@@ -7,11 +7,47 @@ use gpui::*;
 
 impl Workspace {
     /// Set focused project (focus mode)
+    ///
+    /// This also focuses the first terminal in the project if one exists.
     pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
-        self.focused_project_id = project_id;
+        self.focused_project_id = project_id.clone();
         // Exit fullscreen when changing focus
         self.fullscreen_terminal = None;
+
+        // Focus the first terminal in the project
+        if let Some(ref pid) = project_id {
+            if let Some(project) = self.project(pid) {
+                if let Some(ref layout) = project.layout {
+                    // Find the first terminal's path
+                    if let Some(first_path) = Self::find_first_terminal_path(layout) {
+                        self.focus_manager.focus_terminal(pid.clone(), first_path.clone());
+                        self.focused_terminal = Some(FocusedTerminalState {
+                            project_id: pid.clone(),
+                            layout_path: first_path,
+                        });
+                    }
+                }
+            }
+        }
+
         cx.notify();
+    }
+
+    /// Find the path to the first terminal in a layout tree
+    fn find_first_terminal_path(node: &crate::workspace::state::LayoutNode) -> Option<Vec<usize>> {
+        use crate::workspace::state::LayoutNode;
+        match node {
+            LayoutNode::Terminal { .. } => Some(vec![]),
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    if let Some(mut path) = Self::find_first_terminal_path(child) {
+                        path.insert(0, i);
+                        return Some(path);
+                    }
+                }
+                None
+            }
+        }
     }
 
     /// Enter fullscreen mode for a terminal
@@ -105,6 +141,9 @@ impl Workspace {
     ) {
         // Update FocusManager
         self.focus_manager.focus_terminal(project_id.clone(), layout_path.clone());
+
+        // Record project access time for recency sorting
+        self.touch_project(&project_id);
 
         // Update legacy state for compatibility
         self.focused_terminal = Some(FocusedTerminalState {

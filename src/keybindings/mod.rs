@@ -49,6 +49,7 @@ actions!(
         ShowSettings,
         OpenSettingsFile,
         ShowFileSearch,
+        ShowProjectSwitcher,
         SendTab,
         SendBacktab,
     ]
@@ -180,6 +181,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
         "OpenSettingsFile" => Some(KeyBinding::new(keystroke, OpenSettingsFile, context)),
         "ShowFileSearch" => Some(KeyBinding::new(keystroke, ShowFileSearch, context)),
+        "ShowProjectSwitcher" => Some(KeyBinding::new(keystroke, ShowProjectSwitcher, context)),
         "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);

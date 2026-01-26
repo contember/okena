@@ -160,6 +160,8 @@ pub struct Workspace {
     pub shell_selector_request: Option<ShellSelectorRequest>,
     /// Pending request to rename a project
     pub pending_project_rename: Option<ProjectRenameRequest>,
+    /// Last access time for each project (for sorting in project switcher)
+    pub project_access_times: HashMap<String, std::time::Instant>,
 }
 
 impl Workspace {
@@ -175,7 +177,29 @@ impl Workspace {
             context_menu_request: None,
             shell_selector_request: None,
             pending_project_rename: None,
+            project_access_times: HashMap::new(),
         }
+    }
+
+    /// Record that a project was accessed (for sorting by recency)
+    pub fn touch_project(&mut self, project_id: &str) {
+        self.project_access_times.insert(project_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Get projects sorted by last access time (most recent first)
+    pub fn projects_by_recency(&self) -> Vec<&ProjectData> {
+        let mut projects: Vec<&ProjectData> = self.data.projects.iter().collect();
+        projects.sort_by(|a, b| {
+            let time_a = self.project_access_times.get(&a.id);
+            let time_b = self.project_access_times.get(&b.id);
+            match (time_a, time_b) {
+                (Some(ta), Some(tb)) => tb.cmp(ta), // Most recent first
+                (Some(_), None) => std::cmp::Ordering::Less, // Accessed projects first
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        });
+        projects
     }
 
     pub fn projects(&self) -> &[ProjectData] {

@@ -13,7 +13,7 @@ use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
-use crate::views::overlays::{ShellSelectorOverlay, ShellSelectorOverlayEvent};
+use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
@@ -183,6 +183,12 @@ pub enum OverlayManagerEvent {
 
     /// Context menu: Delete project
     DeleteProject { project_id: String },
+
+    /// Project switcher: Focus a specific project
+    FocusProject(String),
+
+    /// Project switcher: Toggle project visibility
+    ToggleProjectVisibility(String),
 }
 
 /// Centralized overlay manager that handles all modal overlays.
@@ -198,6 +204,7 @@ pub struct OverlayManager {
     theme_selector: OverlaySlot<ThemeSelector>,
     command_palette: OverlaySlot<CommandPalette>,
     settings_panel: OverlaySlot<SettingsPanel>,
+    project_switcher: OverlaySlot<ProjectSwitcher>,
 
     // Parametric overlays
     shell_selector: OverlaySlot<ShellSelectorOverlay>,
@@ -219,6 +226,7 @@ impl OverlayManager {
             theme_selector: OverlaySlot::new(),
             command_palette: OverlaySlot::new(),
             settings_panel: OverlaySlot::new(),
+            project_switcher: OverlaySlot::new(),
             shell_selector: OverlaySlot::new(),
             worktree_dialog: None,
             context_menu: None,
@@ -255,6 +263,11 @@ impl OverlayManager {
     /// Check if settings panel is open.
     pub fn has_settings_panel(&self) -> bool {
         self.settings_panel.is_open()
+    }
+
+    /// Check if project switcher is open.
+    pub fn has_project_switcher(&self) -> bool {
+        self.project_switcher.is_open()
     }
 
     /// Check if shell selector is open.
@@ -304,6 +317,42 @@ impl OverlayManager {
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
+    }
+
+    /// Toggle project switcher overlay.
+    pub fn toggle_project_switcher(&mut self, cx: &mut Context<Self>) {
+        if self.project_switcher.is_open() {
+            self.project_switcher.close();
+            // Restore focus after closing
+            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| ProjectSwitcher::new(workspace, cx));
+            cx.subscribe(&entity, |this, _, event: &ProjectSwitcherEvent, cx| {
+                match event {
+                    ProjectSwitcherEvent::Close => {
+                        this.project_switcher.close();
+                        this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                        cx.notify();
+                    }
+                    ProjectSwitcherEvent::FocusProject(project_id) => {
+                        this.project_switcher.close();
+                        cx.emit(OverlayManagerEvent::FocusProject(project_id.clone()));
+                        this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                        cx.notify();
+                    }
+                    ProjectSwitcherEvent::ToggleVisibility(project_id) => {
+                        cx.emit(OverlayManagerEvent::ToggleProjectVisibility(project_id.clone()));
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+            self.project_switcher.set(entity);
+            // Clear focus during modal
+            self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        }
+        cx.notify();
     }
 
     // ========================================================================
@@ -596,6 +645,11 @@ impl OverlayManager {
     /// Get settings panel entity for rendering.
     pub fn render_settings_panel(&self) -> Option<Entity<SettingsPanel>> {
         self.settings_panel.render()
+    }
+
+    /// Get project switcher entity for rendering.
+    pub fn render_project_switcher(&self) -> Option<Entity<ProjectSwitcher>> {
+        self.project_switcher.render()
     }
 
     /// Get shell selector entity for rendering.

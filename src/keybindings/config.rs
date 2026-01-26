@@ -360,6 +360,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             category: "Global",
         },
     );
+    map.insert(
+        "ShowProjectSwitcher",
+        ActionDescription {
+            name: "Switch Project",
+            description: "Quick project navigation (Enter=focus, Space=toggle visibility)",
+            category: "Global",
+        },
+    );
 
     map
 }
@@ -458,6 +466,13 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-p", None),
                 KeybindingEntry::new("ctrl-p", None),
+            ],
+        );
+        bindings.insert(
+            "ShowProjectSwitcher".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-e", None),
+                KeybindingEntry::new("ctrl-e", None),
             ],
         );
 
