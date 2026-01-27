@@ -250,6 +250,7 @@ impl FileSearchDialog {
 
         div()
             .id(ElementId::Name(format!("file-{}", filtered_index).into()))
+            .w_full()
             .cursor_pointer()
             .flex()
             .items_center()
@@ -281,17 +282,15 @@ impl FileSearchDialog {
                             .text_ellipsis()
                             .child(filename),
                     )
-                    .when(!dir_path.is_empty(), |d| {
-                        d.child(
-                            // Directory path
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(t.text_muted))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(dir_path),
-                        )
-                    }),
+                    .child(
+                        // Directory path (always rendered for uniform height)
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_muted))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(if dir_path.is_empty() { "\u{00A0}".to_string() } else { dir_path }),
+                    ),
             )
     }
 }
@@ -376,7 +375,7 @@ impl Render for FileSearchDialog {
             .child(
                 modal_content("file-search-modal", &t)
                     .w(px(650.0))
-                    .max_h(px(550.0))
+                    .h(px(550.0))
                     .child(modal_header(
                         "Go to File",
                         Some(format!("Searching in {}", project_name)),
