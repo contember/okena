@@ -2,7 +2,7 @@ use crate::theme::{
     get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{badge, modal_backdrop, modal_content, modal_header};
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
 use gpui::prelude::*;
@@ -308,16 +308,7 @@ impl ThemeSelector {
                                     .child(name),
                             )
                             .when(is_custom, |d| {
-                                d.child(
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded(px(3.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .text_size(px(9.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("Custom"),
-                                )
+                                d.child(badge("Custom", &t))
                             })
                             .when(is_selected, |d| {
                                 d.child(

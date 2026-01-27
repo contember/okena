@@ -7,6 +7,7 @@ use crate::keybindings::{
     Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
 };
 use crate::theme::{theme, with_alpha};
+use crate::views::components::{badge, keyboard_hints_footer, search_input_area};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -202,16 +203,7 @@ impl CommandPalette {
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
                             )
-                            .child(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(1.0))
-                                    .rounded(px(3.0))
-                                    .bg(rgb(t.bg_secondary))
-                                    .text_size(px(9.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(category),
-                            ),
+                            .child(badge(category, &t)),
                     )
                     .child(
                         div()
@@ -329,38 +321,7 @@ impl Render for CommandPalette {
                     .flex()
                     .flex_col()
                     .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(
-                        // Search input area
-                        div()
-                            .px(px(12.0))
-                            .py(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(">"),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(14.0))
-                                    .text_color(if search_query.is_empty() {
-                                        rgb(t.text_muted)
-                                    } else {
-                                        rgb(t.text_primary)
-                                    })
-                                    .child(if search_query.is_empty() {
-                                        "Type to search commands...".to_string()
-                                    } else {
-                                        search_query
-                                    }),
-                            ),
-                    )
+                    .child(search_input_area(&search_query, "Type to search commands...", &t))
                     .child(
                         // Command list
                         div()
@@ -385,61 +346,7 @@ impl Render for CommandPalette {
                                 )
                             }),
                     )
-                    .child(
-                        // Footer with hints
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .border_t_1()
-                            .border_color(rgb(t.border))
-                            .flex()
-                            .items_center()
-                            .gap(px(16.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Enter"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("to select"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Esc"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("to close"),
-                                    ),
-                            ),
-                    ),
+                    .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
             )
     }
 }

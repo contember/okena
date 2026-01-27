@@ -4,7 +4,7 @@
 //! similar to VS Code's Cmd+P file picker.
 
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{modal_backdrop, modal_content, modal_header, keyboard_hint, search_input_area};
 use gpui::*;
 use gpui::prelude::*;
 use std::path::PathBuf;
@@ -516,38 +516,7 @@ impl Render for FileSearchDialog {
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(
-                        // Search input area
-                        div()
-                            .px(px(12.0))
-                            .py(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(">"),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(14.0))
-                                    .text_color(if search_query.is_empty() {
-                                        rgb(t.text_muted)
-                                    } else {
-                                        rgb(t.text_primary)
-                                    })
-                                    .child(if search_query.is_empty() {
-                                        "Type to search files...".to_string()
-                                    } else {
-                                        search_query
-                                    }),
-                            ),
-                    )
+                    .child(search_input_area(&search_query, "Type to search files...", &t))
                     .child(if filtered_files.is_empty() {
                         div()
                             .flex_1()
@@ -600,50 +569,8 @@ impl Render for FileSearchDialog {
                                     .flex()
                                     .items_center()
                                     .gap(px(16.0))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .px(px(4.0))
-                                                    .py(px(1.0))
-                                                    .rounded(px(3.0))
-                                                    .bg(rgb(t.bg_secondary))
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child("Enter"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child("to open"),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .px(px(4.0))
-                                                    .py(px(1.0))
-                                                    .rounded(px(3.0))
-                                                    .bg(rgb(t.bg_secondary))
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child("Esc"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child("to close"),
-                                            ),
-                                    ),
+                                    .child(keyboard_hint("Enter", "to open", &t))
+                                    .child(keyboard_hint("Esc", "to close", &t)),
                             )
                             .child(
                                 div()

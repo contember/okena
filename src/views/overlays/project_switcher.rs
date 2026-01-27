@@ -6,7 +6,7 @@
 //! - Type to filter projects
 
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{badge, modal_backdrop, modal_content, modal_header, keyboard_hints_footer, search_input_area};
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -175,16 +175,7 @@ impl ProjectSwitcher {
                                     .child(name),
                             )
                             .when(is_worktree, |d| {
-                                d.child(
-                                    div()
-                                        .px(px(5.0))
-                                        .py(px(1.0))
-                                        .rounded(px(3.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .text_size(px(9.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child("worktree"),
-                                )
+                                d.child(badge("worktree", &t))
                             }),
                     )
                     .child(
@@ -292,38 +283,7 @@ impl Render for ProjectSwitcher {
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(
-                        // Search input display
-                        div()
-                            .px(px(12.0))
-                            .py(px(10.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(">"),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(14.0))
-                                    .text_color(if search_query.is_empty() {
-                                        rgb(t.text_muted)
-                                    } else {
-                                        rgb(t.text_primary)
-                                    })
-                                    .child(if search_query.is_empty() {
-                                        "Type to filter projects...".to_string()
-                                    } else {
-                                        search_query
-                                    }),
-                            ),
-                    )
+                    .child(search_input_area(&search_query, "Type to filter projects...", &t))
                     .child(
                         // Project list
                         div()
@@ -347,83 +307,7 @@ impl Render for ProjectSwitcher {
                                 )
                             }),
                     )
-                    .child(
-                        // Footer with keyboard hints
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .border_t_1()
-                            .border_color(rgb(t.border))
-                            .flex()
-                            .items_center()
-                            .gap(px(16.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Enter"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("focus"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Space"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("toggle visibility"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .px(px(4.0))
-                                            .py(px(1.0))
-                                            .rounded(px(3.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Esc"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("close"),
-                                    ),
-                            ),
-                    ),
+                    .child(keyboard_hints_footer(&[("Enter", "focus"), ("Space", "toggle visibility"), ("Esc", "close")], &t)),
             )
     }
 }
