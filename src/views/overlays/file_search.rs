@@ -9,6 +9,14 @@ use gpui::*;
 use gpui::prelude::*;
 use std::path::PathBuf;
 
+/// Binary/non-openable file extensions that get pushed to the bottom of results.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp",
+    "mp3", "mp4", "wav", "avi", "mov",
+    "zip", "tar", "gz", "rar", "7z",
+    "pdf", "woff", "woff2", "ttf", "eot", "exe", "bin",
+];
+
 /// Maximum number of files to scan
 const MAX_FILES: usize = 10000;
 
@@ -67,7 +75,7 @@ pub struct FileSearchDialog {
     scroll_handle: UniformListScrollHandle,
     search_query: String,
     files: Vec<FileEntry>,
-    filtered_files: Vec<usize>,
+    filtered_files: Vec<(usize, Vec<usize>)>,
     selected_index: usize,
     project_path: PathBuf,
 }
@@ -80,7 +88,7 @@ impl FileSearchDialog {
 
         // Scan files in the project
         let files = Self::scan_files(&project_path);
-        let filtered_files: Vec<usize> = (0..files.len()).collect();
+        let filtered_files: Vec<(usize, Vec<usize>)> = (0..files.len()).map(|i| (i, vec![])).collect();
 
         Self {
             focus_handle,
@@ -177,7 +185,7 @@ impl FileSearchDialog {
 
     /// Open the currently selected file.
     fn open_selected(&self, cx: &mut Context<Self>) {
-        if let Some(&file_index) = self.filtered_files.get(self.selected_index) {
+        if let Some(&(file_index, _)) = self.filtered_files.get(self.selected_index) {
             let file = &self.files[file_index];
             cx.emit(FileSearchDialogEvent::FileSelected(file.path.clone()));
         }
@@ -190,62 +198,190 @@ impl FileSearchDialog {
         }
     }
 
-    /// Filter files based on the search query using fuzzy matching.
+    /// Filter files based on the search query using fuzzy matching with scoring.
     fn filter_files(&mut self) {
         let query = self.search_query.to_lowercase();
 
         if query.is_empty() {
-            self.filtered_files = (0..self.files.len()).collect();
+            self.filtered_files = (0..self.files.len()).map(|i| (i, vec![])).collect();
         } else {
-            // Simple fuzzy matching: check if all query characters appear in order
-            self.filtered_files = self.files
+            let mut scored: Vec<(usize, i32, Vec<usize>)> = self.files
                 .iter()
                 .enumerate()
-                .filter(|(_, file)| {
-                    Self::fuzzy_match(&file.relative_path.to_lowercase(), &query)
+                .filter_map(|(i, file)| {
+                    let text = file.relative_path.to_lowercase();
+                    Self::fuzzy_score(&text, &query, &file.filename, &file.relative_path)
+                        .map(|(score, positions)| (i, score, positions))
                 })
-                .map(|(i, _)| i)
                 .collect();
+
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_files = scored.into_iter().map(|(i, _, pos)| (i, pos)).collect();
         }
 
-        // Reset selection to first item
         self.selected_index = 0;
     }
 
-    /// Simple fuzzy matching: all query characters must appear in order.
-    fn fuzzy_match(text: &str, query: &str) -> bool {
-        let mut text_chars = text.chars().peekable();
+    /// Fuzzy match with scoring. Returns (score, matched_byte_positions) or None.
+    fn fuzzy_score(text: &str, query: &str, filename: &str, relative_path: &str) -> Option<(i32, Vec<usize>)> {
+        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
+        let query_chars: Vec<char> = query.chars().collect();
 
-        for query_char in query.chars() {
-            loop {
-                match text_chars.next() {
-                    Some(text_char) if text_char == query_char => break,
-                    Some(_) => continue,
-                    None => return false,
+        if query_chars.is_empty() {
+            return Some((0, vec![]));
+        }
+
+        // Find match positions greedily
+        let mut positions = Vec::with_capacity(query_chars.len());
+        let mut text_idx = 0;
+        for &qc in &query_chars {
+            let mut found = false;
+            while text_idx < text_bytes.len() {
+                if text_bytes[text_idx].1 == qc {
+                    positions.push(text_bytes[text_idx].0);
+                    text_idx += 1;
+                    found = true;
+                    break;
+                }
+                text_idx += 1;
+            }
+            if !found {
+                return None;
+            }
+        }
+
+        // Calculate score
+        let mut score: i32 = 0;
+
+        // Consecutive matches bonus
+        for w in positions.windows(2) {
+            // Check if positions are adjacent in the original text
+            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0]).unwrap();
+            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1]).unwrap();
+            if p1_text_idx == p0_text_idx + 1 {
+                score += 5;
+            } else {
+                // Gap penalty
+                score -= (p1_text_idx - p0_text_idx - 1) as i32;
+            }
+        }
+
+        // Start-of-word bonus
+        let word_separators = ['/', '.', '-', '_', '\\'];
+        for &pos in &positions {
+            if pos == 0 {
+                score += 10;
+            } else {
+                let prev_char = text[..pos].chars().last().unwrap();
+                if word_separators.contains(&prev_char) {
+                    score += 10;
                 }
             }
         }
 
-        true
+        // Filename match bonus: matches in the filename portion score higher
+        let filename_lower = filename.to_lowercase();
+        let filename_start = if text.len() >= filename_lower.len() {
+            text.len() - filename_lower.len()
+        } else {
+            0
+        };
+        for &pos in &positions {
+            if pos >= filename_start {
+                score += 20;
+            }
+        }
+
+        // Shorter path bonus
+        score -= (relative_path.len() / 10) as i32;
+
+        // Binary extension penalty
+        if let Some(ext) = std::path::Path::new(relative_path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            if BINARY_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                score -= 1000;
+            }
+        }
+
+        Some((score, positions))
+    }
+
+    /// Build a `StyledText` with highlighted match positions.
+    fn styled_text_with_highlights(
+        text: &str,
+        positions: &[usize],
+        accent_color: u32,
+    ) -> StyledText {
+        let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = positions
+            .iter()
+            .filter_map(|&pos| {
+                // Find the byte length of the char at this position
+                let ch = text.get(pos..)?.chars().next()?;
+                Some((
+                    pos..pos + ch.len_utf8(),
+                    HighlightStyle {
+                        color: Some(rgb(accent_color).into()),
+                        font_weight: Some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                ))
+            })
+            .collect();
+
+        StyledText::new(text.to_string()).with_highlights(highlights)
     }
 
     /// Render a single file row.
-    fn render_file_row(&self, filtered_index: usize, file_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_file_row(
+        &self,
+        filtered_index: usize,
+        file_index: usize,
+        match_positions: &[usize],
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let file = &self.files[file_index];
         let is_selected = filtered_index == self.selected_index;
 
-        let filename = file.filename.clone();
-        let relative_path = file.relative_path.clone();
+        let filename = &file.filename;
+        let relative_path = &file.relative_path;
 
         // Get directory portion of the path
         let dir_path = if relative_path.contains('/') || relative_path.contains('\\') {
-            let path = std::path::Path::new(&relative_path);
+            let path = std::path::Path::new(relative_path.as_str());
             path.parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default()
         } else {
             String::new()
+        };
+
+        // Split match positions into dir vs filename ranges
+        let filename_start = if relative_path.len() >= filename.len() {
+            relative_path.len() - filename.len()
+        } else {
+            0
+        };
+
+        let dir_positions: Vec<usize> = match_positions
+            .iter()
+            .filter(|&&p| p < filename_start)
+            .copied()
+            .collect();
+
+        let filename_positions: Vec<usize> = match_positions
+            .iter()
+            .filter(|&&p| p >= filename_start)
+            .map(|&p| p - filename_start)
+            .collect();
+
+        let filename_element = Self::styled_text_with_highlights(filename, &filename_positions, t.border_active);
+        let dir_element = if dir_path.is_empty() {
+            StyledText::new("\u{00A0}".to_string())
+        } else {
+            Self::styled_text_with_highlights(&dir_path, &dir_positions, t.border_active)
         };
 
         div()
@@ -273,23 +409,21 @@ impl FileSearchDialog {
                     .gap(px(2.0))
                     .overflow_hidden()
                     .child(
-                        // Filename
                         div()
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.text_primary))
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(filename),
+                            .child(filename_element),
                     )
                     .child(
-                        // Directory path (always rendered for uniform height)
                         div()
                             .text_size(px(11.0))
                             .text_color(rgb(t.text_muted))
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(if dir_path.is_empty() { "\u{00A0}".to_string() } else { dir_path }),
+                            .child(dir_element),
                     ),
             )
     }
@@ -440,8 +574,8 @@ impl Render for FileSearchDialog {
                                 view.update(cx, |this, cx| {
                                     range
                                         .map(|i| {
-                                            let file_index = filtered[i];
-                                            this.render_file_row(i, file_index, cx)
+                                            let (file_index, ref positions) = filtered[i];
+                                            this.render_file_row(i, file_index, positions, cx)
                                         })
                                         .collect()
                                 })
