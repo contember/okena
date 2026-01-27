@@ -64,7 +64,7 @@ pub struct FileEntry {
 /// File search dialog for finding files in a project
 pub struct FileSearchDialog {
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
+    scroll_handle: UniformListScrollHandle,
     search_query: String,
     files: Vec<FileEntry>,
     filtered_files: Vec<usize>,
@@ -76,7 +76,7 @@ impl FileSearchDialog {
     /// Create a new file search dialog for the given project path.
     pub fn new(project_path: PathBuf, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let scroll_handle = ScrollHandle::new();
+        let scroll_handle = UniformListScrollHandle::new();
 
         // Scan files in the project
         let files = Self::scan_files(&project_path);
@@ -186,7 +186,7 @@ impl FileSearchDialog {
     /// Scroll to keep the selected item visible.
     fn scroll_to_selected(&self) {
         if !self.filtered_files.is_empty() {
-            self.scroll_handle.scroll_to_item(self.selected_index);
+            self.scroll_handle.scroll_to_item(self.selected_index, ScrollStrategy::Top);
         }
     }
 
@@ -415,34 +415,43 @@ impl Render for FileSearchDialog {
                                     }),
                             ),
                     )
-                    .child(
-                        // File list
+                    .child(if filtered_files.is_empty() {
                         div()
-                            .id("file-list")
                             .flex_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll_handle)
-                            .children(
-                                filtered_files
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, &file_index)| self.render_file_row(i, file_index, cx)),
+                            .child(
+                                div()
+                                    .px(px(12.0))
+                                    .py(px(20.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(if self.files.is_empty() {
+                                        "No files found in project"
+                                    } else {
+                                        "No matching files"
+                                    }),
                             )
-                            .when(filtered_files.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px(px(12.0))
-                                        .py(px(20.0))
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(if self.files.is_empty() {
-                                            "No files found in project"
-                                        } else {
-                                            "No matching files"
-                                        }),
-                                )
-                            }),
-                    )
+                            .into_any_element()
+                    } else {
+                        let filtered = self.filtered_files.clone();
+                        let view = cx.entity().clone();
+                        uniform_list(
+                            "file-list",
+                            filtered.len(),
+                            move |range, _window, cx| {
+                                view.update(cx, |this, cx| {
+                                    range
+                                        .map(|i| {
+                                            let file_index = filtered[i];
+                                            this.render_file_row(i, file_index, cx)
+                                        })
+                                        .collect()
+                                })
+                            },
+                        )
+                        .flex_1()
+                        .track_scroll(&self.scroll_handle)
+                        .into_any_element()
+                    })
                     .child(
                         // Footer with hints
                         div()
