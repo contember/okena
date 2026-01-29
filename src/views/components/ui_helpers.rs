@@ -168,6 +168,45 @@ pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
     container
 }
 
+/// Shell indicator chip showing current shell name with dropdown chevron.
+///
+/// Returns a Stateful<Div> that can have `.on_mouse_down()` and `.tooltip()` chained.
+pub fn shell_indicator_chip(
+    id: impl Into<ElementId>,
+    shell_name: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .px(px(6.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(rgb(t.bg_secondary))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_secondary))
+                        .child(shell_name.into()),
+                )
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .size(px(10.0))
+                        .text_color(rgb(t.text_secondary)),
+                ),
+        )
+}
+
 /// Search input area with ">" prefix prompt and query/placeholder display.
 pub fn search_input_area(query: &str, placeholder: &str, t: &ThemeColors) -> Div {
     div()

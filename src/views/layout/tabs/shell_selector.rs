@@ -7,10 +7,11 @@
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
+use crate::views::components::shell_indicator_chip;
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::workspace::state::LayoutNode;
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
@@ -35,11 +36,6 @@ impl LayoutContainer {
             }
         }
         ShellType::Default
-    }
-
-    /// Get the display name for a shell type.
-    fn get_shell_display_name(&self, shell_type: &ShellType) -> String {
-        shell_type.display_name()
     }
 
     /// Toggle the shell dropdown for tab groups.
@@ -104,42 +100,14 @@ impl LayoutContainer {
     pub(super) fn render_shell_indicator(&mut self, active_tab: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let shell_type = self.get_active_shell_type(active_tab, cx);
-        let shell_name = self.get_shell_display_name(&shell_type);
+        let shell_name = shell_type.short_display_name();
         let id_suffix = format!("tabs-{:?}", self.layout_path);
 
-        div()
-            .id(format!("shell-indicator-{}", id_suffix))
-            .cursor_pointer()
-            .px(px(6.0))
-            .h(px(18.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_secondary))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
+        shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 cx.stop_propagation();
                 this.toggle_shell_dropdown(cx);
             }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child(shell_name)
-                    )
-                    .child(
-                        svg()
-                            .path("icons/chevron-down.svg")
-                            .size(px(10.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-            )
             .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
     }
 

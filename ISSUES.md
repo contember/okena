@@ -16,10 +16,9 @@
 
 ## Medium Priority
 
-### 4. Deduplicate shell selector display logic
+### ~~4. Deduplicate shell selector display logic~~ ✅ DONE
 **Files:** `terminal_pane/shell_selector.rs`, `tabs/shell_selector.rs`
-**Similarity:** ~95%
-**Description:** Both files implement identical `get_display_name()` matching on `ShellType` and nearly identical rendering (indicator chip with shell name + chevron icon). Move `get_display_name()` to `ShellType` impl in `shell_config.rs` and extract shared rendering function.
+**Solution:** Added `short_display_name()` to `ShellType` in `shell_config.rs` and created `shell_indicator_chip()` helper in `ui_helpers.rs`. Both shell selector files refactored to use shared infrastructure.
 
 ### 5. Extract standard button component
 **Files:** 20+ occurrences across overlays and panels

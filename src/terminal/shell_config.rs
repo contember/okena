@@ -77,6 +77,22 @@ impl ShellType {
         }
     }
 
+    /// Get a short display name for compact UI elements (e.g., shell indicator chips)
+    pub fn short_display_name(&self) -> &'static str {
+        match self {
+            ShellType::Default => "Default",
+            #[cfg(windows)]
+            ShellType::Cmd => "CMD",
+            #[cfg(windows)]
+            ShellType::PowerShell { core } => {
+                if *core { "pwsh" } else { "PS" }
+            }
+            #[cfg(windows)]
+            ShellType::Wsl { .. } => "WSL",
+            ShellType::Custom { .. } => "Custom",
+        }
+    }
+
     /// Build a CommandBuilder for this shell type
     pub fn build_command(&self, cwd: &str) -> CommandBuilder {
         match self {
