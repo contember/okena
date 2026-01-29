@@ -1,6 +1,7 @@
 //! Shared UI helper functions for badges, keyboard hints, search inputs, and menu items.
 
 use crate::theme::ThemeColors;
+use crate::ui::tokens::*;
 use gpui::*;
 
 /// Context menu item with icon and label.
@@ -28,19 +29,19 @@ pub fn menu_item_with_color(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .px(px(12.0))
-        .py(px(6.0))
+        .px(SPACE_LG)
+        .py(SPACE_SM)
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(SPACE_MD)
         .cursor_pointer()
-        .text_size(px(12.0))
+        .text_size(TEXT_MD)
         .text_color(rgb(text_color))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             svg()
                 .path(icon)
-                .size(px(14.0))
+                .size(ICON_STD)
                 .text_color(rgb(icon_color)),
         )
         .child(label.into())
@@ -55,17 +56,17 @@ pub fn menu_item_disabled(
 ) -> Stateful<Div> {
     div()
         .id(id)
-        .px(px(12.0))
-        .py(px(6.0))
+        .px(SPACE_LG)
+        .py(SPACE_SM)
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .text_size(px(12.0))
+        .gap(SPACE_MD)
+        .text_size(TEXT_MD)
         .text_color(rgb(t.text_muted))
         .child(
             svg()
                 .path(icon)
-                .size(px(14.0))
+                .size(ICON_STD)
                 .text_color(rgb(t.text_muted)),
         )
         .child(label.into())
@@ -74,11 +75,11 @@ pub fn menu_item_disabled(
 /// Small pill label for categories like "Custom", "worktree", etc.
 pub fn badge(text: impl Into<SharedString>, t: &ThemeColors) -> Div {
     div()
-        .px(px(6.0))
+        .px(SPACE_SM)
         .py(px(1.0))
-        .rounded(px(3.0))
+        .rounded(RADIUS_MD)
         .bg(rgb(t.bg_secondary))
-        .text_size(px(9.0))
+        .text_size(TEXT_XS)
         .text_color(rgb(t.text_muted))
         .child(text.into())
 }
@@ -86,11 +87,11 @@ pub fn badge(text: impl Into<SharedString>, t: &ThemeColors) -> Div {
 /// Keyboard key badge (e.g., "Enter", "Esc").
 pub fn kbd(key: impl Into<SharedString>, t: &ThemeColors) -> Div {
     div()
-        .px(px(4.0))
+        .px(SPACE_XS)
         .py(px(1.0))
-        .rounded(px(3.0))
+        .rounded(RADIUS_MD)
         .bg(rgb(t.bg_secondary))
-        .text_size(px(10.0))
+        .text_size(TEXT_SM)
         .text_color(rgb(t.text_muted))
         .child(key.into())
 }
@@ -100,11 +101,11 @@ pub fn keyboard_hint(key: impl Into<SharedString>, description: impl Into<Shared
     div()
         .flex()
         .items_center()
-        .gap(px(4.0))
+        .gap(SPACE_XS)
         .child(kbd(key, t))
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(TEXT_SM)
                 .text_color(rgb(t.text_muted))
                 .child(description.into()),
         )
@@ -115,13 +116,13 @@ pub fn keyboard_hint(key: impl Into<SharedString>, description: impl Into<Shared
 /// `hints` is a slice of `(key, description)` pairs.
 pub fn keyboard_hints_footer(hints: &[(&str, &str)], t: &ThemeColors) -> Div {
     let mut footer = div()
-        .px(px(12.0))
-        .py(px(8.0))
+        .px(SPACE_LG)
+        .py(SPACE_MD)
         .border_t_1()
         .border_color(rgb(t.border))
         .flex()
         .items_center()
-        .gap(px(16.0));
+        .gap(SPACE_XL);
 
     for &(key, desc) in hints {
         footer = footer.child(keyboard_hint(key.to_string(), desc.to_string(), t));
@@ -136,16 +137,16 @@ pub fn keyboard_hints_footer(hints: &[(&str, &str)], t: &ThemeColors) -> Div {
 pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
     let mut container = div()
         .flex()
-        .rounded(px(4.0))
+        .rounded(RADIUS_STD)
         .bg(rgb(t.bg_secondary))
         .p(px(2.0));
 
     for (i, &(label, is_active)) in options.iter().enumerate() {
         let mut button = div()
-            .px(px(8.0))
+            .px(SPACE_MD)
             .py(px(3.0))
-            .rounded(px(3.0))
-            .text_size(px(11.0))
+            .rounded(RADIUS_MD)
+            .text_size(TEXT_MS)
             .cursor_pointer();
 
         if is_active {
@@ -180,12 +181,12 @@ pub fn button(
     div()
         .id(id)
         .cursor_pointer()
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(px(4.0))
+        .px(SPACE_LG)
+        .py(SPACE_SM)
+        .rounded(RADIUS_STD)
         .bg(rgb(t.bg_secondary))
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        .text_size(px(12.0))
+        .text_size(TEXT_MD)
         .text_color(rgb(t.text_secondary))
         .child(label.into())
 }
@@ -202,12 +203,12 @@ pub fn button_primary(
     div()
         .id(id)
         .cursor_pointer()
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(px(4.0))
+        .px(SPACE_LG)
+        .py(SPACE_SM)
+        .rounded(RADIUS_STD)
         .bg(rgb(t.button_primary_bg))
         .hover(|s| s.bg(rgb(t.button_primary_hover)))
-        .text_size(px(12.0))
+        .text_size(TEXT_MD)
         .text_color(rgb(t.button_primary_fg))
         .child(label.into())
 }
@@ -223,29 +224,29 @@ pub fn shell_indicator_chip(
     div()
         .id(id)
         .cursor_pointer()
-        .px(px(6.0))
-        .h(px(18.0))
+        .px(SPACE_SM)
+        .h(HEIGHT_CHIP)
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.0))
+        .rounded(RADIUS_STD)
         .bg(rgb(t.bg_secondary))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             div()
                 .flex()
                 .items_center()
-                .gap(px(4.0))
+                .gap(SPACE_XS)
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(TEXT_SM)
                         .text_color(rgb(t.text_secondary))
                         .child(shell_name.into()),
                 )
                 .child(
                     svg()
                         .path("icons/chevron-down.svg")
-                        .size(px(10.0))
+                        .size(ICON_SM)
                         .text_color(rgb(t.text_secondary)),
                 ),
         )
@@ -254,23 +255,23 @@ pub fn shell_indicator_chip(
 /// Search input area with ">" prefix prompt and query/placeholder display.
 pub fn search_input_area(query: &str, placeholder: &str, t: &ThemeColors) -> Div {
     div()
-        .px(px(12.0))
+        .px(SPACE_LG)
         .py(px(10.0))
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(SPACE_MD)
         .border_b_1()
         .border_color(rgb(t.border))
         .child(
             div()
-                .text_size(px(14.0))
+                .text_size(TEXT_XL)
                 .text_color(rgb(t.text_muted))
                 .child(">"),
         )
         .child(
             div()
                 .flex_1()
-                .text_size(px(14.0))
+                .text_size(TEXT_XL)
                 .text_color(if query.is_empty() {
                     rgb(t.text_muted)
                 } else {

@@ -42,9 +42,9 @@
 
 ## Low Priority
 
-### 9. Standardize UI spacing/sizing constants
+### ~~9. Standardize UI spacing/sizing constants~~ ✅ DONE
 **Files:** All UI overlay and component files
-**Description:** Repeated magic numbers for padding (6, 8, 12), text sizes (10, 11, 12, 13), border radius (4), gap (4, 8). Consider defining named constants or a small design token module for consistency.
+**Solution:** Created `ui/tokens.rs` with named constants for spacing (SPACE_XS/SM/MD/LG/XL), text sizes (TEXT_XS/SM/MS/MD/LG/XL), border radius (RADIUS_SM/MD/STD/LG), icon sizes, and common widths/heights. Updated `ui_helpers.rs` to use tokens. Other files can adopt incrementally.
 
 ### 10. Deduplicate input field styling — LOW PRIORITY
 **Files:** `sidebar/add_dialog.rs`, `overlays/worktree_dialog.rs`

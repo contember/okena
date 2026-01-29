@@ -5,6 +5,7 @@
 
 mod click_detector;
 mod selection;
+pub mod tokens;
 
 pub use click_detector::ClickDetector;
 pub use selection::*;
