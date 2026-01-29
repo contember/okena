@@ -1,5 +1,5 @@
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::Terminal;
+use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
 use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::navigation::clear_pane_map;
@@ -9,7 +9,7 @@ use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
-use crate::settings::open_settings_file;
+use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
 use crate::workspace::persistence::{load_settings, AppSettings};
@@ -119,9 +119,7 @@ impl RootView {
                 self.spawn_terminals_for_project(new_project_id.clone(), cx);
             }
             OverlayManagerEvent::ShellSelected { shell_type, project_id, terminal_id } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_shell_by_id(project_id, terminal_id, shell_type.clone(), cx);
-                });
+                self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
             }
             OverlayManagerEvent::AddTerminal { project_id } => {
                 self.workspace.update(cx, |ws, cx| {
@@ -418,6 +416,83 @@ impl RootView {
 
         // Sync project columns to pick up the new project
         self.sync_project_columns(cx);
+    }
+
+    /// Switch terminal shell - kills old terminal and creates new one with the new shell.
+    /// Used when user selects a different shell from the shell selector overlay.
+    fn switch_terminal_shell(
+        &mut self,
+        project_id: &str,
+        old_terminal_id: &str,
+        shell_type: crate::terminal::shell_config::ShellType,
+        cx: &mut Context<Self>,
+    ) {
+        // Get project path and terminal's layout path
+        let (project_path, layout_path) = {
+            let ws = self.workspace.read(cx);
+            let project = match ws.project(project_id) {
+                Some(p) => p,
+                None => {
+                    log::error!("switch_terminal_shell: Project {} not found", project_id);
+                    return;
+                }
+            };
+            let layout_path = match project.layout.as_ref().and_then(|l| l.find_terminal_path(old_terminal_id)) {
+                Some(p) => p,
+                None => {
+                    log::error!("switch_terminal_shell: Terminal {} not found in project {}", old_terminal_id, project_id);
+                    return;
+                }
+            };
+            (project.path.clone(), layout_path)
+        };
+
+        // Get current shell to check if it's actually changing
+        let current_shell = self.workspace.read(cx).get_terminal_shell(project_id, &layout_path);
+        if current_shell.as_ref() == Some(&shell_type) {
+            log::info!("switch_terminal_shell: Shell type unchanged, skipping");
+            return;
+        }
+
+        // Kill the old terminal
+        self.pty_manager.kill(old_terminal_id);
+        self.terminals.lock().remove(old_terminal_id);
+
+        // Update shell type in workspace state
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_terminal_shell(project_id, &layout_path, shell_type.clone(), cx);
+        });
+
+        // Determine the actual shell to use (resolve Default to settings)
+        let actual_shell = if shell_type == crate::terminal::shell_config::ShellType::Default {
+            settings(cx).default_shell.clone()
+        } else {
+            shell_type
+        };
+
+        // Create new terminal with the new shell
+        match self.pty_manager.create_terminal_with_shell(&project_path, Some(&actual_shell)) {
+            Ok(new_terminal_id) => {
+                log::info!("switch_terminal_shell: Switched to {:?}, new terminal_id: {}", actual_shell, new_terminal_id);
+
+                // Update terminal_id in workspace state
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_id(project_id, &layout_path, new_terminal_id.clone(), cx);
+                });
+
+                // Create terminal wrapper and register it
+                let size = TerminalSize::default();
+                let terminal = Arc::new(Terminal::new(
+                    new_terminal_id.clone(),
+                    size,
+                    self.pty_manager.clone(),
+                ));
+                self.terminals.lock().insert(new_terminal_id, terminal);
+            }
+            Err(e) => {
+                log::error!("switch_terminal_shell: Failed to create terminal with new shell: {}", e);
+            }
+        }
     }
 
     /// Recursively collect paths to all Terminal nodes with terminal_id: None

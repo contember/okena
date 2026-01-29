@@ -84,21 +84,6 @@ impl Workspace {
         }
     }
 
-    /// Set shell type for a terminal by its ID
-    pub fn set_terminal_shell_by_id(
-        &mut self,
-        project_id: &str,
-        terminal_id: &str,
-        shell_type: ShellType,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(project) = self.project(project_id) {
-            if let Some(path) = project.layout.as_ref().and_then(|l| l.find_terminal_path(terminal_id)) {
-                self.set_terminal_shell(project_id, &path, shell_type, cx);
-            }
-        }
-    }
-
     /// Toggle terminal minimized state
     pub fn toggle_terminal_minimized(
         &mut self,

@@ -7,7 +7,6 @@
 //! - Tab groups (via the `tabs` submodule)
 
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::shell_config::{available_shells, AvailableShell};
 use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
 use crate::views::split_pane::render_split_divider;
@@ -40,10 +39,6 @@ pub struct LayoutContainer {
     /// Animation state for recently dropped tab (tab_index, animation_progress)
     /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     pub(super) drop_animation: Option<(usize, f32)>,
-    /// Shell dropdown state for tab groups
-    pub(super) shell_dropdown_open: bool,
-    /// Available shells for switching
-    pub(super) available_shells: Vec<AvailableShell>,
 }
 
 impl LayoutContainer {
@@ -70,8 +65,6 @@ impl LayoutContainer {
             })),
             tab_context_menu: None,
             drop_animation: None,
-            shell_dropdown_open: false,
-            available_shells: available_shells(),
         }
     }
 

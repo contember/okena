@@ -459,9 +459,8 @@ impl LayoutContainer {
         // Render action buttons using helper method
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions, cx);
 
-        // Render shell indicator and dropdown
+        // Render shell indicator (dropdown is handled by overlay)
         let shell_indicator = self.render_shell_indicator(active_tab, cx);
-        let shell_dropdown = self.render_shell_dropdown(active_tab, cx);
 
         div()
             .flex()
@@ -514,7 +513,5 @@ impl LayoutContainer {
                         .clone()
                 }),
             )
-            // Shell dropdown modal (rendered last to be on top)
-            .child(shell_dropdown)
     }
 }

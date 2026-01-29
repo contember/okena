@@ -1,11 +1,9 @@
 //! Shell selector for tab groups
 //!
-//! This module contains shell switching functionality for the tab bar:
-//! - Shell indicator button showing current shell
-//! - Shell dropdown modal for switching shells
+//! This module contains shell indicator functionality for the tab bar.
+//! The actual shell switching is handled by the ShellSelectorOverlay.
 
 use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
 use crate::views::components::shell_indicator_chip;
 use crate::views::layout::layout_container::LayoutContainer;
@@ -13,7 +11,6 @@ use crate::workspace::state::LayoutNode;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
-use std::sync::Arc;
 
 impl LayoutContainer {
     /// Get the terminal_id for the active tab in this Tabs container.
@@ -38,174 +35,28 @@ impl LayoutContainer {
         ShellType::Default
     }
 
-    /// Toggle the shell dropdown for tab groups.
-    fn toggle_shell_dropdown(&mut self, cx: &mut Context<Self>) {
-        self.shell_dropdown_open = !self.shell_dropdown_open;
-        cx.notify();
-    }
-
-    /// Switch the shell for the active tab.
-    fn switch_shell(&mut self, active_tab: usize, shell_type: ShellType, cx: &mut Context<Self>) {
-        self.shell_dropdown_open = false;
-
-        // Get the terminal_id for the active tab
-        let terminal_id = self.get_active_terminal_id(active_tab, cx);
-
-        // Get the current shell type
-        let current_shell = self.get_active_shell_type(active_tab, cx);
-        if current_shell == shell_type {
-            cx.notify();
-            return;
-        }
-
-        // Kill the old terminal if it exists
-        if let Some(ref tid) = terminal_id {
-            self.pty_manager.kill(tid);
-        }
-
-        // Update the shell type in workspace state
-        let mut full_path = self.layout_path.clone();
-        full_path.push(active_tab);
-        let project_id = self.project_id.clone();
-        let shell_for_save = shell_type.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.set_terminal_shell(&project_id, &full_path, shell_for_save, cx);
-        });
-
-        // Create a new terminal with the new shell
-        match self.pty_manager.create_terminal_with_shell(&self.project_path, Some(&shell_type)) {
-            Ok(new_terminal_id) => {
-                // Update the terminal_id in workspace state
-                let new_id = new_terminal_id.clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_id(&project_id, &full_path, new_id.clone(), cx);
-                });
-
-                // Create Terminal wrapper and register it
-                let size = TerminalSize::default();
-                let terminal = Arc::new(Terminal::new(new_terminal_id.clone(), size, self.pty_manager.clone()));
-                self.terminals.lock().insert(new_terminal_id.clone(), terminal);
-
-                log::info!("Switched tab {} to shell {:?}, new terminal_id: {}", active_tab, shell_type, new_terminal_id);
-            }
-            Err(e) => {
-                log::error!("Failed to create terminal with new shell: {}", e);
-            }
-        }
-
-        cx.notify();
-    }
-
     /// Render the shell indicator button for tab groups.
-    pub(super) fn render_shell_indicator(&mut self, active_tab: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Clicking opens the shell selector overlay.
+    pub(super) fn render_shell_indicator(&self, active_tab: usize, cx: &Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let shell_type = self.get_active_shell_type(active_tab, cx);
         let shell_name = shell_type.short_display_name();
         let id_suffix = format!("tabs-{:?}", self.layout_path);
+        let terminal_id = self.get_active_terminal_id(active_tab, cx);
+        let project_id = self.project_id.clone();
 
         shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                cx.stop_propagation();
-                this.toggle_shell_dropdown(cx);
-            }))
-            .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
-    }
-
-    /// Render the shell dropdown modal for tab groups.
-    pub(super) fn render_shell_dropdown(&mut self, active_tab: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-
-        if !self.shell_dropdown_open {
-            return div().into_any_element();
-        }
-
-        let shells = self.available_shells.clone();
-        let current_shell = self.get_active_shell_type(active_tab, cx);
-
-        // Full-screen backdrop + centered modal
-        div()
-            .id("shell-modal-backdrop-tabs")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000088))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.shell_dropdown_open = false;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .id("shell-modal-tabs")
-                    .w(px(200.0))
-                    .bg(rgb(t.bg_secondary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(8.0))
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            .when_some(terminal_id, |el, tid| {
+                el.on_mouse_down(MouseButton::Left, {
+                    let workspace = self.workspace.clone();
+                    move |_, _window, cx| {
                         cx.stop_propagation();
-                    })
-                    .child(
-                        // Modal header
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(t.text_primary))
-                                    .child("Switch Shell")
-                            )
-                    )
-                    .child(
-                        // Shell list
-                        div()
-                            .py(px(2.0))
-                            .children(shells.into_iter().filter(|s| s.available).map(|shell| {
-                                let shell_type = shell.shell_type.clone();
-                                let is_current = shell_type == current_shell;
-                                let name = shell.name.clone();
-
-                                div()
-                                    .id(format!("shell-option-tabs-{}", name.replace(" ", "-").to_lowercase()))
-                                    .w_full()
-                                    .px(px(12.0))
-                                    .py(px(6.0))
-                                    .cursor_pointer()
-                                    .bg(if is_current { rgb(t.bg_hover) } else { rgb(t.bg_secondary) })
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
-                                        this.switch_shell(active_tab, shell_type.clone(), cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.0))
-                                                    .text_color(rgb(t.text_primary))
-                                                    .child(name)
-                                            )
-                                            .when(is_current, |d| {
-                                                d.child(
-                                                    svg()
-                                                        .path("icons/check.svg")
-                                                        .size(px(12.0))
-                                                        .text_color(rgb(t.success))
-                                                )
-                                            })
-                                    )
-                            }))
-                    )
-            )
-            .into_any_element()
+                        workspace.update(cx, |ws, cx| {
+                            ws.request_shell_selector(&project_id, &tid, shell_type.clone(), cx);
+                        });
+                    }
+                })
+            })
+            .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
     }
 }
