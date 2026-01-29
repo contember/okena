@@ -4,16 +4,18 @@
 
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::theme::theme;
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{
+    handle_list_overlay_key, modal_backdrop, modal_content, modal_header, ListOverlayAction,
+    ListOverlayConfig, ListOverlayState,
+};
 use gpui::*;
 use gpui::prelude::*;
 
 /// Shell selector overlay for choosing a shell.
 pub struct ShellSelectorOverlay {
     focus_handle: FocusHandle,
-    available_shells: Vec<AvailableShell>,
+    state: ListOverlayState<AvailableShell>,
     current_shell: ShellType,
-    selected_index: usize,
     /// Context: which terminal this is for (project_id, terminal_id)
     context: Option<(String, String)>,
 }
@@ -26,11 +28,19 @@ impl ShellSelectorOverlay {
             .position(|s| s.shell_type == current_shell)
             .unwrap_or(0);
 
+        let config = ListOverlayConfig::new("Switch Shell")
+            .subtitle("Select shell for this terminal")
+            .size(280.0, 300.0)
+            .centered()
+            .key_context("ShellSelectorOverlay");
+
+        let state = ListOverlayState::with_selected(shells, config, selected_index, cx);
+        let focus_handle = state.focus_handle.clone();
+
         Self {
-            focus_handle: cx.focus_handle(),
-            available_shells: shells,
+            focus_handle,
+            state,
             current_shell,
-            selected_index,
             context,
         }
     }
@@ -47,7 +57,7 @@ impl ShellSelectorOverlay {
     }
 
     fn select_current(&mut self, cx: &mut Context<Self>) {
-        if let Some(shell) = self.available_shells.get(self.selected_index) {
+        if let Some(shell) = self.state.selected_item() {
             self.select_shell(shell.shell_type.clone(), cx);
         }
     }
@@ -68,9 +78,11 @@ impl Render for ShellSelectorOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let shells = self.available_shells.clone();
         let current_shell = self.current_shell.clone();
-        let selected_index = self.selected_index;
+        let selected_index = self.state.selected_index;
+        let config_width = self.state.config.width;
+        let config_title = self.state.config.title.clone();
+        let config_subtitle = self.state.config.subtitle.clone();
 
         window.focus(&focus_handle, cx);
 
@@ -79,21 +91,10 @@ impl Render for ShellSelectorOverlay {
             .key_context("ShellSelectorOverlay")
             .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => this.close(cx),
-                    "up" => {
-                        if this.selected_index > 0 {
-                            this.selected_index -= 1;
-                            cx.notify();
-                        }
-                    }
-                    "down" => {
-                        if this.selected_index < this.available_shells.len().saturating_sub(1) {
-                            this.selected_index += 1;
-                            cx.notify();
-                        }
-                    }
-                    "enter" => this.select_current(cx),
+                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                    ListOverlayAction::Close => this.close(cx),
+                    ListOverlayAction::Confirm => this.select_current(cx),
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => cx.notify(),
                     _ => {}
                 }
             }))
@@ -102,10 +103,10 @@ impl Render for ShellSelectorOverlay {
             }))
             .child(
                 modal_content("shell-selector-overlay-modal", &t)
-                    .w(px(280.0))
+                    .w(px(config_width))
                     .child(modal_header(
-                        "Switch Shell",
-                        Some("Select shell for this terminal"),
+                        config_title,
+                        config_subtitle,
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
@@ -113,9 +114,10 @@ impl Render for ShellSelectorOverlay {
                         div()
                             .id("shell-selector-list")
                             .py(px(4.0))
-                            .max_h(px(300.0))
+                            .max_h(px(self.state.config.max_height))
                             .overflow_y_scroll()
-                            .children(shells.into_iter().enumerate().map(|(i, shell)| {
+                            .children(self.state.filtered.iter().enumerate().map(|(i, filter_result)| {
+                                let shell = &self.state.items[filter_result.index];
                                 let is_current = shell.shell_type == current_shell;
                                 let is_selected = i == selected_index;
                                 let shell_type = shell.shell_type.clone();

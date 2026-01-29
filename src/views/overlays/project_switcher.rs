@@ -6,7 +6,11 @@
 //! - Type to filter projects
 
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{badge, modal_backdrop, modal_content, modal_header, keyboard_hints_footer, search_input_area};
+use crate::views::components::{
+    badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
+    modal_header, search_input_area, substring_filter, ListOverlayAction, ListOverlayConfig,
+    ListOverlayState,
+};
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -27,34 +31,26 @@ impl EventEmitter<ProjectSwitcherEvent> for ProjectSwitcher {}
 /// Project switcher overlay for quick project navigation.
 pub struct ProjectSwitcher {
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
-    /// All projects (snapshot at creation time)
-    projects: Vec<ProjectData>,
-    /// Indices into `projects` that match the current filter
-    filtered_indices: Vec<usize>,
-    /// Currently selected index (into filtered_indices)
-    selected_index: usize,
-    /// Search query for filtering
-    search_query: String,
+    state: ListOverlayState<ProjectData>,
 }
 
 impl ProjectSwitcher {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        let scroll_handle = ScrollHandle::new();
-
         // Get all projects from workspace, sorted by recency
         let projects: Vec<ProjectData> = workspace.read(cx).projects_by_recency().into_iter().cloned().collect();
-        let filtered_indices: Vec<usize> = (0..projects.len()).collect();
 
-        Self {
-            focus_handle,
-            scroll_handle,
-            projects,
-            filtered_indices,
-            selected_index: 0,
-            search_query: String::new(),
-        }
+        let config = ListOverlayConfig::new("Switch Project")
+            .subtitle("Type to search, Enter to focus, Space to toggle visibility")
+            .searchable("Type to filter projects...")
+            .size(500.0, 500.0)
+            .empty_message("No projects found")
+            .keyboard_hints(vec![("Enter", "focus"), ("Space", "toggle visibility"), ("Esc", "close")])
+            .key_context("ProjectSwitcher");
+
+        let state = ListOverlayState::new(projects, config, cx);
+        let focus_handle = state.focus_handle.clone();
+
+        Self { focus_handle, state }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -62,47 +58,22 @@ impl ProjectSwitcher {
     }
 
     fn focus_selected(&self, cx: &mut Context<Self>) {
-        if let Some(&project_index) = self.filtered_indices.get(self.selected_index) {
-            if let Some(project) = self.projects.get(project_index) {
-                cx.emit(ProjectSwitcherEvent::FocusProject(project.id.clone()));
-            }
+        if let Some(project) = self.state.selected_item() {
+            cx.emit(ProjectSwitcherEvent::FocusProject(project.id.clone()));
         }
     }
 
     fn toggle_visibility_selected(&self, cx: &mut Context<Self>) {
-        if let Some(&project_index) = self.filtered_indices.get(self.selected_index) {
-            if let Some(project) = self.projects.get(project_index) {
-                cx.emit(ProjectSwitcherEvent::ToggleVisibility(project.id.clone()));
-            }
+        if let Some(project) = self.state.selected_item() {
+            cx.emit(ProjectSwitcherEvent::ToggleVisibility(project.id.clone()));
         }
     }
 
     fn filter_projects(&mut self) {
-        let query = self.search_query.to_lowercase();
-
-        if query.is_empty() {
-            self.filtered_indices = (0..self.projects.len()).collect();
-        } else {
-            self.filtered_indices = self
-                .projects
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| {
-                    p.name.to_lowercase().contains(&query)
-                        || p.path.to_lowercase().contains(&query)
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
-
-        // Reset selection to first item
-        self.selected_index = 0;
-    }
-
-    fn scroll_to_selected(&self) {
-        if !self.filtered_indices.is_empty() {
-            self.scroll_handle.scroll_to_item(self.selected_index);
-        }
+        let filtered = substring_filter(&self.state.items, &self.state.search_query, |p| {
+            vec![p.name.clone(), p.path.clone()]
+        });
+        self.state.set_filtered(filtered);
     }
 
     fn render_project_row(
@@ -112,8 +83,8 @@ impl ProjectSwitcher {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let project = &self.projects[project_index];
-        let is_selected = display_index == self.selected_index;
+        let project = &self.state.items[project_index];
+        let is_selected = display_index == self.state.selected_index;
         let name = project.name.clone();
         let path = project.path.clone();
         let is_visible = project.is_visible;
@@ -135,7 +106,7 @@ impl ProjectSwitcher {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
-                    this.selected_index = display_index;
+                    this.state.selected_index = display_index;
                     this.focus_selected(cx);
                 }),
             )
@@ -217,8 +188,13 @@ impl Render for ProjectSwitcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let filtered_indices = self.filtered_indices.clone();
-        let search_query = self.search_query.clone();
+        let search_query = self.state.search_query.clone();
+        let config_width = self.state.config.width;
+        let config_max_height = self.state.config.max_height;
+        let config_title = self.state.config.title.clone();
+        let config_subtitle = self.state.config.subtitle.clone();
+        let search_placeholder = self.state.config.search_placeholder.clone().unwrap_or_default();
+        let empty_message = self.state.config.empty_message.clone();
 
         window.focus(&focus_handle, cx);
 
@@ -228,42 +204,19 @@ impl Render for ProjectSwitcher {
             .items_start()
             .pt(px(80.0))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => this.close(cx),
-                    "up" => {
-                        if this.selected_index > 0 {
-                            this.selected_index -= 1;
-                            this.scroll_to_selected();
-                            cx.notify();
-                        }
+                match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
+                    ListOverlayAction::Close => this.close(cx),
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
+                        this.state.scroll_to_selected();
+                        cx.notify();
                     }
-                    "down" => {
-                        if this.selected_index < this.filtered_indices.len().saturating_sub(1) {
-                            this.selected_index += 1;
-                            this.scroll_to_selected();
-                            cx.notify();
-                        }
+                    ListOverlayAction::Confirm => this.focus_selected(cx),
+                    ListOverlayAction::QueryChanged => {
+                        this.filter_projects();
+                        cx.notify();
                     }
-                    "enter" => {
-                        this.focus_selected(cx);
-                    }
-                    "space" => {
+                    ListOverlayAction::Custom(action) if action == "toggle" => {
                         this.toggle_visibility_selected(cx);
-                    }
-                    "backspace" => {
-                        if !this.search_query.is_empty() {
-                            this.search_query.pop();
-                            this.filter_projects();
-                            cx.notify();
-                        }
-                    }
-                    key if key.len() == 1 => {
-                        let ch = key.chars().next().unwrap();
-                        if ch.is_alphanumeric() || ch == '-' || ch == '_' || ch == '/' || ch == '.' {
-                            this.search_query.push(ch);
-                            this.filter_projects();
-                            cx.notify();
-                        }
                     }
                     _ => {}
                 }
@@ -274,36 +227,36 @@ impl Render for ProjectSwitcher {
             )
             .child(
                 modal_content("project-switcher-modal", &t)
-                    .w(px(500.0))
-                    .max_h(px(500.0))
+                    .w(px(config_width))
+                    .max_h(px(config_max_height))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(modal_header(
-                        "Switch Project",
-                        Some("Type to search, Enter to focus, Space to toggle visibility"),
+                        config_title,
+                        config_subtitle,
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(&search_query, "Type to filter projects...", &t))
+                    .child(search_input_area(&search_query, &search_placeholder, &t))
                     .child(
                         // Project list
                         div()
                             .id("project-list")
                             .flex_1()
                             .overflow_y_scroll()
-                            .track_scroll(&self.scroll_handle)
-                            .children(filtered_indices.iter().enumerate().map(
-                                |(display_idx, &project_idx)| {
-                                    self.render_project_row(display_idx, project_idx, cx)
+                            .track_scroll(&self.state.scroll_handle)
+                            .children(self.state.filtered.iter().enumerate().map(
+                                |(display_idx, filter_result)| {
+                                    self.render_project_row(display_idx, filter_result.index, cx)
                                 },
                             ))
-                            .when(filtered_indices.is_empty(), |d| {
+                            .when(self.state.is_empty(), |d| {
                                 d.child(
                                     div()
                                         .px(px(12.0))
                                         .py(px(20.0))
                                         .text_size(px(13.0))
                                         .text_color(rgb(t.text_muted))
-                                        .child("No projects found"),
+                                        .child(empty_message.clone()),
                                 )
                             }),
                     )

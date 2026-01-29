@@ -2,7 +2,10 @@ use crate::theme::{
     get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
-use crate::views::components::{badge, modal_backdrop, modal_content, modal_header};
+use crate::views::components::{
+    badge, handle_list_overlay_key, modal_backdrop, modal_content, modal_header, ListOverlayAction,
+    ListOverlayConfig, ListOverlayState,
+};
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
 use gpui::prelude::*;
@@ -17,14 +20,11 @@ struct ThemeEntry {
 /// Theme selector overlay for choosing and previewing themes
 pub struct ThemeSelector {
     focus_handle: FocusHandle,
-    themes: Vec<ThemeEntry>,
-    selected_index: usize,
+    state: ListOverlayState<ThemeEntry>,
 }
 
 impl ThemeSelector {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-
         // Build theme list: built-in + custom
         let mut themes = Vec::new();
 
@@ -98,11 +98,16 @@ impl ThemeSelector {
             }
         };
 
-        Self {
-            focus_handle,
-            themes,
-            selected_index,
-        }
+        let config = ListOverlayConfig::new("Theme")
+            .subtitle("Select a color theme for the application")
+            .size(480.0, 550.0)
+            .centered()
+            .key_context("ThemeSelector");
+
+        let state = ListOverlayState::with_selected(themes, config, selected_index, cx);
+        let focus_handle = state.focus_handle.clone();
+
+        Self { focus_handle, state }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -114,11 +119,11 @@ impl ThemeSelector {
     }
 
     fn select_theme(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.themes.len() {
+        if index >= self.state.items.len() {
             return;
         }
 
-        let theme_entry = &self.themes[index];
+        let theme_entry = &self.state.items[index];
         let theme_ent = theme_entity(cx);
 
         // Determine the mode from the theme ID
@@ -147,7 +152,7 @@ impl ThemeSelector {
         settings.theme_mode = mode;
         let _ = save_settings(&settings);
 
-        self.selected_index = index;
+        self.state.selected_index = index;
         cx.notify();
 
         // Close the dialog
@@ -155,11 +160,11 @@ impl ThemeSelector {
     }
 
     fn preview_theme(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.themes.len() {
+        if index >= self.state.items.len() {
             return;
         }
 
-        let theme_entry = &self.themes[index];
+        let theme_entry = &self.state.items[index];
         let theme_ent = theme_entity(cx);
 
         // Determine the mode for preview
@@ -262,7 +267,7 @@ impl ThemeSelector {
 
     fn render_theme_row(&self, index: usize, entry: &ThemeEntry, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let is_selected = index == self.selected_index;
+        let is_selected = index == self.state.selected_index;
         let colors = entry.colors;
         let name = entry.info.name.clone();
         let description = entry.info.description.clone();
@@ -339,8 +344,11 @@ impl Render for ThemeSelector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let themes = self.themes.clone();
         let themes_dir = get_themes_dir();
+        let config_width = self.state.config.width;
+        let config_max_height = self.state.config.max_height;
+        let config_title = self.state.config.title.clone();
+        let config_subtitle = self.state.config.subtitle.clone();
 
         window.focus(&focus_handle, cx);
 
@@ -349,24 +357,14 @@ impl Render for ThemeSelector {
             .key_context("ThemeSelector")
             .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => this.close(cx),
-                    "up" => {
-                        if this.selected_index > 0 {
-                            this.selected_index -= 1;
-                            this.preview_theme(this.selected_index, cx);
-                            cx.notify();
-                        }
+                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                    ListOverlayAction::Close => this.close(cx),
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
+                        this.preview_theme(this.state.selected_index, cx);
+                        cx.notify();
                     }
-                    "down" => {
-                        if this.selected_index < this.themes.len() - 1 {
-                            this.selected_index += 1;
-                            this.preview_theme(this.selected_index, cx);
-                            cx.notify();
-                        }
-                    }
-                    "enter" => {
-                        let index = this.selected_index;
+                    ListOverlayAction::Confirm => {
+                        let index = this.state.selected_index;
                         this.select_theme(index, cx);
                     }
                     _ => {}
@@ -377,11 +375,11 @@ impl Render for ThemeSelector {
             }))
             .child(
                 modal_content("theme-selector-modal", &t)
-                    .w(px(480.0))
-                    .max_h(px(550.0))
+                    .w(px(config_width))
+                    .max_h(px(config_max_height))
                     .child(modal_header(
-                        "Theme",
-                        Some("Select a color theme for the application"),
+                        config_title,
+                        config_subtitle,
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
@@ -392,10 +390,10 @@ impl Render for ThemeSelector {
                             .flex_1()
                             .overflow_y_scroll()
                             .children(
-                                themes
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, entry)| self.render_theme_row(i, entry, cx)),
+                                self.state.filtered.iter().enumerate().map(|(i, filter_result)| {
+                                    let entry = &self.state.items[filter_result.index];
+                                    self.render_theme_row(i, entry, cx)
+                                }),
                             ),
                     )
                     .child(

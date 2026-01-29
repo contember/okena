@@ -4,7 +4,10 @@
 //! similar to VS Code's Cmd+P file picker.
 
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{modal_backdrop, modal_content, modal_header, keyboard_hint, search_input_area};
+use crate::views::components::{
+    keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area,
+    ListOverlayConfig,
+};
 use gpui::*;
 use gpui::prelude::*;
 use std::path::PathBuf;
@@ -58,6 +61,9 @@ const IGNORED_EXTENSIONS: &[&str] = &[
     "dylib",
 ];
 
+/// Characters allowed in search queries
+const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./";
+
 /// A file entry in the search list
 #[derive(Clone, Debug)]
 pub struct FileEntry {
@@ -78,6 +84,7 @@ pub struct FileSearchDialog {
     filtered_files: Vec<(usize, Vec<usize>)>,
     selected_index: usize,
     project_path: PathBuf,
+    config: ListOverlayConfig,
 }
 
 impl FileSearchDialog {
@@ -90,6 +97,11 @@ impl FileSearchDialog {
         let files = Self::scan_files(&project_path);
         let filtered_files: Vec<(usize, Vec<usize>)> = (0..files.len()).map(|i| (i, vec![])).collect();
 
+        let config = ListOverlayConfig::new("Go to File")
+            .searchable("Type to search files...")
+            .size(650.0, 550.0)
+            .key_context("FileSearchDialog");
+
         Self {
             focus_handle,
             scroll_handle,
@@ -98,6 +110,7 @@ impl FileSearchDialog {
             filtered_files,
             selected_index: 0,
             project_path,
+            config,
         }
     }
 
@@ -195,6 +208,28 @@ impl FileSearchDialog {
     fn scroll_to_selected(&self) {
         if !self.filtered_files.is_empty() {
             self.scroll_handle.scroll_to_item(self.selected_index, ScrollStrategy::Top);
+        }
+    }
+
+    /// Move selection up.
+    fn select_prev(&mut self) -> bool {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+            self.scroll_to_selected();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Move selection down.
+    fn select_next(&mut self) -> bool {
+        if self.selected_index < self.filtered_files.len().saturating_sub(1) {
+            self.selected_index += 1;
+            self.scroll_to_selected();
+            true
+        } else {
+            false
         }
     }
 
@@ -444,7 +479,6 @@ impl Render for FileSearchDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let filtered_files = self.filtered_files.clone();
         let search_query = self.search_query.clone();
         let project_name = self.project_path
             .file_name()
@@ -456,31 +490,23 @@ impl Render for FileSearchDialog {
 
         modal_backdrop("file-search-backdrop", &t)
             .track_focus(&focus_handle)
-            .key_context("FileSearchDialog")
+            .key_context(self.config.key_context.as_str())
             .items_start()
             .pt(px(80.0))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.close(cx);
-                    }
+                    "escape" => this.close(cx),
                     "up" => {
-                        if this.selected_index > 0 {
-                            this.selected_index -= 1;
-                            this.scroll_to_selected();
+                        if this.select_prev() {
                             cx.notify();
                         }
                     }
                     "down" => {
-                        if this.selected_index < this.filtered_files.len().saturating_sub(1) {
-                            this.selected_index += 1;
-                            this.scroll_to_selected();
+                        if this.select_next() {
                             cx.notify();
                         }
                     }
-                    "enter" => {
-                        this.open_selected(cx);
-                    }
+                    "enter" => this.open_selected(cx),
                     "backspace" => {
                         if !this.search_query.is_empty() {
                             this.search_query.pop();
@@ -489,9 +515,8 @@ impl Render for FileSearchDialog {
                         }
                     }
                     key if key.len() == 1 => {
-                        // Single character - add to search
                         let ch = key.chars().next().unwrap();
-                        if ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_' || ch == '.' || ch == '/' {
+                        if SEARCH_CHARS.contains(ch) {
                             this.search_query.push(ch);
                             this.filter_files();
                             cx.notify();
@@ -508,16 +533,16 @@ impl Render for FileSearchDialog {
             )
             .child(
                 modal_content("file-search-modal", &t)
-                    .w(px(650.0))
-                    .h(px(550.0))
+                    .w(px(self.config.width))
+                    .h(px(self.config.max_height))
                     .child(modal_header(
-                        "Go to File",
+                        &self.config.title,
                         Some(format!("Searching in {}", project_name)),
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(&search_query, "Type to search files...", &t))
-                    .child(if filtered_files.is_empty() {
+                    .child(search_input_area(&search_query, self.config.search_placeholder.as_ref().map(|s| s.as_str()).unwrap_or(""), &t))
+                    .child(if self.filtered_files.is_empty() {
                         div()
                             .flex_1()
                             .child(

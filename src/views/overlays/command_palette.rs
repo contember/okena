@@ -7,7 +7,10 @@ use crate::keybindings::{
     Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
 };
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{badge, keyboard_hints_footer, search_input_area};
+use crate::views::components::{
+    badge, handle_list_overlay_key, keyboard_hints_footer, search_input_area, substring_filter,
+    ListOverlayAction, ListOverlayConfig, ListOverlayState,
+};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -29,27 +32,20 @@ struct CommandEntry {
 /// Command palette for quick access to all commands
 pub struct CommandPalette {
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
-    commands: Vec<CommandEntry>,
-    filtered_commands: Vec<usize>,
-    selected_index: usize,
-    search_query: String,
+    state: ListOverlayState<CommandEntry>,
 }
 
 impl CommandPalette {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        let scroll_handle = ScrollHandle::new();
-
         // Build command list from action descriptions
         let descriptions = get_action_descriptions();
-        let config = get_config();
+        let config_data = get_config();
 
         let mut commands: Vec<CommandEntry> = descriptions
             .iter()
             .map(|(action, desc)| {
                 // Get primary keybinding for this action
-                let keybinding = config
+                let keybinding = config_data
                     .bindings
                     .get(*action)
                     .and_then(|entries| entries.iter().find(|e| e.enabled))
@@ -70,31 +66,26 @@ impl CommandPalette {
             a.category.cmp(&b.category).then(a.name.cmp(&b.name))
         });
 
-        let filtered_commands: Vec<usize> = (0..commands.len()).collect();
+        let config = ListOverlayConfig::new("Command Palette")
+            .searchable("Type to search commands...")
+            .size(550.0, 450.0)
+            .empty_message("No commands found")
+            .keyboard_hints(vec![("Enter", "to select"), ("Esc", "to close")])
+            .key_context("CommandPalette");
 
-        Self {
-            focus_handle,
-            scroll_handle,
-            commands,
-            filtered_commands,
-            selected_index: 0,
-            search_query: String::new(),
-        }
+        let state = ListOverlayState::new(commands, config, cx);
+        let focus_handle = state.focus_handle.clone();
+
+        Self { focus_handle, state }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
         cx.emit(CommandPaletteEvent::Close);
     }
 
-    fn scroll_to_selected(&self) {
-        if !self.filtered_commands.is_empty() {
-            self.scroll_handle.scroll_to_item(self.selected_index);
-        }
-    }
-
     fn execute_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(&cmd_index) = self.filtered_commands.get(index) {
-            let command = &self.commands[cmd_index];
+        if let Some(filter_result) = self.state.filtered.get(index) {
+            let command = &self.state.items[filter_result.index];
             let action = command.action.as_str();
 
             // Dispatch the appropriate action
@@ -136,32 +127,21 @@ impl CommandPalette {
     }
 
     fn filter_commands(&mut self) {
-        let query = self.search_query.to_lowercase();
-
-        if query.is_empty() {
-            self.filtered_commands = (0..self.commands.len()).collect();
-        } else {
-            self.filtered_commands = self.commands
-                .iter()
-                .enumerate()
-                .filter(|(_, cmd)| {
-                    cmd.name.to_lowercase().contains(&query)
-                        || cmd.description.to_lowercase().contains(&query)
-                        || cmd.category.to_lowercase().contains(&query)
-                        || cmd.action.to_lowercase().contains(&query)
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
-
-        // Reset selection to first item
-        self.selected_index = 0;
+        let filtered = substring_filter(&self.state.items, &self.state.search_query, |cmd| {
+            vec![
+                cmd.name.clone(),
+                cmd.description.clone(),
+                cmd.category.clone(),
+                cmd.action.clone(),
+            ]
+        });
+        self.state.set_filtered(filtered);
     }
 
     fn render_command_row(&self, filtered_index: usize, cmd_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let command = &self.commands[cmd_index];
-        let is_selected = filtered_index == self.selected_index;
+        let command = &self.state.items[cmd_index];
+        let is_selected = filtered_index == self.state.selected_index;
 
         let name = command.name.clone();
         let description = command.description.clone();
@@ -242,8 +222,11 @@ impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let filtered_commands = self.filtered_commands.clone();
-        let search_query = self.search_query.clone();
+        let search_query = self.state.search_query.clone();
+        let config_width = self.state.config.width;
+        let config_max_height = self.state.config.max_height;
+        let search_placeholder = self.state.config.search_placeholder.clone().unwrap_or_default();
+        let empty_message = self.state.config.empty_message.clone();
 
         // Focus on first render
         window.focus(&focus_handle, cx);
@@ -252,43 +235,19 @@ impl Render for CommandPalette {
             .track_focus(&focus_handle)
             .key_context("CommandPalette")
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.close(cx);
+                match handle_list_overlay_key(&mut this.state, event, &[]) {
+                    ListOverlayAction::Close => this.close(cx),
+                    ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
+                        this.state.scroll_to_selected();
+                        cx.notify();
                     }
-                    "up" => {
-                        if this.selected_index > 0 {
-                            this.selected_index -= 1;
-                            this.scroll_to_selected();
-                            cx.notify();
-                        }
-                    }
-                    "down" => {
-                        if this.selected_index < this.filtered_commands.len().saturating_sub(1) {
-                            this.selected_index += 1;
-                            this.scroll_to_selected();
-                            cx.notify();
-                        }
-                    }
-                    "enter" => {
-                        let index = this.selected_index;
+                    ListOverlayAction::Confirm => {
+                        let index = this.state.selected_index;
                         this.execute_command(index, window, cx);
                     }
-                    "backspace" => {
-                        if !this.search_query.is_empty() {
-                            this.search_query.pop();
-                            this.filter_commands();
-                            cx.notify();
-                        }
-                    }
-                    key if key.len() == 1 => {
-                        // Single character - add to search
-                        let ch = key.chars().next().unwrap();
-                        if ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_' {
-                            this.search_query.push(ch);
-                            this.filter_commands();
-                            cx.notify();
-                        }
+                    ListOverlayAction::QueryChanged => {
+                        this.filter_commands();
+                        cx.notify();
                     }
                     _ => {}
                 }
@@ -311,8 +270,8 @@ impl Render for CommandPalette {
                 // Modal content
                 div()
                     .id("command-palette-modal")
-                    .w(px(550.0))
-                    .max_h(px(450.0))
+                    .w(px(config_width))
+                    .max_h(px(config_max_height))
                     .bg(rgb(t.bg_primary))
                     .rounded(px(8.0))
                     .border_1()
@@ -321,28 +280,28 @@ impl Render for CommandPalette {
                     .flex()
                     .flex_col()
                     .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(search_input_area(&search_query, "Type to search commands...", &t))
+                    .child(search_input_area(&search_query, &search_placeholder, &t))
                     .child(
                         // Command list
                         div()
                             .id("command-list")
                             .flex_1()
                             .overflow_y_scroll()
-                            .track_scroll(&self.scroll_handle)
+                            .track_scroll(&self.state.scroll_handle)
                             .children(
-                                filtered_commands
+                                self.state.filtered
                                     .iter()
                                     .enumerate()
-                                    .map(|(i, &cmd_index)| self.render_command_row(i, cmd_index, cx)),
+                                    .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
                             )
-                            .when(filtered_commands.is_empty(), |d| {
+                            .when(self.state.is_empty(), |d| {
                                 d.child(
                                     div()
                                         .px(px(12.0))
                                         .py(px(20.0))
                                         .text_size(px(13.0))
                                         .text_color(rgb(t.text_muted))
-                                        .child("No commands found"),
+                                        .child(empty_message.clone()),
                                 )
                             }),
                     )
