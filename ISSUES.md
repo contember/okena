@@ -24,19 +24,21 @@
 **Files:** 20+ occurrences across overlays and panels
 **Solution:** Created `button()` and `button_primary()` helpers in `ui_helpers.rs`. Refactored `add_dialog.rs` and `worktree_dialog.rs` to use shared infrastructure. Other files can be migrated incrementally.
 
-### 6. Extract modal close trait
+### 6. Extract modal close trait — DEFERRED
 **Files:** All 6 overlay files
 **Similarity:** 100%
 **Description:** Every overlay defines `fn close(&self, cx) { cx.emit(Event::Close); }` with its own event enum containing a `Close` variant. Minor duplication but could use a shared `Closeable` trait or macro.
+**Deferred:** Complexity of adding a trait/macro outweighs minimal benefit. Each overlay has its own event type, making abstraction awkward.
 
 ### ~~7. Deduplicate scroll-to-selected logic~~ ✅ DONE
 **Files:** `command_palette.rs`, `file_search.rs`, `project_switcher.rs`
 **Solution:** Now part of `ListOverlayState::scroll_to_selected()` method.
 
-### 8. Deduplicate workspace action path-based mutation pattern
+### 8. Deduplicate workspace action path-based mutation pattern — DEFERRED
 **Files:** `workspace/actions/terminal.rs`, `workspace/actions/layout.rs`
 **Similarity:** ~70%
 **Description:** Multiple methods follow the same pattern: take `project_id` + `path`, call `self.with_layout_node(...)`, match on `LayoutNode::Terminal { field, .. }`, mutate field, return bool. Could use a helper or macro for the common wrapper.
+**Deferred:** The methods do subtly different things (set, toggle, complex ops). A macro would obscure the logic without significant benefit.
 
 ## Low Priority
 
@@ -44,7 +46,8 @@
 **Files:** All UI overlay and component files
 **Description:** Repeated magic numbers for padding (6, 8, 12), text sizes (10, 11, 12, 13), border radius (4), gap (4, 8). Consider defining named constants or a small design token module for consistency.
 
-### 10. Deduplicate input field styling
+### 10. Deduplicate input field styling — LOW PRIORITY
 **Files:** `sidebar/add_dialog.rs`, `overlays/worktree_dialog.rs`
 **Similarity:** ~75%
 **Description:** Both implement name/path input fields with labels, styled containers, and action buttons (Browse, Quick-add). Extract shared input field component.
+**Note:** Only 2 files affected, and worktree_dialog has focus-border logic that add_dialog doesn't need. Consider when adding more input dialogs.
