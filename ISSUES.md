@@ -20,9 +20,9 @@
 **Files:** `terminal_pane/shell_selector.rs`, `tabs/shell_selector.rs`
 **Solution:** Added `short_display_name()` to `ShellType` in `shell_config.rs` and created `shell_indicator_chip()` helper in `ui_helpers.rs`. Both shell selector files refactored to use shared infrastructure.
 
-### 5. Extract standard button component
+### ~~5. Extract standard button component~~ ✅ DONE
 **Files:** 20+ occurrences across overlays and panels
-**Description:** Recurring pattern: `div().cursor_pointer().px().py().rounded(4).bg(bg_secondary).hover(bg_hover).text_size().text_color().child(label).on_click(...)`. Text sizes vary (11-13px), padding varies slightly. Extract `button(id, label, theme, on_click)` helper to `ui_helpers.rs`.
+**Solution:** Created `button()` and `button_primary()` helpers in `ui_helpers.rs`. Refactored `add_dialog.rs` and `worktree_dialog.rs` to use shared infrastructure. Other files can be migrated incrementally.
 
 ### 6. Extract modal close trait
 **Files:** All 6 overlay files

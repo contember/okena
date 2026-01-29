@@ -1,5 +1,6 @@
 use crate::git;
 use crate::theme::theme;
+use crate::views::components::{button, button_primary};
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
@@ -576,37 +577,21 @@ impl Render for WorktreeDialog {
                             .border_t_1()
                             .border_color(rgb(t.border))
                             .child(
-                                div()
-                                    .id("cancel-btn")
-                                    .cursor_pointer()
+                                button("cancel-btn", "Cancel", &t)
                                     .px(px(16.0))
                                     .py(px(8.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(t.bg_secondary))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                                    .child("Cancel")
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.close(cx);
-                                    }))
+                                    })),
                             )
                             .child(
-                                div()
-                                    .id("create-btn")
-                                    .cursor_pointer()
+                                button_primary("create-btn", "Create Worktree", &t)
                                     .px(px(16.0))
                                     .py(px(8.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(t.button_primary_bg))
-                                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(t.button_primary_fg))
-                                    .child("Create Worktree")
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         this.create_worktree(cx);
-                                    }))
-                            )
+                                    })),
+                            ),
                     )
             )
     }

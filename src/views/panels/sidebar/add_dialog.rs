@@ -1,9 +1,9 @@
 //! Add project dialog and path suggestions for the sidebar
 
 use crate::theme::theme;
-use crate::views::components::SimpleInput;
-use gpui::*;
+use crate::views::components::{button, button_primary, SimpleInput};
 use gpui::prelude::*;
+use gpui::*;
 
 use super::Sidebar;
 
@@ -87,17 +87,11 @@ impl Sidebar {
             )
             .child(
                 // Browse button
-                div()
-                    .id("browse-folder-btn")
-                    .cursor_pointer()
+                button("browse-folder-btn", "Browse...", &t)
                     .px(px(8.0))
                     .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
                     .text_size(px(11.0))
                     .text_color(rgb(t.text_primary))
-                    .child("Browse...")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_folder_picker(window, cx);
                     })),
@@ -109,17 +103,11 @@ impl Sidebar {
                     .flex_wrap()
                     .gap(px(4.0))
                     .child(
-                        div()
-                            .id("quick-add-home")
-                            .cursor_pointer()
+                        button("quick-add-home", "Home (~)", &t)
                             .px(px(8.0))
                             .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .text_size(px(11.0))
                             .text_color(rgb(t.text_primary))
-                            .child("Home (~)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let path = dirs::home_dir()
                                     .map(|p| p.to_string_lossy().to_string())
@@ -128,33 +116,21 @@ impl Sidebar {
                             })),
                     )
                     .child(
-                        div()
-                            .id("quick-add-tmp")
-                            .cursor_pointer()
+                        button("quick-add-tmp", "Tmp (/tmp)", &t)
                             .px(px(8.0))
                             .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .text_size(px(11.0))
                             .text_color(rgb(t.text_primary))
-                            .child("Tmp (/tmp)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.set_quick_path("Tmp", "/tmp", window, cx);
                             })),
                     )
                     .child(
-                        div()
-                            .id("quick-add-projects")
-                            .cursor_pointer()
+                        button("quick-add-projects", "Projects", &t)
                             .px(px(8.0))
                             .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .text_size(px(11.0))
                             .text_color(rgb(t.text_primary))
-                            .child("Projects")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let path = dirs::home_dir()
                                     .map(|p| p.join("projects").to_string_lossy().to_string())
@@ -213,17 +189,7 @@ impl Sidebar {
                     .gap(px(8.0))
                     .justify_end()
                     .child(
-                        div()
-                            .id("cancel-add-btn")
-                            .cursor_pointer()
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("Cancel")
+                        button("cancel-add-btn", "Cancel", &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.show_add_dialog = false;
                                 this.create_without_terminal = false;
@@ -239,17 +205,7 @@ impl Sidebar {
                             })),
                     )
                     .child(
-                        div()
-                            .id("confirm-add-btn")
-                            .cursor_pointer()
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.button_primary_bg))
-                            .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.button_primary_fg))
-                            .child("Add")
+                        button_primary("confirm-add-btn", "Add", &t)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.add_project(window, cx);
                             })),
