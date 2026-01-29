@@ -1,6 +1,6 @@
 use crate::git;
 use crate::theme::theme;
-use crate::views::components::{button, button_primary};
+use crate::views::components::{button, button_primary, input_container};
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
@@ -421,19 +421,8 @@ impl Render for WorktreeDialog {
                                             .child("WORKTREE DIRECTORY")
                                     )
                                     .child(
-                                        div()
-                                            .bg(rgb(t.bg_secondary))
-                                            .border_1()
-                                            .border_color(if path_input_focused {
-                                                rgb(t.border_active)
-                                            } else {
-                                                rgb(t.border)
-                                            })
-                                            .rounded(px(4.0))
-                                            .child(
-                                                SimpleInput::new(&path_input)
-                                                    .text_size(px(12.0))
-                                            )
+                                        input_container(&t, Some(path_input_focused))
+                                            .child(SimpleInput::new(&path_input).text_size(px(12.0))),
                                     )
                                     .child(
                                         div()
@@ -471,19 +460,8 @@ impl Render for WorktreeDialog {
                                     )
                                     // Search input
                                     .child(
-                                        div()
-                                            .bg(rgb(t.bg_secondary))
-                                            .border_1()
-                                            .border_color(if search_input_focused {
-                                                rgb(t.border_active)
-                                            } else {
-                                                rgb(t.border)
-                                            })
-                                            .rounded(px(4.0))
-                                            .child(
-                                                SimpleInput::new(&branch_search_input)
-                                                    .text_size(px(12.0))
-                                            )
+                                        input_container(&t, Some(search_input_focused))
+                                            .child(SimpleInput::new(&branch_search_input).text_size(px(12.0))),
                                     )
                                     // Create new branch option
                                     .child(
@@ -527,19 +505,8 @@ impl Render for WorktreeDialog {
                                                 .pl(px(34.0))
                                                 .pr(px(12.0))
                                                 .child(
-                                                    div()
-                                                        .bg(rgb(t.bg_secondary))
-                                                        .border_1()
-                                                        .border_color(if new_branch_input_focused {
-                                                            rgb(t.border_active)
-                                                        } else {
-                                                            rgb(t.border)
-                                                        })
-                                                        .rounded(px(4.0))
-                                                        .child(
-                                                            SimpleInput::new(&new_branch_input)
-                                                                .text_size(px(12.0))
-                                                        )
+                                                    input_container(&t, Some(new_branch_input_focused))
+                                                        .child(SimpleInput::new(&new_branch_input).text_size(px(12.0))),
                                                 )
                                         )
                                     })

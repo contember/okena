@@ -46,8 +46,6 @@
 **Files:** All UI overlay and component files
 **Solution:** Created `ui/tokens.rs` with named constants for spacing (SPACE_XS/SM/MD/LG/XL), text sizes (TEXT_XS/SM/MS/MD/LG/XL), border radius (RADIUS_SM/MD/STD/LG), icon sizes, and common widths/heights. Updated `ui_helpers.rs` to use tokens. Other files can adopt incrementally.
 
-### 10. Deduplicate input field styling — LOW PRIORITY
+### ~~10. Deduplicate input field styling~~ ✅ DONE
 **Files:** `sidebar/add_dialog.rs`, `overlays/worktree_dialog.rs`
-**Similarity:** ~75%
-**Description:** Both implement name/path input fields with labels, styled containers, and action buttons (Browse, Quick-add). Extract shared input field component.
-**Note:** Only 2 files affected, and worktree_dialog has focus-border logic that add_dialog doesn't need. Consider when adding more input dialogs.
+**Solution:** Created `input_container()` helper with optional focus highlight support and `labeled_input()` for label+input combos. Both dialog files refactored to use shared helpers.

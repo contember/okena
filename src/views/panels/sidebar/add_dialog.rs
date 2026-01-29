@@ -1,7 +1,7 @@
 //! Add project dialog and path suggestions for the sidebar
 
 use crate::theme::theme;
-use crate::views::components::{button, button_primary, SimpleInput};
+use crate::views::components::{button, button_primary, input_container, labeled_input, SimpleInput};
 use gpui::prelude::*;
 use gpui::*;
 
@@ -49,40 +49,15 @@ impl Sidebar {
             )
             .child(
                 // Name input
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
+                labeled_input("Name:", &t)
                     .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(t.text_muted))
-                            .child("Name:"),
-                    )
-                    .child(
-                        div()
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border))
-                            .rounded(px(4.0))
-                            .child(
-                                SimpleInput::new(&name_input)
-                                    .text_size(px(12.0))
-                            )
+                        input_container(&t, None)
+                            .child(SimpleInput::new(&name_input).text_size(px(12.0))),
                     ),
             )
             .child(
                 // Path input with auto-complete
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgb(t.text_muted))
-                            .child("Path (Tab to complete):"),
-                    )
+                labeled_input("Path (Tab to complete):", &t)
                     .child(path_input),
             )
             .child(
