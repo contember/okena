@@ -4,5 +4,7 @@
 //! different views in the application.
 
 mod click_detector;
+mod selection;
 
 pub use click_detector::ClickDetector;
+pub use selection::*;

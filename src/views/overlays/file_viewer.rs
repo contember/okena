@@ -4,6 +4,7 @@
 //! Markdown files can be viewed in rendered preview mode.
 
 use crate::theme::theme;
+use crate::ui::{copy_to_clipboard, Selection1DExtension, Selection2DExtension, SelectionState};
 use crate::views::components::{modal_backdrop, modal_content, segmented_toggle};
 use super::markdown_renderer::{MarkdownDocument, MarkdownSelection, RenderedNode};
 use gpui::*;
@@ -43,41 +44,8 @@ struct HighlightedLine {
     plain_text: String,
 }
 
-/// Selection state for the file viewer.
-#[derive(Clone, Default)]
-struct Selection {
-    /// Start position (line, column)
-    start: Option<(usize, usize)>,
-    /// End position (line, column)
-    end: Option<(usize, usize)>,
-    /// Whether we're currently dragging
-    is_selecting: bool,
-}
-
-impl Selection {
-    /// Get normalized selection range (start <= end)
-    fn normalized(&self) -> Option<((usize, usize), (usize, usize))> {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) => {
-                if start.0 < end.0 || (start.0 == end.0 && start.1 <= end.1) {
-                    Some((start, end))
-                } else {
-                    Some((end, start))
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Check if line is fully or partially selected
-    fn line_has_selection(&self, line: usize) -> bool {
-        if let Some(((start_line, _), (end_line, _))) = self.normalized() {
-            line >= start_line && line <= end_line
-        } else {
-            false
-        }
-    }
-}
+/// Type alias for source view selection (line, column).
+type Selection = SelectionState<(usize, usize)>;
 
 /// File viewer overlay for displaying file contents.
 pub struct FileViewer {
@@ -404,9 +372,7 @@ impl FileViewer {
 
     /// Copy selected text to clipboard.
     fn copy_selection(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.get_selected_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        copy_to_clipboard(cx, self.get_selected_text());
     }
 
     /// Select all text.
@@ -425,25 +391,19 @@ impl FileViewer {
     /// Get selected text from markdown preview (using character indices).
     fn get_selected_markdown_text(&self) -> Option<String> {
         let doc = self.markdown_doc.as_ref()?;
-        let (start, end) = self.markdown_selection.normalized()?;
+        let (start, end) = self.markdown_selection.normalized_non_empty()?;
 
         let chars: Vec<char> = doc.plain_text.chars().collect();
         let char_count = chars.len();
         let start = start.min(char_count);
         let end = end.min(char_count);
 
-        if start == end {
-            None
-        } else {
-            Some(chars[start..end].iter().collect())
-        }
+        Some(chars[start..end].iter().collect())
     }
 
     /// Copy selected markdown text to clipboard.
     fn copy_markdown_selection(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.get_selected_markdown_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        copy_to_clipboard(cx, self.get_selected_markdown_text());
     }
 
     /// Select all markdown text (using character count).
@@ -491,7 +451,7 @@ impl FileViewer {
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                this.selection.is_selecting = false;
+                this.selection.finish();
                 cx.notify();
             }))
             .child(
@@ -669,13 +629,13 @@ impl Render for FileViewer {
         // Pre-render markdown preview with selection - using per-node handlers
         let preview_nodes: Vec<RenderedNode> = if !has_error && is_preview_mode && is_markdown {
             self.markdown_doc.as_ref().map(|doc| {
-                let selection = self.markdown_selection.normalized();
+                let selection = self.markdown_selection.normalized_non_empty();
                 doc.render_nodes_with_offsets(&t, selection)
             }).unwrap_or_default()
         } else {
             Vec::new()
         };
-        let has_markdown_selection = self.markdown_selection.normalized().is_some();
+        let has_markdown_selection = self.markdown_selection.normalized_non_empty().is_some();
 
         // Focus on first render
         window.focus(&focus_handle, cx);
@@ -692,11 +652,11 @@ impl Render for FileViewer {
                 match key {
                     "escape" => {
                         // Clear selection first, then close if no selection
-                        if is_preview && this.markdown_selection.normalized().is_some() {
-                            this.markdown_selection = MarkdownSelection::default();
+                        if is_preview && this.markdown_selection.normalized_non_empty().is_some() {
+                            this.markdown_selection.clear();
                             cx.notify();
                         } else if this.selection.normalized().is_some() {
-                            this.selection = Selection::default();
+                            this.selection.clear();
                             cx.notify();
                         } else {
                             this.close(cx);
@@ -855,7 +815,7 @@ impl Render for FileViewer {
                                                     // Double-click: select entire block
                                                     this.markdown_selection.start = Some(start_offset);
                                                     this.markdown_selection.end = Some(node_end);
-                                                    this.markdown_selection.is_selecting = false;
+                                                    this.markdown_selection.finish();
                                                 } else {
                                                     this.markdown_selection.start = Some(start_offset);
                                                     this.markdown_selection.end = Some(start_offset);
@@ -876,7 +836,7 @@ impl Render for FileViewer {
                                                 }
                                             }))
                                             .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                this.markdown_selection.is_selecting = false;
+                                                this.markdown_selection.finish();
                                                 cx.notify();
                                             }))
                                             .child(node_div)
@@ -899,7 +859,7 @@ impl Render for FileViewer {
                                                     // Double-click: select entire line
                                                     this.markdown_selection.start = Some(start_offset);
                                                     this.markdown_selection.end = Some(line_end);
-                                                    this.markdown_selection.is_selecting = false;
+                                                    this.markdown_selection.finish();
                                                 } else {
                                                     this.markdown_selection.start = Some(start_offset);
                                                     this.markdown_selection.end = Some(start_offset);
@@ -920,7 +880,7 @@ impl Render for FileViewer {
                                                 }
                                             }))
                                             .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                this.markdown_selection.is_selecting = false;
+                                                this.markdown_selection.finish();
                                                 cx.notify();
                                             }))
                                             .child(line_div)
@@ -981,7 +941,7 @@ impl Render for FileViewer {
                                                         // Double-click: select entire row
                                                         this.markdown_selection.start = Some(start_offset);
                                                         this.markdown_selection.end = Some(row_end);
-                                                        this.markdown_selection.is_selecting = false;
+                                                        this.markdown_selection.finish();
                                                     } else {
                                                         this.markdown_selection.start = Some(start_offset);
                                                         this.markdown_selection.end = Some(start_offset);
@@ -1002,7 +962,7 @@ impl Render for FileViewer {
                                                     }
                                                 }))
                                                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                    this.markdown_selection.is_selecting = false;
+                                                    this.markdown_selection.finish();
                                                     cx.notify();
                                                 }))
                                                 .child(header_div)
@@ -1021,7 +981,7 @@ impl Render for FileViewer {
                                                         // Double-click: select entire row
                                                         this.markdown_selection.start = Some(start_offset);
                                                         this.markdown_selection.end = Some(row_end);
-                                                        this.markdown_selection.is_selecting = false;
+                                                        this.markdown_selection.finish();
                                                     } else {
                                                         this.markdown_selection.start = Some(start_offset);
                                                         this.markdown_selection.end = Some(start_offset);
@@ -1042,7 +1002,7 @@ impl Render for FileViewer {
                                                     }
                                                 }))
                                                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                                    this.markdown_selection.is_selecting = false;
+                                                    this.markdown_selection.finish();
                                                     cx.notify();
                                                 }))
                                                 .child(row_div)
@@ -1086,7 +1046,7 @@ impl Render for FileViewer {
                                 .cursor(CursorStyle::IBeam)
                                 // Global mouse up to handle case where mouse up happens outside a node
                                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
-                                    this.markdown_selection.is_selecting = false;
+                                    this.markdown_selection.finish();
                                     cx.notify();
                                 }))
                                 .child(content_div)

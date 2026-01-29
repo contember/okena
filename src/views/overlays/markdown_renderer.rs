@@ -3,20 +3,13 @@
 //! Parses markdown content and renders it as GPUI elements.
 
 use crate::theme::ThemeColors;
+use crate::ui::SelectionState;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-/// Selection state for markdown content.
-#[derive(Clone, Default)]
-pub struct MarkdownSelection {
-    /// Start position as character offset in flat text
-    pub start: Option<usize>,
-    /// End position as character offset in flat text
-    pub end: Option<usize>,
-    /// Currently selecting
-    pub is_selecting: bool,
-}
+/// Type alias for markdown selection (1D character offset).
+pub type MarkdownSelection = SelectionState<usize>;
 
 /// A rendered node that can be either a simple block or a code block with selectable lines.
 pub enum RenderedNode {
@@ -44,21 +37,6 @@ pub enum RenderedNode {
     },
 }
 
-impl MarkdownSelection {
-    /// Get normalized selection range (start <= end)
-    pub fn normalized(&self) -> Option<(usize, usize)> {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) if start != end => {
-                if start <= end {
-                    Some((start, end))
-                } else {
-                    Some((end, start))
-                }
-            }
-            _ => None,
-        }
-    }
-}
 
 /// Slice a string by character indices (not byte indices).
 /// Returns (before, selected, after) parts.
