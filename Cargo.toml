@@ -48,5 +48,8 @@ time = { version = "0.3", features = ["local-offset"] }
 # Syntax highlighting
 syntect = "5"
 
+# Markdown parsing
+pulldown-cmark = "0.12"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

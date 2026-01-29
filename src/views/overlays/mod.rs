@@ -19,6 +19,7 @@ pub mod context_menu;
 pub mod detached_terminal;
 pub mod file_search;
 pub mod file_viewer;
+mod markdown_renderer;
 pub mod fullscreen_terminal;
 pub mod keybindings_help;
 pub mod project_switcher;

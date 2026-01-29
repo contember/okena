@@ -62,6 +62,44 @@ pub fn keyboard_hints_footer(hints: &[(&str, &str)], t: &ThemeColors) -> Div {
     footer
 }
 
+/// Segmented toggle button for switching between options.
+///
+/// `options` is a slice of `(label, is_active)` pairs.
+pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
+    let mut container = div()
+        .flex()
+        .rounded(px(4.0))
+        .bg(rgb(t.bg_secondary))
+        .p(px(2.0));
+
+    for (i, &(label, is_active)) in options.iter().enumerate() {
+        let mut button = div()
+            .px(px(8.0))
+            .py(px(3.0))
+            .rounded(px(3.0))
+            .text_size(px(11.0))
+            .cursor_pointer();
+
+        if is_active {
+            button = button
+                .bg(rgb(t.bg_primary))
+                .text_color(rgb(t.text_primary));
+        } else {
+            button = button
+                .text_color(rgb(t.text_muted));
+        }
+
+        // Add small gap between buttons
+        if i > 0 {
+            container = container.child(div().w(px(2.0)));
+        }
+
+        container = container.child(button.child(label.to_string()));
+    }
+
+    container
+}
+
 /// Search input area with ">" prefix prompt and query/placeholder display.
 pub fn search_input_area(query: &str, placeholder: &str, t: &ThemeColors) -> Div {
     div()
