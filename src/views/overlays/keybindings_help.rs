@@ -3,6 +3,7 @@ use crate::keybindings::{
     ShowKeybindings,
 };
 use crate::theme::theme;
+use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -192,9 +193,10 @@ impl Render for KeybindingsHelp {
 
         let focus_handle = self.focus_handle.clone();
 
-        div()
+        modal_backdrop("keybindings-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("KeybindingsHelp")
+            .items_center()
             .on_action(cx.listener(|this, _: &ShowKeybindings, _window, cx| {
                 this.close(cx);
             }))
@@ -203,77 +205,19 @@ impl Render for KeybindingsHelp {
                     this.close(cx);
                 }
             }))
-            .absolute()
-            .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
-            .flex()
-            .items_center()
-            .justify_center()
-            // Click outside to close
-            .id("keybindings-backdrop")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
             }))
             .child(
-                // Modal content
-                div()
-                    .id("keybindings-modal")
+                modal_content("keybindings-modal", &t)
                     .w(px(600.0))
                     .max_h(px(700.0))
-                    .bg(rgb(t.bg_primary))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .shadow_xl()
-                    .flex()
-                    .flex_col()
-                    // Stop click propagation
-                    .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(
-                        // Header
-                        div()
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(16.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(t.text_primary))
-                                            .child("Keyboard Shortcuts"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Press ESC to close"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("keybindings-close-btn")
-                                    .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(16.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("✕")
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                                        this.close(cx);
-                                    })),
-                            ),
-                    )
+                    .child(modal_header(
+                        "Keyboard Shortcuts",
+                        Some("Press ESC to close"),
+                        &t,
+                        cx.listener(|this, _, _window, cx| this.close(cx)),
+                    ))
                     .child(
                         // Conflicts warning
                         div()

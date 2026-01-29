@@ -5,6 +5,7 @@
 use crate::elements::terminal_element::{SearchMatch, TerminalElement};
 use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ThemeColors};
+use crate::views::components::{menu_item, menu_item_conditional, menu_item_with_color};
 use crate::views::layout::navigation::register_pane_bounds;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
@@ -361,9 +362,6 @@ impl TerminalContent {
             (position, false)
         };
 
-        // Capture colors for closures
-        let bg_hover = t.bg_hover;
-
         let menu = div()
             .id("terminal-context-menu-interactive")
             .absolute()
@@ -379,202 +377,69 @@ impl TerminalContent {
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
-            // Copy
+            // Copy (conditional - requires selection)
             .child(
-                div()
-                    .id("context-menu-copy-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(if has_selection {
-                        rgb(t.text_primary)
-                    } else {
-                        rgb(t.text_muted)
-                    })
-                    .cursor(if has_selection {
-                        CursorStyle::PointingHand
-                    } else {
-                        CursorStyle::Arrow
-                    })
-                    .when(has_selection, |el: Stateful<Div>| {
-                        el.hover(move |s| s.bg(rgb(bg_hover)))
-                    })
-                    .when(has_selection, |el: Stateful<Div>| {
+                menu_item_conditional("context-menu-copy", "icons/copy.svg", "Copy", has_selection, t)
+                    .when(has_selection, |el| {
                         el.on_click(cx.listener(|this, _, _window, cx| {
                             cx.emit(ContextMenuEvent::Copy);
                             this.hide_context_menu(cx);
                         }))
-                    })
-                    .child(
-                        svg()
-                            .path("icons/copy.svg")
-                            .size(px(14.0))
-                            .text_color(if has_selection {
-                                rgb(t.text_secondary)
-                            } else {
-                                rgb(t.text_muted)
-                            }),
-                    )
-                    .child("Copy"),
+                    }),
             )
             // Paste
             .child(
-                div()
-                    .id("context-menu-paste-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item("context-menu-paste", "icons/clipboard-paste.svg", "Paste", t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::Paste);
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/clipboard-paste.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary)),
-                    )
-                    .child("Paste"),
+                    })),
             )
             // Separator
             .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
             // Clear
             .child(
-                div()
-                    .id("context-menu-clear-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item("context-menu-clear", "icons/eraser.svg", "Clear", t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::Clear);
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/eraser.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary)),
-                    )
-                    .child("Clear"),
+                    })),
             )
             // Select All
             .child(
-                div()
-                    .id("context-menu-select-all-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item("context-menu-select-all", "icons/select-all.svg", "Select All", t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::SelectAll);
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/select-all.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary)),
-                    )
-                    .child("Select All"),
+                    })),
             )
             // Separator
             .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
             // Split Horizontal
             .child(
-                div()
-                    .id("context-menu-split-h-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item("context-menu-split-h", "icons/split-horizontal.svg", "Split Horizontal", t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::Split(SplitDirection::Horizontal));
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/split-horizontal.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary)),
-                    )
-                    .child("Split Horizontal"),
+                    })),
             )
             // Split Vertical
             .child(
-                div()
-                    .id("context-menu-split-v-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item("context-menu-split-v", "icons/split-vertical.svg", "Split Vertical", t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::Split(SplitDirection::Vertical));
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/split-vertical.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary)),
-                    )
-                    .child("Split Vertical"),
+                    })),
             )
             // Separator
             .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
             // Close
             .child(
-                div()
-                    .id("context-menu-close-interactive")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.error))
-                    .hover(move |s| s.bg(rgb(bg_hover)))
-                    .cursor_pointer()
+                menu_item_with_color("context-menu-close", "icons/close.svg", "Close", t.error, t.error, t)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         cx.emit(ContextMenuEvent::Close);
                         this.hide_context_menu(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/close.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.error)),
-                    )
-                    .child("Close"),
+                    })),
             );
 
         // Position menu

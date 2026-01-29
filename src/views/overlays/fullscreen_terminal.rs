@@ -1,10 +1,12 @@
-use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
+use super::terminal_overlay_utils::{
+    create_terminal_content, get_or_create_terminal, handle_pending_focus, handle_terminal_key_input,
+};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use std::sync::Arc;
@@ -36,24 +38,8 @@ impl FullscreenTerminal {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Try to get existing terminal from registry
-        let terminal = {
-            let mut terminals_guard = terminals.lock();
-            if let Some(existing) = terminals_guard.get(&terminal_id) {
-                existing.clone()
-            } else {
-                // Create terminal view (connects to existing PTY)
-                let size = TerminalSize {
-                    cols: 120,
-                    rows: 40,
-                    cell_width: 8.0,
-                    cell_height: 17.0,
-                };
-                let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, pty_manager.clone()));
-                terminals_guard.insert(terminal_id.clone(), terminal.clone());
-                terminal
-            }
-        };
+        // Get or create terminal from registry
+        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals);
 
         // Find the actual layout path for this terminal (needed for zoom)
         let layout_path = {
@@ -65,18 +51,14 @@ impl FullscreenTerminal {
         };
 
         // Create terminal content view
-        let content = cx.new(|cx| {
-            let mut content = TerminalContent::new(
-                focus_handle.clone(),
-                project_id.clone(),
-                layout_path,
-                workspace.clone(),
-                cx,
-            );
-            content.set_terminal(Some(terminal.clone()), cx);
-            content.set_focused(true);
-            content
-        });
+        let content = create_terminal_content(
+            cx,
+            focus_handle.clone(),
+            project_id.clone(),
+            layout_path,
+            workspace.clone(),
+            terminal.clone(),
+        );
 
         // Start fade-in animation with minimal opacity to ensure first paint runs
         // (GPUI may skip paint for elements with opacity 0)
@@ -141,22 +123,7 @@ impl FullscreenTerminal {
     /// Switch to another terminal in fullscreen mode
     fn switch_to_terminal(&mut self, new_terminal_id: String, cx: &mut Context<Self>) {
         // Get or create the terminal
-        let terminal = {
-            let mut terminals_guard = self.terminals.lock();
-            if let Some(existing) = terminals_guard.get(&new_terminal_id) {
-                existing.clone()
-            } else {
-                let size = TerminalSize {
-                    cols: 120,
-                    rows: 40,
-                    cell_width: 8.0,
-                    cell_height: 17.0,
-                };
-                let terminal = Arc::new(Terminal::new(new_terminal_id.clone(), size, self.pty_manager.clone()));
-                terminals_guard.insert(new_terminal_id.clone(), terminal.clone());
-                terminal
-            }
-        };
+        let terminal = get_or_create_terminal(&new_terminal_id, &self.pty_manager, &self.terminals);
 
         // Update workspace fullscreen state (preserve previous_focused_project_id)
         self.workspace.update(cx, |ws, cx| {
@@ -228,29 +195,17 @@ impl FullscreenTerminal {
         }
 
         // Forward other keys to terminal
-        if let Some(input) = self.key_to_input(event) {
-            self.terminal.send_bytes(&input);
-            // Don't call cx.notify() here - the PTY event loop will trigger
-            // a render when the terminal responds
-        }
-    }
-
-    fn key_to_input(&self, event: &KeyDownEvent) -> Option<Vec<u8>> {
-        // Use the shared key_to_bytes function for consistent key handling
-        // Pass app_cursor_mode so arrow keys work correctly in less, vim, etc.
-        let app_cursor_mode = self.terminal.is_app_cursor_mode();
-        key_to_bytes(event, app_cursor_mode)
+        handle_terminal_key_input(&self.terminal, event);
+        // Don't call cx.notify() here - the PTY event loop will trigger
+        // a render when the terminal responds
     }
 }
 
 impl Render for FullscreenTerminal {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        if self.pending_focus {
-            self.pending_focus = false;
-            _window.focus(&self.focus_handle, cx);
-        }
+        handle_pending_focus(&mut self.pending_focus, &self.focus_handle, window, cx);
 
         let focus_handle = self.focus_handle.clone();
         let workspace = self.workspace.clone();

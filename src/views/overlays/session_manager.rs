@@ -1,5 +1,6 @@
 use crate::settings::settings_entity;
 use crate::theme::{theme, with_alpha};
+use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use crate::workspace::persistence::{
     config_dir, delete_session, export_workspace, import_workspace, list_sessions,
     load_session, rename_session, save_session, session_exists, SessionInfo,
@@ -743,21 +744,15 @@ impl Render for SessionManager {
         // Focus on first render
         window.focus(&focus_handle, cx);
 
-        div()
+        modal_backdrop("session-manager-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("SessionManager")
+            .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key.as_str() == "escape" {
                     this.close(cx);
                 }
             }))
-            .absolute()
-            .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
-            .flex()
-            .items_center()
-            .justify_center()
-            .id("session-manager-backdrop")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
@@ -765,67 +760,15 @@ impl Render for SessionManager {
                 }),
             )
             .child(
-                // Modal content
-                div()
-                    .id("session-manager-modal")
+                modal_content("session-manager-modal", &t)
                     .w(px(550.0))
                     .max_h(px(600.0))
-                    .bg(rgb(t.bg_primary))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .shadow_xl()
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(
-                        // Header
-                        div()
-                            .px(px(16.0))
-                            .py(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(16.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(t.text_primary))
-                                            .child("Session Manager"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .child("Save and restore workspace sessions"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("session-manager-close-btn")
-                                    .cursor_pointer()
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .rounded(px(4.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(16.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("✕")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _window, cx| {
-                                            this.close(cx);
-                                        }),
-                                    ),
-                            ),
-                    )
+                    .child(modal_header(
+                        "Session Manager",
+                        Some("Save and restore workspace sessions"),
+                        &t,
+                        cx.listener(|this, _, _window, cx| this.close(cx)),
+                    ))
                     .child(
                         // Tabs
                         div()

@@ -1,10 +1,12 @@
-use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
+use super::terminal_overlay_utils::{
+    create_terminal_content, get_or_create_terminal, handle_pending_focus, handle_terminal_key_input,
+};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use std::sync::Arc;
@@ -56,38 +58,18 @@ impl DetachedTerminalView {
             (name, found_project_id, found_layout_path)
         };
 
-        // Try to get existing terminal from registry
-        let terminal = {
-            let mut terminals_guard = terminals.lock();
-            if let Some(existing) = terminals_guard.get(&terminal_id) {
-                existing.clone()
-            } else {
-                // Create terminal view (connects to existing PTY)
-                let size = TerminalSize {
-                    cols: 120,
-                    rows: 40,
-                    cell_width: 8.0,
-                    cell_height: 17.0,
-                };
-                let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, pty_manager));
-                terminals_guard.insert(terminal_id.clone(), terminal.clone());
-                terminal
-            }
-        };
+        // Get or create terminal from registry
+        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals);
 
         // Create terminal content view
-        let content = cx.new(|cx| {
-            let mut content = TerminalContent::new(
-                focus_handle.clone(),
-                project_id,
-                layout_path,
-                workspace.clone(),
-                cx,
-            );
-            content.set_terminal(Some(terminal.clone()), cx);
-            content.set_focused(true);
-            content
-        });
+        let content = create_terminal_content(
+            cx,
+            focus_handle.clone(),
+            project_id,
+            layout_path,
+            workspace.clone(),
+            terminal.clone(),
+        );
 
         // Observe workspace for changes (to detect when re-attached)
         let terminal_id_for_observer = terminal_id.clone();
@@ -148,11 +130,7 @@ impl DetachedTerminalView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
         // Forward keys to terminal
-        // Pass app_cursor_mode so arrow keys work correctly in less, vim, etc.
-        let app_cursor_mode = self.terminal.is_app_cursor_mode();
-        if let Some(input) = key_to_bytes(event, app_cursor_mode) {
-            self.terminal.send_bytes(&input);
-        }
+        handle_terminal_key_input(&self.terminal, event);
     }
 
     fn handle_reattach(&mut self, cx: &mut Context<Self>) {
@@ -172,10 +150,7 @@ impl Render for DetachedTerminalView {
             return div().into_any_element();
         }
 
-        if self.pending_focus {
-            self.pending_focus = false;
-            window.focus(&self.focus_handle, cx);
-        }
+        handle_pending_focus(&mut self.pending_focus, &self.focus_handle, window, cx);
 
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();

@@ -72,6 +72,52 @@ pub fn menu_item_disabled(
         .child(label.into())
 }
 
+/// Context menu item with conditional enabled/disabled state.
+///
+/// When `enabled` is true: shows pointer cursor, hover effect, and primary colors.
+/// When `enabled` is false: shows default cursor, no hover, and muted colors.
+///
+/// Returns a Stateful<Div> that can have `.on_click()` chained (caller should guard with `enabled`).
+pub fn menu_item_conditional(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    let (text_color, icon_color) = if enabled {
+        (t.text_primary, t.text_secondary)
+    } else {
+        (t.text_muted, t.text_muted)
+    };
+
+    let bg_hover = t.bg_hover;
+
+    let base = div()
+        .id(id)
+        .px(SPACE_LG)
+        .py(SPACE_SM)
+        .flex()
+        .items_center()
+        .gap(SPACE_MD)
+        .text_size(TEXT_MD)
+        .text_color(rgb(text_color))
+        .cursor(if enabled { CursorStyle::PointingHand } else { CursorStyle::Arrow })
+        .child(
+            svg()
+                .path(icon)
+                .size(ICON_STD)
+                .text_color(rgb(icon_color)),
+        )
+        .child(label.into());
+
+    if enabled {
+        base.hover(move |s| s.bg(rgb(bg_hover)))
+    } else {
+        base
+    }
+}
+
 /// Small pill label for categories like "Custom", "worktree", etc.
 pub fn badge(text: impl Into<SharedString>, t: &ThemeColors) -> Div {
     div()
