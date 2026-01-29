@@ -10,10 +10,9 @@
 **Files:** `command_palette.rs`, `theme_selector.rs`, `file_search.rs`, `project_switcher.rs`, `shell_selector_overlay.rs`
 **Solution:** Created `handle_list_overlay_key()` function with support for custom extra keys (e.g., Space for toggle in ProjectSwitcher).
 
-### 3. Extract context menu item helper
+### ~~3. Extract context menu item helper~~ ✅ DONE
 **Files:** `overlays/context_menu.rs`, `layout/tabs/context_menu.rs`
-**Similarity:** ~80%
-**Description:** Menu items use identical styling: `div().px(12).py(6).flex().items_center().gap(8).cursor_pointer().text_size(12).text_color(...).hover(...).child(svg).child(label).on_click(...)`. Extract `menu_item(id, icon, label, theme, on_click)` helper. Each file has 3+ near-identical items.
+**Solution:** Created `menu_item()`, `menu_item_with_color()`, and `menu_item_disabled()` helpers in `ui_helpers.rs`. Both context menu files refactored to use shared infrastructure.
 
 ## Medium Priority
 

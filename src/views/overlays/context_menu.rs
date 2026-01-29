@@ -2,9 +2,10 @@
 
 use crate::git;
 use crate::theme::theme;
+use crate::views::components::{menu_item, menu_item_with_color};
 use crate::workspace::state::{ContextMenuRequest, Workspace};
-use gpui::*;
 use gpui::prelude::*;
+use gpui::*;
 
 /// Event emitted by ContextMenu
 pub enum ContextMenuEvent {
@@ -137,55 +138,21 @@ impl Render for ContextMenu {
                     })
                     // Add Terminal option
                     .child(
-                        div()
-                            .id("context-menu-add-terminal")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/plus.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .child("Add Terminal")
+                        menu_item("context-menu-add-terminal", "icons/plus.svg", "Add Terminal", &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.add_terminal(cx);
-                            }))
+                            })),
                     )
                     // Create Worktree option (only for git repos that are not already worktrees)
                     .when(is_git_repo && !is_worktree, |d| {
                         d.child(
-                            div()
-                                .id("context-menu-create-worktree")
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.text_primary))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/git-branch.svg")
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.text_secondary))
-                                )
-                                .child("Create Worktree...")
+                            menu_item("context-menu-create-worktree", "icons/git-branch.svg", "Create Worktree...", &t)
                                 .on_click(cx.listener({
                                     let project_path = project_path_for_worktree.clone();
                                     move |this, _, _window, cx| {
                                         this.create_worktree(project_path.clone(), cx);
                                     }
-                                }))
+                                })),
                         )
                     })
                     // Separator
@@ -198,80 +165,29 @@ impl Render for ContextMenu {
                     )
                     // Rename option
                     .child(
-                        div()
-                            .id("context-menu-rename")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/edit.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .child("Rename Project")
+                        menu_item("context-menu-rename", "icons/edit.svg", "Rename Project", &t)
                             .on_click(cx.listener({
                                 let project_name = project_name_for_rename.clone();
                                 move |this, _, _window, cx| {
                                     this.rename_project(project_name.clone(), cx);
                                 }
-                            }))
+                            })),
                     )
                     // Close Worktree option (only for worktree projects)
                     .when(is_worktree, |d| {
                         d.child(
-                            div()
-                                .id("context-menu-close-worktree")
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.warning))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/git-branch.svg")
-                                        .size(px(14.0))
-                                        .text_color(rgb(t.warning))
-                                )
-                                .child("Close Worktree")
+                            menu_item_with_color("context-menu-close-worktree", "icons/git-branch.svg", "Close Worktree", t.warning, t.warning, &t)
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.close_worktree(cx);
-                                }))
+                                })),
                         )
                     })
                     // Delete option
                     .child(
-                        div()
-                            .id("context-menu-delete")
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .cursor_pointer()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.error))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/trash.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(t.error))
-                            )
-                            .child("Delete Project")
+                        menu_item_with_color("context-menu-delete", "icons/trash.svg", "Delete Project", t.error, t.error, &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.delete_project(cx);
-                            }))
+                            })),
                     ),
             )
     }

@@ -1,7 +1,75 @@
-//! Shared UI helper functions for badges, keyboard hints, and search inputs.
+//! Shared UI helper functions for badges, keyboard hints, search inputs, and menu items.
 
 use crate::theme::ThemeColors;
 use gpui::*;
+
+/// Context menu item with icon and label.
+///
+/// Returns a Stateful<Div> that can have `.on_click()` chained.
+pub fn menu_item(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    menu_item_with_color(id, icon, label, t.text_primary, t.text_secondary, t)
+}
+
+/// Context menu item with custom text and icon colors.
+///
+/// Use this for items with warning/error colors or disabled states.
+pub fn menu_item_with_color(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    text_color: u32,
+    icon_color: u32,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .py(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .cursor_pointer()
+        .text_size(px(12.0))
+        .text_color(rgb(text_color))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(14.0))
+                .text_color(rgb(icon_color)),
+        )
+        .child(label.into())
+}
+
+/// Context menu item in disabled state (no hover, default cursor).
+pub fn menu_item_disabled(
+    id: impl Into<ElementId>,
+    icon: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .py(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .text_color(rgb(t.text_muted))
+        .child(
+            svg()
+                .path(icon)
+                .size(px(14.0))
+                .text_color(rgb(t.text_muted)),
+        )
+        .child(label.into())
+}
 
 /// Small pill label for categories like "Custom", "worktree", etc.
 pub fn badge(text: impl Into<SharedString>, t: &ThemeColors) -> Div {

@@ -6,6 +6,7 @@
 //! - Close tabs to the right
 
 use crate::theme::theme;
+use crate::views::components::{menu_item, menu_item_disabled};
 use crate::views::layout::layout_container::LayoutContainer;
 use gpui::*;
 
@@ -48,24 +49,7 @@ impl LayoutContainer {
             })
             // Close tab
             .child(
-                div()
-                    .id("tab-menu-close")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(t.text_primary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .cursor_pointer()
-                    .child(
-                        svg()
-                            .path("icons/close.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .child("Close")
+                menu_item("tab-menu-close", "icons/close.svg", "Close", &t)
                     .on_click({
                         let workspace = workspace.clone();
                         let project_id = project_id.clone();
@@ -79,76 +63,38 @@ impl LayoutContainer {
                     }),
             )
             // Close Others
-            .child({
-                let base = div()
-                    .id("tab-menu-close-others")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(if has_other_tabs { rgb(t.text_primary) } else { rgb(t.text_muted) })
-                    .cursor(if has_other_tabs { CursorStyle::PointingHand } else { CursorStyle::Arrow })
-                    .child(
-                        svg()
-                            .path("icons/close.svg")
-                            .size(px(14.0))
-                            .text_color(if has_other_tabs { rgb(t.text_secondary) } else { rgb(t.text_muted) })
-                    )
-                    .child("Close Others");
-                if has_other_tabs {
-                    base.hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_click({
-                            let workspace = workspace.clone();
-                            let project_id = project_id.clone();
-                            let layout_path = layout_path.clone();
-                            cx.listener(move |this, _, _window, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.close_other_tabs(&project_id, &layout_path, tab_index, cx);
-                                });
-                                this.hide_tab_context_menu(cx);
-                            })
+            .child(if has_other_tabs {
+                menu_item("tab-menu-close-others", "icons/close.svg", "Close Others", &t)
+                    .on_click({
+                        let workspace = workspace.clone();
+                        let project_id = project_id.clone();
+                        let layout_path = layout_path.clone();
+                        cx.listener(move |this, _, _window, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.close_other_tabs(&project_id, &layout_path, tab_index, cx);
+                            });
+                            this.hide_tab_context_menu(cx);
                         })
-                } else {
-                    base
-                }
+                    })
+            } else {
+                menu_item_disabled("tab-menu-close-others", "icons/close.svg", "Close Others", &t)
             })
             // Close to Right
-            .child({
-                let base = div()
-                    .id("tab-menu-close-to-right")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .text_size(px(13.0))
-                    .text_color(if has_tabs_to_right { rgb(t.text_primary) } else { rgb(t.text_muted) })
-                    .cursor(if has_tabs_to_right { CursorStyle::PointingHand } else { CursorStyle::Arrow })
-                    .child(
-                        svg()
-                            .path("icons/chevron-right.svg")
-                            .size(px(14.0))
-                            .text_color(if has_tabs_to_right { rgb(t.text_secondary) } else { rgb(t.text_muted) })
-                    )
-                    .child("Close to Right");
-                if has_tabs_to_right {
-                    base.hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_click({
-                            let workspace = workspace.clone();
-                            let project_id = project_id.clone();
-                            let layout_path = layout_path.clone();
-                            cx.listener(move |this, _, _window, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.close_tabs_to_right(&project_id, &layout_path, tab_index, cx);
-                                });
-                                this.hide_tab_context_menu(cx);
-                            })
+            .child(if has_tabs_to_right {
+                menu_item("tab-menu-close-to-right", "icons/chevron-right.svg", "Close to Right", &t)
+                    .on_click({
+                        let workspace = workspace.clone();
+                        let project_id = project_id.clone();
+                        let layout_path = layout_path.clone();
+                        cx.listener(move |this, _, _window, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.close_tabs_to_right(&project_id, &layout_path, tab_index, cx);
+                            });
+                            this.hide_tab_context_menu(cx);
                         })
-                } else {
-                    base
-                }
+                    })
+            } else {
+                menu_item_disabled("tab-menu-close-to-right", "icons/chevron-right.svg", "Close to Right", &t)
             })
     }
 }
