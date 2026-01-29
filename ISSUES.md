@@ -2,15 +2,13 @@
 
 ## High Priority
 
-### 1. Extract generic filterable list overlay component
+### ~~1. Extract generic filterable list overlay component~~ ✅ DONE
 **Files:** `command_palette.rs`, `theme_selector.rs`, `file_search.rs`, `project_switcher.rs`, `shell_selector_overlay.rs`
-**Similarity:** ~90%
-**Description:** All overlay dialogs implement the same pattern: `search_query` + `selected_index` + `filtered_items` + `scroll_handle`, with identical filtering (lowercase match), scroll-to-selected, close, and rendering (modal backdrop → search input → scrollable list → keyboard hints footer). Extract a generic `ListOverlay` component with configurable item type, filter function, and row render function. Saves ~500+ lines.
+**Solution:** Created `list_overlay.rs` with `ListOverlayConfig`, `ListOverlayState<T, M>`, `substring_filter()`. All overlays refactored to use shared infrastructure.
 
-### 2. Extract keyboard navigation handler for list overlays
+### ~~2. Extract keyboard navigation handler for list overlays~~ ✅ DONE
 **Files:** `command_palette.rs`, `theme_selector.rs`, `file_search.rs`, `project_switcher.rs`, `shell_selector_overlay.rs`
-**Similarity:** ~85%
-**Description:** Same `on_key_down` handler copy-pasted in every overlay: escape → close, up/down → navigate with bounds check, enter → execute, backspace → remove char, single char → append to query. Extract a `keyboard_navigator()` helper or shared trait. Saves ~200 lines.
+**Solution:** Created `handle_list_overlay_key()` function with support for custom extra keys (e.g., Space for toggle in ProjectSwitcher).
 
 ### 3. Extract context menu item helper
 **Files:** `overlays/context_menu.rs`, `layout/tabs/context_menu.rs`
@@ -33,10 +31,9 @@
 **Similarity:** 100%
 **Description:** Every overlay defines `fn close(&self, cx) { cx.emit(Event::Close); }` with its own event enum containing a `Close` variant. Minor duplication but could use a shared `Closeable` trait or macro.
 
-### 7. Deduplicate scroll-to-selected logic
+### ~~7. Deduplicate scroll-to-selected logic~~ ✅ DONE
 **Files:** `command_palette.rs`, `file_search.rs`, `project_switcher.rs`
-**Similarity:** ~90%
-**Description:** Each overlay has `fn scroll_to_selected(&self) { if !self.filtered_*.is_empty() { self.scroll_handle.scroll_to_item(self.selected_index); } }`. Could be part of the generic list overlay (issue #1).
+**Solution:** Now part of `ListOverlayState::scroll_to_selected()` method.
 
 ### 8. Deduplicate workspace action path-based mutation pattern
 **Files:** `workspace/actions/terminal.rs`, `workspace/actions/layout.rs`
