@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct KeybindingEntry {
     /// The keystroke string (e.g., "cmd-b", "ctrl-shift-d")
     pub keystroke: String,
-    /// Optional context for the keybinding (e.g., "TerminalPane", "FullscreenTerminal")
+    /// Optional context for the keybinding (e.g., "TerminalPane")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// Whether this binding is enabled
@@ -98,14 +98,6 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     );
 
     // Fullscreen actions
-    map.insert(
-        "ExitFullscreen",
-        ActionDescription {
-            name: "Exit Fullscreen",
-            description: "Exit fullscreen mode",
-            category: "Fullscreen",
-        },
-    );
     map.insert(
         "ToggleFullscreen",
         ActionDescription {
@@ -478,28 +470,23 @@ impl KeybindingConfig {
 
         // Fullscreen keybindings
         bindings.insert(
-            "ExitFullscreen".to_string(),
-            vec![KeybindingEntry::new("escape", Some("FullscreenTerminal"))],
-        );
-        bindings.insert(
             "ToggleFullscreen".to_string(),
             vec![
                 KeybindingEntry::new("shift-escape", Some("TerminalPane")),
-                KeybindingEntry::new("shift-escape", Some("FullscreenTerminal")),
             ],
         );
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
             vec![
-                KeybindingEntry::new("cmd-]", Some("FullscreenTerminal")),
-                KeybindingEntry::new("ctrl-]", Some("FullscreenTerminal")),
+                KeybindingEntry::new("cmd-]", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-]", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "FullscreenPrevTerminal".to_string(),
             vec![
-                KeybindingEntry::new("cmd-[", Some("FullscreenTerminal")),
-                KeybindingEntry::new("ctrl-[", Some("FullscreenTerminal")),
+                KeybindingEntry::new("cmd-[", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-[", Some("TerminalPane")),
             ],
         );
 

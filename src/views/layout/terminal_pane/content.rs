@@ -124,11 +124,6 @@ impl TerminalContent {
         self.is_focused = focused;
     }
 
-    /// Set layout path (used when switching terminals in fullscreen).
-    pub fn set_layout_path(&mut self, layout_path: Vec<usize>) {
-        self.layout_path = layout_path;
-    }
-
     /// Mark scroll activity.
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.scrollbar.update(cx, |scrollbar, _| {

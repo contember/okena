@@ -121,6 +121,29 @@ impl LayoutContainer {
         project.layout.as_ref()?.get_at_path(&self.layout_path)
     }
 
+    /// Check if a layout node subtree contains the zoomed terminal.
+    /// Returns the child index that contains the zoomed terminal, if any.
+    pub(super) fn find_zoomed_child_index(
+        &self,
+        children: &[LayoutNode],
+        cx: &Context<Self>,
+    ) -> Option<usize> {
+        let ws = self.workspace.read(cx);
+        let fs = ws.fullscreen_terminal.as_ref()?;
+        if fs.project_id != self.project_id {
+            return None;
+        }
+        let zoomed_tid = &fs.terminal_id;
+
+        for (i, child) in children.iter().enumerate() {
+            let ids = child.collect_terminal_ids();
+            if ids.iter().any(|id| id == zoomed_tid) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     fn render_terminal(
         &mut self,
         terminal_id: Option<String>,
@@ -146,10 +169,41 @@ impl LayoutContainer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_horizontal = direction == SplitDirection::Horizontal;
         let num_children = children.len();
         let project_id = self.project_id.clone();
         let layout_path = self.layout_path.clone();
+
+        // If a zoomed terminal exists in one of our children, render only that child at full size
+        if let Some(zoomed_idx) = self.find_zoomed_child_index(children, cx) {
+            let mut child_path = self.layout_path.clone();
+            child_path.push(zoomed_idx);
+
+            let container = self
+                .child_containers
+                .entry(child_path.clone())
+                .or_insert_with(|| {
+                    cx.new(|_cx| {
+                        LayoutContainer::new(
+                            self.workspace.clone(),
+                            self.project_id.clone(),
+                            self.project_path.clone(),
+                            child_path.clone(),
+                            self.pty_manager.clone(),
+                            self.terminals.clone(),
+                        )
+                    })
+                })
+                .clone();
+
+            return div()
+                .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
+                .size_full()
+                .min_h_0()
+                .min_w_0()
+                .child(container);
+        }
+
+        let is_horizontal = direction == SplitDirection::Horizontal;
 
         // Clean up stale child containers (e.g., when a child was removed)
         let valid_paths: std::collections::HashSet<Vec<usize>> = (0..num_children)

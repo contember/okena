@@ -1,7 +1,6 @@
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::theme::theme;
-use crate::views::fullscreen_terminal::FullscreenTerminal;
 use crate::views::navigation::clear_pane_map;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::views::project_column::ProjectColumn;
@@ -43,10 +42,6 @@ pub struct RootView {
     status_bar: Entity<StatusBar>,
     /// Centralized overlay manager
     overlay_manager: Entity<OverlayManager>,
-    /// Fullscreen terminal overlay (synced from workspace state)
-    fullscreen_terminal: Option<Entity<FullscreenTerminal>>,
-    /// Currently displayed fullscreen state (to detect changes)
-    fullscreen_state: Option<(String, String)>,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
 }
@@ -93,8 +88,6 @@ impl RootView {
             title_bar,
             status_bar,
             overlay_manager,
-            fullscreen_terminal: None,
-            fullscreen_state: None,
             focus_handle,
         };
 
@@ -177,10 +170,6 @@ impl RootView {
         // Clear project columns (will be recreated)
         self.project_columns.clear();
 
-        // Clear fullscreen state
-        self.fullscreen_terminal = None;
-        self.fullscreen_state = None;
-
         // Update workspace with new data
         self.workspace.update(cx, |ws, cx| {
             ws.data = data;
@@ -238,7 +227,12 @@ impl RootView {
 
         let visible_projects: Vec<_> = {
             let workspace = self.workspace.read(cx);
-            workspace.visible_projects().iter().map(|p| p.id.clone()).collect()
+            // When zoomed, show only the zoomed project's column
+            if let Some(ref fs) = workspace.fullscreen_terminal {
+                vec![fs.project_id.clone()]
+            } else {
+                workspace.visible_projects().iter().map(|p| p.id.clone()).collect()
+            }
         };
 
         let num_projects = visible_projects.len();
@@ -318,40 +312,6 @@ impl RootView {
             ).absolute().size_full())
             // Mouse handlers are on root div - no need to duplicate here
             .children(elements)
-    }
-
-    /// Sync fullscreen terminal entity with workspace state
-    fn sync_fullscreen(&mut self, cx: &mut Context<Self>) {
-        let current_state: Option<(String, String)> = {
-            let workspace = self.workspace.read(cx);
-            workspace.fullscreen_terminal.as_ref()
-                .map(|fs| (fs.project_id.clone(), fs.terminal_id.clone()))
-        };
-
-        // Check if state changed
-        if self.fullscreen_state != current_state {
-            self.fullscreen_state = current_state.clone();
-
-            if let Some((project_id, terminal_id)) = current_state {
-                // Create new fullscreen entity
-                let workspace_clone = self.workspace.clone();
-                let pty_manager_clone = self.pty_manager.clone();
-                let terminals_clone = self.terminals.clone();
-                self.fullscreen_terminal = Some(cx.new(move |cx| {
-                    FullscreenTerminal::new(
-                        workspace_clone,
-                        terminal_id,
-                        project_id,
-                        pty_manager_clone,
-                        terminals_clone,
-                        cx,
-                    )
-                }));
-            } else {
-                // Fullscreen was closed
-                self.fullscreen_terminal = None;
-            }
-        }
     }
 
     /// Spawn terminals for all layout slots in a project that have terminal_id: None
@@ -677,17 +637,8 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        // Sync fullscreen entity with workspace state (creates entity only when state changes)
-        self.sync_fullscreen(cx);
-
         // Process any pending overlay requests from workspace
         self.process_pending_requests(cx);
-
-        let has_fullscreen = self.fullscreen_terminal.is_some();
-        if has_fullscreen {
-            log::info!("RootView render: has_fullscreen=true, fullscreen_terminal={:?}",
-                self.workspace.read(cx).fullscreen_terminal);
-        }
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);
@@ -931,22 +882,13 @@ impl Render for RootView {
                             .flex_col()
                             .min_h_0()
                             .child(
-                                // Projects grid OR fullscreen (mutually exclusive)
+                                // Projects grid (zoom is handled by LayoutContainer)
                                 div()
                                     .id("projects-container")
                                     .flex_1()
                                     .min_h_0()
                                     .size_full()
-                                    .when(has_fullscreen, |d| {
-                                        if let Some(fullscreen) = &self.fullscreen_terminal {
-                                            d.child(fullscreen.clone())
-                                        } else {
-                                            d.child(self.render_projects_grid(cx))
-                                        }
-                                    })
-                                    .when(!has_fullscreen, |d| {
-                                        d.child(self.render_projects_grid(cx))
-                                    }),
+                                    .child(self.render_projects_grid(cx)),
                             ),
                     ),
             )

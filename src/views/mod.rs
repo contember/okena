@@ -48,8 +48,6 @@ pub use overlays::command_palette;
 #[allow(unused_imports)]
 pub use overlays::detached_terminal;
 #[allow(unused_imports)]
-pub use overlays::fullscreen_terminal;
-#[allow(unused_imports)]
 pub use overlays::keybindings_help;
 #[allow(unused_imports)]
 pub use overlays::session_manager;
@@ -61,7 +59,7 @@ pub use overlays::theme_selector;
 pub use overlays::worktree_dialog;
 #[allow(unused_imports)]
 pub use overlays::{
-    CommandPalette, DetachedTerminalView, FullscreenTerminal, KeybindingsHelp, SessionManager,
+    CommandPalette, DetachedTerminalView, KeybindingsHelp, SessionManager,
     SettingsPanel, ThemeSelector, WorktreeDialog,
 };
 
