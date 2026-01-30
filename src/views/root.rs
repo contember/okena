@@ -405,6 +405,7 @@ impl RootView {
                         terminal_id.clone(),
                         size,
                         self.pty_manager.clone(),
+                        project_path.clone(),
                     ));
                     self.terminals.lock().insert(terminal_id, terminal);
                 }
@@ -486,6 +487,7 @@ impl RootView {
                     new_terminal_id.clone(),
                     size,
                     self.pty_manager.clone(),
+                    project_path.clone(),
                 ));
                 self.terminals.lock().insert(new_terminal_id, terminal);
             }

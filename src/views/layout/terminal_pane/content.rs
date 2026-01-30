@@ -2,7 +2,8 @@
 //!
 //! An Entity with Render that handles terminal display, mouse interactions, and selection.
 
-use crate::elements::terminal_element::{SearchMatch, TerminalElement};
+use crate::elements::terminal_element::{LinkKind, SearchMatch, TerminalElement};
+use crate::settings::settings_entity;
 use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ThemeColors};
 use crate::views::components::{menu_item, menu_item_conditional, menu_item_with_color};
@@ -239,10 +240,18 @@ impl TerminalContent {
 
         if let Some(ref terminal) = self.terminal {
             if let Some((col, row)) = self.pixel_to_cell(event.position) {
-                // Check for Ctrl+Click on URL
-                if event.modifiers.control {
+                // Check for Cmd+Click (macOS) / Ctrl+Click (Linux/Windows) on URL or file path
+                if event.modifiers.platform {
                     if let Some(url_match) = self.url_detector.find_at(col, row) {
-                        UrlDetector::open_url(&url_match.url);
+                        match &url_match.kind {
+                            LinkKind::Url => {
+                                UrlDetector::open_url(&url_match.url);
+                            }
+                            LinkKind::FilePath { line, col } => {
+                                let file_opener = settings_entity(cx).read(cx).settings.file_opener.clone();
+                                UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
+                            }
+                        }
                         return;
                     }
                 }
@@ -550,8 +559,8 @@ impl Render for TerminalContent {
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
-                if event.modifiers.control {
-                    // Ctrl+scroll = per-terminal zoom
+                if event.modifiers.platform {
+                    // Cmd/Ctrl+scroll = per-terminal zoom
                     let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);

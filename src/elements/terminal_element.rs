@@ -17,13 +17,26 @@ pub struct SearchMatch {
     pub len: usize,
 }
 
-/// A detected URL in the terminal grid
+/// The kind of link detected in the terminal
+#[derive(Clone, Debug)]
+pub enum LinkKind {
+    /// A web URL (http/https)
+    Url,
+    /// A file path, optionally with line and column numbers
+    FilePath {
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+}
+
+/// A detected URL or file path in the terminal grid
 #[derive(Clone, Debug)]
 pub struct URLMatch {
     pub line: i32,
     pub col: usize,
     pub len: usize,
     pub url: String,
+    pub kind: LinkKind,
 }
 
 /// Custom GPUI element for rendering a terminal

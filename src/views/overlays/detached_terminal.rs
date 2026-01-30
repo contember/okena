@@ -36,11 +36,12 @@ impl DetachedTerminalView {
         let focus_handle = cx.focus_handle();
 
         // Get terminal name and project_id from workspace
-        let (terminal_name, project_id, layout_path) = {
+        let (terminal_name, project_id, layout_path, project_path) = {
             let ws = workspace.read(cx);
             let mut name = terminal_id.chars().take(8).collect::<String>();
             let mut found_project_id = String::new();
             let mut found_layout_path = vec![];
+            let mut found_project_path = String::new();
 
             for project in ws.projects() {
                 if let Some(custom_name) = project.terminal_names.get(&terminal_id) {
@@ -51,15 +52,16 @@ impl DetachedTerminalView {
                     if let Some(path) = layout.find_terminal_path(&terminal_id) {
                         found_project_id = project.id.clone();
                         found_layout_path = path;
+                        found_project_path = project.path.clone();
                         break;
                     }
                 }
             }
-            (name, found_project_id, found_layout_path)
+            (name, found_project_id, found_layout_path, found_project_path)
         };
 
         // Get or create terminal from registry
-        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals);
+        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals, &project_path);
 
         // Create terminal content view
         let content = create_terminal_content(
