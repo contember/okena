@@ -60,6 +60,8 @@ pub struct TerminalContent {
     layout_path: Vec<usize>,
     /// Workspace entity for accessing per-terminal zoom
     workspace: Entity<Workspace>,
+    /// Accumulated scroll delta for smooth trackpad scrolling
+    scroll_accumulator: f32,
 }
 
 impl TerminalContent {
@@ -89,6 +91,7 @@ impl TerminalContent {
             project_id,
             layout_path,
             workspace,
+            scroll_accumulator: 0.0,
         }
     }
 
@@ -140,24 +143,31 @@ impl TerminalContent {
         cx: &mut Context<Self>,
     ) {
         if let Some(ref terminal) = self.terminal {
+            let (cell_width, cell_height) = terminal.cell_dimensions();
+
             if terminal.is_mouse_mode() {
                 // Forward scroll to PTY as mouse wheel events
-                let (cell_width, cell_height) = terminal.cell_dimensions();
-                let (col, row) = self.pixel_to_cell_raw(position, cell_width, cell_height);
-                let lines = (delta.abs() / cell_height).max(1.0) as i32;
-                let button = if delta > 0.0 { 64u8 } else { 65u8 };
-
-                for _ in 0..lines {
-                    terminal.send_mouse_scroll(button, col, row);
+                self.scroll_accumulator += delta;
+                let lines = (self.scroll_accumulator / cell_height) as i32;
+                if lines != 0 {
+                    self.scroll_accumulator -= lines as f32 * cell_height;
+                    let (col, row) = self.pixel_to_cell_raw(position, cell_width, cell_height);
+                    let button = if lines > 0 { 64u8 } else { 65u8 };
+                    for _ in 0..lines.abs() {
+                        terminal.send_mouse_scroll(button, col, row);
+                    }
                 }
             } else {
                 // Normal scrollback scrolling
-                let (_, cell_height) = terminal.cell_dimensions();
-                let lines = (delta / cell_height) as i32;
-                if lines > 0 {
-                    terminal.scroll_up(lines);
-                } else if lines < 0 {
-                    terminal.scroll_down(-lines);
+                self.scroll_accumulator += delta;
+                let lines = (self.scroll_accumulator / cell_height) as i32;
+                if lines != 0 {
+                    self.scroll_accumulator -= lines as f32 * cell_height;
+                    if lines > 0 {
+                        terminal.scroll_up(lines);
+                    } else {
+                        terminal.scroll_down(-lines);
+                    }
                 }
             }
             self.mark_scroll_activity(cx);
