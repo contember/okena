@@ -97,6 +97,12 @@ pub struct AppSettings {
     /// Session backend for terminal persistence (tmux/screen/none/auto)
     #[serde(default)]
     pub session_backend: SessionBackend,
+
+    // File opener settings
+    /// Editor command to open file paths (e.g. "code", "cursor", "zed", "subl", "vim")
+    /// Empty string = use system default (open/xdg-open/start)
+    #[serde(default = "default_file_opener")]
+    pub file_opener: String,
 }
 
 impl Default for AppSettings {
@@ -116,6 +122,7 @@ impl Default for AppSettings {
             default_shell: ShellType::default(),
             show_shell_selector: false,
             session_backend: SessionBackend::default(),
+            file_opener: default_file_opener(),
         }
     }
 }
@@ -151,6 +158,10 @@ fn default_cursor_blink() -> bool {
 
 fn default_scrollback_lines() -> u32 {
     10000
+}
+
+fn default_file_opener() -> String {
+    String::new()
 }
 
 /// Metadata about a saved session
@@ -316,6 +327,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("scrollback_lines").and_then(|v| v.as_u64()) {
         settings.scrollback_lines = (v as u32).clamp(100, 100000);
+    }
+
+    if let Some(v) = obj.get("file_opener").and_then(|v| v.as_str()) {
+        settings.file_opener = v.to_string();
     }
 
     Ok(settings)
