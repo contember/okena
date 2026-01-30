@@ -32,8 +32,6 @@ pub mod worktree_dialog;
 
 pub use command_palette::CommandPalette;
 pub use detached_terminal::DetachedTerminalView;
-pub use file_search::{FileSearchDialog, FileSearchDialogEvent};
-pub use file_viewer::{FileViewer, FileViewerEvent};
 pub use fullscreen_terminal::FullscreenTerminal;
 pub use keybindings_help::KeybindingsHelp;
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};
