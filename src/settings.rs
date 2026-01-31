@@ -87,6 +87,36 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set the file opener command
+    pub fn set_file_opener(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.file_opener = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_project_open
+    pub fn set_hook_on_project_open(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_project_open = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_project_close
+    pub fn set_hook_on_project_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_project_close = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_worktree_create
+    pub fn set_hook_on_worktree_create(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_worktree_create = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_worktree_close
+    pub fn set_hook_on_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_worktree_close = value;
+        self.save_and_notify(cx);
+    }
+
     /// Save and notify - common logic for all setters
     fn save_and_notify(&mut self, cx: &mut Context<Self>) {
         self.save_debounced(cx);

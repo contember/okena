@@ -42,6 +42,9 @@ pub struct ProjectData {
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
+    /// Per-project lifecycle hooks (overrides global settings)
+    #[serde(default)]
+    pub hooks: crate::workspace::persistence::HooksConfig,
 }
 
 use crate::terminal::shell_config::ShellType;
