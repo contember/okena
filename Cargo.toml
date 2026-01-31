@@ -51,5 +51,9 @@ syntect = "5"
 # Markdown parsing
 pulldown-cmark = "0.12"
 
+# Pin core-text to 21.0.x to avoid core-graphics 0.24/0.25 conflict in zed-font-kit
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = ">=21.0, <21.1"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
