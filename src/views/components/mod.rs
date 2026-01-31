@@ -17,11 +17,11 @@ pub mod ui_helpers;
 
 pub use dropdown::{dropdown_button, dropdown_option, dropdown_overlay};
 pub use list_overlay::{
-    handle_list_overlay_key, substring_filter, FilterResult, ListOverlayAction, ListOverlayConfig,
+    handle_list_overlay_key, substring_filter, ListOverlayAction, ListOverlayConfig,
     ListOverlayState,
 };
 pub use modal_backdrop::{modal_backdrop, modal_content, modal_header};
-pub use ui_helpers::{badge, button, button_primary, input_container, kbd, keyboard_hint, keyboard_hints_footer, labeled_input, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color, search_input_area, segmented_toggle, shell_indicator_chip};
+pub use ui_helpers::{badge, button, button_primary, input_container, keyboard_hint, keyboard_hints_footer, labeled_input, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color, search_input_area, segmented_toggle, shell_indicator_chip};
 pub use path_autocomplete::PathAutoCompleteState;
 pub use rename_state::{
     cancel_rename, finish_rename, is_renaming, rename_input, start_rename, start_rename_with_blur,
