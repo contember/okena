@@ -51,6 +51,9 @@ actions!(
         ShowProjectSwitcher,
         SendTab,
         SendBacktab,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
     ]
 );
 
@@ -179,6 +182,9 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowFileSearch" => Some(KeyBinding::new(keystroke, ShowFileSearch, context)),
         "ShowProjectSwitcher" => Some(KeyBinding::new(keystroke, ShowProjectSwitcher, context)),
         "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
+        "ZoomIn" => Some(KeyBinding::new(keystroke, ZoomIn, context)),
+        "ZoomOut" => Some(KeyBinding::new(keystroke, ZoomOut, context)),
+        "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

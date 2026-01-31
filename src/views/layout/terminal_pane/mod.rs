@@ -25,8 +25,8 @@ pub use content::TerminalContent;
 use crate::keybindings::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
     FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    MinimizeTerminal, Paste, Search, SearchNext, SearchPrev, SendBacktab, SendTab,
-    SplitHorizontal, SplitVertical, ToggleFullscreen,
+    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendTab,
+    SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
 };
 use crate::settings::settings;
 use crate::terminal::input::key_to_bytes;
@@ -1070,6 +1070,31 @@ impl Render for TerminalPane {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_bytes(b"\x1b[Z");
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| {
+                let current = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
+                let new_zoom = (current + 0.1).clamp(0.5, 3.0);
+                let project_id = this.project_id.clone();
+                let layout_path = this.layout_path.clone();
+                this.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ZoomOut, _window, cx| {
+                let current = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
+                let new_zoom = (current - 0.1).clamp(0.5, 3.0);
+                let project_id = this.project_id.clone();
+                let layout_path = this.layout_path.clone();
+                this.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
+                });
+            }))
+            .on_action(cx.listener(|this, _: &ResetZoom, _window, cx| {
+                let project_id = this.project_id.clone();
+                let layout_path = this.layout_path.clone();
+                this.workspace.update(cx, |ws, cx| {
+                    ws.set_terminal_zoom(&project_id, &layout_path, 1.0, cx);
+                });
             }))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
                 let is_fullscreen = this.workspace.read(cx).fullscreen_terminal.is_some();

@@ -229,6 +229,32 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
 
+    // Zoom actions
+    map.insert(
+        "ZoomIn",
+        ActionDescription {
+            name: "Zoom In",
+            description: "Increase terminal font size",
+            category: "Terminal",
+        },
+    );
+    map.insert(
+        "ZoomOut",
+        ActionDescription {
+            name: "Zoom Out",
+            description: "Decrease terminal font size",
+            category: "Terminal",
+        },
+    );
+    map.insert(
+        "ResetZoom",
+        ActionDescription {
+            name: "Reset Zoom",
+            description: "Reset terminal font size to default",
+            category: "Terminal",
+        },
+    );
+
     // Navigation actions
     map.insert(
         "FocusLeft",
@@ -553,6 +579,29 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-f", Some("TerminalPane")),
                 KeybindingEntry::new("ctrl-f", Some("TerminalPane")),
+            ],
+        );
+
+        // Zoom keybindings
+        bindings.insert(
+            "ZoomIn".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-=", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-=", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "ZoomOut".to_string(),
+            vec![
+                KeybindingEntry::new("cmd--", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl--", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "ResetZoom".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-0", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-0", Some("TerminalPane")),
             ],
         );
 
