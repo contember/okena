@@ -24,19 +24,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: term-manager-macos-arm64
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: term-manager-macos-x64
-            tags-only: true
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: term-manager-windows-x64
-            tags-only: true
 
     runs-on: ${{ matrix.os }}
-
-    # Skip tags-only targets on PRs
-    if: ${{ !matrix.tags-only || startsWith(github.ref, 'refs/tags/v') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +76,52 @@ jobs:
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          retention-days: 7
+
+  # Intel Mac and Windows only run for tag pushes
+  build-extra:
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: term-manager-macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: term-manager-windows-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+          save-if: true
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x scripts/bundle-macos.sh
+          ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
+
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
         run: |
@@ -102,7 +137,7 @@ jobs:
 
   # Create release when a tag is pushed
   release:
-    needs: build
+    needs: [build, build-extra]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
