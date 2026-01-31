@@ -329,7 +329,7 @@ impl TerminalPane {
         }
 
         let size = TerminalSize::default();
-        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone()));
+        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone(), self.project_path.clone()));
         self.terminals.lock().insert(terminal_id, terminal.clone());
         self.terminal = Some(terminal.clone());
         self.update_child_terminals(terminal, cx);
@@ -355,7 +355,7 @@ impl TerminalPane {
 
                 let size = TerminalSize::default();
                 let terminal =
-                    Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone()));
+                    Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone(), self.project_path.clone()));
                 self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
                 self.terminal = Some(terminal.clone());
 

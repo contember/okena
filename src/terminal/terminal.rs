@@ -10,7 +10,7 @@ use alacritty_terminal::grid::{Scroll, Dimensions};
 use async_channel::{Sender, unbounded};
 use parking_lot::Mutex;
 use regex::Regex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Terminal size in cells and pixels
 #[derive(Clone, Copy, Debug)]
@@ -95,6 +95,75 @@ impl Default for SelectionState {
     }
 }
 
+/// A detected link in terminal content (URL or file path)
+#[derive(Clone, Debug)]
+pub struct DetectedLink {
+    pub line: i32,
+    pub col: usize,
+    pub len: usize,
+    pub text: String,
+    pub file_line: Option<u32>,
+    pub file_col: Option<u32>,
+    pub is_url: bool,
+}
+
+/// Trim trailing punctuation from a URL/path, handling balanced parentheses.
+///
+/// Ghostty-style: strip trailing `.,:;!?)` but keep closing parens if they have
+/// a matching opening paren inside the URL (e.g. Wikipedia links).
+fn trim_url_trailing(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut end = bytes.len();
+
+    loop {
+        if end == 0 {
+            break;
+        }
+        let c = bytes[end - 1];
+        match c {
+            b'.' | b',' | b':' | b';' | b'!' | b'?' => {
+                end -= 1;
+            }
+            b')' => {
+                // Only strip closing paren if unbalanced
+                let open = s[..end].matches('(').count();
+                let close = s[..end].matches(')').count();
+                if close > open {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    &s[..end]
+}
+
+/// Parse optional `:line:col` suffix from a file path string.
+/// Returns (display_text_including_suffix, optional_line, optional_col).
+fn parse_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
+    // Try to match :line:col at the end
+    if let Some(colon_pos) = s.rfind(':') {
+        let after = &s[colon_pos + 1..];
+        if let Ok(num) = after.parse::<u32>() {
+            let before = &s[..colon_pos];
+            // Check for another :line before this
+            if let Some(colon_pos2) = before.rfind(':') {
+                let after2 = &before[colon_pos2 + 1..];
+                if let Ok(line_num) = after2.parse::<u32>() {
+                    // path:line:col
+                    return (s.to_string(), Some(line_num), Some(num));
+                }
+            }
+            // path:line
+            return (s.to_string(), Some(num), None);
+        }
+    }
+    (s.to_string(), None, None)
+}
+
 /// A terminal instance wrapping alacritty_terminal
 pub struct Terminal {
     term: Arc<Mutex<Term<ZedEventListener>>>,
@@ -116,6 +185,8 @@ pub struct Terminal {
     pending_pty_resize: Mutex<Option<(u16, u16)>>,
     /// Channel for notifying subscribers when terminal content changes (event-driven, no polling)
     dirty_notify: Sender<()>,
+    /// Initial working directory (for resolving relative file paths in URL detection)
+    initial_cwd: String,
 }
 
 impl Terminal {
@@ -124,6 +195,7 @@ impl Terminal {
         terminal_id: String,
         size: TerminalSize,
         pty_manager: Arc<PtyManager>,
+        initial_cwd: String,
     ) -> Self {
         let config = TermConfig::default();
         let term_size = TermSize::new(size.cols as usize, size.rows as usize);
@@ -156,6 +228,7 @@ impl Terminal {
             last_pty_resize: Mutex::new(std::time::Instant::now()),
             pending_pty_resize: Mutex::new(None),
             dirty_notify,
+            initial_cwd,
         }
     }
 
@@ -432,6 +505,11 @@ impl Terminal {
         *self.has_bell.lock() = false;
     }
 
+    /// Get the initial working directory for this terminal
+    pub fn initial_cwd(&self) -> &str {
+        &self.initial_cwd
+    }
+
     /// Search the terminal grid for occurrences of a query string
     /// Returns a list of (line, col, length) for each match
     /// Supports case-sensitive and regex search, and searches through scrollback buffer
@@ -539,15 +617,23 @@ impl Terminal {
         term.grid().display_offset()
     }
 
-    /// Detect URLs in the visible terminal content
-    /// Returns a list of (line, col, length, url_string) for each detected URL
-    /// Handles URLs that wrap across multiple lines by creating multiple match entries
-    pub fn detect_urls(&self) -> Vec<(i32, usize, usize, String)> {
-        // URL regex pattern - matches http:// and https:// URLs
-        let url_regex = match Regex::new(r#"https?://[^\s<>"'`{}\[\]|\\^)]+"#) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+    /// Detect URLs and file paths in the visible terminal content (Ghostty-style).
+    ///
+    /// Uses a single combined regex compiled once via OnceLock. Two branches:
+    /// - URL: many schemes (http, https, ftp, ssh, git, mailto, etc.)
+    /// - Path: explicit prefixes only (`/`, `~/`, `./`, `../`) with optional `:line:col`
+    ///
+    /// Returns a list of `DetectedLink` for each match. File paths are validated
+    /// for existence by the caller (UrlDetector).
+    pub fn detect_urls(&self) -> Vec<DetectedLink> {
+        static LINK_REGEX: OnceLock<Regex> = OnceLock::new();
+        let regex = LINK_REGEX.get_or_init(|| {
+            // Combined regex: URL schemes | explicit file paths with optional :line:col
+            // Path prefixes: /, ~/, ./, ../, or dotfile dirs like .github/
+            Regex::new(
+                r#"(?:(?:https?|ftp|file|ssh|git|mailto|tel|magnet|ipfs|gemini|gopher|news)://[^\s<>"'`{}\[\]|\\^]+|(?:~?/|(?:\./|\.\./)|\.[a-zA-Z][\w.-]*/)[^\s<>"'`{}\[\]|\\^()]+(?::(\d+)(?::(\d+))?)?)"#
+            ).expect("link detection regex should compile")
+        });
 
         // Characters that can appear in a URL (for continuation detection)
         let url_char = |c: char| -> bool {
@@ -561,67 +647,71 @@ impl Terminal {
             let screen_lines = grid.screen_lines() as i32;
             let cols = grid.columns();
             let last_col = Column(cols - 1);
+            let display_offset = grid.display_offset() as i32;
 
-            // Build logical lines by joining wrapped physical lines
-            // A line is considered wrapped if:
-            // 1. It has WRAPLINE flag, OR
-            // 2. It ends with a URL-valid character (no trailing space) and next line starts with URL-valid char
-            let mut row = 0i32;
-            while row < screen_lines {
+            // Iterate over visual rows (0..screen_lines).
+            // When scrolled, visual row 0 maps to buffer line (0 - display_offset).
+            let mut visual_row = 0i32;
+            while visual_row < screen_lines {
                 let mut combined_text = String::new();
-                // Track where each physical row starts in the combined string
                 let mut row_offsets: Vec<(i32, usize)> = Vec::new();
 
-                // Collect all wrapped lines into one logical line
+                // Collect wrapped lines into one logical line
                 loop {
-                    row_offsets.push((row, combined_text.len()));
+                    row_offsets.push((visual_row, combined_text.len()));
 
-                    // Build this row's text (trim trailing spaces for cleaner matching)
+                    // Buffer line accounts for scroll offset
+                    let buffer_line = visual_row - display_offset;
+
                     let mut row_text = String::with_capacity(cols);
                     for col in 0..cols {
-                        let cell_point = Point::new(Line(row), Column(col));
+                        let cell_point = Point::new(Line(buffer_line), Column(col));
                         let cell = &grid[cell_point];
                         row_text.push(cell.c);
                     }
                     combined_text.push_str(&row_text);
 
-                    // Check if this row wraps to the next
-                    let last_cell = &grid[Point::new(Line(row), last_col)];
+                    let last_cell = &grid[Point::new(Line(buffer_line), last_col)];
                     let has_wrapline_flag = last_cell.flags.contains(Flags::WRAPLINE);
 
-                    // Also check for visual wrapping: last char is URL-valid and next row starts with URL-valid
                     let last_char = last_cell.c;
-                    let next_row = row + 1;
-                    let visual_wrap = if next_row < screen_lines && url_char(last_char) {
-                        let first_cell_next = &grid[Point::new(Line(next_row), Column(0))];
+                    let next_visual = visual_row + 1;
+                    let visual_wrap = if next_visual < screen_lines && url_char(last_char) {
+                        let next_buffer = next_visual - display_offset;
+                        let first_cell_next = &grid[Point::new(Line(next_buffer), Column(0))];
                         url_char(first_cell_next.c)
                     } else {
                         false
                     };
 
-                    let is_wrapped = has_wrapline_flag || visual_wrap;
+                    visual_row += 1;
 
-                    row += 1;
-
-                    if !is_wrapped || row >= screen_lines {
+                    if !(has_wrapline_flag || visual_wrap) || visual_row >= screen_lines {
                         break;
                     }
                 }
 
-                // Find all URLs in the combined text
-                for mat in url_regex.find_iter(&combined_text) {
-                    let url = mat.as_str().to_string();
-                    // Clean up trailing punctuation that's likely not part of URL
-                    let url = url.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
-                    if url.is_empty() {
+                for mat in regex.find_iter(&combined_text) {
+                    let raw = mat.as_str();
+                    let trimmed = trim_url_trailing(raw);
+                    if trimmed.is_empty() {
                         continue;
                     }
 
-                    let url_start = mat.start();
-                    let url_end = url_start + url.len();
+                    let match_start = mat.start();
+                    let trimmed_end = match_start + trimmed.len();
 
-                    // Map the URL position back to physical rows
-                    // For wrapped URLs, create one match per physical row
+                    // Determine if this is a URL or file path
+                    let is_url = trimmed.contains("://");
+
+                    // Parse :line:col from file paths
+                    let (display_text, file_line, file_col) = if !is_url {
+                        parse_path_line_col(trimmed)
+                    } else {
+                        (trimmed.to_string(), None, None)
+                    };
+
+                    // Map back to physical rows
                     for i in 0..row_offsets.len() {
                         let (phys_row, row_start_offset) = row_offsets[i];
                         let row_end_offset = if i + 1 < row_offsets.len() {
@@ -630,20 +720,26 @@ impl Terminal {
                             combined_text.len()
                         };
 
-                        // Check if URL overlaps with this row
-                        if url_end <= row_start_offset || url_start >= row_end_offset {
+                        if trimmed_end <= row_start_offset || match_start >= row_end_offset {
                             continue;
                         }
 
-                        // Calculate the portion of URL on this row
-                        let match_start_in_combined = url_start.max(row_start_offset);
-                        let match_end_in_combined = url_end.min(row_end_offset);
+                        let seg_start = match_start.max(row_start_offset);
+                        let seg_end = trimmed_end.min(row_end_offset);
 
-                        let col_start = match_start_in_combined - row_start_offset;
-                        let len = match_end_in_combined - match_start_in_combined;
+                        let col_start = combined_text[row_start_offset..seg_start].chars().count();
+                        let len = combined_text[seg_start..seg_end].chars().count();
 
                         if len > 0 {
-                            matches.push((phys_row, col_start, len, url.to_string()));
+                            matches.push(DetectedLink {
+                                line: phys_row,
+                                col: col_start,
+                                len,
+                                text: display_text.clone(),
+                                file_line,
+                                file_col,
+                                is_url,
+                            });
                         }
                     }
                 }

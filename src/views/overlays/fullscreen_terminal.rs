@@ -38,17 +38,20 @@ impl FullscreenTerminal {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Get or create terminal from registry
-        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals);
-
-        // Find the actual layout path for this terminal (needed for zoom)
-        let layout_path = {
+        // Get project path for CWD resolution
+        let (layout_path, project_path) = {
             let ws = workspace.read(cx);
-            ws.project(&project_id)
+            let project = ws.project(&project_id);
+            let lp = project
                 .and_then(|p| p.layout.as_ref())
                 .and_then(|l| l.find_terminal_path(&terminal_id))
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let pp = project.map(|p| p.path.clone()).unwrap_or_default();
+            (lp, pp)
         };
+
+        // Get or create terminal from registry
+        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals, &project_path);
 
         // Create terminal content view
         let content = create_terminal_content(
@@ -122,8 +125,14 @@ impl FullscreenTerminal {
 
     /// Switch to another terminal in fullscreen mode
     fn switch_to_terminal(&mut self, new_terminal_id: String, cx: &mut Context<Self>) {
+        // Get project path for CWD resolution
+        let project_path = {
+            let ws = self.workspace.read(cx);
+            ws.project(&self.project_id).map(|p| p.path.clone()).unwrap_or_default()
+        };
+
         // Get or create the terminal
-        let terminal = get_or_create_terminal(&new_terminal_id, &self.pty_manager, &self.terminals);
+        let terminal = get_or_create_terminal(&new_terminal_id, &self.pty_manager, &self.terminals, &project_path);
 
         // Update workspace fullscreen state (preserve previous_focused_project_id)
         self.workspace.update(cx, |ws, cx| {

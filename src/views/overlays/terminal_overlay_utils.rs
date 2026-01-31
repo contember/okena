@@ -27,10 +27,12 @@ pub const DEFAULT_TERMINAL_SIZE: TerminalSize = TerminalSize {
 ///
 /// If a terminal with the given ID exists, returns it. Otherwise creates a new terminal
 /// with the default size and inserts it into the registry.
+/// `cwd` is used for resolving relative file paths in URL detection.
 pub fn get_or_create_terminal(
     terminal_id: &str,
     pty_manager: &Arc<PtyManager>,
     terminals: &TerminalsRegistry,
+    cwd: &str,
 ) -> Arc<Terminal> {
     let mut terminals_guard = terminals.lock();
     if let Some(existing) = terminals_guard.get(terminal_id) {
@@ -40,6 +42,7 @@ pub fn get_or_create_terminal(
             terminal_id.to_string(),
             DEFAULT_TERMINAL_SIZE,
             pty_manager.clone(),
+            cwd.to_string(),
         ));
         terminals_guard.insert(terminal_id.to_string(), terminal.clone());
         terminal

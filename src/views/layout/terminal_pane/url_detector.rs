@@ -2,8 +2,10 @@
 //!
 //! Pure logic component - no UI, no Entity.
 
-use crate::elements::terminal_element::URLMatch;
+use crate::elements::terminal_element::{LinkKind, URLMatch};
 use crate::terminal::terminal::Terminal;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// URL detector for finding and tracking URLs in terminal content.
@@ -12,6 +14,8 @@ pub struct UrlDetector {
     matches: Vec<URLMatch>,
     /// Currently hovered URL index
     hovered_index: Option<usize>,
+    /// Cache of path existence checks to avoid repeated syscalls
+    path_exists_cache: HashMap<String, bool>,
 }
 
 impl Default for UrlDetector {
@@ -25,16 +29,81 @@ impl UrlDetector {
         Self {
             matches: Vec::new(),
             hovered_index: None,
+            path_exists_cache: HashMap::new(),
         }
+    }
+
+    /// Resolve a detected path string against a working directory.
+    /// Handles `~/`, `./`, `../`, and absolute paths.
+    fn resolve_path(text: &str, cwd: &str) -> PathBuf {
+        // Strip :line:col suffix for existence check
+        let clean = strip_line_col_suffix(text);
+
+        if clean.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                return PathBuf::from(home).join(&clean[2..]);
+            }
+            PathBuf::from(clean)
+        } else if clean.starts_with("./") || clean.starts_with("../") {
+            Path::new(cwd).join(clean)
+        } else {
+            // Absolute path
+            PathBuf::from(clean)
+        }
+    }
+
+    /// Check if a path exists, using the cache.
+    fn path_exists_cached(&mut self, text: &str, cwd: &str) -> bool {
+        if let Some(&exists) = self.path_exists_cache.get(text) {
+            return exists;
+        }
+
+        // Evict cache if too large
+        if self.path_exists_cache.len() >= 200 {
+            self.path_exists_cache.clear();
+        }
+
+        let resolved = Self::resolve_path(text, cwd);
+        let exists = resolved.exists();
+        self.path_exists_cache.insert(text.to_string(), exists);
+        exists
     }
 
     /// Update URL matches from terminal content.
     pub fn update_matches(&mut self, terminal: &Option<Arc<Terminal>>) {
         if let Some(ref terminal) = terminal {
             let detected = terminal.detect_urls();
+            let cwd = terminal.initial_cwd();
+
             self.matches = detected
                 .into_iter()
-                .map(|(line, col, len, url)| URLMatch { line, col, len, url })
+                .filter_map(|link| {
+                    if link.is_url {
+                        Some(URLMatch {
+                            line: link.line,
+                            col: link.col,
+                            len: link.len,
+                            url: link.text,
+                            kind: LinkKind::Url,
+                        })
+                    } else {
+                        // File path: verify existence before showing
+                        if self.path_exists_cached(&link.text, cwd) {
+                            Some(URLMatch {
+                                line: link.line,
+                                col: link.col,
+                                len: link.len,
+                                url: link.text,
+                                kind: LinkKind::FilePath {
+                                    line: link.file_line,
+                                    col: link.file_col,
+                                },
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                })
                 .collect();
         }
     }
@@ -101,4 +170,126 @@ impl UrlDetector {
                 .spawn();
         }
     }
+
+    /// Open a file path in the configured editor or system default.
+    ///
+    /// `path` is the file path (may include :line:col suffix in the display string).
+    /// `file_line` and `file_col` are the parsed line/col numbers.
+    /// `opener` is the editor command (e.g. "code", "cursor", "zed", "subl", "vim").
+    /// If empty, falls back to the system default opener.
+    pub fn open_file(path: &str, file_line: Option<u32>, file_col: Option<u32>, opener: &str) {
+        // Strip any :line:col suffix from the path for the actual file path
+        let clean_path = strip_line_col_suffix(path);
+
+        // Expand ~ to the user's home directory
+        let expanded: String;
+        let clean_path = if clean_path.starts_with("~/") {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+                expanded = format!("{}{}", home.to_string_lossy(), &clean_path[1..]);
+                &expanded
+            } else {
+                clean_path
+            }
+        } else {
+            clean_path
+        };
+
+        log::info!("Opening file: {} (line: {:?}, col: {:?}, opener: {:?})", clean_path, file_line, file_col, opener);
+
+        if opener.is_empty() {
+            // Use system default
+            #[cfg(target_os = "linux")]
+            {
+                let _ = std::process::Command::new("xdg-open").arg(clean_path).spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open").arg(clean_path).spawn();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", clean_path])
+                    .spawn();
+            }
+            return;
+        }
+
+        // Build editor-specific arguments
+        match opener {
+            "code" | "cursor" => {
+                // VS Code / Cursor: --goto file:line:col
+                let mut args = vec!["--goto".to_string()];
+                let mut loc = clean_path.to_string();
+                if let Some(line) = file_line {
+                    loc.push_str(&format!(":{}", line));
+                    if let Some(col) = file_col {
+                        loc.push_str(&format!(":{}", col));
+                    }
+                }
+                args.push(loc);
+                let _ = std::process::Command::new(opener).args(&args).spawn();
+            }
+            "zed" => {
+                // Zed: file:line
+                let mut loc = clean_path.to_string();
+                if let Some(line) = file_line {
+                    loc.push_str(&format!(":{}", line));
+                    if let Some(col) = file_col {
+                        loc.push_str(&format!(":{}", col));
+                    }
+                }
+                let _ = std::process::Command::new("zed").arg(&loc).spawn();
+            }
+            "subl" | "sublime" => {
+                // Sublime Text: file:line:col
+                let mut loc = clean_path.to_string();
+                if let Some(line) = file_line {
+                    loc.push_str(&format!(":{}", line));
+                    if let Some(col) = file_col {
+                        loc.push_str(&format!(":{}", col));
+                    }
+                }
+                let _ = std::process::Command::new("subl").arg(&loc).spawn();
+            }
+            "vim" | "nvim" => {
+                // vim/nvim: +line file
+                let mut args = Vec::new();
+                if let Some(line) = file_line {
+                    args.push(format!("+{}", line));
+                }
+                args.push(clean_path.to_string());
+                let _ = std::process::Command::new(opener).args(&args).spawn();
+            }
+            _ => {
+                // Generic: try editor file:line:col pattern
+                let mut loc = clean_path.to_string();
+                if let Some(line) = file_line {
+                    loc.push_str(&format!(":{}", line));
+                    if let Some(col) = file_col {
+                        loc.push_str(&format!(":{}", col));
+                    }
+                }
+                let _ = std::process::Command::new(opener).arg(&loc).spawn();
+            }
+        }
+    }
+}
+
+/// Strip `:line` or `:line:col` suffix from a path string.
+fn strip_line_col_suffix(path: &str) -> &str {
+    if let Some(colon_pos) = path.rfind(':') {
+        let after = &path[colon_pos + 1..];
+        if after.chars().all(|c| c.is_ascii_digit()) && !after.is_empty() {
+            let before = &path[..colon_pos];
+            if let Some(colon_pos2) = before.rfind(':') {
+                let after2 = &before[colon_pos2 + 1..];
+                if after2.chars().all(|c| c.is_ascii_digit()) && !after2.is_empty() {
+                    return &before[..colon_pos2];
+                }
+            }
+            return before;
+        }
+    }
+    path
 }
