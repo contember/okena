@@ -21,7 +21,7 @@ use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
 use gpui::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Drag payload for project reordering
 #[derive(Clone)]
@@ -417,6 +417,28 @@ impl Render for Sidebar {
             .iter()
             .filter_map(|id| workspace.data.projects.iter().find(|p| &p.id == id).cloned())
             .collect();
+
+        // Collect all project IDs for orphan detection
+        let all_project_ids: HashSet<&str> = ordered_projects.iter().map(|p| p.id.as_str()).collect();
+
+        // Split into main projects and worktree children grouped by parent
+        let mut worktree_children: HashMap<String, Vec<ProjectData>> = HashMap::new();
+        let mut main_projects: Vec<(ProjectData, usize)> = Vec::new();
+        let mut main_index = 0;
+        for project in &ordered_projects {
+            if let Some(ref wt_info) = project.worktree_info {
+                if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                    worktree_children
+                        .entry(wt_info.parent_project_id.clone())
+                        .or_default()
+                        .push(project.clone());
+                    continue;
+                }
+            }
+            main_projects.push((project.clone(), main_index));
+            main_index += 1;
+        }
+
         let show_add_dialog = self.show_add_dialog;
         let color_picker_project_id = self.color_picker_project_id.clone();
 
@@ -443,10 +465,12 @@ impl Render for Sidebar {
                     .flex_1()
                     .overflow_y_scroll()
                     .children(
-                        ordered_projects
+                        main_projects
                             .iter()
-                            .enumerate()
-                            .map(|(i, p)| self.render_project_item(p, i, window, cx)),
+                            .map(|(p, i)| {
+                                let children = worktree_children.get(&p.id);
+                                self.render_project_item_with_worktrees(p, *i, children, window, cx)
+                            }),
                     ),
             )
             .child(self.render_keybindings_hint(cx))
