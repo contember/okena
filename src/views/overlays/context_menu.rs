@@ -15,6 +15,7 @@ pub enum ContextMenuEvent {
     RenameProject { project_id: String, project_name: String },
     CloseWorktree { project_id: String },
     DeleteProject { project_id: String },
+    ConfigureHooks { project_id: String },
 }
 
 /// Project context menu component
@@ -70,6 +71,12 @@ impl ContextMenu {
 
     fn delete_project(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::DeleteProject {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn configure_hooks(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::ConfigureHooks {
             project_id: self.request.project_id.clone(),
         });
     }
@@ -171,6 +178,13 @@ impl Render for ContextMenu {
                                 move |this, _, _window, cx| {
                                     this.rename_project(project_name.clone(), cx);
                                 }
+                            })),
+                    )
+                    // Configure Hooks option
+                    .child(
+                        menu_item("context-menu-configure-hooks", "icons/shell.svg", "Configure Hooks...", &t)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.configure_hooks(cx);
                             })),
                     )
                     // Close Worktree option (only for worktree projects)

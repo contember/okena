@@ -184,6 +184,9 @@ pub enum OverlayManagerEvent {
     /// Context menu: Delete project
     DeleteProject { project_id: String },
 
+    /// Context menu: Configure hooks for a project
+    ConfigureHooks { project_id: String },
+
     /// Project switcher: Focus a specific project
     FocusProject(String),
 
@@ -316,7 +319,37 @@ impl OverlayManager {
 
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, settings_panel, SettingsPanelEvent, |cx| SettingsPanel::new(cx));
+        if self.settings_panel.is_open() {
+            self.settings_panel.close();
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
+            cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
+                if event.is_close() {
+                    this.settings_panel.close();
+                    cx.notify();
+                }
+            }).detach();
+            self.settings_panel.set(entity);
+        }
+        cx.notify();
+    }
+
+    /// Show settings panel opened to Hooks category for a specific project.
+    pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
+        // Close existing settings panel if open
+        self.settings_panel.close();
+
+        let workspace = self.workspace.clone();
+        let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
+        cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
+            if event.is_close() {
+                this.settings_panel.close();
+                cx.notify();
+            }
+        }).detach();
+        self.settings_panel.set(entity);
+        cx.notify();
     }
 
     /// Toggle project switcher overlay.
@@ -513,6 +546,12 @@ impl OverlayManager {
                 ContextMenuEvent::DeleteProject { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::DeleteProject {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::ConfigureHooks { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ConfigureHooks {
                         project_id: project_id.clone(),
                     });
                 }

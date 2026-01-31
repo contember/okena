@@ -142,6 +142,11 @@ impl RootView {
                     ws.delete_project(project_id, cx);
                 });
             }
+            OverlayManagerEvent::ConfigureHooks { project_id } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_settings_for_project(project_id.clone(), cx);
+                });
+            }
             OverlayManagerEvent::FocusProject(project_id) => {
                 self.workspace.update(cx, |ws, cx| {
                     // Focus the project (like clicking on it in sidebar)
