@@ -53,8 +53,13 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-sed -i.bak -E '0,/^version = ".*"$/s/^version = ".*"$/version = "'"$version"'"/' "$REPO_ROOT/Cargo.toml"
-rm -f "$REPO_ROOT/Cargo.toml.bak"
+if [[ "$(uname)" == "Darwin" ]]; then
+  # macOS BSD sed: -i requires separate backup extension argument
+  sed -i '' -E '1,/^version = ".*"$/s/^version = ".*"$/version = "'"$version"'"/' "$REPO_ROOT/Cargo.toml"
+else
+  # GNU sed: 0, address works
+  sed -i -E '0,/^version = ".*"$/s/^version = ".*"$/version = "'"$version"'"/' "$REPO_ROOT/Cargo.toml"
+fi
 
 # Update Cargo.lock
 cargo generate-lockfile --manifest-path "$REPO_ROOT/Cargo.toml"
