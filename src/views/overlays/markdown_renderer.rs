@@ -24,9 +24,6 @@ pub enum RenderedNode {
         language: Option<String>,
         /// Each line as (div, start_offset, end_offset)
         lines: Vec<(Div, usize, usize)>,
-        /// Total range of the code block
-        total_start: usize,
-        total_end: usize,
     },
     /// A table with individually selectable rows
     Table {
@@ -63,8 +60,6 @@ pub struct MarkdownDocument {
     nodes: Vec<Node>,
     /// Flat text representation of all visible content
     pub plain_text: String,
-    /// Line breaks in the flat text (cumulative offsets at end of each line)
-    line_offsets: Vec<usize>,
 }
 
 /// A node in the markdown AST.
@@ -86,7 +81,7 @@ enum Inline {
     Code(String),
     Bold(Vec<Inline>),
     Italic(Vec<Inline>),
-    Link { url: String, children: Vec<Inline> },
+    Link { #[allow(dead_code)] url: String, children: Vec<Inline> },
 }
 
 impl MarkdownDocument {
@@ -322,64 +317,51 @@ impl MarkdownDocument {
 
         // Build flat text representation
         let mut plain_text = String::new();
-        let mut line_offsets = vec![];
 
         for node in &nodes {
-            Self::node_to_flat_text(node, &mut plain_text, &mut line_offsets);
+            Self::node_to_flat_text(node, &mut plain_text);
         }
 
-        Self { nodes, plain_text, line_offsets }
+        Self { nodes, plain_text }
     }
 
-    /// Convert a node to flat text, tracking line offsets (in characters, not bytes).
-    fn node_to_flat_text(node: &Node, text: &mut String, lines: &mut Vec<usize>) {
+    /// Convert a node to flat text (in characters, not bytes).
+    fn node_to_flat_text(node: &Node, text: &mut String) {
         match node {
             Node::Heading { children, .. } |
             Node::Paragraph { children } |
             Node::Blockquote { children } => {
                 Self::inlines_to_flat_text(children, text);
                 text.push('\n');
-                lines.push(char_len(text));
             }
             Node::CodeBlock { code, .. } => {
                 for line in code.lines() {
                     text.push_str(line);
                     text.push('\n');
-                    lines.push(char_len(text));
-                }
-                // Handle trailing newline if code doesn't end with one
-                if !code.ends_with('\n') && !code.is_empty() {
-                    // Already pushed
                 }
             }
             Node::List { items, .. } => {
                 for item in items {
                     Self::inlines_to_flat_text(item, text);
                     text.push('\n');
-                    lines.push(char_len(text));
                 }
             }
             Node::Table { headers, rows } => {
-                // Headers
                 for (i, header) in headers.iter().enumerate() {
                     if i > 0 { text.push('\t'); }
                     Self::inlines_to_flat_text(header, text);
                 }
                 text.push('\n');
-                lines.push(char_len(text));
-                // Rows
                 for row in rows {
                     for (i, cell) in row.iter().enumerate() {
                         if i > 0 { text.push('\t'); }
                         Self::inlines_to_flat_text(cell, text);
                     }
                     text.push('\n');
-                    lines.push(char_len(text));
                 }
             }
             Node::HorizontalRule => {
                 text.push('\n');
-                lines.push(char_len(text));
             }
         }
     }
@@ -398,70 +380,6 @@ impl MarkdownDocument {
                 }
             }
         }
-    }
-
-    /// Get line offsets for coordinate mapping.
-    pub fn line_offsets(&self) -> &[usize] {
-        &self.line_offsets
-    }
-
-    /// Get the list of nodes with their character offset ranges.
-    /// Returns (start_offset, end_offset, node_index) for each node.
-    pub fn node_ranges(&self) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        let mut offset = 0usize;
-        for node in &self.nodes {
-            let node_len = Self::node_text_length(node);
-            ranges.push((offset, offset + node_len));
-            offset += node_len;
-        }
-        ranges
-    }
-
-    /// Render a single node by index with selection.
-    pub fn render_node_at(&self, index: usize, t: &ThemeColors, selection: Option<(usize, usize)>) -> Option<Div> {
-        self.nodes.get(index).map(|node| {
-            Self::render_node_with_selection(node, t, selection)
-        })
-    }
-
-    /// Render the document with selection highlighting.
-    pub fn render_with_selection(
-        &self,
-        t: &ThemeColors,
-        selection: Option<(usize, usize)>, // (start, end) in flat text coordinates
-    ) -> Div {
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .p(px(16.0))
-            .max_w(px(900.0));
-
-        let mut offset = 0usize;
-        for node in &self.nodes {
-            let node_len = Self::node_text_length(node);
-            let node_selection = selection.and_then(|(start, end)| {
-                // Calculate selection relative to this node
-                if end <= offset || start >= offset + node_len {
-                    None // No overlap
-                } else {
-                    Some((
-                        start.saturating_sub(offset),
-                        (end - offset).min(node_len),
-                    ))
-                }
-            });
-            content = content.child(Self::render_node_with_selection(node, t, node_selection));
-            offset += node_len;
-        }
-
-        content
-    }
-
-    /// Get the number of nodes in the document.
-    pub fn node_count(&self) -> usize {
-        self.nodes.len()
     }
 
     /// Render the document as a list of RenderedNode items.
@@ -533,8 +451,6 @@ impl MarkdownDocument {
                     result.push(RenderedNode::CodeBlock {
                         language: language.clone(),
                         lines,
-                        total_start: offset,
-                        total_end: offset + node_len,
                     });
                 }
                 Node::Table { headers, rows } => {

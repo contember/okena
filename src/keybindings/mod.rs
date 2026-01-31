@@ -16,7 +16,6 @@ actions!(
         About,
         ToggleSidebar,
         ToggleSidebarAutoHide,
-        ExitFullscreen,
         ToggleFullscreen,
         FullscreenNextTerminal,
         FullscreenPrevTerminal,
@@ -52,6 +51,9 @@ actions!(
         ShowProjectSwitcher,
         SendTab,
         SendBacktab,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
     ]
 );
 
@@ -112,9 +114,7 @@ pub fn register_keybindings(cx: &mut App) {
     // Tab/Shift+Tab must be captured to prevent GPUI's focus navigation from consuming them
     cx.bind_keys([
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
-        KeyBinding::new("tab", SendTab, Some("FullscreenTerminal")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
-        KeyBinding::new("shift-tab", SendBacktab, Some("FullscreenTerminal")),
     ]);
 }
 
@@ -148,7 +148,6 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
     match action {
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
         "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
-        "ExitFullscreen" => Some(KeyBinding::new(keystroke, ExitFullscreen, context)),
         "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),
         "FullscreenNextTerminal" => Some(KeyBinding::new(keystroke, FullscreenNextTerminal, context)),
         "FullscreenPrevTerminal" => Some(KeyBinding::new(keystroke, FullscreenPrevTerminal, context)),
@@ -183,6 +182,9 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowFileSearch" => Some(KeyBinding::new(keystroke, ShowFileSearch, context)),
         "ShowProjectSwitcher" => Some(KeyBinding::new(keystroke, ShowProjectSwitcher, context)),
         "SendTab" => Some(KeyBinding::new(keystroke, SendTab, context)),
+        "ZoomIn" => Some(KeyBinding::new(keystroke, ZoomIn, context)),
+        "ZoomOut" => Some(KeyBinding::new(keystroke, ZoomOut, context)),
+        "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

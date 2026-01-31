@@ -251,6 +251,35 @@ impl LayoutContainer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // If a zoomed terminal exists in one of our children, render only that child at full size
+        if let Some(zoomed_idx) = self.find_zoomed_child_index(children, cx) {
+            let mut child_path = self.layout_path.clone();
+            child_path.push(zoomed_idx);
+
+            let container = self
+                .child_containers
+                .entry(child_path.clone())
+                .or_insert_with(|| {
+                    cx.new(|_cx| {
+                        LayoutContainer::new(
+                            self.workspace.clone(),
+                            self.project_id.clone(),
+                            self.project_path.clone(),
+                            child_path.clone(),
+                            self.pty_manager.clone(),
+                            self.terminals.clone(),
+                        )
+                    })
+                })
+                .clone();
+
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(container);
+        }
+
         let t = theme(cx);
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();

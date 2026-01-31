@@ -103,38 +103,29 @@ impl ListOverlayConfig {
     }
 }
 
-/// Result of filtering an item, with optional match metadata.
+/// Result of filtering an item.
 #[derive(Clone, Debug, Default)]
-pub struct FilterResult<M: Clone + Default = ()> {
+pub struct FilterResult {
     /// Original index in the items list.
     pub index: usize,
-    /// Optional match metadata (e.g., matched positions for highlighting).
-    pub match_data: M,
 }
 
-impl<M: Clone + Default> FilterResult<M> {
+impl FilterResult {
     pub fn new(index: usize) -> Self {
-        Self {
-            index,
-            match_data: M::default(),
-        }
-    }
-
-    pub fn with_match_data(index: usize, match_data: M) -> Self {
-        Self { index, match_data }
+        Self { index }
     }
 }
 
 /// Shared state for list overlays.
-pub struct ListOverlayState<T: Clone, M: Clone + Default = ()> {
+pub struct ListOverlayState<T: Clone> {
     /// Focus handle for keyboard events.
     pub focus_handle: FocusHandle,
     /// Scroll handle for list scrolling.
     pub scroll_handle: ScrollHandle,
     /// All items in the list.
     pub items: Vec<T>,
-    /// Filtered items (indices + match data).
-    pub filtered: Vec<FilterResult<M>>,
+    /// Filtered items (indices).
+    pub filtered: Vec<FilterResult>,
     /// Currently selected index (into filtered list).
     pub selected_index: usize,
     /// Current search query.
@@ -143,10 +134,10 @@ pub struct ListOverlayState<T: Clone, M: Clone + Default = ()> {
     pub config: ListOverlayConfig,
 }
 
-impl<T: Clone, M: Clone + Default> ListOverlayState<T, M> {
+impl<T: Clone> ListOverlayState<T> {
     /// Create a new state with the given items and config.
     pub fn new(items: Vec<T>, config: ListOverlayConfig, cx: &mut App) -> Self {
-        let filtered: Vec<FilterResult<M>> = (0..items.len())
+        let filtered: Vec<FilterResult> = (0..items.len())
             .map(FilterResult::new)
             .collect();
 
@@ -173,11 +164,6 @@ impl<T: Clone, M: Clone + Default> ListOverlayState<T, M> {
         self.filtered
             .get(self.selected_index)
             .map(|f| &self.items[f.index])
-    }
-
-    /// Get the currently selected filter result with match data.
-    pub fn selected_filter_result(&self) -> Option<&FilterResult<M>> {
-        self.filtered.get(self.selected_index)
     }
 
     /// Move selection up.
@@ -225,7 +211,7 @@ impl<T: Clone, M: Clone + Default> ListOverlayState<T, M> {
     }
 
     /// Update the filtered list and reset selection to first item.
-    pub fn set_filtered(&mut self, filtered: Vec<FilterResult<M>>) {
+    pub fn set_filtered(&mut self, filtered: Vec<FilterResult>) {
         self.filtered = filtered;
         self.selected_index = 0;
     }
@@ -233,11 +219,6 @@ impl<T: Clone, M: Clone + Default> ListOverlayState<T, M> {
     /// Check if the list is empty after filtering.
     pub fn is_empty(&self) -> bool {
         self.filtered.is_empty()
-    }
-
-    /// Get the number of filtered items.
-    pub fn len(&self) -> usize {
-        self.filtered.len()
     }
 }
 
@@ -274,8 +255,8 @@ const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 /// # Returns
 ///
 /// The action to take in response to the key event.
-pub fn handle_list_overlay_key<T: Clone, M: Clone + Default>(
-    state: &mut ListOverlayState<T, M>,
+pub fn handle_list_overlay_key<T: Clone>(
+    state: &mut ListOverlayState<T>,
     event: &KeyDownEvent,
     extra_keys: &[(&str, &str)],
 ) -> ListOverlayAction {

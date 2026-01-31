@@ -56,6 +56,11 @@ impl SimpleInputState {
         self
     }
 
+    /// Set placeholder text on an existing instance (for use with &mut self).
+    pub fn set_placeholder(&mut self, placeholder: impl Into<String>) {
+        self.placeholder = placeholder.into();
+    }
+
     pub fn default_value(mut self, value: impl Into<String>) -> Self {
         let v = value.into();
         self.cursor_position = v.len();

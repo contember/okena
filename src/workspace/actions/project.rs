@@ -3,6 +3,8 @@
 //! Actions for creating, modifying, and deleting projects.
 
 use crate::theme::FolderColor;
+use crate::workspace::hooks;
+use crate::workspace::persistence::HooksConfig;
 use crate::workspace::state::{LayoutNode, ProjectData, Workspace};
 use gpui::*;
 use std::collections::HashMap;
@@ -22,18 +24,22 @@ impl Workspace {
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
             id: id.clone(),
-            name,
-            path,
+            name: name.clone(),
+            path: path.clone(),
             is_visible: true,
             layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
         };
+        let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
-        self.data.project_order.push(id);
+        self.data.project_order.push(id.clone());
         cx.notify();
+
+        hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
     }
 
     /// Start a terminal for a project that doesn't have one (bookmark -> active project)
@@ -82,6 +88,11 @@ impl Workspace {
 
     /// Delete a project
     pub fn delete_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // Capture project info before removal for the hook
+        let hook_info = self.project(project_id).map(|p| {
+            (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
+        });
+
         // Remove from projects list
         self.data.projects.retain(|p| p.id != project_id);
         // Remove from project order
@@ -99,6 +110,10 @@ impl Workspace {
             }
         }
         cx.notify();
+
+        if let Some((project_hooks, id, name, path)) = hook_info {
+            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
+        }
     }
 
     /// Move a project to a new position in the order
@@ -189,6 +204,7 @@ impl Workspace {
                 main_repo_path: repo_path.to_string_lossy().to_string(),
             }),
             folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
         };
 
         // Insert after parent project in order
@@ -197,10 +213,22 @@ impl Workspace {
             .position(|pid| pid == parent_project_id)
             .unwrap_or(self.data.project_order.len());
 
+        let new_project_hooks = project.hooks.clone();
+        let new_project_name = project.name.clone();
         self.data.projects.push(project);
         self.data.project_order.insert(parent_index + 1, id.clone());
 
         cx.notify();
+
+        hooks::fire_on_worktree_create(
+            &new_project_hooks,
+            &id,
+            &new_project_name,
+            target_path,
+            branch,
+            cx,
+        );
+
         Ok(id)
     }
 
@@ -214,13 +242,20 @@ impl Workspace {
             return Err("Not a worktree project".to_string());
         }
 
-        let worktree_path = std::path::PathBuf::from(&project.path);
+        // Capture info before removal for the hook
+        let project_hooks = project.hooks.clone();
+        let project_name = project.name.clone();
+        let project_path = project.path.clone();
+        let worktree_path = std::path::PathBuf::from(&project_path);
 
         // Remove the git worktree
         crate::git::remove_worktree(&worktree_path, force)?;
 
-        // Delete the project from workspace
+        // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, cx);
+
+        // Fire worktree-specific hook
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
 
         Ok(())
     }

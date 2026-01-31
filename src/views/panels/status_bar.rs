@@ -192,11 +192,22 @@ impl Render for StatusBar {
                             )
                     )
             )
-            // Right side - time
+            // Right side - version and time
             .child(
                 div()
-                    .text_color(rgb(t.text_secondary))
-                    .child(time_str)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(t.text_secondary))
+                            .child(time_str)
+                    )
             )
     }
 }

@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Configuration for project lifecycle hooks
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_open: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_project_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_worktree_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_worktree_close: Option<String>,
+}
+
 /// Default sidebar width in pixels.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 250.0;
 /// Minimum sidebar width in pixels.
@@ -103,6 +116,10 @@ pub struct AppSettings {
     /// Empty string = use system default (open/xdg-open/start)
     #[serde(default = "default_file_opener")]
     pub file_opener: String,
+
+    /// Global lifecycle hooks (can be overridden per-project)
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 impl Default for AppSettings {
@@ -123,6 +140,7 @@ impl Default for AppSettings {
             show_shell_selector: false,
             session_backend: SessionBackend::default(),
             file_opener: default_file_opener(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -450,6 +468,7 @@ pub fn default_workspace() -> WorkspaceData {
             hidden_terminals: HashMap::new(),
             worktree_info: None,
             folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),

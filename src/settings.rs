@@ -75,8 +75,6 @@ impl SettingsState {
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
-    setting_setter!(set_file_opener, file_opener, String);
-
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
         self.settings.default_shell = value;
@@ -86,6 +84,36 @@ impl SettingsState {
     /// Set the session backend for terminal persistence
     pub fn set_session_backend(&mut self, value: SessionBackend, cx: &mut Context<Self>) {
         self.settings.session_backend = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the file opener command
+    pub fn set_file_opener(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.file_opener = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_project_open
+    pub fn set_hook_on_project_open(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_project_open = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_project_close
+    pub fn set_hook_on_project_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_project_close = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_worktree_create
+    pub fn set_hook_on_worktree_create(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_worktree_create = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_worktree_close
+    pub fn set_hook_on_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_worktree_close = value;
         self.save_and_notify(cx);
     }
 

@@ -124,11 +124,6 @@ impl TerminalContent {
         self.is_focused = focused;
     }
 
-    /// Set layout path (used when switching terminals in fullscreen).
-    pub fn set_layout_path(&mut self, layout_path: Vec<usize>) {
-        self.layout_path = layout_path;
-    }
-
     /// Mark scroll activity.
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.scrollbar.update(cx, |scrollbar, _| {
@@ -559,8 +554,8 @@ impl Render for TerminalContent {
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 let delta = event.delta.pixel_delta(px(17.0));
-                if event.modifiers.platform {
-                    // Cmd/Ctrl+scroll = per-terminal zoom
+                if event.modifiers.control {
+                    // Ctrl+scroll = per-terminal zoom (Linux/Windows)
                     let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);

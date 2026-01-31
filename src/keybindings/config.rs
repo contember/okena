@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct KeybindingEntry {
     /// The keystroke string (e.g., "cmd-b", "ctrl-shift-d")
     pub keystroke: String,
-    /// Optional context for the keybinding (e.g., "TerminalPane", "FullscreenTerminal")
+    /// Optional context for the keybinding (e.g., "TerminalPane")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// Whether this binding is enabled
@@ -98,14 +98,6 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     );
 
     // Fullscreen actions
-    map.insert(
-        "ExitFullscreen",
-        ActionDescription {
-            name: "Exit Fullscreen",
-            description: "Exit fullscreen mode",
-            category: "Fullscreen",
-        },
-    );
     map.insert(
         "ToggleFullscreen",
         ActionDescription {
@@ -234,6 +226,32 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Close Search",
             description: "Close search panel",
             category: "Search",
+        },
+    );
+
+    // Zoom actions
+    map.insert(
+        "ZoomIn",
+        ActionDescription {
+            name: "Zoom In",
+            description: "Increase terminal font size",
+            category: "Terminal",
+        },
+    );
+    map.insert(
+        "ZoomOut",
+        ActionDescription {
+            name: "Zoom Out",
+            description: "Decrease terminal font size",
+            category: "Terminal",
+        },
+    );
+    map.insert(
+        "ResetZoom",
+        ActionDescription {
+            name: "Reset Zoom",
+            description: "Reset terminal font size to default",
+            category: "Terminal",
         },
     );
 
@@ -478,28 +496,23 @@ impl KeybindingConfig {
 
         // Fullscreen keybindings
         bindings.insert(
-            "ExitFullscreen".to_string(),
-            vec![KeybindingEntry::new("escape", Some("FullscreenTerminal"))],
-        );
-        bindings.insert(
             "ToggleFullscreen".to_string(),
             vec![
                 KeybindingEntry::new("shift-escape", Some("TerminalPane")),
-                KeybindingEntry::new("shift-escape", Some("FullscreenTerminal")),
             ],
         );
         bindings.insert(
             "FullscreenNextTerminal".to_string(),
             vec![
-                KeybindingEntry::new("cmd-]", Some("FullscreenTerminal")),
-                KeybindingEntry::new("ctrl-]", Some("FullscreenTerminal")),
+                KeybindingEntry::new("cmd-]", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-]", Some("TerminalPane")),
             ],
         );
         bindings.insert(
             "FullscreenPrevTerminal".to_string(),
             vec![
-                KeybindingEntry::new("cmd-[", Some("FullscreenTerminal")),
-                KeybindingEntry::new("ctrl-[", Some("FullscreenTerminal")),
+                KeybindingEntry::new("cmd-[", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-[", Some("TerminalPane")),
             ],
         );
 
@@ -566,6 +579,29 @@ impl KeybindingConfig {
             vec![
                 KeybindingEntry::new("cmd-f", Some("TerminalPane")),
                 KeybindingEntry::new("ctrl-f", Some("TerminalPane")),
+            ],
+        );
+
+        // Zoom keybindings
+        bindings.insert(
+            "ZoomIn".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-=", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-=", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "ZoomOut".to_string(),
+            vec![
+                KeybindingEntry::new("cmd--", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl--", Some("TerminalPane")),
+            ],
+        );
+        bindings.insert(
+            "ResetZoom".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-0", Some("TerminalPane")),
+                KeybindingEntry::new("ctrl-0", Some("TerminalPane")),
             ],
         );
 
