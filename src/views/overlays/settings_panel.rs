@@ -735,8 +735,12 @@ impl SettingsPanel {
             .child(
                 section_container(&t)
                     .child(self.render_toggle(
-                        "focus-border", "Show Focus Border", s.show_focused_border, false,
+                        "focus-border", "Show Focus Border", s.show_focused_border, true,
                         |state, val, cx| state.set_show_focused_border(val, cx), cx,
+                    ))
+                    .child(self.render_toggle(
+                        "remote-server", "Remote Server", s.remote_server_enabled, false,
+                        |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
                     )),
             )
             .child(section_header("File Opener", &t))

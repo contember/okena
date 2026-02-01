@@ -51,6 +51,17 @@ syntect = "5"
 # Markdown parsing
 pulldown-cmark = "0.12"
 
+# Remote control server
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+base64 = "0.22"
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.5"
+data-encoding = "2.6"
+
 # Pin core-text to 21.0.x to avoid core-graphics 0.24/0.25 conflict in zed-font-kit
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = ">=21.0, <21.1"

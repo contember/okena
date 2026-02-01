@@ -5,6 +5,7 @@ mod assets;
 mod elements;
 mod git;
 mod keybindings;
+mod remote;
 mod settings;
 #[cfg(target_os = "linux")]
 mod simple_root;

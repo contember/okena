@@ -128,6 +128,10 @@ pub struct AppSettings {
     /// Diff viewer display mode (unified or side-by-side)
     #[serde(default)]
     pub diff_view_mode: DiffViewMode,
+
+    /// Enable remote control server (default: false)
+    #[serde(default)]
+    pub remote_server_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -151,6 +155,7 @@ impl Default for AppSettings {
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
+            remote_server_enabled: false,
         }
     }
 }

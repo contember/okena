@@ -1,3 +1,11 @@
+use alacritty_terminal::grid::Dimensions;
+use crate::remote::auth::AuthStore;
+use crate::remote::bridge::{self, BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
+use crate::remote::pty_broadcaster::PtyBroadcaster;
+use crate::remote::server::RemoteServer;
+use crate::remote::types::{ApiFullscreen, ApiLayoutNode, ApiProject, StateResponse};
+use crate::remote::{GlobalRemoteInfo, RemoteInfo};
+use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::detached_terminal::DetachedTerminalView;
 use crate::views::root::{RootView, TerminalsRegistry};
@@ -11,7 +19,7 @@ use gpui_component::Root;
 use crate::simple_root::SimpleRoot as Root;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Main application state and view
 pub struct Muxy {
@@ -25,6 +33,12 @@ pub struct Muxy {
     /// Note: Field is read by spawned tasks, not directly
     #[allow(dead_code)]
     save_pending: Arc<AtomicBool>,
+    // ── Remote control fields ───────────────────────────────────────────
+    remote_server: Option<RemoteServer>,
+    pub auth_store: Arc<AuthStore>,
+    pty_broadcaster: Arc<PtyBroadcaster>,
+    state_version: Arc<AtomicU64>,
+    remote_info: RemoteInfo,
 }
 
 impl Muxy {
@@ -42,24 +56,17 @@ impl Muxy {
         let save_pending = Arc::new(AtomicBool::new(false));
 
         // Set up debounced auto-save on workspace changes
-        // Instead of saving synchronously on every change, we mark save as pending
-        // and a background task saves after 500ms of no changes
         let save_pending_for_observer = save_pending.clone();
         let workspace_for_save = workspace.clone();
         cx.observe(&workspace, move |_this, _workspace, cx| {
-            // Mark that a save is needed
             save_pending_for_observer.store(true, Ordering::Relaxed);
 
-            // Spawn a debounced save task
             let save_pending = save_pending_for_observer.clone();
             let workspace = workspace_for_save.clone();
             cx.spawn(async move |_, cx| {
-                // Wait for debounce period
                 smol::Timer::after(std::time::Duration::from_millis(500)).await;
 
-                // Only save if still pending (no newer changes reset this)
                 if save_pending.swap(false, Ordering::Relaxed) {
-                    // Read workspace data and save in background
                     let data = cx.update(|cx| workspace.read(cx).data.clone());
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
@@ -79,11 +86,27 @@ impl Muxy {
         let terminals = root_view.read(cx).terminals().clone();
 
         // Observe window bounds changes to force re-render
-        // This fixes Linux maximize issue where canvas bounds in LayoutContainer become stale
         cx.observe_window_bounds(window, |_this, _window, cx| {
             cx.notify();
         })
         .detach();
+
+        // ── Remote control setup ────────────────────────────────────────
+        let auth_store = Arc::new(AuthStore::new());
+        let pty_broadcaster = Arc::new(PtyBroadcaster::new());
+        let state_version = Arc::new(AtomicU64::new(0));
+        let remote_info = RemoteInfo::new();
+        cx.set_global(GlobalRemoteInfo(remote_info.clone()));
+
+        // Bump state_version on workspace changes
+        let sv = state_version.clone();
+        cx.observe(&workspace, move |_this, _workspace, _cx| {
+            sv.fetch_add(1, Ordering::Relaxed);
+        })
+        .detach();
+
+        // Create bridge channel and start command loop
+        let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         let mut manager = Self {
             root_view,
@@ -92,10 +115,18 @@ impl Muxy {
             terminals,
             opened_detached_windows: HashSet::new(),
             save_pending,
+            remote_server: None,
+            auth_store: auth_store.clone(),
+            pty_broadcaster: pty_broadcaster.clone(),
+            state_version: state_version.clone(),
+            remote_info: remote_info.clone(),
         };
 
         // Start PTY event loop (centralized for all windows)
         manager.start_pty_event_loop(pty_events, cx);
+
+        // Start remote command bridge loop
+        manager.start_remote_command_loop(bridge_rx, cx);
 
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -103,7 +134,298 @@ impl Muxy {
         })
         .detach();
 
+        // Auto-start remote server if enabled in settings
+        let settings = cx.global::<GlobalSettings>().0.clone();
+        if settings.read(cx).get().remote_server_enabled {
+            manager.start_remote_server(bridge_tx.clone());
+        }
+
+        // Observe settings changes to start/stop server dynamically
+        let bridge_tx_for_observer = bridge_tx.clone();
+        cx.observe(&settings, move |this, settings, cx| {
+            let enabled = settings.read(cx).get().remote_server_enabled;
+            let running = this.remote_server.is_some();
+
+            if enabled && !running {
+                this.start_remote_server(bridge_tx_for_observer.clone());
+            } else if !enabled && running {
+                this.stop_remote_server();
+            }
+        })
+        .detach();
+
         manager
+    }
+
+    /// Start the remote HTTP/WS server.
+    fn start_remote_server(&mut self, bridge_tx: bridge::BridgeSender) {
+        match RemoteServer::start(
+            bridge_tx,
+            self.auth_store.clone(),
+            self.pty_broadcaster.clone(),
+            self.state_version.clone(),
+        ) {
+            Ok(server) => {
+                let port = server.port();
+                let code = self.auth_store.get_or_create_code();
+                self.remote_info.set_active(port, code);
+                log::info!("Remote server started on port {}", port);
+                self.remote_server = Some(server);
+            }
+            Err(e) => {
+                log::error!("Failed to start remote server: {}", e);
+            }
+        }
+    }
+
+    /// Stop the remote server.
+    fn stop_remote_server(&mut self) {
+        if let Some(mut server) = self.remote_server.take() {
+            server.stop();
+        }
+        self.remote_info.set_inactive();
+    }
+
+    /// Get the remote server port (if running).
+    pub fn remote_server_port(&self) -> Option<u16> {
+        self.remote_server.as_ref().map(|s| s.port())
+    }
+
+    /// Process commands from the remote API bridge.
+    /// Runs on the GPUI main thread via cx.spawn().
+    fn start_remote_command_loop(
+        &mut self,
+        bridge_rx: BridgeReceiver,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let terminals = self.terminals.clone();
+        let state_version = self.state_version.clone();
+
+        cx.spawn(async move |_this: WeakEntity<Muxy>, cx| {
+            loop {
+                let msg: BridgeMessage = match bridge_rx.recv().await {
+                    Ok(msg) => msg,
+                    Err(_) => break,
+                };
+
+                let result = match msg.command {
+                    RemoteCommand::GetState => {
+                        cx.update(|cx| {
+                            let ws = workspace.read(cx);
+                            let sv = state_version.load(Ordering::Relaxed);
+                            let projects: Vec<ApiProject> = ws.data.projects.iter().map(|p| {
+                                ApiProject {
+                                    id: p.id.clone(),
+                                    name: p.name.clone(),
+                                    path: p.path.clone(),
+                                    is_visible: p.is_visible,
+                                    layout: p.layout.as_ref().map(ApiLayoutNode::from_layout),
+                                    terminal_names: p.terminal_names.clone(),
+                                }
+                            }).collect();
+
+                            let fullscreen = ws.fullscreen_terminal.as_ref().map(|fs| {
+                                ApiFullscreen {
+                                    project_id: fs.project_id.clone(),
+                                    terminal_id: fs.terminal_id.clone(),
+                                }
+                            });
+
+                            let resp = StateResponse {
+                                state_version: sv,
+                                projects,
+                                focused_project_id: ws.focused_project_id.clone(),
+                                fullscreen_terminal: fullscreen,
+                            };
+
+                            CommandResult::Ok(Some(serde_json::to_value(resp).unwrap()))
+                        })
+                    }
+                    RemoteCommand::SendText { terminal_id, text } => {
+                        let found = {
+                            let guard = terminals.lock();
+                            guard.get(&terminal_id).cloned()
+                        };
+                        match found {
+                            Some(term) => {
+                                term.send_input(&text);
+                                CommandResult::Ok(None)
+                            }
+                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                        }
+                    }
+                    RemoteCommand::RunCommand { terminal_id, command } => {
+                        let found = {
+                            let guard = terminals.lock();
+                            guard.get(&terminal_id).cloned()
+                        };
+                        match found {
+                            Some(term) => {
+                                term.send_input(&format!("{}\n", command));
+                                CommandResult::Ok(None)
+                            }
+                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                        }
+                    }
+                    RemoteCommand::SendSpecialKey { terminal_id, key } => {
+                        let found = {
+                            let guard = terminals.lock();
+                            guard.get(&terminal_id).cloned()
+                        };
+                        match found {
+                            Some(term) => {
+                                term.send_bytes(key.to_bytes());
+                                CommandResult::Ok(None)
+                            }
+                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                        }
+                    }
+                    RemoteCommand::ReadContent { terminal_id } => {
+                        let found = {
+                            let guard = terminals.lock();
+                            guard.get(&terminal_id).cloned()
+                        };
+                        match found {
+                            Some(term) => {
+                                let content = term.with_content(|term| {
+                                    let grid = term.grid();
+                                    let screen_lines = grid.screen_lines();
+                                    let cols = grid.columns();
+                                    let mut lines = Vec::with_capacity(screen_lines);
+
+                                    for row in 0..screen_lines as i32 {
+                                        let mut line = String::with_capacity(cols);
+                                        for col in 0..cols {
+                                            use alacritty_terminal::index::{Point, Line, Column};
+                                            let cell = &grid[Point::new(Line(row), Column(col))];
+                                            line.push(cell.c);
+                                        }
+                                        // Trim trailing spaces
+                                        let trimmed = line.trim_end().to_string();
+                                        lines.push(trimmed);
+                                    }
+
+                                    // Remove trailing empty lines
+                                    while lines.last().map_or(false, |l| l.is_empty()) {
+                                        lines.pop();
+                                    }
+
+                                    lines.join("\n")
+                                });
+                                CommandResult::Ok(Some(serde_json::json!({"content": content})))
+                            }
+                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                        }
+                    }
+                    RemoteCommand::SplitTerminal { project_id, path, direction } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                if let Some(project) = ws.project_mut(&project_id) {
+                                    if let Some(ref mut layout) = project.layout {
+                                        if let Some(node) = layout.get_at_path_mut(&path) {
+                                            let existing = node.clone();
+                                            let new_terminal = crate::workspace::state::LayoutNode::new_terminal();
+                                            *node = crate::workspace::state::LayoutNode::Split {
+                                                direction,
+                                                sizes: vec![0.5, 0.5],
+                                                children: vec![existing, new_terminal],
+                                            };
+                                            cx.notify();
+                                            return CommandResult::Ok(None);
+                                        }
+                                    }
+                                }
+                                CommandResult::Err(format!("project or path not found: {}:{:?}", project_id, path))
+                            })
+                        })
+                    }
+                    RemoteCommand::CloseTerminal { project_id, terminal_id } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                if let Some(project) = ws.project_mut(&project_id) {
+                                    if let Some(ref layout) = project.layout {
+                                        if let Some(path) = layout.find_terminal_path(&terminal_id) {
+                                            // For simplicity, if it's the root terminal, replace with new empty one
+                                            if path.is_empty() {
+                                                project.layout = Some(crate::workspace::state::LayoutNode::new_terminal());
+                                            } else {
+                                                // Remove from parent
+                                                let parent_path = &path[..path.len() - 1];
+                                                let child_idx = path[path.len() - 1];
+                                                if let Some(ref mut layout) = project.layout {
+                                                    if let Some(parent) = layout.get_at_path_mut(parent_path) {
+                                                        match parent {
+                                                            crate::workspace::state::LayoutNode::Split { children, sizes, .. } => {
+                                                                if child_idx < children.len() {
+                                                                    children.remove(child_idx);
+                                                                    if child_idx < sizes.len() {
+                                                                        sizes.remove(child_idx);
+                                                                    }
+                                                                    let total: f32 = sizes.iter().sum();
+                                                                    if total > 0.0 {
+                                                                        for s in sizes.iter_mut() {
+                                                                            *s /= total;
+                                                                        }
+                                                                    }
+                                                                    if children.len() == 1 {
+                                                                        let child = children.remove(0);
+                                                                        *parent = child;
+                                                                    }
+                                                                }
+                                                            }
+                                                            crate::workspace::state::LayoutNode::Tabs { children, .. } => {
+                                                                if child_idx < children.len() {
+                                                                    children.remove(child_idx);
+                                                                    if children.len() == 1 {
+                                                                        let child = children.remove(0);
+                                                                        *parent = child;
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cx.notify();
+                                            return CommandResult::Ok(None);
+                                        }
+                                    }
+                                }
+                                CommandResult::Err(format!("terminal not found: {}", terminal_id))
+                            })
+                        })
+                    }
+                    RemoteCommand::FocusTerminal { project_id, terminal_id } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                if let Some(project) = ws.project(&project_id) {
+                                    if let Some(ref layout) = project.layout {
+                                        if let Some(path) = layout.find_terminal_path(&terminal_id) {
+                                            ws.focus_manager.focus_terminal(
+                                                project_id.clone(),
+                                                path.clone(),
+                                            );
+                                            ws.focused_terminal = Some(crate::workspace::state::FocusedTerminalState {
+                                                project_id: project_id.clone(),
+                                                layout_path: path,
+                                            });
+                                            cx.notify();
+                                            return CommandResult::Ok(None);
+                                        }
+                                    }
+                                }
+                                CommandResult::Err(format!("terminal not found: {}", terminal_id))
+                            })
+                        })
+                    }
+                };
+
+                let _ = msg.reply.send(result);
+            }
+        })
+        .detach();
     }
 
     /// Centralized PTY event loop - notifies all windows (main and detached)
@@ -113,22 +435,23 @@ impl Muxy {
         cx: &mut Context<Self>,
     ) {
         let terminals = self.terminals.clone();
+        let broadcaster = self.pty_broadcaster.clone();
 
         cx.spawn(async move |this: WeakEntity<Muxy>, cx| {
             loop {
-                // Wait for an event
                 let event = match pty_events.recv().await {
                     Ok(event) => event,
-                    Err(_) => break, // Channel closed
+                    Err(_) => break,
                 };
 
-                // Process first event
+                // Process first event + broadcast to remote subscribers
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
                             terminal.process_output(data);
                         }
+                        broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, .. } => {
                         terminals.lock().remove(terminal_id);
@@ -143,6 +466,7 @@ impl Muxy {
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
                                 terminal.process_output(data);
                             }
+                            broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, .. } => {
                             terminals.lock().remove(terminal_id);
@@ -171,7 +495,6 @@ impl Muxy {
             .map(|d| d.terminal_id.clone())
             .collect();
 
-        // Find newly detached terminals (not yet opened)
         let new_detached: Vec<_> = ws
             .detached_terminals
             .iter()
@@ -179,7 +502,6 @@ impl Muxy {
             .cloned()
             .collect();
 
-        // Find terminals that were re-attached (windows should close)
         let reattached: Vec<_> = self
             .opened_detached_windows
             .iter()
@@ -187,17 +509,13 @@ impl Muxy {
             .cloned()
             .collect();
 
-        // Update our tracking set
         self.opened_detached_windows = current_detached;
 
-        // Open windows for newly detached terminals
         for detached in new_detached {
             self.open_detached_window(&detached.terminal_id, cx);
         }
 
-        // Note: Window closing when re-attached is handled by the window itself
-        // through workspace observation
-        let _ = reattached; // Suppress unused warning
+        let _ = reattached;
     }
 
     fn open_detached_window(&self, terminal_id: &str, cx: &mut Context<Self>) {
@@ -206,7 +524,6 @@ impl Muxy {
         let terminals = self.terminals.clone();
         let terminal_id_owned = terminal_id.to_string();
 
-        // Get terminal name for window title
         let terminal_name = {
             let ws = workspace.read(cx);
             let mut name = terminal_id.chars().take(8).collect::<String>();
