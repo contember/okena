@@ -10,7 +10,7 @@ pub use config::{
 
 // Define actions
 actions!(
-    term_manager,
+    muxy,
     [
         Quit,
         About,

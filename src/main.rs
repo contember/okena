@@ -22,7 +22,7 @@ use gpui_component::Root;
 use crate::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
-use crate::app::TermManager;
+use crate::app::Muxy;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
 use crate::terminal::pty_manager::PtyManager;
@@ -38,20 +38,20 @@ fn quit(_: &Quit, cx: &mut App) {
 /// About action handler - shows about dialog
 fn about(_: &About, _cx: &mut App) {
     // TODO: Show about dialog when GPUI supports it
-    log::info!("Term Manager - A modern terminal manager");
+    log::info!("Muxy - A fast, native terminal multiplexer");
 }
 
 /// Set up macOS application menu
 fn set_app_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
-            name: "Term Manager".into(),
+            name: "Muxy".into(),
             items: vec![
-                MenuItem::action("About Term Manager", About),
+                MenuItem::action("About Muxy", About),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Quit Term Manager", Quit),
+                MenuItem::action("Quit Muxy", Quit),
             ],
         },
         Menu {
@@ -121,7 +121,7 @@ fn main() {
                     None
                 } else {
                     Some(TitlebarOptions {
-                        title: Some("Term Manager".into()),
+                        title: Some("Muxy".into()),
                         appears_transparent: true,
                         ..Default::default()
                     })
@@ -141,7 +141,7 @@ fn main() {
                     width: px(400.0),
                     height: px(300.0),
                 }),
-                app_id: Some("term-manager".to_string()),
+                app_id: Some("muxy".to_string()),
                 ..Default::default()
             },
             |window, cx| {
@@ -178,10 +178,10 @@ fn main() {
                     .detach();
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
-                let term_manager = cx.new(|cx| {
-                    TermManager::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
+                let muxy = cx.new(|cx| {
+                    Muxy::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
                 });
-                cx.new(|cx| Root::new(term_manager, window, cx))
+                cx.new(|cx| Root::new(muxy, window, cx))
             },
         )
         .expect("Failed to create main window");

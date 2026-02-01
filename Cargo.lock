@@ -3425,6 +3425,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "muxy"
+version = "0.1.5"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel 2.5.0",
+ "core-text",
+ "dirs 5.0.1",
+ "env_logger",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "libc",
+ "log",
+ "parking_lot",
+ "portable-pty",
+ "pulldown-cmark",
+ "regex",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "smol",
+ "syntect",
+ "sysinfo 0.33.1",
+ "thiserror 2.0.18",
+ "time",
+ "uuid",
+ "winresource",
+]
+
+[[package]]
 name = "naga"
 version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5748,7 +5779,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "term-manager"
+name = "muxy"
 version = "0.3.0"
 dependencies = [
  "alacritty_terminal",

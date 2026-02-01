@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Main application state and view
-pub struct TermManager {
+pub struct Muxy {
     root_view: Entity<RootView>,
     workspace: Entity<Workspace>,
     pty_manager: Arc<PtyManager>,
@@ -27,7 +27,7 @@ pub struct TermManager {
     save_pending: Arc<AtomicBool>,
 }
 
-impl TermManager {
+impl Muxy {
     pub fn new(
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
@@ -114,7 +114,7 @@ impl TermManager {
     ) {
         let terminals = self.terminals.clone();
 
-        cx.spawn(async move |this: WeakEntity<TermManager>, cx| {
+        cx.spawn(async move |this: WeakEntity<Muxy>, cx| {
             loop {
                 // Wait for an event
                 let event = match pty_events.recv().await {
@@ -255,7 +255,7 @@ impl TermManager {
     }
 }
 
-impl Render for TermManager {
+impl Render for Muxy {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.root_view.clone())
     }

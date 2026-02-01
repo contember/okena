@@ -273,17 +273,17 @@ fn get_dtach_socket_dir() -> std::path::PathBuf {
     // Use XDG_RUNTIME_DIR if available (Linux), otherwise fall back to temp dir
     // XDG_RUNTIME_DIR is preferred as it's user-specific and cleaned on logout
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        std::path::PathBuf::from(runtime_dir).join("term-manager")
+        std::path::PathBuf::from(runtime_dir).join("muxy")
     } else {
-        // Fallback: /tmp/term-manager-<uid> for security
+        // Fallback: /tmp/muxy-<uid> for security
         #[cfg(unix)]
         {
             let uid = unsafe { libc::getuid() };
-            std::path::PathBuf::from(format!("/tmp/term-manager-{}", uid))
+            std::path::PathBuf::from(format!("/tmp/muxy-{}", uid))
         }
         #[cfg(not(unix))]
         {
-            std::env::temp_dir().join("term-manager")
+            std::env::temp_dir().join("muxy")
         }
     }
 }

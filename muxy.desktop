@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Term Manager
+Name=Muxy
 Comment=Terminal multiplexer for managing multiple terminal sessions
-Exec=term-manager
-Icon=term-manager
+Exec=muxy
+Icon=muxy
 Terminal=false
 Categories=System;TerminalEmulator;Utility;
 Keywords=terminal;console;shell;command;pty;
-StartupWMClass=term-manager
+StartupWMClass=muxy
 X-GNOME-UsesNotifications=true

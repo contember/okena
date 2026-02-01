@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# macOS App Bundle Script for Term Manager
+# macOS App Bundle Script for Muxy
 # Usage: ./scripts/bundle-macos.sh [--target <target>] [--skip-build] [--dmg]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,8 +11,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 TARGET=""
 SKIP_BUILD=false
 CREATE_DMG=false
-APP_NAME="Term Manager"
-BUNDLE_ID="com.contember.term-manager"
+APP_NAME="Muxy"
+BUNDLE_ID="com.contember.muxy"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,7 +46,7 @@ if [[ -z "$TARGET" ]]; then
     fi
 fi
 
-echo "==> Building Term Manager for macOS"
+echo "==> Building Muxy for macOS"
 echo "    Target: $TARGET"
 
 cd "$PROJECT_ROOT"
@@ -62,14 +62,14 @@ if [[ "$SKIP_BUILD" == false ]]; then
 fi
 
 # Verify binary exists (check target-specific path first, then default)
-BINARY_PATH="target/$TARGET/release/term-manager"
+BINARY_PATH="target/$TARGET/release/muxy"
 if [[ ! -f "$BINARY_PATH" ]]; then
     # Try default release path (when built without --target)
-    BINARY_PATH="target/release/term-manager"
+    BINARY_PATH="target/release/muxy"
     if [[ ! -f "$BINARY_PATH" ]]; then
         echo "Error: Binary not found"
-        echo "Checked: target/$TARGET/release/term-manager"
-        echo "Checked: target/release/term-manager"
+        echo "Checked: target/$TARGET/release/muxy"
+        echo "Checked: target/release/muxy"
         echo "Run without --skip-build or build first with: cargo build --release"
         exit 1
     fi
@@ -91,8 +91,8 @@ mkdir -p "$RESOURCES_DIR"
 
 # Copy binary
 echo "==> Copying binary..."
-cp "$BINARY_PATH" "$MACOS_DIR/term-manager"
-chmod +x "$MACOS_DIR/term-manager"
+cp "$BINARY_PATH" "$MACOS_DIR/muxy"
+chmod +x "$MACOS_DIR/muxy"
 
 # Create Info.plist with version
 echo "==> Creating Info.plist..."
@@ -134,7 +134,7 @@ echo "==> App bundle created at: $APP_BUNDLE"
 # Create DMG if requested
 if [[ "$CREATE_DMG" == true ]]; then
     echo "==> Creating DMG..."
-    DMG_NAME="Term-Manager-$VERSION-$TARGET.dmg"
+    DMG_NAME="Muxy-$VERSION-$TARGET.dmg"
     DMG_PATH="$DIST_DIR/$DMG_NAME"
 
     # Remove existing DMG

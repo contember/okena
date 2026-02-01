@@ -1,4 +1,4 @@
-# STATUS.md - Analýza projektu Term Manager RS
+# STATUS.md - Analýza projektu Muxy
 
 **Datum:** 2026-01-13
 **Stav:** Aktivní vývoj (WIP commity)
@@ -275,7 +275,7 @@ Některé error messages jsou příliš technické, nejsou user-friendly
 
 ## Závěr
 
-Term Manager RS je dobře navržený terminálový multiplexer s solidní architekturou. Hlavní priority by měly být:
+Muxy je dobře navržený terminálový multiplexer s solidní architekturou. Hlavní priority by měly být:
 
 1. **Stabilita:** Opravit race conditions a přidat proper error handling
 2. **UX:** Scrollback buffer je klíčová chybějící feature

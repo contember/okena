@@ -217,7 +217,7 @@ pub struct ExportedWorkspace {
 fn get_config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("term-manager-rs")
+        .join("muxy")
 }
 
 /// Get the workspace file path

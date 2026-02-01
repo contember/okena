@@ -20,10 +20,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: term-manager-linux-x64
+            artifact: muxy-linux-x64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: term-manager-macos-arm64
+            artifact: muxy-macos-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -68,14 +68,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/icons
-          cp target/${{ matrix.target }}/release/term-manager dist/
-          chmod +x dist/term-manager
+          cp target/${{ matrix.target }}/release/muxy dist/
+          chmod +x dist/muxy
           # Bundle icons for Linux installation
-          cp assets/app-icon-simple.svg dist/icons/
           cp assets/app-icon-16.png assets/app-icon-32.png assets/app-icon-48.png \
              assets/app-icon-64.png assets/app-icon-128.png assets/app-icon-256.png \
              assets/app-icon-512.png dist/icons/
-          cp term-manager.desktop dist/
+          cp muxy.desktop dist/
 
       - name: Create macOS app bundle
         if: runner.os == 'macOS'
@@ -99,10 +98,10 @@ jobs:
         include:
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            artifact: term-manager-macos-x64
+            artifact: muxy-macos-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: term-manager-windows-x64
+            artifact: muxy-windows-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -134,7 +133,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           mkdir dist
-          copy target\${{ matrix.target }}\release\term-manager.exe dist\
+          copy target\${{ matrix.target }}\release\muxy.exe dist\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -171,7 +170,7 @@ jobs:
               # macOS: DMG is already created, just move it
               mv "$dir"/*.dmg "../" 2>/dev/null || true
               # Also create a zip of the .app for those who prefer it
-              cd "$dir" && zip -r "../../${name}.zip" "Term Manager.app" && cd ..
+              cd "$dir" && zip -r "../../${name}.zip" "Muxy.app" && cd ..
             else
               tar -czvf "../${name}.tar.gz" -C "$dir" .
             fi
@@ -182,21 +181,21 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
 
           # Calculate SHA256 from local zip files
-          ARM64_SHA=$(sha256sum term-manager-macos-arm64.zip | cut -d' ' -f1)
-          X64_SHA=$(sha256sum term-manager-macos-x64.zip | cut -d' ' -f1)
+          ARM64_SHA=$(sha256sum muxy-macos-arm64.zip | cut -d' ' -f1)
+          X64_SHA=$(sha256sum muxy-macos-x64.zip | cut -d' ' -f1)
 
           # Update cask
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/term-manager.rb
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/term-manager.rb
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/term-manager.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/muxy.rb
+          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/muxy.rb
+          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/muxy.rb
 
-          cat Casks/term-manager.rb
+          cat Casks/muxy.rb
 
       - name: Commit cask update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/term-manager.rb
+          git add Casks/muxy.rb
           git commit -m "chore: update homebrew cask for ${GITHUB_REF#refs/tags/}"
           git push origin HEAD:main
 
