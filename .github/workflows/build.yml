@@ -24,6 +24,12 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: muxy-macos-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: muxy-macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: muxy-windows-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -61,11 +67,16 @@ jobs:
             pkg-config \
             cmake
 
+      - name: Check compilation
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: cargo check --release --target ${{ matrix.target }}
+
       - name: Build
+        if: startsWith(github.ref, 'refs/tags/v')
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare artifact (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p dist/icons
           cp target/${{ matrix.target }}/release/muxy dist/
@@ -77,65 +88,19 @@ jobs:
           cp muxy.desktop dist/
 
       - name: Create macOS app bundle
-        if: runner.os == 'macOS'
-        run: |
-          chmod +x scripts/bundle-macos.sh
-          ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist/
-          retention-days: 7
-
-  # Intel Mac and Windows only run for tag pushes
-  build-extra:
-    if: startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: muxy-macos-x64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: muxy-windows-x64
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93"
-          targets: ${{ matrix.target }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.target }}
-          save-if: true
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Create macOS app bundle
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
         run: |
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
 
       - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir dist
           copy target\${{ matrix.target }}\release\muxy.exe dist\
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -144,7 +109,7 @@ jobs:
 
   # Create release when a tag is pushed
   release:
-    needs: [build, build-extra]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
