@@ -517,7 +517,12 @@ impl Element for TerminalElement {
         let new_rows = ((available_height - 0.5) / line_height_f).floor().max(1.0) as u16;
 
         let current_size = self.terminal.size.lock().clone();
-        if new_cols != current_size.cols || new_rows != current_size.rows {
+        let cols_rows_changed = new_cols != current_size.cols || new_rows != current_size.rows;
+        let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
+            || (line_height_f - current_size.cell_height).abs() > 0.001;
+
+        if cols_rows_changed {
+            // Full resize: grid dimensions changed, need to resize terminal and PTY
             let new_size = crate::terminal::terminal::TerminalSize {
                 cols: new_cols,
                 rows: new_rows,
@@ -525,6 +530,13 @@ impl Element for TerminalElement {
                 cell_height: line_height_f,
             };
             self.terminal.resize(new_size);
+        } else if cell_size_changed {
+            // Only cell dimensions changed (e.g., zoom) - just update the size struct
+            // This ensures hover detection uses the same cell_width as rendering
+            // without triggering unnecessary grid/PTY resizes
+            let mut size = self.terminal.size.lock();
+            size.cell_width = cell_width_f;
+            size.cell_height = line_height_f;
         }
 
         // Paint background using theme color (different for focused vs unfocused)
