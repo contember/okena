@@ -236,7 +236,7 @@ impl TerminalContent {
         if let Some(ref terminal) = self.terminal {
             if let Some((col, row)) = self.pixel_to_cell(event.position) {
                 // Check for Cmd+Click (macOS) / Ctrl+Click (Linux/Windows) on URL or file path
-                if event.modifiers.platform {
+                if event.modifiers.platform || event.modifiers.control {
                     if let Some(url_match) = self.url_detector.find_at(col, row) {
                         match &url_match.kind {
                             LinkKind::Url => {
