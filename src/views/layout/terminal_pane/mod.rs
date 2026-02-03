@@ -937,6 +937,16 @@ impl Render for TerminalPane {
                         self.pending_focus = true;
                     }
                 }
+
+                // Fullscreen focus: if this terminal is in fullscreen and doesn't have focus, restore it
+                if let Some(ref fs) = ws.fullscreen_terminal {
+                    if fs.project_id == self.project_id
+                        && Some(&fs.terminal_id) == self.terminal_id.as_ref()
+                        && !focus_handle.is_focused(window)
+                    {
+                        self.pending_focus = true;
+                    }
+                }
             }
             is_modal
         };
