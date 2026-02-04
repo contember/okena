@@ -7,7 +7,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -827,17 +827,20 @@ impl Render for RootView {
                 let overlay_manager = overlay_manager.clone();
                 let workspace = workspace.clone();
                 move |_this, _: &ShowDiffViewer, _window, cx| {
-                    // Get the focused or first visible project path
-                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
-                        .map(|f| f.project_id.clone())
-                        .or_else(|| {
-                            workspace.read(cx).visible_projects()
-                                .first()
-                                .map(|p| p.id.clone())
-                        })
-                        .and_then(|id| {
-                            workspace.read(cx).project(&id).map(|p| p.path.clone())
-                        });
+                    // Check for pending path first (from project header click)
+                    let project_path = take_pending_diff_path().or_else(|| {
+                        // Otherwise get the focused or first visible project path
+                        workspace.read(cx).focus_manager.focused_terminal_state()
+                            .map(|f| f.project_id.clone())
+                            .or_else(|| {
+                                workspace.read(cx).visible_projects()
+                                    .first()
+                                    .map(|p| p.id.clone())
+                            })
+                            .and_then(|id| {
+                                workspace.read(cx).project(&id).map(|p| p.path.clone())
+                            })
+                    });
 
                     if let Some(path) = project_path {
                         overlay_manager.update(cx, |om, cx| {

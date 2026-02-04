@@ -1,4 +1,5 @@
 use crate::git;
+use crate::keybindings::{set_pending_diff_path, ShowDiffViewer};
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout_container::LayoutContainer;
@@ -160,7 +161,7 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    fn render_git_status(&self, project: &ProjectData, t: ThemeColors) -> impl IntoElement {
+    fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let status = git::get_git_status(Path::new(&project.path));
         let is_worktree = project.worktree_info.is_some();
         let main_repo_path = project.worktree_info.as_ref()
@@ -169,6 +170,12 @@ impl ProjectColumn {
 
         match status {
             Some(status) if status.branch.is_some() => {
+                let has_changes = status.has_changes();
+                let lines_added = status.lines_added;
+                let lines_removed = status.lines_removed;
+                let project_id = self.project_id.clone();
+                let project_path = project.path.clone();
+
                 div()
                     .flex()
                     .items_center()
@@ -213,17 +220,32 @@ impl ProjectColumn {
                                     .child(status.branch.clone().unwrap_or_default())
                             )
                     )
-                    // Diff stats (only if there are changes)
-                    .when(status.has_changes(), |d: Div| {
+                    // Diff stats (clickable, only if there are changes)
+                    .when(has_changes, |d: Div| {
                         d.child(
                             div()
+                                .id(ElementId::Name(format!("git-diff-stats-{}", project_id).into()))
                                 .flex()
                                 .items_center()
                                 .gap(px(3.0))
+                                .cursor_pointer()
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    // Set the path and dispatch ShowDiffViewer
+                                    set_pending_diff_path(project_path.clone());
+                                    window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                                }))
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_green))
-                                        .child(format!("+{}", status.lines_added))
+                                        .child(format!("+{}", lines_added))
                                 )
                                 .child(
                                     div()
@@ -233,8 +255,9 @@ impl ProjectColumn {
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_red))
-                                        .child(format!("-{}", status.lines_removed))
+                                        .child(format!("-{}", lines_removed))
                                 )
+                                .tooltip(|_window, cx| Tooltip::new("View Git Diff").build(_window, cx))
                         )
                     })
                     .into_any_element()
@@ -291,7 +314,7 @@ impl ProjectColumn {
                                     .overflow_hidden()
                                     .child(project.path.clone()),
                             )
-                            .child(self.render_git_status(project, t)),
+                            .child(self.render_git_status(project, t, cx)),
                     ),
             )
             .child(
