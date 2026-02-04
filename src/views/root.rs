@@ -7,7 +7,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -658,6 +658,7 @@ impl Render for RootView {
         let has_context_menu = om.has_context_menu();
         let has_file_search = om.has_file_search();
         let has_file_viewer = om.has_file_viewer();
+        let has_diff_viewer = om.has_diff_viewer();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -821,6 +822,30 @@ impl Render for RootView {
                     overlay_manager.update(cx, |om, cx| om.toggle_project_switcher(cx));
                 }
             }))
+            // Handle show diff viewer action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                let workspace = workspace.clone();
+                move |_this, _: &ShowDiffViewer, _window, cx| {
+                    // Get the focused or first visible project path
+                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                        .map(|f| f.project_id.clone())
+                        .or_else(|| {
+                            workspace.read(cx).visible_projects()
+                                .first()
+                                .map(|p| p.id.clone())
+                        })
+                        .and_then(|id| {
+                            workspace.read(cx).project(&id).map(|p| p.path.clone())
+                        });
+
+                    if let Some(path) = project_path {
+                        overlay_manager.update(cx, |om, cx| {
+                            om.show_diff_viewer(path, cx);
+                        });
+                    }
+                }
+            }))
             // Title bar at the top (with window controls)
             .child(self.title_bar.clone())
             // Main content area
@@ -958,6 +983,14 @@ impl Render for RootView {
             // File viewer overlay (renders on top of everything)
             .when(has_file_viewer, |d| {
                 if let Some(viewer) = self.overlay_manager.read(cx).render_file_viewer() {
+                    d.child(viewer)
+                } else {
+                    d
+                }
+            })
+            // Diff viewer overlay (renders on top of everything)
+            .when(has_diff_viewer, |d| {
+                if let Some(viewer) = self.overlay_manager.read(cx).render_diff_viewer() {
                     d.child(viewer)
                 } else {
                     d

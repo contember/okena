@@ -6,13 +6,17 @@
 //! - Modal backdrop and content builders
 //! - Dropdown select component
 //! - Rename state management
+//! - Syntax highlighting utilities
+//! - Virtualized code view
 
+pub mod code_view;
 pub mod dropdown;
 pub mod list_overlay;
 pub mod modal_backdrop;
 pub mod path_autocomplete;
 pub mod rename_state;
 pub mod simple_input;
+pub mod syntax;
 pub mod ui_helpers;
 
 pub use dropdown::{dropdown_button, dropdown_option, dropdown_overlay};
@@ -28,3 +32,8 @@ pub use rename_state::{
     RenameState,
 };
 pub use simple_input::{SimpleInput, SimpleInputState};
+pub use syntax::{highlight_content, HighlightedLine};
+pub use code_view::{
+    get_scrollbar_geometry, get_selected_text, start_scrollbar_drag, update_scrollbar_drag,
+    ScrollbarDrag,
+};

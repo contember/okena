@@ -85,6 +85,14 @@ pub struct ThemeColors {
     pub folder_blue: u32,
     pub folder_purple: u32,
     pub folder_pink: u32,
+
+    // Diff colors
+    pub diff_added_bg: u32,
+    pub diff_removed_bg: u32,
+    pub diff_added_fg: u32,
+    pub diff_removed_fg: u32,
+    pub diff_hunk_header_bg: u32,
+    pub diff_hunk_header_fg: u32,
 }
 
 /// Dark theme (VSCode-like)
@@ -160,6 +168,14 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x61afef,     // Vibrant blue
     folder_purple: 0xc678dd,
     folder_pink: 0xe06c9f,
+
+    // Diff colors
+    diff_added_bg: 0x1e3a1e,      // Dark green background
+    diff_removed_bg: 0x3a1e1e,    // Dark red background
+    diff_added_fg: 0x4ec9b0,      // Green for + indicator
+    diff_removed_fg: 0xf14c4c,    // Red for - indicator
+    diff_hunk_header_bg: 0x2d3748, // Blue-gray background
+    diff_hunk_header_fg: 0x569cd6, // Blue text
 };
 
 /// Light theme (VSCode Light-like)
@@ -235,6 +251,14 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x0366d6,     // Vibrant blue
     folder_purple: 0x6f42c1,
     folder_pink: 0xdb2777,
+
+    // Diff colors
+    diff_added_bg: 0xdafbe1,      // Light green background
+    diff_removed_bg: 0xffebe9,    // Light red background
+    diff_added_fg: 0x22863a,      // Green for + indicator
+    diff_removed_fg: 0xd73a49,    // Red for - indicator
+    diff_hunk_header_bg: 0xe1e4e8, // Gray background
+    diff_hunk_header_fg: 0x0366d6, // Blue text
 };
 
 /// Pastel Dark theme (Ghostty Builtin Pastel Dark)
@@ -311,6 +335,14 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x7dcfff,     // Bright cyan-blue
     folder_purple: 0xbb9af7,
     folder_pink: 0xf472b6,
+
+    // Diff colors
+    diff_added_bg: 0x1a2e1a,      // Dark green background
+    diff_removed_bg: 0x2e1a1a,    // Dark red background
+    diff_added_fg: 0xa8ff60,      // Pastel green for + indicator
+    diff_removed_fg: 0xff6c60,    // Pastel red for - indicator
+    diff_hunk_header_bg: 0x282828, // Dark gray background
+    diff_hunk_header_fg: 0x96cbfe, // Pastel blue text
 };
 
 /// High Contrast theme for accessibility
@@ -386,6 +418,14 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x55aaff,     // Bright blue
     folder_purple: 0xff55ff,
     folder_pink: 0xff77aa,
+
+    // Diff colors
+    diff_added_bg: 0x003300,      // Dark green background
+    diff_removed_bg: 0x330000,    // Dark red background
+    diff_added_fg: 0x00ff00,      // Bright green for + indicator
+    diff_removed_fg: 0xff0000,    // Bright red for - indicator
+    diff_hunk_header_bg: 0x001133, // Dark blue background
+    diff_hunk_header_fg: 0x00aaff, // Bright blue text
 };
 
 impl ThemeColors {

@@ -1,7 +1,7 @@
 use crate::keybindings::{
     format_keystroke, get_action_descriptions, get_config,
     ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowSettings, OpenSettingsFile,
-    ShowFileSearch, ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
+    ShowFileSearch, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
     SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
     FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
     Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
@@ -116,6 +116,7 @@ impl CommandPalette {
                 "ShowSettings" => window.dispatch_action(Box::new(ShowSettings), cx),
                 "OpenSettingsFile" => window.dispatch_action(Box::new(OpenSettingsFile), cx),
                 "ShowFileSearch" => window.dispatch_action(Box::new(ShowFileSearch), cx),
+                "ShowDiffViewer" => window.dispatch_action(Box::new(ShowDiffViewer), cx),
                 _ => {
                     log::warn!("Unknown action in command palette: {}", action);
                 }

@@ -3,17 +3,19 @@
 //! Provides a read-only view of files with syntax highlighting via syntect.
 //! Markdown files can be viewed in rendered preview mode.
 
-use crate::theme::theme;
+use crate::theme::{theme, ThemeColors};
 use crate::ui::{copy_to_clipboard, Selection1DExtension, Selection2DExtension, SelectionState};
-use crate::views::components::{modal_backdrop, modal_content, segmented_toggle};
+use crate::views::components::{
+    get_scrollbar_geometry, get_selected_text, highlight_content, modal_backdrop, modal_content,
+    segmented_toggle, start_scrollbar_drag, update_scrollbar_drag, HighlightedLine, ScrollbarDrag,
+};
 use super::markdown_renderer::{MarkdownDocument, MarkdownSelection, RenderedNode};
 use gpui::*;
 use gpui::prelude::*;
 use std::path::PathBuf;
-use syntect::easy::HighlightLines;
+use std::sync::Arc;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
 
 /// Maximum file size to load (5MB)
 const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
@@ -27,21 +29,6 @@ enum DisplayMode {
     #[default]
     Source,
     Preview,
-}
-
-/// A pre-processed span with color and text ready for display.
-#[derive(Clone)]
-struct DisplaySpan {
-    color: Rgba,
-    text: String,
-}
-
-/// A highlighted line with pre-processed spans.
-#[derive(Clone)]
-struct HighlightedLine {
-    spans: Vec<DisplaySpan>,
-    /// Plain text content of the line (for selection/copy)
-    plain_text: String,
 }
 
 /// Type alias for source view selection (line, column).
@@ -67,6 +54,14 @@ pub struct FileViewer {
     markdown_selection: MarkdownSelection,
     /// Scroll handle for markdown preview (to track scroll offset)
     markdown_scroll_handle: ScrollHandle,
+    /// Scroll handle for virtualized source view
+    source_scroll_handle: UniformListScrollHandle,
+    /// Scrollbar drag state
+    scrollbar_drag: Option<ScrollbarDrag>,
+    /// Syntax set for highlighting
+    syntax_set: SyntaxSet,
+    /// Theme set for highlighting
+    theme_set: ThemeSet,
 }
 
 impl FileViewer {
@@ -89,6 +84,10 @@ impl FileViewer {
             markdown_doc: None,
             markdown_selection: MarkdownSelection::default(),
             markdown_scroll_handle: ScrollHandle::new(),
+            source_scroll_handle: UniformListScrollHandle::new(),
+            scrollbar_drag: None,
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
         };
 
         // Load and highlight the file
@@ -143,7 +142,7 @@ impl FileViewer {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 self.content = content.clone();
-                self.highlight_content(path);
+                self.do_highlight_content(path);
                 // Parse markdown if this is a markdown file
                 if self.is_markdown {
                     self.markdown_doc = Some(MarkdownDocument::parse(&content));
@@ -167,160 +166,17 @@ impl FileViewer {
         }
     }
 
-    /// Map file extension to syntax name for better coverage.
-    fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
-        match ext.to_lowercase().as_str() {
-            // TypeScript/JavaScript variants - use JavaScript syntax
-            "ts" | "tsx" | "mts" | "cts" => Some("js"),
-            "jsx" | "mjs" | "cjs" => Some("js"),
-            // Vue/Svelte - use HTML
-            "vue" | "svelte" => Some("html"),
-            // Config files
-            "yml" | "yaml" => Some("yaml"),
-            "json" | "jsonc" | "json5" => Some("json"),
-            "toml" => Some("toml"),
-            "ini" | "cfg" | "conf" => Some("ini"),
-            // Shell scripts
-            "sh" | "bash" | "zsh" | "fish" => Some("sh"),
-            "ps1" | "psm1" | "psd1" => Some("ps1"),
-            // Web
-            "html" | "htm" | "xhtml" => Some("html"),
-            "css" | "scss" | "sass" | "less" => Some("css"),
-            "xml" | "svg" | "xsl" | "xslt" => Some("xml"),
-            // Common languages
-            "py" | "pyw" | "pyi" => Some("py"),
-            "rb" | "erb" | "rake" => Some("rb"),
-            "rs" => Some("rs"),
-            "go" => Some("go"),
-            "c" | "h" => Some("c"),
-            "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => Some("cpp"),
-            "java" => Some("java"),
-            "kt" | "kts" => Some("kt"),
-            "swift" => Some("swift"),
-            "cs" => Some("cs"),
-            "php" => Some("php"),
-            "pl" | "pm" => Some("pl"),
-            "lua" => Some("lua"),
-            "sql" => Some("sql"),
-            "md" | "markdown" => Some("md"),
-            "tex" | "latex" => Some("tex"),
-            "diff" | "patch" => Some("diff"),
-            "dockerfile" => Some("dockerfile"),
-            _ => None,
-        }
-    }
-
-    /// Apply syntax highlighting to the content.
-    fn highlight_content(&mut self, path: &PathBuf) {
-        let ss = SyntaxSet::load_defaults_newlines();
-        let ts = ThemeSet::load_defaults();
-
-        // Try to find syntax by extension with our custom mapping
-        let ext = path.extension().and_then(|e| e.to_str());
-        let syntax = ext
-            .and_then(|e| Self::map_extension_to_syntax(e))
-            .and_then(|mapped| ss.find_syntax_by_extension(mapped))
-            .or_else(|| {
-                // Try direct extension match
-                ext.and_then(|e| ss.find_syntax_by_extension(e))
-            })
-            .or_else(|| {
-                // Try by filename for special files
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .and_then(|name| {
-                        let name_lower = name.to_lowercase();
-                        match name_lower.as_str() {
-                            "makefile" | "gnumakefile" => ss.find_syntax_by_extension("makefile"),
-                            "dockerfile" => ss.find_syntax_by_extension("dockerfile"),
-                            "cargo.toml" | "cargo.lock" | "pyproject.toml" => ss.find_syntax_by_extension("toml"),
-                            "package.json" | "tsconfig.json" | "jsconfig.json" => ss.find_syntax_by_extension("json"),
-                            ".gitignore" | ".dockerignore" | ".npmignore" => ss.find_syntax_by_name("Git Ignore"),
-                            ".bashrc" | ".zshrc" | ".bash_profile" | ".profile" => ss.find_syntax_by_extension("sh"),
-                            ".env" | ".env.local" | ".env.development" | ".env.production" => ss.find_syntax_by_extension("sh"),
-                            _ => None,
-                        }
-                    })
-            })
-            .unwrap_or_else(|| ss.find_syntax_plain_text());
-
-        // Use a dark theme that works well with our terminal themes
-        let theme = &ts.themes["base16-ocean.dark"];
-        let mut highlighter = HighlightLines::new(syntax, theme);
-
-        // Default text color for fallback
-        let default_color = Rgba {
-            r: 0.8,
-            g: 0.8,
-            b: 0.8,
-            a: 1.0,
-        };
-
-        let mut lines = Vec::new();
-        let mut line_count = 0;
-
-        for line in LinesWithEndings::from(&self.content) {
-            if line_count >= MAX_LINES {
-                break;
-            }
-
-            let (display_spans, plain_text) = match highlighter.highlight_line(line, &ss) {
-                Ok(spans) => {
-                    // Merge consecutive spans with the same color and pre-process text
-                    let mut merged: Vec<DisplaySpan> = Vec::new();
-                    let mut plain = String::new();
-
-                    for (style, text) in spans {
-                        let color = Rgba {
-                            r: style.foreground.r as f32 / 255.0,
-                            g: style.foreground.g as f32 / 255.0,
-                            b: style.foreground.b as f32 / 255.0,
-                            a: style.foreground.a as f32 / 255.0,
-                        };
-
-                        // Pre-process text: remove newlines, expand tabs
-                        let processed = text
-                            .trim_end_matches(&['\n', '\r'][..])
-                            .replace('\t', "    ");
-
-                        if processed.is_empty() {
-                            continue;
-                        }
-
-                        plain.push_str(&processed);
-
-                        // Try to merge with previous span if same color
-                        if let Some(last) = merged.last_mut() {
-                            if (last.color.r - color.r).abs() < 0.01
-                                && (last.color.g - color.g).abs() < 0.01
-                                && (last.color.b - color.b).abs() < 0.01
-                            {
-                                last.text.push_str(&processed);
-                                continue;
-                            }
-                        }
-
-                        merged.push(DisplaySpan { color, text: processed });
-                    }
-
-                    (merged, plain)
-                }
-                Err(_) => {
-                    // Fallback: no highlighting
-                    let text = line
-                        .trim_end_matches(&['\n', '\r'][..])
-                        .replace('\t', "    ");
-                    (vec![DisplaySpan { color: default_color, text: text.clone() }], text)
-                }
-            };
-
-            lines.push(HighlightedLine { spans: display_spans, plain_text });
-            line_count += 1;
-        }
-
-        self.highlighted_lines = lines;
-        self.line_count = line_count;
-        self.line_num_width = line_count.to_string().len().max(3);
+    /// Apply syntax highlighting to the content using shared utilities.
+    fn do_highlight_content(&mut self, path: &PathBuf) {
+        self.highlighted_lines = highlight_content(
+            &self.content,
+            path,
+            &self.syntax_set,
+            &self.theme_set,
+            MAX_LINES,
+        );
+        self.line_count = self.highlighted_lines.len();
+        self.line_num_width = self.line_count.to_string().len().max(3);
     }
 
     /// Close the viewer.
@@ -328,46 +184,9 @@ impl FileViewer {
         cx.emit(FileViewerEvent::Close);
     }
 
-    /// Get selected text.
+    /// Get selected text using the shared utility.
     fn get_selected_text(&self) -> Option<String> {
-        let ((start_line, start_col), (end_line, end_col)) = self.selection.normalized()?;
-
-        let mut result = String::new();
-
-        for line_idx in start_line..=end_line {
-            if line_idx >= self.highlighted_lines.len() {
-                break;
-            }
-
-            let line = &self.highlighted_lines[line_idx];
-            let text = &line.plain_text;
-
-            if start_line == end_line {
-                // Single line selection
-                let start = start_col.min(text.len());
-                let end = end_col.min(text.len());
-                result.push_str(&text[start..end]);
-            } else if line_idx == start_line {
-                // First line of multi-line selection
-                let start = start_col.min(text.len());
-                result.push_str(&text[start..]);
-                result.push('\n');
-            } else if line_idx == end_line {
-                // Last line of multi-line selection
-                let end = end_col.min(text.len());
-                result.push_str(&text[..end]);
-            } else {
-                // Middle line - take entire line
-                result.push_str(text);
-                result.push('\n');
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
+        get_selected_text(&self.highlighted_lines, &self.selection)
     }
 
     /// Copy selected text to clipboard.
@@ -586,6 +405,94 @@ impl FileViewer {
         let text_x = (x - gutter_width).max(0.0);
         (text_x / char_width) as usize
     }
+
+    // Scrollbar methods using shared utilities
+
+    fn start_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        let mut drag = start_scrollbar_drag(&self.source_scroll_handle);
+        drag.start_y = y;
+        self.scrollbar_drag = Some(drag);
+        cx.notify();
+    }
+
+    fn update_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
+        if let Some(drag) = self.scrollbar_drag {
+            update_scrollbar_drag(&self.source_scroll_handle, drag, y);
+            cx.notify();
+        }
+    }
+
+    fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
+        self.scrollbar_drag = None;
+        cx.notify();
+    }
+
+    /// Render visible lines for the virtualized list.
+    fn render_visible_lines(
+        &self,
+        range: std::ops::Range<usize>,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        range
+            .filter_map(|i| {
+                self.highlighted_lines
+                    .get(i)
+                    .map(|line| self.render_line(i, line, t, cx).into_any_element())
+            })
+            .collect()
+    }
+
+    /// Render scrollbar thumb.
+    fn render_scrollbar(
+        &self,
+        t: &ThemeColors,
+        thumb_y: f32,
+        thumb_height: f32,
+        is_dragging: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("file-viewer-scrollbar-track")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(12.0))
+            .cursor(CursorStyle::Arrow)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let y = f32::from(event.position.y);
+                    this.start_scrollbar_drag(y, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrollbar_drag.is_some() {
+                    let y = f32::from(event.position.y);
+                    this.update_scrollbar_drag(y, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| this.end_scrollbar_drag(cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(thumb_y))
+                    .right(px(3.0))
+                    .w(px(6.0))
+                    .h(px(thumb_height))
+                    .rounded(px(3.0))
+                    .bg(rgb(if is_dragging {
+                        t.scrollbar_hover
+                    } else {
+                        t.scrollbar
+                    }))
+                    .hover(|s| s.bg(rgb(t.scrollbar_hover))),
+            )
+    }
 }
 
 /// Events emitted by the file viewer.
@@ -615,16 +522,12 @@ impl Render for FileViewer {
 
         let relative_path = self.file_path.to_string_lossy().to_string();
 
-        // Pre-render source lines for better performance
-        let rendered_lines: Vec<Stateful<Div>> = if !has_error && !is_preview_mode {
-            self.highlighted_lines
-                .iter()
-                .enumerate()
-                .map(|(i, line)| self.render_line(i, line, &t, cx))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Virtualization setup
+        let line_count = self.line_count;
+        let theme_colors = Arc::new(t.clone());
+        let view = cx.entity().clone();
+        let scrollbar_geometry = get_scrollbar_geometry(&self.source_scroll_handle);
+        let is_dragging_scrollbar = self.scrollbar_drag.is_some();
 
         // Pre-render markdown preview with selection - using per-node handlers
         let preview_nodes: Vec<RenderedNode> = if !has_error && is_preview_mode && is_markdown {
@@ -685,7 +588,24 @@ impl Render for FileViewer {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
-                    this.close(cx);
+                    // Don't close if scrollbar is being dragged
+                    if this.scrollbar_drag.is_none() {
+                        this.close(cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrollbar_drag.is_some() {
+                    let y = f32::from(event.position.y);
+                    this.update_scrollbar_drag(y, cx);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.scrollbar_drag.is_some() {
+                        this.end_scrollbar_drag(cx);
+                    }
                 }),
             )
             .child(
@@ -781,17 +701,32 @@ impl Render for FileViewer {
                                 ),
                         )
                     })
-                    // Source view (syntax highlighted)
+                    // Source view (virtualized, syntax highlighted)
                     .when(!has_error && !is_preview_mode, |d| {
+                        let tc = theme_colors.clone();
+                        let view_clone = view.clone();
                         d.child(
                             div()
                                 .id("file-content")
                                 .flex_1()
-                                .overflow_y_scroll()
-                                .overflow_x_scroll()
-                                .bg(rgb(t.bg_secondary))
-                                .py(px(8.0))
-                                .children(rendered_lines),
+                                .min_h_0()
+                                .relative()
+                                .child(
+                                    uniform_list("file-lines", line_count, move |range, _window, cx| {
+                                        let tc = tc.clone();
+                                        view_clone.update(cx, |this, cx| {
+                                            this.render_visible_lines(range, &tc, cx)
+                                        })
+                                    })
+                                    .size_full()
+                                    .bg(rgb(t.bg_secondary))
+                                    .cursor(CursorStyle::IBeam)
+                                    .track_scroll(&self.source_scroll_handle),
+                                )
+                                .when(scrollbar_geometry.is_some(), |d| {
+                                    let (_, _, thumb_y, thumb_height) = scrollbar_geometry.unwrap();
+                                    d.child(self.render_scrollbar(&t, thumb_y, thumb_height, is_dragging_scrollbar, cx))
+                                }),
                         )
                     })
                     // Preview view (rendered markdown) - with per-node selection handlers

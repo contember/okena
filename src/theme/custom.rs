@@ -145,6 +145,20 @@ pub struct CustomThemeColors {
     pub folder_purple: String,
     #[serde(default = "default_folder_pink")]
     pub folder_pink: String,
+
+    // Diff colors
+    #[serde(default = "default_diff_added_bg")]
+    pub diff_added_bg: String,
+    #[serde(default = "default_diff_removed_bg")]
+    pub diff_removed_bg: String,
+    #[serde(default = "default_diff_added_fg")]
+    pub diff_added_fg: String,
+    #[serde(default = "default_diff_removed_fg")]
+    pub diff_removed_fg: String,
+    #[serde(default = "default_diff_hunk_header_bg")]
+    pub diff_hunk_header_bg: String,
+    #[serde(default = "default_diff_hunk_header_fg")]
+    pub diff_hunk_header_fg: String,
 }
 
 // Default color functions for serde (based on dark theme)
@@ -200,6 +214,12 @@ fn default_folder_green() -> String { "#98c379".to_string() }
 fn default_folder_blue() -> String { "#61afef".to_string() }
 fn default_folder_purple() -> String { "#c678dd".to_string() }
 fn default_folder_pink() -> String { "#e06c9f".to_string() }
+fn default_diff_added_bg() -> String { "#1e3a1e".to_string() }
+fn default_diff_removed_bg() -> String { "#3a1e1e".to_string() }
+fn default_diff_added_fg() -> String { "#4ec9b0".to_string() }
+fn default_diff_removed_fg() -> String { "#f14c4c".to_string() }
+fn default_diff_hunk_header_bg() -> String { "#2d3748".to_string() }
+fn default_diff_hunk_header_fg() -> String { "#569cd6".to_string() }
 
 impl CustomThemeColors {
     /// Parse a hex color string (e.g., "#1e1e1e" or "1e1e1e") to u32
@@ -263,6 +283,12 @@ impl CustomThemeColors {
             folder_blue: Self::parse_hex(&self.folder_blue),
             folder_purple: Self::parse_hex(&self.folder_purple),
             folder_pink: Self::parse_hex(&self.folder_pink),
+            diff_added_bg: Self::parse_hex(&self.diff_added_bg),
+            diff_removed_bg: Self::parse_hex(&self.diff_removed_bg),
+            diff_added_fg: Self::parse_hex(&self.diff_added_fg),
+            diff_removed_fg: Self::parse_hex(&self.diff_removed_fg),
+            diff_hunk_header_bg: Self::parse_hex(&self.diff_hunk_header_bg),
+            diff_hunk_header_fg: Self::parse_hex(&self.diff_hunk_header_fg),
         }
     }
 }
@@ -345,6 +371,12 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 folder_blue: "#7dcfff".to_string(),
                 folder_purple: "#bb9af7".to_string(),
                 folder_pink: "#f472b6".to_string(),
+                diff_added_bg: "#1a2e1a".to_string(),
+                diff_removed_bg: "#2e1a1a".to_string(),
+                diff_added_fg: "#a8ff60".to_string(),
+                diff_removed_fg: "#ff6c60".to_string(),
+                diff_hunk_header_bg: "#282828".to_string(),
+                diff_hunk_header_fg: "#96cbfe".to_string(),
             },
         };
 

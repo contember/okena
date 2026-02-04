@@ -4,6 +4,7 @@
 //! - Detached terminal windows
 //! - Command palette
 //! - Context menu
+//! - Diff viewer
 //! - File search
 //! - File viewer
 //! - Keybindings help
@@ -16,6 +17,7 @@
 pub mod command_palette;
 pub mod context_menu;
 pub mod detached_terminal;
+pub mod diff_viewer;
 pub mod file_search;
 pub mod file_viewer;
 mod markdown_renderer;

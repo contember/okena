@@ -12,6 +12,7 @@ use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
+use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
 use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::session_manager::{SessionManager, SessionManagerEvent};
@@ -146,6 +147,12 @@ impl CloseEvent for FileViewerEvent {
     }
 }
 
+impl CloseEvent for DiffViewerEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, DiffViewerEvent::Close)
+    }
+}
+
 // ============================================================================
 // OverlayManager Entity
 // ============================================================================
@@ -218,6 +225,7 @@ pub struct OverlayManager {
     // File search and viewer
     file_search: Option<Entity<FileSearchDialog>>,
     file_viewer: Option<Entity<FileViewer>>,
+    diff_viewer: Option<Entity<DiffViewer>>,
 }
 
 impl OverlayManager {
@@ -236,6 +244,7 @@ impl OverlayManager {
             session_manager: None,
             file_search: None,
             file_viewer: None,
+            diff_viewer: None,
         }
     }
 
@@ -296,6 +305,11 @@ impl OverlayManager {
     /// Check if file viewer is open.
     pub fn has_file_viewer(&self) -> bool {
         self.file_viewer.is_some()
+    }
+
+    /// Check if diff viewer is open.
+    pub fn has_diff_viewer(&self) -> bool {
+        self.diff_viewer.is_some()
     }
 
     // ========================================================================
@@ -658,6 +672,41 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Diff viewer (parametric)
+    // ========================================================================
+
+    /// Show diff viewer for a project.
+    pub fn show_diff_viewer(&mut self, project_path: String, cx: &mut Context<Self>) {
+        let viewer = cx.new(|cx| DiffViewer::new(project_path, cx));
+
+        cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
+            match event {
+                DiffViewerEvent::Close => {
+                    this.hide_diff_viewer(cx);
+                }
+            }
+        })
+        .detach();
+
+        self.diff_viewer = Some(viewer);
+        // Clear focused terminal during modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    /// Hide diff viewer.
+    pub fn hide_diff_viewer(&mut self, cx: &mut Context<Self>) {
+        self.diff_viewer = None;
+        // Restore focus after modal
+        self.workspace.update(cx, |ws, cx| {
+            ws.restore_focused_terminal(cx);
+        });
+        cx.notify();
+    }
+
+    // ========================================================================
     // Render helpers
     // ========================================================================
 
@@ -714,6 +763,11 @@ impl OverlayManager {
     /// Get file viewer entity for rendering.
     pub fn render_file_viewer(&self) -> Option<Entity<FileViewer>> {
         self.file_viewer.clone()
+    }
+
+    /// Get diff viewer entity for rendering.
+    pub fn render_diff_viewer(&self) -> Option<Entity<DiffViewer>> {
+        self.diff_viewer.clone()
     }
 }
 

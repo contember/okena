@@ -1,5 +1,7 @@
+pub mod diff;
 mod repository;
 
+pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff, is_git_repo};
 pub use repository::{
     create_worktree,
     remove_worktree,

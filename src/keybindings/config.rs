@@ -386,6 +386,14 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             category: "Global",
         },
     );
+    map.insert(
+        "ShowDiffViewer",
+        ActionDescription {
+            name: "Show Git Diff",
+            description: "View git diff for the current project",
+            category: "Git",
+        },
+    );
 
     map
 }
