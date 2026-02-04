@@ -9,7 +9,7 @@ A modern terminal multiplexer written in Rust, built with [GPUI](https://github.
 **Homebrew (recommended):**
 
 ```bash
-brew tap contember/tap
+brew tap contember/term-manager
 brew install --cask term-manager
 ```
 

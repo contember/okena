@@ -152,6 +152,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -174,6 +177,29 @@ jobs:
             fi
           done
 
+      - name: Update Homebrew cask
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+
+          # Calculate SHA256 from local zip files
+          ARM64_SHA=$(sha256sum term-manager-macos-arm64.zip | cut -d' ' -f1)
+          X64_SHA=$(sha256sum term-manager-macos-x64.zip | cut -d' ' -f1)
+
+          # Update cask
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/term-manager.rb
+          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/term-manager.rb
+          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/term-manager.rb
+
+          cat Casks/term-manager.rb
+
+      - name: Commit cask update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/term-manager.rb
+          git commit -m "chore: update homebrew cask for ${GITHUB_REF#refs/tags/}"
+          git push origin HEAD:main
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -182,67 +208,3 @@ jobs:
             *.zip
             *.dmg
           generate_release_notes: true
-
-  # Update Homebrew cask after release
-  update-homebrew:
-    needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
-        with:
-          repository: contember/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: homebrew-tap
-
-      - name: Get version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Calculate SHA256 checksums
-        id: sha256
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-
-          # Download macOS artifacts and calculate SHA256
-          ARM64_URL="https://github.com/contember/term-manager/releases/download/v${VERSION}/term-manager-macos-arm64.zip"
-          X64_URL="https://github.com/contember/term-manager/releases/download/v${VERSION}/term-manager-macos-x64.zip"
-
-          echo "Downloading ARM64 artifact..."
-          curl -sL "$ARM64_URL" -o arm64.zip
-          ARM64_SHA=$(sha256sum arm64.zip | cut -d' ' -f1)
-
-          echo "Downloading x64 artifact..."
-          curl -sL "$X64_URL" -o x64.zip
-          X64_SHA=$(sha256sum x64.zip | cut -d' ' -f1)
-
-          echo "arm64_sha=$ARM64_SHA" >> $GITHUB_OUTPUT
-          echo "x64_sha=$X64_SHA" >> $GITHUB_OUTPUT
-
-      - name: Update cask file
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          ARM64_SHA=${{ steps.sha256.outputs.arm64_sha }}
-          X64_SHA=${{ steps.sha256.outputs.x64_sha }}
-
-          CASK_FILE="homebrew-tap/Casks/term-manager.rb"
-
-          # Update version
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" "$CASK_FILE"
-
-          # Update SHA256 checksums
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" "$CASK_FILE"
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" "$CASK_FILE"
-
-          cat "$CASK_FILE"
-
-      - name: Commit and push
-        run: |
-          cd homebrew-tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/term-manager.rb
-          git commit -m "Update term-manager to v${{ steps.version.outputs.version }}"
-          git push

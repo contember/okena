@@ -1,6 +1,6 @@
 # Homebrew Cask for Term Manager
 # This file is automatically updated by CI on release.
-# To install: brew tap contember/tap && brew install --cask term-manager
+# To install: brew tap contember/term-manager && brew install --cask term-manager
 
 cask "term-manager" do
   arch arm: "arm64", intel: "x64"
