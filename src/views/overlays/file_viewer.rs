@@ -3,6 +3,7 @@
 //! Provides a read-only view of files with syntax highlighting via syntect.
 //! Markdown files can be viewed in rendered preview mode.
 
+use crate::settings::settings_entity;
 use crate::theme::{theme, ThemeColors};
 use crate::ui::{copy_to_clipboard, Selection1DExtension, Selection2DExtension, SelectionState};
 use crate::views::components::{
@@ -62,6 +63,8 @@ pub struct FileViewer {
     syntax_set: SyntaxSet,
     /// Theme set for highlighting
     theme_set: ThemeSet,
+    /// File font size from settings
+    file_font_size: f32,
 }
 
 impl FileViewer {
@@ -69,6 +72,7 @@ impl FileViewer {
     pub fn new(file_path: PathBuf, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let is_markdown = Self::is_markdown_file(&file_path);
+        let file_font_size = settings_entity(cx).read(cx).settings.file_font_size;
 
         let mut viewer = Self {
             focus_handle,
@@ -88,6 +92,7 @@ impl FileViewer {
             scrollbar_drag: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
+            file_font_size,
         };
 
         // Load and highlight the file
@@ -249,11 +254,14 @@ impl FileViewer {
             a: 0.4,
         };
 
+        let font_size = self.file_font_size;
+        let line_height = font_size * 1.5;
+
         div()
             .id(ElementId::Name(format!("line-{}", line_number).into()))
             .flex()
-            .h(px(18.0))
-            .text_size(px(12.0))
+            .h(px(line_height))
+            .text_size(px(font_size))
             .font_family("monospace")
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                 let col = this.x_to_column(f32::from(event.position.x), line_num_width);
@@ -399,8 +407,8 @@ impl FileViewer {
 
     /// Calculate column position from x coordinate.
     fn x_to_column(&self, x: f32, line_num_width: usize) -> usize {
-        // Approximate: assume 7.2px per character in monospace font at 12px
-        let char_width = 7.2;
+        // Approximate char width based on font size (monospace fonts are ~0.6 of font size)
+        let char_width = self.file_font_size * 0.6;
         let gutter_width = (line_num_width * 8 + 16) as f32;
         let text_x = (x - gutter_width).max(0.0);
         (text_x / char_width) as usize
@@ -849,7 +857,7 @@ impl Render for FileViewer {
                                             div()
                                                 .p(px(12.0))
                                                 .font_family("monospace")
-                                                .text_size(px(12.0))
+                                                .text_size(px(self.file_font_size))
                                                 .text_color(rgb(t.text_secondary))
                                                 .flex()
                                                 .flex_col()

@@ -71,6 +71,7 @@ impl SettingsState {
     setting_setter!(set_font_family, font_family, String);
     setting_setter!(set_line_height, line_height, f32, 1.0, 3.0);
     setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
+    setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);

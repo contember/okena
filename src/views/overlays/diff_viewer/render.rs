@@ -209,7 +209,7 @@ impl DiffViewer {
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .bg(rgb(t.bg_header))
-                    .text_size(px(12.0))
+                    .text_size(px(self.file_font_size))
                     .font_family("monospace")
                     .text_color(rgb(t.text_secondary))
                     .child(file_path),

@@ -11,7 +11,8 @@ use gpui::*;
 impl DiffViewer {
     /// Calculate column position from x coordinate.
     pub(super) fn x_to_column(&self, x: f32, gutter_width: f32) -> usize {
-        let char_width = 7.2;
+        // Approximate char width based on font size (monospace fonts are ~0.6 of font size)
+        let char_width = self.file_font_size * 0.6;
         let text_x = (x - gutter_width - SIDEBAR_WIDTH).max(0.0);
         (text_x / char_width) as usize
     }
@@ -46,12 +47,14 @@ impl DiffViewer {
         let is_header = line.line_type == DiffLineType::Header;
         let spans = line.spans.clone();
         let plain_text = line.plain_text.clone();
+        let font_size = self.file_font_size;
+        let line_height = font_size * 1.5;
 
         div()
             .id(ElementId::Name(format!("diff-line-{}", line_index).into()))
             .flex()
-            .h(px(18.0))
-            .text_size(px(12.0))
+            .h(px(line_height))
+            .text_size(px(font_size))
             .font_family("monospace")
             .when(bg_color.is_some(), |d| d.bg(rgb(bg_color.unwrap())))
             .on_mouse_down(

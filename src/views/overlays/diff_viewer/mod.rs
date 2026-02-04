@@ -10,6 +10,7 @@ mod syntax;
 mod types;
 
 use crate::git::{get_diff, is_git_repo, DiffMode, DiffResult};
+use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
 use crate::views::components::{modal_backdrop, modal_content};
@@ -44,12 +45,14 @@ pub struct DiffViewer {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     scrollbar_drag: Option<ScrollbarDrag>,
+    file_font_size: f32,
 }
 
 impl DiffViewer {
     /// Create a new diff viewer for the given project path.
     pub fn new(project_path: String, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let file_font_size = settings_entity(cx).read(cx).settings.file_font_size;
 
         let mut viewer = Self {
             focus_handle,
@@ -66,6 +69,7 @@ impl DiffViewer {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             scrollbar_drag: None,
+            file_font_size,
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {

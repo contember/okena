@@ -89,6 +89,9 @@ pub struct AppSettings {
     /// UI font size for panels/dialogs (default: 13.0)
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
+    /// File viewer/diff viewer font size (default: 12.0)
+    #[serde(default = "default_file_font_size")]
+    pub file_font_size: f32,
 
     // Terminal settings
     /// Enable cursor blinking (default: false)
@@ -134,6 +137,7 @@ impl Default for AppSettings {
             font_family: default_font_family(),
             line_height: default_line_height(),
             ui_font_size: default_ui_font_size(),
+            file_font_size: default_file_font_size(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
             default_shell: ShellType::default(),
@@ -168,6 +172,10 @@ fn default_line_height() -> f32 {
 
 fn default_ui_font_size() -> f32 {
     13.0
+}
+
+fn default_file_font_size() -> f32 {
+    12.0
 }
 
 fn default_cursor_blink() -> bool {
@@ -337,6 +345,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("ui_font_size").and_then(|v| v.as_f64()) {
         settings.ui_font_size = (v as f32).clamp(8.0, 24.0);
+    }
+
+    if let Some(v) = obj.get("file_font_size").and_then(|v| v.as_f64()) {
+        settings.file_font_size = (v as f32).clamp(8.0, 24.0);
     }
 
     if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {

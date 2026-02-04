@@ -801,8 +801,12 @@ impl SettingsPanel {
                         |state, val, cx| state.set_line_height(val, cx), cx,
                     ))
                     .child(self.render_number_stepper(
-                        "ui-font-size", "UI Font Size", s.ui_font_size, "{}", 1.0, 50.0, false,
+                        "ui-font-size", "UI Font Size", s.ui_font_size, "{}", 1.0, 50.0, true,
                         |state, val, cx| state.set_ui_font_size(val, cx), cx,
+                    ))
+                    .child(self.render_number_stepper(
+                        "file-font-size", "File Font Size", s.file_font_size, "{}", 1.0, 50.0, false,
+                        |state, val, cx| state.set_file_font_size(val, cx), cx,
                     )),
             )
     }
