@@ -33,7 +33,7 @@ pub struct LayoutContainer {
     /// Without this, split/tabs would recreate entities every render, which breaks focus.
     pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer>>,
     /// Shared bounds of this container (updated during prepaint via canvas)
-    container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
+    pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
     /// Tab context menu state: (tab_index, position, num_tabs)
     pub(super) tab_context_menu: Option<(usize, Point<Pixels>, usize)>,
     /// Animation state for recently dropped tab (tab_index, animation_progress)

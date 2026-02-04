@@ -394,6 +394,18 @@ impl LayoutContainer {
                     this.show_tab_context_menu(i, event.position, num_children, cx);
                     cx.stop_propagation();
                 }))
+                // Middle-click to close tab
+                .on_mouse_down(MouseButton::Middle, {
+                    let workspace = workspace.clone();
+                    let project_id = project_id.clone();
+                    let layout_path = layout_path.clone();
+                    cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&project_id, &layout_path, i, cx);
+                        });
+                        cx.stop_propagation();
+                    })
+                })
                 // Drag source for tab reordering
                 .on_drag(
                     TabDrag {
@@ -491,11 +503,24 @@ impl LayoutContainer {
         // Render shell indicator (dropdown is handled by overlay)
         let shell_indicator = self.render_shell_indicator(active_tab, cx);
 
+        // Shared reference to container bounds (updated by canvas during prepaint)
+        let container_bounds_ref = self.container_bounds_ref.clone();
+
         div()
             .flex()
             .flex_col()
             .size_full()
             .relative()
+            // Use a canvas to capture the container bounds during prepaint
+            .child(canvas(
+                {
+                    let container_bounds_ref = container_bounds_ref.clone();
+                    move |bounds, _window, _cx| {
+                        *container_bounds_ref.borrow_mut() = bounds;
+                    }
+                },
+                |_bounds, _prepaint, _window, _cx| {},
+            ).absolute().size_full())
             // Close context menu on left-click anywhere in tabs area
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 if this.tab_context_menu.is_some() {
