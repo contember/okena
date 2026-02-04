@@ -110,9 +110,16 @@ pub fn process_file(
     // Get syntax highlighter for this file
     let syntax = get_syntax_for_path(path, syntax_set);
     let theme = &theme_set.themes["base16-ocean.dark"];
-    let mut highlighter = HighlightLines::new(syntax, theme);
 
     for hunk in &file.hunks {
+        // Create fresh highlighters for each hunk since hunks may be from
+        // different parts of the file with different syntax states.
+        // We use separate highlighters for added and removed lines because
+        // they come from different versions of the file and have different contexts.
+        // Context lines use the "added" (new file) highlighter.
+        let mut highlighter_added = HighlightLines::new(syntax, theme);
+        let mut highlighter_removed = HighlightLines::new(syntax, theme);
+
         for line in &hunk.lines {
             if let Some(num) = line.old_line_num {
                 *max_line_num = (*max_line_num).max(num);
@@ -137,7 +144,13 @@ pub fn process_file(
                 )
             } else {
                 let plain = line.content.replace('\t', "    ");
-                let spans = highlight_line(&line.content, &mut highlighter, syntax_set);
+                // Use separate highlighters for added vs removed lines to maintain
+                // proper syntax state for each version of the file
+                let highlighter = match line.line_type {
+                    DiffLineType::Removed => &mut highlighter_removed,
+                    _ => &mut highlighter_added, // Added and Context use the "new" file highlighter
+                };
+                let spans = highlight_line(&line.content, highlighter, syntax_set);
                 (spans, plain)
             };
 

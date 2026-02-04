@@ -195,7 +195,8 @@ pub fn parse_unified_diff(output: &str) -> DiffResult {
         }
 
         // Check for binary file
-        if line.starts_with("Binary files ") || line.contains("differ") {
+        // Git outputs "Binary files a/path and b/path differ" for binary files
+        if line.starts_with("Binary files ") && line.ends_with(" differ") {
             file.is_binary = true;
             continue;
         }
