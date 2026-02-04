@@ -760,14 +760,9 @@ impl Element for TerminalElement {
             }
 
             // Phase 2.6: Paint URL underlines
-            // Get the hovered URL string (if any) to highlight all parts of the same URL
-            let hovered_url: Option<&str> = self.hovered_url_index
-                .and_then(|idx| self.url_matches.get(idx))
-                .map(|m| m.url.as_str());
-
-            for url_match in self.url_matches.iter() {
-                // Highlight all parts of the same URL when any part is hovered
-                let is_hovered = hovered_url.is_some_and(|u| u == url_match.url);
+            for (idx, url_match) in self.url_matches.iter().enumerate() {
+                // Only highlight the specific hovered URL instance, not all instances of the same URL
+                let is_hovered = self.hovered_url_index == Some(idx);
 
                 // Only draw visible URLs (within screen bounds)
                 if url_match.line < 0 || url_match.line >= screen_lines as i32 {
