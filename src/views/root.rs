@@ -7,7 +7,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -843,8 +843,9 @@ impl Render for RootView {
                     });
 
                     if let Some(path) = project_path {
+                        let select_file = take_pending_diff_file();
                         overlay_manager.update(cx, |om, cx| {
-                            om.show_diff_viewer(path, cx);
+                            om.show_diff_viewer(path, select_file, cx);
                         });
                     }
                 }

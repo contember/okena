@@ -57,8 +57,8 @@ pub struct DiffViewer {
 }
 
 impl DiffViewer {
-    /// Create a new diff viewer for the given project path.
-    pub fn new(project_path: String, cx: &mut Context<Self>) -> Self {
+    /// Create a new diff viewer for the given project path, optionally selecting a specific file.
+    pub fn new(project_path: String, select_file: Option<String>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let settings = settings_entity(cx).read(cx);
         let file_font_size = settings.settings.file_font_size;
@@ -90,6 +90,15 @@ impl DiffViewer {
         }
 
         viewer.load_diff(DiffMode::WorkingTree);
+
+        // Select specific file if requested
+        if let Some(file_path) = select_file {
+            if let Some(index) = viewer.files.iter().position(|f| f.path == file_path) {
+                viewer.selected_file_index = index;
+                viewer.update_side_by_side_cache();
+            }
+        }
+
         viewer
     }
 

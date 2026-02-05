@@ -27,6 +27,19 @@ pub struct GitStatus {
     pub lines_removed: usize,
 }
 
+/// Per-file diff summary for popover display
+#[derive(Clone, Debug)]
+pub struct FileDiffSummary {
+    /// File path (relative to repo root)
+    pub path: String,
+    /// Lines added
+    pub added: usize,
+    /// Lines removed
+    pub removed: usize,
+    /// Whether this is a new (untracked) file
+    pub is_new: bool,
+}
+
 impl GitStatus {
     pub fn has_changes(&self) -> bool {
         self.lines_added > 0 || self.lines_removed > 0
@@ -107,4 +120,72 @@ pub fn clear_cache() {
     with_cache(|cache| {
         cache.clear();
     });
+}
+
+/// Get per-file diff summary for a repository.
+/// Returns a list of files with their add/remove counts.
+pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let mut summaries = Vec::new();
+
+    // Get tracked file changes with numstat
+    let output = std::process::Command::new("git")
+        .args(["-C", path_str, "diff", "--numstat", "HEAD"])
+        .output()
+        .ok();
+
+    if let Some(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 3 {
+                    // Binary files show "-" instead of numbers
+                    let added = parts[0].parse::<usize>().unwrap_or(0);
+                    let removed = parts[1].parse::<usize>().unwrap_or(0);
+                    summaries.push(FileDiffSummary {
+                        path: parts[2].to_string(),
+                        added,
+                        removed,
+                        is_new: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // Get untracked files
+    let output = std::process::Command::new("git")
+        .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
+        .output()
+        .ok();
+
+    if let Some(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for file in stdout.lines() {
+                if !file.is_empty() {
+                    // Count lines in untracked file
+                    let file_path = path.join(file);
+                    let added = std::fs::read_to_string(&file_path)
+                        .map(|c| c.lines().count())
+                        .unwrap_or(0);
+                    summaries.push(FileDiffSummary {
+                        path: file.to_string(),
+                        added,
+                        removed: 0,
+                        is_new: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort by path
+    summaries.sort_by(|a, b| a.path.cmp(&b.path));
+    summaries
 }

@@ -1,6 +1,6 @@
 ---
 description: Prepare and publish a new release
-allowed-tools: Bash(git:*), Read, Edit
+allowed-tools: Bash(git:*), Bash(cargo check), Read, Edit
 ---
 
 ## Release Process
@@ -20,16 +20,18 @@ allowed-tools: Bash(git:*), Read, Edit
 
 4. **Update version in Cargo.toml**.
 
-5. **Commit, push, and create the tag:**
+5. **Run `cargo check` to update Cargo.lock** with the new version.
+
+6. **Commit, push, and create the tag:**
    ```
-   git add Cargo.toml
+   git add Cargo.toml Cargo.lock
    git commit -m "chore: bump version to <new-version>"
    git push
    git tag v<new-version>
    git push origin v<new-version>
    ```
 
-6. **Report success** with link to GitHub Actions where the build is running.
+7. **Report success** with link to GitHub Actions where the build is running.
 
 ## Notes
 

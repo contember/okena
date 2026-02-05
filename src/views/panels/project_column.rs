@@ -1,15 +1,20 @@
-use crate::git;
-use crate::keybindings::{set_pending_diff_path, ShowDiffViewer};
+use crate::git::{self, FileDiffSummary};
+use crate::keybindings::{set_pending_diff_path, set_pending_diff_file, ShowDiffViewer};
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout_container::LayoutContainer;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{ProjectData, Workspace};
-use gpui::prelude::FluentBuilder;
+use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// Delay before showing diff summary popover (ms)
+const HOVER_DELAY_MS: u64 = 400;
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
@@ -21,6 +26,14 @@ pub struct ProjectColumn {
     terminals: TerminalsRegistry,
     /// Stored layout container entity (must be created in new(), not render())
     layout_container: Option<Entity<LayoutContainer>>,
+    /// Whether the diff summary popover is visible
+    diff_popover_visible: bool,
+    /// Cached file summaries for popover
+    diff_file_summaries: Vec<FileDiffSummary>,
+    /// Project path for the current popover
+    diff_popover_project_path: String,
+    /// Hover token to cancel pending popover show
+    hover_token: Arc<AtomicU64>,
 }
 
 impl ProjectColumn {
@@ -36,7 +49,220 @@ impl ProjectColumn {
             pty_manager,
             terminals,
             layout_container: None, // Will be initialized on first render with cx
+            diff_popover_visible: false,
+            diff_file_summaries: Vec::new(),
+            diff_popover_project_path: String::new(),
+            hover_token: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
+        // Skip if already visible
+        if self.diff_popover_visible {
+            return;
+        }
+
+        // Increment token to invalidate any pending show
+        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let hover_token = self.hover_token.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            smol::Timer::after(Duration::from_millis(HOVER_DELAY_MS)).await;
+
+            // Check if token is still valid (mouse hasn't left)
+            if hover_token.load(Ordering::SeqCst) != token {
+                return;
+            }
+
+            // Load file summaries
+            let summaries = git::get_diff_file_summary(Path::new(&project_path));
+
+            let _ = this.update(cx, |this, cx| {
+                // Re-check token after loading
+                if hover_token.load(Ordering::SeqCst) == token && !summaries.is_empty() {
+                    this.diff_file_summaries = summaries;
+                    this.diff_popover_project_path = project_path;
+                    this.diff_popover_visible = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn hide_diff_popover(&mut self, cx: &mut Context<Self>) {
+        if !self.diff_popover_visible {
+            return;
+        }
+
+        // Use token to allow cancellation if mouse enters popover
+        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let hover_token = self.hover_token.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // Small delay to allow mouse to reach popover
+            smol::Timer::after(Duration::from_millis(100)).await;
+
+            // Check if hide was cancelled (mouse entered popover)
+            if hover_token.load(Ordering::SeqCst) != token {
+                return;
+            }
+
+            let _ = this.update(cx, |this, cx| {
+                if hover_token.load(Ordering::SeqCst) == token && this.diff_popover_visible {
+                    this.diff_popover_visible = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_diff_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.diff_popover_visible || self.diff_file_summaries.is_empty() {
+            return div().absolute().size_0().into_any_element();
+        }
+
+        let max_files = 15;
+        let total_files = self.diff_file_summaries.len();
+        let show_more = total_files > max_files;
+        let project_path = self.diff_popover_project_path.clone();
+
+        div()
+            .id("diff-summary-popover")
+            .absolute()
+            .top(px(35.0))
+            .left(px(12.0))
+            .min_w(px(280.0))
+            .max_w(px(400.0))
+            .max_h(px(300.0))
+            .overflow_y_scroll()
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(6.0))
+            .shadow_lg()
+            .py(px(6.0))
+            // Keep popover open when hovering over it
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                if *hovered {
+                    // Cancel any pending hide by updating token
+                    this.hover_token.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    this.hide_diff_popover(cx);
+                }
+            }))
+            .children(
+                self.diff_file_summaries
+                    .iter()
+                    .take(max_files)
+                    .enumerate()
+                    .map(|(idx, summary)| {
+                        let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
+                        let dir = if summary.path.contains('/') {
+                            let parts: Vec<&str> = summary.path.rsplitn(2, '/').collect();
+                            if parts.len() > 1 { Some(parts[1]) } else { None }
+                        } else {
+                            None
+                        };
+                        let is_new = summary.is_new;
+                        let added = summary.added;
+                        let removed = summary.removed;
+                        let file_path = summary.path.clone();
+                        let project_path_for_click = project_path.clone();
+
+                        div()
+                            .id(ElementId::Name(format!("diff-file-{}", idx).into()))
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .rounded(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.0))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.hide_diff_popover(cx);
+                                set_pending_diff_path(project_path_for_click.clone());
+                                set_pending_diff_file(file_path.clone());
+                                window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.0))
+                                                    .text_color(rgb(t.text_primary))
+                                                    .text_ellipsis()
+                                                    .child(filename.to_string()),
+                                            )
+                                            .when(is_new, |d| {
+                                                d.child(
+                                                    div()
+                                                        .px(px(4.0))
+                                                        .py(px(1.0))
+                                                        .rounded(px(2.0))
+                                                        .bg(rgb(t.term_green))
+                                                        .text_size(px(8.0))
+                                                        .text_color(rgb(0x000000))
+                                                        .child("new"),
+                                                )
+                                            }),
+                                    )
+                                    .when_some(dir, |d, dir| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(9.0))
+                                                .text_color(rgb(t.text_muted))
+                                                .text_ellipsis()
+                                                .child(dir.to_string()),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .flex_shrink_0()
+                                    .text_size(px(10.0))
+                                    .when(added > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.term_green))
+                                                .child(format!("+{}", added)),
+                                        )
+                                    })
+                                    .when(removed > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.term_red))
+                                                .child(format!("-{}", removed)),
+                                        )
+                                    }),
+                            )
+                    }),
+            )
+            .when(show_more, |d: Stateful<Div>| {
+                d.child(
+                    div()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_muted))
+                        .child(format!("... and {} more files", total_files - max_files)),
+                )
+            })
+            .into_any_element()
     }
 
     fn ensure_layout_container(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -175,6 +401,7 @@ impl ProjectColumn {
                 let lines_removed = status.lines_removed;
                 let project_id = self.project_id.clone();
                 let project_path = project.path.clone();
+                let project_path_for_hover = project.path.clone();
 
                 div()
                     .flex()
@@ -225,6 +452,7 @@ impl ProjectColumn {
                         d.child(
                             div()
                                 .id(ElementId::Name(format!("git-diff-stats-{}", project_id).into()))
+                                .relative()
                                 .flex()
                                 .items_center()
                                 .gap(px(3.0))
@@ -236,8 +464,16 @@ impl ProjectColumn {
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .on_click(cx.listener(move |_this, _, window, cx| {
+                                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                                    if *hovered {
+                                        this.show_diff_popover(project_path_for_hover.clone(), cx);
+                                    } else {
+                                        this.hide_diff_popover(cx);
+                                    }
+                                }))
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
+                                    this.hide_diff_popover(cx);
                                     // Set the path and dispatch ShowDiffViewer
                                     set_pending_diff_path(project_path.clone());
                                     window.dispatch_action(Box::new(ShowDiffViewer), cx);
@@ -257,7 +493,6 @@ impl ProjectColumn {
                                         .text_color(rgb(t.term_red))
                                         .child(format!("-{}", lines_removed))
                                 )
-                                .tooltip(|_window, cx| Tooltip::new("View Git Diff").build(_window, cx))
                         )
                     })
                     .into_any_element()
@@ -493,6 +728,7 @@ impl Render for ProjectColumn {
 
                 div()
                     .id("project-column-main")
+                    .relative()
                     .flex()
                     .flex_col()
                     .size_full()
@@ -500,6 +736,7 @@ impl Render for ProjectColumn {
                     .bg(rgb(t.bg_primary))
                     .child(self.render_header(&project, cx))
                     .child(content)
+                    .child(self.render_diff_popover(&t, cx))
                     .into_any_element()
             }
 

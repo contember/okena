@@ -675,9 +675,9 @@ impl OverlayManager {
     // Diff viewer (parametric)
     // ========================================================================
 
-    /// Show diff viewer for a project.
-    pub fn show_diff_viewer(&mut self, project_path: String, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| DiffViewer::new(project_path, cx));
+    /// Show diff viewer for a project, optionally selecting a specific file.
+    pub fn show_diff_viewer(&mut self, project_path: String, select_file: Option<String>, cx: &mut Context<Self>) {
+        let viewer = cx.new(|cx| DiffViewer::new(project_path, select_file, cx));
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {
