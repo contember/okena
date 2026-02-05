@@ -1,6 +1,6 @@
 //! Render helper methods for the diff viewer.
 
-use super::types::FileTreeNode;
+use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use crate::theme::ThemeColors;
 use crate::views::components::segmented_toggle;
@@ -18,6 +18,8 @@ impl DiffViewer {
         is_working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let is_unified = self.view_mode == DiffViewMode::Unified;
+
         div()
             .px(px(16.0))
             .py(px(10.0))
@@ -70,6 +72,15 @@ impl DiffViewer {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
+                    .child(
+                        div()
+                            .id("view-mode-toggle")
+                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_view_mode(cx)))
+                            .child(segmented_toggle(
+                                &[("Unified", is_unified), ("Split", !is_unified)],
+                                t,
+                            )),
+                    )
                     .child(
                         div()
                             .id("diff-mode-toggle")
@@ -195,6 +206,18 @@ impl DiffViewer {
         let is_dragging = self.scrollbar_drag.is_some();
         let tc = theme_colors;
         let view = cx.entity().clone();
+        let side_by_side_count = self.side_by_side_lines.len();
+
+        // For new/deleted files, always use unified view (no point in split)
+        let current_file = self.files.get(self.selected_file_index);
+        let is_new_or_deleted = current_file
+            .map(|f| f.is_new || f.is_deleted)
+            .unwrap_or(false);
+        let view_mode = if is_new_or_deleted {
+            DiffViewMode::Unified
+        } else {
+            self.view_mode
+        };
 
         div()
             .flex_1()
@@ -230,21 +253,37 @@ impl DiffViewer {
                 )
             })
             .when(!is_binary, |d| {
+                let item_count = match view_mode {
+                    DiffViewMode::Unified => line_count,
+                    DiffViewMode::SideBySide => side_by_side_count,
+                };
+
                 d.child(
                     div()
                         .flex_1()
                         .min_h_0()
                         .relative()
                         .child(
-                            uniform_list("diff-lines", line_count, move |range, _window, cx| {
+                            uniform_list("diff-lines", item_count, move |range, _window, cx| {
                                 let tc = tc.clone();
                                 view.update(cx, |this, cx| {
-                                    this.render_visible_lines(range, &tc, gutter_width, cx)
+                                    match view_mode {
+                                        DiffViewMode::Unified => {
+                                            this.render_visible_lines(range, &tc, gutter_width, cx)
+                                        }
+                                        DiffViewMode::SideBySide => {
+                                            this.render_side_by_side_lines(range, &tc, cx)
+                                        }
+                                    }
                                 })
                             })
                             .size_full()
                             .bg(rgb(t.bg_secondary))
-                            .cursor(CursorStyle::IBeam)
+                            .cursor(if view_mode == DiffViewMode::Unified {
+                                CursorStyle::IBeam
+                            } else {
+                                CursorStyle::Arrow
+                            })
                             .track_scroll(&self.scroll_handle),
                         )
                         .when(scrollbar_geometry.is_some(), |d| {
@@ -329,6 +368,7 @@ impl DiffViewer {
                     .gap(px(16.0))
                     .child(self.render_hint("Esc", "close", t))
                     .child(self.render_hint("Tab", "toggle mode", t))
+                    .child(self.render_hint("S", "split view", t))
                     .child(self.render_hint("↑↓", "files", t))
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {

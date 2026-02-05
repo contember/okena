@@ -118,6 +118,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set diff view mode (unified or side-by-side)
+    pub fn set_diff_view_mode(&mut self, value: crate::views::overlays::DiffViewMode, cx: &mut Context<Self>) {
+        self.settings.diff_view_mode = value;
+        self.save_and_notify(cx);
+    }
+
     /// Save and notify - common logic for all setters
     fn save_and_notify(&mut self, cx: &mut Context<Self>) {
         self.save_debounced(cx);

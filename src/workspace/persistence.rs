@@ -1,6 +1,7 @@
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::{FolderColor, ThemeMode};
+use crate::views::overlays::DiffViewMode;
 use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,10 @@ pub struct AppSettings {
     /// Global lifecycle hooks (can be overridden per-project)
     #[serde(default)]
     pub hooks: HooksConfig,
+
+    /// Diff viewer display mode (unified or side-by-side)
+    #[serde(default)]
+    pub diff_view_mode: DiffViewMode,
 }
 
 impl Default for AppSettings {
@@ -145,6 +150,7 @@ impl Default for AppSettings {
             session_backend: SessionBackend::default(),
             file_opener: default_file_opener(),
             hooks: HooksConfig::default(),
+            diff_view_mode: DiffViewMode::default(),
         }
     }
 }

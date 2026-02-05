@@ -4,6 +4,47 @@ use crate::git::DiffLineType;
 use gpui::Rgba;
 use std::collections::BTreeMap;
 
+/// Display mode for the diff viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DiffViewMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+impl DiffViewMode {
+    /// Toggle between view modes.
+    pub fn toggle(self) -> Self {
+        match self {
+            DiffViewMode::Unified => DiffViewMode::SideBySide,
+            DiffViewMode::SideBySide => DiffViewMode::Unified,
+        }
+    }
+}
+
+/// Content for one side of a side-by-side line.
+#[derive(Clone)]
+pub struct SideContent {
+    pub line_num: usize,
+    pub line_type: DiffLineType,
+    pub spans: Vec<HighlightedSpan>,
+    /// Plain text content (for selection/copy - future use).
+    #[allow(dead_code)]
+    pub plain_text: String,
+}
+
+/// A paired line for side-by-side view.
+#[derive(Clone)]
+pub struct SideBySideLine {
+    pub left: Option<SideContent>,
+    pub right: Option<SideContent>,
+    pub is_header: bool,
+    /// Header text content (for copy - future use).
+    #[allow(dead_code)]
+    pub header_text: String,
+    pub header_spans: Vec<HighlightedSpan>,
+}
+
 /// A highlighted span with color.
 #[derive(Clone)]
 pub struct HighlightedSpan {

@@ -32,6 +32,7 @@ pub mod worktree_dialog;
 
 pub use command_palette::CommandPalette;
 pub use detached_terminal::DetachedTerminalView;
+pub use diff_viewer::DiffViewMode;
 pub use keybindings_help::KeybindingsHelp;
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};
 pub use session_manager::SessionManager;

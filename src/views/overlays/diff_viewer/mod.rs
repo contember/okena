@@ -21,7 +21,12 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use syntax::process_file;
-use types::{DiffDisplayFile, FileTreeNode, ScrollbarDrag};
+use types::{DiffDisplayFile, FileTreeNode, ScrollbarDrag, SideBySideLine};
+
+mod side_by_side;
+
+// Re-export for use in settings (and use locally)
+pub use types::DiffViewMode;
 
 /// Type alias for diff selection (line index, column).
 type Selection = SelectionState<(usize, usize)>;
@@ -33,6 +38,7 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 pub struct DiffViewer {
     focus_handle: FocusHandle,
     diff_mode: DiffMode,
+    view_mode: DiffViewMode,
     project_path: String,
     files: Vec<DiffDisplayFile>,
     file_tree: FileTreeNode,
@@ -46,17 +52,22 @@ pub struct DiffViewer {
     theme_set: ThemeSet,
     scrollbar_drag: Option<ScrollbarDrag>,
     file_font_size: f32,
+    /// Cached side-by-side lines for current file.
+    side_by_side_lines: Vec<SideBySideLine>,
 }
 
 impl DiffViewer {
     /// Create a new diff viewer for the given project path.
     pub fn new(project_path: String, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let file_font_size = settings_entity(cx).read(cx).settings.file_font_size;
+        let settings = settings_entity(cx).read(cx);
+        let file_font_size = settings.settings.file_font_size;
+        let view_mode = settings.settings.diff_view_mode;
 
         let mut viewer = Self {
             focus_handle,
             diff_mode: DiffMode::WorkingTree,
+            view_mode,
             project_path: project_path.clone(),
             files: Vec::new(),
             file_tree: FileTreeNode::default(),
@@ -70,6 +81,7 @@ impl DiffViewer {
             theme_set: ThemeSet::load_defaults(),
             scrollbar_drag: None,
             file_font_size,
+            side_by_side_lines: Vec::new(),
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {
@@ -88,6 +100,7 @@ impl DiffViewer {
         self.file_tree = FileTreeNode::default();
         self.selected_file_index = 0;
         self.selection.clear();
+        self.side_by_side_lines.clear();
 
         let path = std::path::Path::new(&self.project_path);
         match get_diff(path, mode) {
@@ -98,6 +111,7 @@ impl DiffViewer {
                 } else {
                     self.process_diff_result(result);
                     self.build_file_tree();
+                    self.update_side_by_side_cache();
                 }
             }
             Err(e) => {
@@ -151,10 +165,33 @@ impl DiffViewer {
         cx.notify();
     }
 
+    fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
+        self.view_mode = self.view_mode.toggle();
+        self.update_side_by_side_cache();
+        // Save to global settings
+        settings_entity(cx).update(cx, |settings, cx| {
+            settings.set_diff_view_mode(self.view_mode, cx);
+        });
+        cx.notify();
+    }
+
+    fn update_side_by_side_cache(&mut self) {
+        if self.view_mode == DiffViewMode::SideBySide {
+            if let Some(file) = self.files.get(self.selected_file_index) {
+                self.side_by_side_lines = side_by_side::to_side_by_side(&file.lines);
+            } else {
+                self.side_by_side_lines.clear();
+            }
+        } else {
+            self.side_by_side_lines.clear();
+        }
+    }
+
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.files.len() {
             self.selected_file_index = index;
             self.selection.clear();
+            self.update_side_by_side_cache();
             cx.notify();
         }
     }
@@ -284,6 +321,7 @@ impl Render for DiffViewer {
                         }
                     }
                     "tab" => this.toggle_mode(cx),
+                    "s" => this.toggle_view_mode(cx),
                     "up" => this.prev_file(cx),
                     "down" => this.next_file(cx),
                     "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
