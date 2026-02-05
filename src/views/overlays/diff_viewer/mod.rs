@@ -108,9 +108,17 @@ impl DiffViewer {
 
     fn process_diff_result(&mut self, result: DiffResult) {
         let mut max_line_num = 0usize;
+        let repo_path = std::path::Path::new(&self.project_path);
 
         for file in result.files {
-            let display_file = process_file(&file, &mut max_line_num, &self.syntax_set, &self.theme_set);
+            let display_file = process_file(
+                &file,
+                &mut max_line_num,
+                &self.syntax_set,
+                &self.theme_set,
+                repo_path,
+                self.diff_mode,
+            );
             self.files.push(display_file);
         }
 

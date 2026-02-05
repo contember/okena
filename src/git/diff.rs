@@ -460,6 +460,67 @@ pub fn is_git_repo(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Get the full content of a file from git at a specific revision.
+///
+/// - `revision` can be "HEAD", a commit hash, or empty for the index (staged version)
+pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> Option<String> {
+    let repo_str = repo_path.to_str()?;
+
+    // Format: revision:path (e.g., "HEAD:src/main.rs")
+    // For index, use ":0:path" syntax (stage 0 = normal index entry)
+    let object = if revision.is_empty() {
+        format!(":0:{}", file_path)
+    } else {
+        format!("{}:{}", revision, file_path)
+    };
+
+    let output = Command::new("git")
+        .args(["-C", repo_str, "show", &object])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        String::from_utf8(output.stdout).ok()
+    } else {
+        None
+    }
+}
+
+/// Get the full content of a file from the working tree (filesystem).
+pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<String> {
+    let full_path = repo_path.join(file_path);
+    std::fs::read_to_string(full_path).ok()
+}
+
+/// Get the "old" and "new" file content for a file diff based on the diff mode.
+///
+/// Returns (old_content, new_content).
+/// - For WorkingTree mode: old = HEAD (or index), new = working tree
+/// - For Staged mode: old = HEAD, new = index
+pub fn get_file_contents_for_diff(
+    repo_path: &Path,
+    file_path: &str,
+    mode: DiffMode,
+) -> (Option<String>, Option<String>) {
+    match mode {
+        DiffMode::WorkingTree => {
+            // Unstaged: comparing index vs working tree
+            // Try index first, fall back to HEAD (they're equal if nothing staged)
+            let old = get_file_from_git(repo_path, "", file_path)
+                .or_else(|| get_file_from_git(repo_path, "HEAD", file_path));
+            let new = get_file_from_working_tree(repo_path, file_path);
+            (old, new)
+        }
+        DiffMode::Staged => {
+            // Staged: comparing HEAD vs index
+            let old = get_file_from_git(repo_path, "HEAD", file_path);
+            let new = get_file_from_git(repo_path, "", file_path)
+                .or_else(|| get_file_from_working_tree(repo_path, file_path));
+            (old, new)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
