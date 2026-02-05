@@ -5,9 +5,9 @@
 cask "term-manager" do
   arch arm: "arm64", intel: "x64"
 
-  version "0.2.0"
-  sha256 arm:   "203ffb67bd6891f0f1fef1a82728841d3e403838927204d6bd4e8b0652d3758e",
-         intel: "ef2966d2d2148033439b00f3776099876743b6cb698f040ff73605784aad7b5d"
+  version "0.3.0"
+  sha256 arm:   "4cdf398bfb815fef343cd157c240deae4a3ef778cc0bbb31f9c2020ca0399d7b",
+         intel: "37efb512c95b54d0a6048b170af4d43b01955ad82c7853b1a59a7bbe418173be"
 
   url "https://github.com/contember/term-manager/releases/download/v#{version}/term-manager-macos-#{arch}.zip"
   name "Term Manager"
