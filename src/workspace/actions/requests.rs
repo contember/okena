@@ -27,6 +27,28 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Request showing the folder context menu
+    pub fn request_folder_context_menu(
+        &mut self,
+        folder_id: &str,
+        folder_name: &str,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.folder_context_menu_request = Some(crate::workspace::state::FolderContextMenuRequest {
+            folder_id: folder_id.to_string(),
+            folder_name: folder_name.to_string(),
+            position,
+        });
+        cx.notify();
+    }
+
+    /// Clear the folder context menu request
+    pub fn clear_folder_context_menu_request(&mut self, cx: &mut Context<Self>) {
+        self.folder_context_menu_request = None;
+        cx.notify();
+    }
+
     /// Request showing the shell selector for a terminal
     pub fn request_shell_selector(
         &mut self,
@@ -66,6 +88,24 @@ impl Workspace {
     /// Clear the project rename request
     pub fn clear_project_rename_request(&mut self, cx: &mut Context<Self>) {
         self.pending_project_rename = None;
+        cx.notify();
+    }
+
+    /// Clear the folder rename request
+    pub fn clear_folder_rename_request(&mut self, cx: &mut Context<Self>) {
+        self.pending_folder_rename = None;
+        cx.notify();
+    }
+
+    /// Request showing the add project dialog
+    pub fn request_add_project_dialog(&mut self, cx: &mut Context<Self>) {
+        self.add_project_requested = true;
+        cx.notify();
+    }
+
+    /// Clear the add project dialog request
+    pub fn clear_add_project_dialog_request(&mut self, cx: &mut Context<Self>) {
+        self.add_project_requested = false;
         cx.notify();
     }
 }

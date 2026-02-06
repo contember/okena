@@ -564,6 +564,18 @@ impl RootView {
             }
         }
 
+        // Check for folder context menu request
+        if let Some(request) = self.workspace.read(cx).folder_context_menu_request.clone() {
+            if !self.overlay_manager.read(cx).has_folder_context_menu() {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_folder_context_menu(request.clone(), cx);
+                });
+                self.workspace.update(cx, |ws, cx| {
+                    ws.clear_folder_context_menu_request(cx);
+                });
+            }
+        }
+
         // Check for shell selector request
         if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
             if !self.overlay_manager.read(cx).has_shell_selector() {
@@ -579,6 +591,18 @@ impl RootView {
                     ws.clear_shell_selector_request(cx);
                 });
             }
+        }
+
+        // Check for add project dialog request
+        if self.workspace.read(cx).add_project_requested {
+            if !self.overlay_manager.read(cx).has_add_project_dialog() {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.toggle_add_project_dialog(cx);
+                });
+            }
+            self.workspace.update(cx, |ws, cx| {
+                ws.clear_add_project_dialog_request(cx);
+            });
         }
     }
 
@@ -658,6 +682,7 @@ impl Render for RootView {
         let has_shell_selector = om.has_shell_selector();
         let has_worktree_dialog = om.has_worktree_dialog();
         let has_context_menu = om.has_context_menu();
+        let has_folder_context_menu = om.has_folder_context_menu();
         let has_file_search = om.has_file_search();
         let has_file_viewer = om.has_file_viewer();
         let has_diff_viewer = om.has_diff_viewer();
@@ -1060,6 +1085,10 @@ impl Render for RootView {
             )
             // Status bar at the bottom
             .child(self.status_bar.clone())
+            // App menu dropdown (renders on top of everything)
+            .when(self.title_bar.read(cx).is_menu_open(), |d| {
+                d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx)))
+            })
             // Keybindings help overlay (renders on top of everything)
             .when(has_keybindings_help, |d| {
                 d.children(self.overlay_manager.read(cx).render_keybindings_help())
@@ -1103,6 +1132,14 @@ impl Render for RootView {
             // Context menu overlay (renders on top of everything)
             .when(has_context_menu, |d| {
                 if let Some(menu) = self.overlay_manager.read(cx).render_context_menu() {
+                    d.child(menu)
+                } else {
+                    d
+                }
+            })
+            // Folder context menu overlay
+            .when(has_folder_context_menu, |d| {
+                if let Some(menu) = self.overlay_manager.read(cx).render_folder_context_menu() {
                     d.child(menu)
                 } else {
                     d
