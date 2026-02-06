@@ -36,16 +36,6 @@ irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
 
 The install script includes built-in auto-update support. On macOS and Linux, Okena is installed to `~/.local/bin/okena`. On Windows, it installs to `%LOCALAPPDATA%\Programs\Okena` with a Start Menu shortcut.
 
-### Manual Download
-
-Download from the [Releases](https://github.com/contember/okena/releases) page or get development builds:
-
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | [okena-macos-arm64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-macos-arm64.zip) |
-| Linux (x64) | [okena-linux-x64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-linux-x64.zip) |
-| Windows (x64) | [okena-windows-x64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-windows-x64.zip) |
-
 ## Features
 
 ### Layout & Window Management
