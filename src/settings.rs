@@ -94,6 +94,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set auto-update enabled/disabled
+    pub fn set_auto_update_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.auto_update_enabled = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set the file opener command
     pub fn set_file_opener(&mut self, value: String, cx: &mut Context<Self>) {
         self.settings.file_opener = value;

@@ -55,6 +55,8 @@ actions!(
         ZoomIn,
         ZoomOut,
         ResetZoom,
+        CheckForUpdates,
+        InstallUpdate,
     ]
 );
 
@@ -213,6 +215,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ZoomIn" => Some(KeyBinding::new(keystroke, ZoomIn, context)),
         "ZoomOut" => Some(KeyBinding::new(keystroke, ZoomOut, context)),
         "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
+        "CheckForUpdates" => Some(KeyBinding::new(keystroke, CheckForUpdates, context)),
+        "InstallUpdate" => Some(KeyBinding::new(keystroke, InstallUpdate, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

@@ -136,6 +136,10 @@ pub struct AppSettings {
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
+
+    /// Enable automatic update checking (default: true)
+    #[serde(default = "default_auto_update_enabled")]
+    pub auto_update_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -161,6 +165,7 @@ impl Default for AppSettings {
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
             diff_ignore_whitespace: false,
+            auto_update_enabled: default_auto_update_enabled(),
         }
     }
 }
@@ -172,6 +177,10 @@ fn default_settings_version() -> u32 {
 
 fn default_show_focused_border() -> bool {
     false
+}
+
+fn default_auto_update_enabled() -> bool {
+    true
 }
 
 fn default_font_size() -> f32 {
@@ -224,7 +233,7 @@ pub struct ExportedWorkspace {
 }
 
 /// Get the config directory path
-fn get_config_dir() -> PathBuf {
+pub fn get_config_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("okena")
@@ -377,6 +386,10 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("file_opener").and_then(|v| v.as_str()) {
         settings.file_opener = v.to_string();
+    }
+
+    if let Some(v) = obj.get("auto_update_enabled").and_then(|v| v.as_bool()) {
+        settings.auto_update_enabled = v;
     }
 
     Ok(settings)
