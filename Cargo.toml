@@ -52,6 +52,10 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 # Markdown parsing
 pulldown-cmark = "0.12"
 
+# Self-updater
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+semver = "1"
+
 # Remote control server
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 axum = { version = "0.8", features = ["ws"] }
