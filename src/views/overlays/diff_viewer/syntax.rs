@@ -237,13 +237,5 @@ pub fn process_file(
         }
     }
 
-    DiffDisplayFile {
-        path: path.to_string(),
-        added: file.lines_added,
-        removed: file.lines_removed,
-        lines,
-        is_binary: file.is_binary,
-        is_new: file.old_path.is_none(),
-        is_deleted: file.new_path.is_none(),
-    }
+    DiffDisplayFile { lines }
 }

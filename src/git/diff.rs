@@ -75,6 +75,7 @@ impl FileDiff {
     }
 
     /// Get just the filename without path.
+    #[allow(dead_code)]
     pub fn filename(&self) -> &str {
         let path = self.display_name();
         path.rsplit('/').next().unwrap_or(path)
@@ -319,6 +320,7 @@ fn parse_hunk_header(header: &str) -> (usize, usize) {
 }
 
 /// Get diff for a repository path.
+#[allow(dead_code)]
 pub fn get_diff(path: &Path, mode: DiffMode) -> Result<DiffResult, String> {
     get_diff_with_options(path, mode, false)
 }

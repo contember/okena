@@ -101,22 +101,10 @@ pub struct DisplayLine {
     pub plain_text: String,
 }
 
-/// Processed file for display.
+/// Processed file for display (lines with syntax highlighting).
 pub struct DiffDisplayFile {
-    /// Full path.
-    pub path: String,
-    /// Lines added count.
-    pub added: usize,
-    /// Lines removed count.
-    pub removed: usize,
     /// Processed lines for display.
     pub lines: Vec<DisplayLine>,
-    /// Whether this is a binary file.
-    pub is_binary: bool,
-    /// Whether this is a new file.
-    pub is_new: bool,
-    /// Whether this is a deleted file.
-    pub is_deleted: bool,
 }
 
 /// A node in the file tree.

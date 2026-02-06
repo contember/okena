@@ -387,6 +387,7 @@ impl SimpleInputState {
     }
 
     /// Check if this input has a selection
+    #[allow(dead_code)]
     pub fn has_selection(&self) -> bool {
         self.selection.is_some()
     }
