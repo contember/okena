@@ -4,6 +4,19 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A folder that groups projects in the sidebar
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FolderData {
+    pub id: String,
+    pub name: String,
+    /// Ordered project IDs inside this folder
+    pub project_ids: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default)]
+    pub folder_color: FolderColor,
+}
+
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
@@ -12,6 +25,9 @@ pub struct WorkspaceData {
     /// Project column widths as percentages (project_id -> width %)
     #[serde(default)]
     pub project_widths: HashMap<String, f32>,
+    /// Folders for grouping projects
+    #[serde(default)]
+    pub folders: Vec<FolderData>,
 }
 
 /// Metadata for worktree projects
@@ -125,6 +141,14 @@ pub struct ContextMenuRequest {
     pub position: gpui::Point<gpui::Pixels>,
 }
 
+/// Request to show folder context menu at a position
+#[derive(Clone, Debug)]
+pub struct FolderContextMenuRequest {
+    pub folder_id: String,
+    pub folder_name: String,
+    pub position: gpui::Point<gpui::Pixels>,
+}
+
 /// Request to show shell selector overlay
 #[derive(Clone, Debug)]
 pub struct ShellSelectorRequest {
@@ -138,6 +162,13 @@ pub struct ShellSelectorRequest {
 pub struct ProjectRenameRequest {
     pub project_id: String,
     pub project_name: String,
+}
+
+/// Request to rename a folder (triggered from context menu)
+#[derive(Clone, Debug)]
+pub struct FolderRenameRequest {
+    pub folder_id: String,
+    pub folder_name: String,
 }
 
 /// GPUI Entity for workspace state
@@ -159,10 +190,16 @@ pub struct Workspace {
     pub worktree_dialog_request: Option<WorktreeDialogRequest>,
     /// Pending request to show context menu
     pub context_menu_request: Option<ContextMenuRequest>,
+    /// Pending request to show folder context menu
+    pub folder_context_menu_request: Option<FolderContextMenuRequest>,
     /// Pending request to show shell selector
     pub shell_selector_request: Option<ShellSelectorRequest>,
     /// Pending request to rename a project
     pub pending_project_rename: Option<ProjectRenameRequest>,
+    /// Pending request to rename a folder
+    pub pending_folder_rename: Option<FolderRenameRequest>,
+    /// Pending request to show add project dialog
+    pub add_project_requested: bool,
     /// Last access time for each project (for sorting in project switcher)
     pub project_access_times: HashMap<String, std::time::Instant>,
 }
@@ -178,8 +215,11 @@ impl Workspace {
             focus_manager: FocusManager::new(),
             worktree_dialog_request: None,
             context_menu_request: None,
+            folder_context_menu_request: None,
             shell_selector_request: None,
             pending_project_rename: None,
+            pending_folder_rename: None,
+            add_project_requested: false,
             project_access_times: HashMap::new(),
         }
     }
@@ -209,21 +249,26 @@ impl Workspace {
         &self.data.projects
     }
 
-    /// Get visible projects in order
+    /// Get visible projects in order, expanding folders into their contained projects
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
-        self.data
-            .project_order
-            .iter()
-            .filter_map(|id| self.data.projects.iter().find(|p| &p.id == id))
-            .filter(|p| {
-                // If focused, only show focused project
-                if let Some(focused_id) = &self.focused_project_id {
-                    &p.id == focused_id
-                } else {
-                    p.is_visible
+        let mut result = Vec::new();
+        for id in &self.data.project_order {
+            if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
+                // Folder: include its projects
+                for pid in &folder.project_ids {
+                    if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
+                        if self.focused_project_id.as_ref().map_or(p.is_visible, |fid| &p.id == fid) {
+                            result.push(p);
+                        }
+                    }
                 }
-            })
-            .collect()
+            } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
+                if self.focused_project_id.as_ref().map_or(p.is_visible, |fid| &p.id == fid) {
+                    result.push(p);
+                }
+            }
+        }
+        result
     }
 
     /// Get a project by ID
@@ -234,6 +279,26 @@ impl Workspace {
     /// Get a mutable project by ID
     pub fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
         self.data.projects.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Get a folder by ID
+    pub fn folder(&self, id: &str) -> Option<&FolderData> {
+        self.data.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Get a mutable folder by ID
+    pub fn folder_mut(&mut self, id: &str) -> Option<&mut FolderData> {
+        self.data.folders.iter_mut().find(|f| f.id == id)
+    }
+
+    /// Check if an ID in project_order refers to a folder
+    pub fn is_folder(&self, id: &str) -> bool {
+        self.data.folders.iter().any(|f| f.id == id)
+    }
+
+    /// Find which folder (if any) contains a given project
+    pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
+        self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
