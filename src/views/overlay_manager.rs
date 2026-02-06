@@ -12,6 +12,7 @@ use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
@@ -20,7 +21,7 @@ use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::workspace::state::{ContextMenuRequest, Workspace, WorkspaceData};
+use crate::workspace::state::{ContextMenuRequest, FolderContextMenuRequest, Workspace, WorkspaceData};
 
 /// Trait for overlay events that support closing.
 ///
@@ -228,6 +229,7 @@ pub struct OverlayManager {
     shell_selector: OverlaySlot<ShellSelectorOverlay>,
     worktree_dialog: Option<Entity<WorktreeDialog>>,
     context_menu: Option<Entity<ContextMenu>>,
+    folder_context_menu: Option<Entity<FolderContextMenu>>,
     session_manager: Option<Entity<SessionManager>>,
 
     // File search and viewer
@@ -250,6 +252,7 @@ impl OverlayManager {
             shell_selector: OverlaySlot::new(),
             worktree_dialog: None,
             context_menu: None,
+            folder_context_menu: None,
             session_manager: None,
             file_search: None,
             file_viewer: None,
@@ -309,6 +312,11 @@ impl OverlayManager {
     /// Check if context menu is open.
     pub fn has_context_menu(&self) -> bool {
         self.context_menu.is_some()
+    }
+
+    /// Check if folder context menu is open.
+    pub fn has_folder_context_menu(&self) -> bool {
+        self.folder_context_menu.is_some()
     }
 
     /// Check if file search is open.
@@ -621,6 +629,51 @@ impl OverlayManager {
         cx.notify();
     }
 
+    /// Show folder context menu.
+    pub fn show_folder_context_menu(&mut self, request: FolderContextMenuRequest, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let menu = cx.new(|cx| FolderContextMenu::new(workspace.clone(), request, cx));
+
+        cx.subscribe(&menu, |this, _, event: &FolderContextMenuEvent, cx| {
+            match event {
+                FolderContextMenuEvent::Close => {
+                    this.hide_folder_context_menu(cx);
+                }
+                FolderContextMenuEvent::RenameFolder { folder_id, folder_name } => {
+                    this.hide_folder_context_menu(cx);
+                    // Use pending_project_rename mechanism to trigger rename in sidebar
+                    // We need to signal the sidebar to rename a folder
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.pending_folder_rename = Some(crate::workspace::state::FolderRenameRequest {
+                            folder_id: folder_id.clone(),
+                            folder_name: folder_name.clone(),
+                        });
+                        cx.notify();
+                    });
+                }
+                FolderContextMenuEvent::DeleteFolder { folder_id } => {
+                    this.hide_folder_context_menu(cx);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.delete_folder(folder_id, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.folder_context_menu = Some(menu);
+        cx.notify();
+    }
+
+    /// Hide folder context menu.
+    pub fn hide_folder_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.folder_context_menu = None;
+        self.workspace.update(cx, |ws, cx| {
+            ws.clear_folder_context_menu_request(cx);
+        });
+        cx.notify();
+    }
+
     // ========================================================================
     // File search (parametric)
     // ========================================================================
@@ -793,6 +846,11 @@ impl OverlayManager {
     /// Get context menu entity for rendering.
     pub fn render_context_menu(&self) -> Option<Entity<ContextMenu>> {
         self.context_menu.clone()
+    }
+
+    /// Get folder context menu entity for rendering.
+    pub fn render_folder_context_menu(&self) -> Option<Entity<FolderContextMenu>> {
+        self.folder_context_menu.clone()
     }
 
     /// Get file search dialog entity for rendering.

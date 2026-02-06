@@ -471,11 +471,30 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
             }
         }
 
-        // Ensure project_order contains all project IDs
+        // Ensure project_order contains all project IDs (that aren't in a folder)
+        let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
+            .flat_map(|f| f.project_ids.iter().cloned())
+            .collect();
         for project in &data.projects {
-            if !data.project_order.contains(&project.id) {
+            if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
                 data.project_order.push(project.id.clone());
             }
+        }
+
+        // Folder consistency checks
+        {
+            let valid_project_ids: std::collections::HashSet<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
+
+            // Remove stale project refs from folders
+            for folder in &mut data.folders {
+                folder.project_ids.retain(|pid| valid_project_ids.contains(pid.as_str()));
+            }
+
+            // Ensure folder IDs in project_order match actual folders
+            let valid_folder_ids: std::collections::HashSet<&str> = data.folders.iter().map(|f| f.id.as_str()).collect();
+            data.project_order.retain(|id| {
+                valid_project_ids.contains(id.as_str()) || valid_folder_ids.contains(id.as_str())
+            });
         }
 
         Ok(data)
@@ -520,6 +539,7 @@ pub fn default_workspace() -> WorkspaceData {
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
+        folders: Vec::new(),
     }
 }
 
@@ -623,11 +643,26 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
         }
     }
 
-    // Ensure project_order contains all project IDs
+    // Ensure project_order contains all project IDs (that aren't in a folder)
+    let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
+        .flat_map(|f| f.project_ids.iter().cloned())
+        .collect();
     for project in &data.projects {
-        if !data.project_order.contains(&project.id) {
+        if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
             data.project_order.push(project.id.clone());
         }
+    }
+
+    // Folder consistency checks
+    {
+        let valid_project_ids: std::collections::HashSet<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
+        for folder in &mut data.folders {
+            folder.project_ids.retain(|pid| valid_project_ids.contains(pid.as_str()));
+        }
+        let valid_folder_ids: std::collections::HashSet<&str> = data.folders.iter().map(|f| f.id.as_str()).collect();
+        data.project_order.retain(|id| {
+            valid_project_ids.contains(id.as_str()) || valid_folder_ids.contains(id.as_str())
+        });
     }
 
     Ok(data)
@@ -702,9 +737,12 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
             }
         }
 
-        // Ensure project_order contains all project IDs
+        // Ensure project_order contains all project IDs (that aren't in a folder)
+        let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
+            .flat_map(|f| f.project_ids.iter().cloned())
+            .collect();
         for project in &data.projects {
-            if !data.project_order.contains(&project.id) {
+            if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
                 data.project_order.push(project.id.clone());
             }
         }
@@ -724,9 +762,12 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
         }
     }
 
-    // Ensure project_order contains all project IDs
+    // Ensure project_order contains all project IDs (that aren't in a folder)
+    let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
+        .flat_map(|f| f.project_ids.iter().cloned())
+        .collect();
     for project in &data.projects {
-        if !data.project_order.contains(&project.id) {
+        if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
             data.project_order.push(project.id.clone());
         }
     }
