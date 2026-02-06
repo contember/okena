@@ -145,7 +145,6 @@ pub struct FolderContextMenuRequest {
 /// Requests consumed by RootView::process_pending_requests()
 #[derive(Clone, Debug)]
 pub enum OverlayRequest {
-    WorktreeDialog { project_id: String, project_path: String },
     ContextMenu { project_id: String, position: gpui::Point<gpui::Pixels> },
     FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
     ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
@@ -165,12 +164,6 @@ pub struct Workspace {
     pub data: WorkspaceData,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<FullscreenState>,
-    /// Currently focused terminal (for visual indicator).
-    ///
-    /// **DEPRECATED**: Use `focus_manager.focused_terminal_state()` instead.
-    /// This field is kept in sync with FocusManager for backward compatibility
-    /// but should not be accessed directly in new code.
-    pub focused_terminal: Option<FocusedTerminalState>,
     /// Currently detached terminals (opened in separate windows)
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
@@ -189,7 +182,6 @@ impl Workspace {
             data,
             focused_project_id: None,
             fullscreen_terminal: None,
-            focused_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
             overlay_requests: VecDeque::new(),
