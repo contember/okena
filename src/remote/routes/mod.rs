@@ -16,6 +16,7 @@ use axum::response::Response;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
+use tower_http::cors::{Any, CorsLayer};
 
 /// Shared state available to all route handlers.
 #[derive(Clone)]
@@ -58,8 +59,14 @@ pub fn build_router(
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair));
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     public
         .merge(protected)
+        .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .with_state(state)
 }
