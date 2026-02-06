@@ -343,80 +343,34 @@ impl Muxy {
                     RemoteCommand::CloseTerminal { project_id, terminal_id } => {
                         cx.update(|cx| {
                             workspace.update(cx, |ws, cx| {
-                                if let Some(project) = ws.project_mut(&project_id) {
-                                    if let Some(ref layout) = project.layout {
-                                        if let Some(path) = layout.find_terminal_path(&terminal_id) {
-                                            // For simplicity, if it's the root terminal, replace with new empty one
-                                            if path.is_empty() {
-                                                project.layout = Some(crate::workspace::state::LayoutNode::new_terminal());
-                                            } else {
-                                                // Remove from parent
-                                                let parent_path = &path[..path.len() - 1];
-                                                let child_idx = path[path.len() - 1];
-                                                if let Some(ref mut layout) = project.layout {
-                                                    if let Some(parent) = layout.get_at_path_mut(parent_path) {
-                                                        match parent {
-                                                            crate::workspace::state::LayoutNode::Split { children, sizes, .. } => {
-                                                                if child_idx < children.len() {
-                                                                    children.remove(child_idx);
-                                                                    if child_idx < sizes.len() {
-                                                                        sizes.remove(child_idx);
-                                                                    }
-                                                                    let total: f32 = sizes.iter().sum();
-                                                                    if total > 0.0 {
-                                                                        for s in sizes.iter_mut() {
-                                                                            *s /= total;
-                                                                        }
-                                                                    }
-                                                                    if children.len() == 1 {
-                                                                        let child = children.remove(0);
-                                                                        *parent = child;
-                                                                    }
-                                                                }
-                                                            }
-                                                            crate::workspace::state::LayoutNode::Tabs { children, .. } => {
-                                                                if child_idx < children.len() {
-                                                                    children.remove(child_idx);
-                                                                    if children.len() == 1 {
-                                                                        let child = children.remove(0);
-                                                                        *parent = child;
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            cx.notify();
-                                            return CommandResult::Ok(None);
-                                        }
+                                let path = ws.project(&project_id)
+                                    .and_then(|p| p.layout.as_ref())
+                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
+
+                                match path {
+                                    Some(path) => {
+                                        ws.close_terminal(&project_id, &path, cx);
+                                        CommandResult::Ok(None)
                                     }
+                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
                                 }
-                                CommandResult::Err(format!("terminal not found: {}", terminal_id))
                             })
                         })
                     }
                     RemoteCommand::FocusTerminal { project_id, terminal_id } => {
                         cx.update(|cx| {
                             workspace.update(cx, |ws, cx| {
-                                if let Some(project) = ws.project(&project_id) {
-                                    if let Some(ref layout) = project.layout {
-                                        if let Some(path) = layout.find_terminal_path(&terminal_id) {
-                                            ws.focus_manager.focus_terminal(
-                                                project_id.clone(),
-                                                path.clone(),
-                                            );
-                                            ws.focused_terminal = Some(crate::workspace::state::FocusedTerminalState {
-                                                project_id: project_id.clone(),
-                                                layout_path: path,
-                                            });
-                                            cx.notify();
-                                            return CommandResult::Ok(None);
-                                        }
+                                let path = ws.project(&project_id)
+                                    .and_then(|p| p.layout.as_ref())
+                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
+
+                                match path {
+                                    Some(path) => {
+                                        ws.set_focused_terminal(project_id, path, cx);
+                                        CommandResult::Ok(None)
                                     }
+                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
                                 }
-                                CommandResult::Err(format!("terminal not found: {}", terminal_id))
                             })
                         })
                     }
