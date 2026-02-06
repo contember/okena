@@ -13,6 +13,7 @@ impl DiffViewer {
         &self,
         t: &ThemeColors,
         has_files: bool,
+        file_count: usize,
         total_added: usize,
         total_removed: usize,
         is_working: bool,
@@ -56,8 +57,8 @@ impl DiffViewer {
                                         .text_color(rgb(t.text_muted))
                                         .child(format!(
                                             "{} {}",
-                                            self.files.len(),
-                                            if self.files.len() == 1 { "file" } else { "files" }
+                                            file_count,
+                                            if file_count == 1 { "file" } else { "files" }
                                         )),
                                 )
                                 .child(
@@ -274,8 +275,8 @@ impl DiffViewer {
         let side_by_side_count = self.side_by_side_lines.len();
 
         // For new/deleted files, always use unified view (no point in split)
-        let current_file = self.files.get(self.selected_file_index);
-        let is_new_or_deleted = current_file
+        let current_stats = self.file_stats.get(self.selected_file_index);
+        let is_new_or_deleted = current_stats
             .map(|f| f.is_new || f.is_deleted)
             .unwrap_or(false);
         let view_mode = if is_new_or_deleted {
@@ -524,7 +525,7 @@ impl DiffViewer {
         }
 
         for &file_index in &node.files {
-            if let Some(file) = self.files.get(file_index) {
+            if let Some(file) = self.file_stats.get(file_index) {
                 let indent = depth * 14;
                 let is_selected = file_index == self.selected_file_index;
                 let filename = file.path.rsplit('/').next().unwrap_or(&file.path);

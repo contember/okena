@@ -281,7 +281,7 @@ impl DiffViewer {
         gutter_width: f32,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(file) = self.files.get(self.selected_file_index) else {
+        let Some(file) = &self.current_file else {
             return Vec::new();
         };
 

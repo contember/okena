@@ -1,6 +1,6 @@
 //! Data types for the diff viewer.
 
-use crate::git::DiffLineType;
+use crate::git::{DiffLineType, FileDiff};
 use gpui::Rgba;
 use std::collections::BTreeMap;
 
@@ -18,6 +18,29 @@ impl DiffViewMode {
         match self {
             DiffViewMode::Unified => DiffViewMode::SideBySide,
             DiffViewMode::SideBySide => DiffViewMode::Unified,
+        }
+    }
+}
+
+/// Lightweight file stats for sidebar display (no syntax highlighting).
+pub struct FileStats {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+    pub is_binary: bool,
+    pub is_new: bool,
+    pub is_deleted: bool,
+}
+
+impl From<&FileDiff> for FileStats {
+    fn from(file: &FileDiff) -> Self {
+        Self {
+            path: file.display_name().to_string(),
+            added: file.lines_added,
+            removed: file.lines_removed,
+            is_binary: file.is_binary,
+            is_new: file.old_path.is_none(),
+            is_deleted: file.new_path.is_none(),
         }
     }
 }

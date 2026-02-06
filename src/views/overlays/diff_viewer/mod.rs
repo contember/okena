@@ -9,7 +9,7 @@ mod scrollbar;
 mod syntax;
 mod types;
 
-use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult};
+use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileDiff};
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
@@ -21,7 +21,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use syntax::process_file;
-use types::{DiffDisplayFile, FileTreeNode, ScrollbarDrag, SideBySideLine};
+use types::{DiffDisplayFile, FileStats, FileTreeNode, ScrollbarDrag, SideBySideLine};
 
 mod side_by_side;
 
@@ -42,7 +42,12 @@ pub struct DiffViewer {
     /// Ignore whitespace changes in diff.
     ignore_whitespace: bool,
     project_path: String,
-    files: Vec<DiffDisplayFile>,
+    /// Raw diff data for all files (not syntax highlighted).
+    raw_files: Vec<FileDiff>,
+    /// Lightweight file stats for sidebar display.
+    file_stats: Vec<FileStats>,
+    /// Currently processed file with syntax highlighting (lazy loaded).
+    current_file: Option<DiffDisplayFile>,
     file_tree: FileTreeNode,
     selected_file_index: usize,
     selection: Selection,
@@ -73,7 +78,9 @@ impl DiffViewer {
             view_mode,
             ignore_whitespace,
             project_path: project_path.clone(),
-            files: Vec::new(),
+            raw_files: Vec::new(),
+            file_stats: Vec::new(),
+            current_file: None,
             file_tree: FileTreeNode::default(),
             selected_file_index: 0,
             selection: Selection::default(),
@@ -97,8 +104,9 @@ impl DiffViewer {
 
         // Select specific file if requested
         if let Some(file_path) = select_file {
-            if let Some(index) = viewer.files.iter().position(|f| f.path == file_path) {
+            if let Some(index) = viewer.file_stats.iter().position(|f| f.path == file_path) {
                 viewer.selected_file_index = index;
+                viewer.process_current_file();
                 viewer.update_side_by_side_cache();
             }
         }
@@ -109,7 +117,9 @@ impl DiffViewer {
     fn load_diff(&mut self, mode: DiffMode) {
         self.diff_mode = mode;
         self.error_message = None;
-        self.files.clear();
+        self.raw_files.clear();
+        self.file_stats.clear();
+        self.current_file = None;
         self.file_tree = FileTreeNode::default();
         self.selected_file_index = 0;
         self.selection.clear();
@@ -122,8 +132,10 @@ impl DiffViewer {
                     self.error_message =
                         Some(format!("No {} changes", mode.display_name().to_lowercase()));
                 } else {
-                    self.process_diff_result(result);
+                    self.store_diff_result(result);
                     self.build_file_tree();
+                    // Process the first file for display
+                    self.process_current_file();
                     self.update_side_by_side_cache();
                 }
             }
@@ -133,29 +145,40 @@ impl DiffViewer {
         }
     }
 
-    fn process_diff_result(&mut self, result: DiffResult) {
-        let mut max_line_num = 0usize;
-        let repo_path = std::path::Path::new(&self.project_path);
-
+    /// Store raw diff data and extract lightweight stats (no syntax highlighting).
+    fn store_diff_result(&mut self, result: DiffResult) {
         for file in result.files {
+            self.file_stats.push(FileStats::from(&file));
+            self.raw_files.push(file);
+        }
+    }
+
+    /// Process the currently selected file with syntax highlighting.
+    fn process_current_file(&mut self) {
+        if let Some(raw_file) = self.raw_files.get(self.selected_file_index) {
+            let repo_path = std::path::Path::new(&self.project_path);
+            let mut max_line_num = 0usize;
+
             let display_file = process_file(
-                &file,
+                raw_file,
                 &mut max_line_num,
                 &self.syntax_set,
                 &self.theme_set,
                 repo_path,
                 self.diff_mode,
             );
-            self.files.push(display_file);
-        }
 
-        self.line_num_width = max_line_num.to_string().len().max(3);
+            self.line_num_width = max_line_num.to_string().len().max(3);
+            self.current_file = Some(display_file);
+        } else {
+            self.current_file = None;
+        }
     }
 
     fn build_file_tree(&mut self) {
         self.file_tree = FileTreeNode::default();
 
-        for (index, file) in self.files.iter().enumerate() {
+        for (index, file) in self.file_stats.iter().enumerate() {
             let parts: Vec<&str> = file.path.split('/').collect();
             let mut node = &mut self.file_tree;
 
@@ -200,7 +223,7 @@ impl DiffViewer {
 
     fn update_side_by_side_cache(&mut self) {
         if self.view_mode == DiffViewMode::SideBySide {
-            if let Some(file) = self.files.get(self.selected_file_index) {
+            if let Some(file) = &self.current_file {
                 self.side_by_side_lines = side_by_side::to_side_by_side(&file.lines);
             } else {
                 self.side_by_side_lines.clear();
@@ -211,9 +234,10 @@ impl DiffViewer {
     }
 
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.files.len() {
+        if index < self.file_stats.len() {
             self.selected_file_index = index;
             self.selection.clear();
+            self.process_current_file();
             self.update_side_by_side_cache();
             cx.notify();
         }
@@ -226,7 +250,7 @@ impl DiffViewer {
     }
 
     fn next_file(&mut self, cx: &mut Context<Self>) {
-        if self.selected_file_index + 1 < self.files.len() {
+        if self.selected_file_index + 1 < self.file_stats.len() {
             self.select_file(self.selected_file_index + 1, cx);
         }
     }
@@ -236,7 +260,7 @@ impl DiffViewer {
     }
 
     fn get_selected_text(&self) -> Option<String> {
-        let file = self.files.get(self.selected_file_index)?;
+        let file = self.current_file.as_ref()?;
         let ((start_line, start_col), (end_line, end_col)) = self.selection.normalized()?;
 
         let mut result = String::new();
@@ -274,7 +298,7 @@ impl DiffViewer {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        if let Some(file) = self.files.get(self.selected_file_index) {
+        if let Some(file) = &self.current_file {
             if file.lines.is_empty() {
                 return;
             }
@@ -303,15 +327,15 @@ impl Render for DiffViewer {
         let error_message = self.error_message.clone();
         let diff_mode = self.diff_mode;
         let is_working = diff_mode == DiffMode::WorkingTree;
-        let has_files = !self.files.is_empty();
+        let has_files = !self.file_stats.is_empty();
         let has_selection = self.selection.normalized().is_some();
 
         let gutter_width = (self.line_num_width * 8 * 2 + 8 + 16) as f32;
 
-        let current_file = self.files.get(self.selected_file_index);
-        let file_path = current_file.map(|f| f.path.clone()).unwrap_or_default();
-        let is_binary = current_file.map(|f| f.is_binary).unwrap_or(false);
-        let line_count = current_file.map(|f| f.lines.len()).unwrap_or(0);
+        let current_stats = self.file_stats.get(self.selected_file_index);
+        let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
+        let is_binary = current_stats.map(|f| f.is_binary).unwrap_or(false);
+        let line_count = self.current_file.as_ref().map(|f| f.lines.len()).unwrap_or(0);
 
         let tree_elements = if has_files {
             self.render_tree_node(&self.file_tree.clone(), 0, &t, cx)
@@ -319,8 +343,8 @@ impl Render for DiffViewer {
             Vec::new()
         };
 
-        let total_added: usize = self.files.iter().map(|f| f.added).sum();
-        let total_removed: usize = self.files.iter().map(|f| f.removed).sum();
+        let total_added: usize = self.file_stats.iter().map(|f| f.added).sum();
+        let total_removed: usize = self.file_stats.iter().map(|f| f.removed).sum();
 
         let theme_colors = Arc::new(t.clone());
 
@@ -381,7 +405,7 @@ impl Render for DiffViewer {
                     .max_w(px(1400.0))
                     .h(relative(0.88))
                     .max_h(px(950.0))
-                    .child(self.render_header(&t, has_files, total_added, total_removed, is_working, self.ignore_whitespace, cx))
+                    .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, is_working, self.ignore_whitespace, cx))
                     .child(self.render_content(&t, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
                     .child(self.render_footer(&t, has_selection)),
             )
