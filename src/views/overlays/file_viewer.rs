@@ -7,8 +7,9 @@ use crate::settings::settings_entity;
 use crate::theme::{theme, ThemeColors};
 use crate::ui::{copy_to_clipboard, Selection1DExtension, Selection2DExtension, SelectionState};
 use crate::views::components::{
-    get_scrollbar_geometry, get_selected_text, highlight_content, modal_backdrop, modal_content,
-    segmented_toggle, start_scrollbar_drag, update_scrollbar_drag, HighlightedLine, ScrollbarDrag,
+    get_scrollbar_geometry, get_selected_text, highlight_content, load_syntax_set, modal_backdrop,
+    modal_content, segmented_toggle, start_scrollbar_drag, update_scrollbar_drag, HighlightedLine,
+    ScrollbarDrag,
 };
 use super::markdown_renderer::{MarkdownDocument, MarkdownSelection, RenderedNode};
 use gpui::*;
@@ -90,7 +91,7 @@ impl FileViewer {
             markdown_scroll_handle: ScrollHandle::new(),
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: load_syntax_set(),
             theme_set: ThemeSet::load_defaults(),
             file_font_size,
         };

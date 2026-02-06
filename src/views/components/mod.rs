@@ -32,7 +32,7 @@ pub use rename_state::{
     RenameState,
 };
 pub use simple_input::{SimpleInput, SimpleInputState};
-pub use syntax::{highlight_content, HighlightedLine};
+pub use syntax::{highlight_content, load_syntax_set, HighlightedLine};
 pub use code_view::{
     get_scrollbar_geometry, get_selected_text, start_scrollbar_drag, update_scrollbar_drag,
     ScrollbarDrag,

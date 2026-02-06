@@ -13,7 +13,7 @@ use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileD
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
-use crate::views::components::{modal_backdrop, modal_content};
+use crate::views::components::{modal_backdrop, modal_content, syntax::load_syntax_set};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ impl DiffViewer {
             tree_scroll_handle: ScrollHandle::new(),
             error_message: None,
             line_num_width: 4,
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set: load_syntax_set(),
             theme_set: ThemeSet::load_defaults(),
             scrollbar_drag: None,
             file_font_size,

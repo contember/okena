@@ -13,8 +13,10 @@ use syntect::util::LinesWithEndings;
 /// Map file extension to syntax name.
 pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
     match ext.to_lowercase().as_str() {
-        "ts" | "tsx" | "mts" | "cts" => Some("js"),
-        "jsx" | "mjs" | "cjs" => Some("js"),
+        "ts" | "mts" | "cts" => Some("ts"),
+        "tsx" => Some("tsx"),
+        "jsx" => Some("tsx"), // JSX uses TypeScriptReact syntax (best JSX support)
+        "mjs" | "cjs" => Some("js"),
         "vue" | "svelte" => Some("html"),
         "yml" | "yaml" => Some("yaml"),
         "json" | "jsonc" | "json5" => Some("json"),

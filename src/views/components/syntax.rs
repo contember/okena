@@ -5,10 +5,22 @@
 
 use gpui::Rgba;
 use std::path::Path;
+use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+
+/// Global cached syntax set with extended syntaxes (including TypeScript/TSX).
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+
+/// Load a SyntaxSet with extended syntaxes including TypeScript/TSX.
+/// Uses the two-face crate which provides many additional syntaxes.
+pub fn load_syntax_set() -> SyntaxSet {
+    SYNTAX_SET
+        .get_or_init(|| two_face::syntax::extra_newlines())
+        .clone()
+}
 
 /// A pre-processed span with color and text ready for display.
 #[derive(Clone)]
@@ -38,9 +50,11 @@ pub fn default_text_color() -> Rgba {
 /// Map file extension to syntax name for better coverage.
 pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
     match ext.to_lowercase().as_str() {
-        // TypeScript/JavaScript variants - use JavaScript syntax
-        "ts" | "tsx" | "mts" | "cts" => Some("js"),
-        "jsx" | "mjs" | "cjs" => Some("js"),
+        // TypeScript/JavaScript variants
+        "ts" | "mts" | "cts" => Some("ts"),
+        "tsx" => Some("tsx"),
+        "jsx" => Some("tsx"), // JSX uses TypeScriptReact syntax (best JSX support)
+        "mjs" | "cjs" => Some("js"),
         // Vue/Svelte - use HTML
         "vue" | "svelte" => Some("html"),
         // Config files
