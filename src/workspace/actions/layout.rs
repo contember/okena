@@ -26,6 +26,13 @@ impl Workspace {
             log::info!("Split complete");
             true
         });
+
+        // Normalize to flatten if parent was already a same-direction split
+        if let Some(project) = self.project_mut(project_id) {
+            if let Some(ref mut layout) = project.layout {
+                layout.normalize();
+            }
+        }
     }
 
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group

@@ -449,6 +449,72 @@ impl LayoutNode {
         }
     }
 
+    /// Normalize the layout tree in-place:
+    /// - Flatten nested splits with the same direction (merging sizes proportionally)
+    /// - Unwrap splits/tabs with a single child
+    /// - Remove empty containers
+    pub fn normalize(&mut self) {
+        // First, recursively normalize children
+        match self {
+            LayoutNode::Terminal { .. } => return,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children.iter_mut() {
+                    child.normalize();
+                }
+            }
+        }
+
+        // Unwrap single-child or empty containers
+        let should_unwrap = match self {
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
+            _ => false,
+        };
+        if should_unwrap {
+            match self {
+                LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                    if children.len() == 1 {
+                        *self = children.remove(0);
+                    } else {
+                        // Empty container - replace with a default terminal
+                        *self = LayoutNode::new_terminal();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Flatten nested splits with the same direction
+        if let LayoutNode::Split { direction, sizes, children } = self {
+            let has_same_dir_child = children.iter().any(|c| matches!(c, LayoutNode::Split { direction: d, .. } if d == direction));
+            if has_same_dir_child {
+                let dir = *direction;
+                let mut new_children = Vec::new();
+                let mut new_sizes = Vec::new();
+
+                for (i, child) in children.drain(..).enumerate() {
+                    let parent_size = sizes[i];
+                    match child {
+                        LayoutNode::Split { direction: child_dir, sizes: child_sizes, children: grandchildren } if child_dir == dir => {
+                            let child_total: f32 = child_sizes.iter().sum();
+                            for (j, grandchild) in grandchildren.into_iter().enumerate() {
+                                new_children.push(grandchild);
+                                new_sizes.push(parent_size * child_sizes[j] / child_total);
+                            }
+                        }
+                        other => {
+                            new_children.push(other);
+                            new_sizes.push(parent_size);
+                        }
+                    }
+                }
+
+                *children = new_children;
+                *sizes = new_sizes;
+            }
+        }
+    }
+
     /// Clone the layout structure but clear all terminal IDs
     /// Used when creating worktree projects to duplicate layout with fresh terminals
     pub fn clone_structure(&self) -> Self {

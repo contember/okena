@@ -451,6 +451,13 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
             }
         }
 
+        // Normalize layout trees (flatten redundant nesting, unwrap single-child containers)
+        for project in &mut data.projects {
+            if let Some(ref mut layout) = project.layout {
+                layout.normalize();
+            }
+        }
+
         // Ensure project_order contains all project IDs
         for project in &data.projects {
             if !data.project_order.contains(&project.id) {
@@ -596,6 +603,13 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
         }
     }
 
+    // Normalize layout trees
+    for project in &mut data.projects {
+        if let Some(ref mut layout) = project.layout {
+            layout.normalize();
+        }
+    }
+
     // Ensure project_order contains all project IDs
     for project in &data.projects {
         if !data.project_order.contains(&project.id) {
@@ -671,6 +685,7 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
         for project in &mut data.projects {
             if let Some(ref mut layout) = project.layout {
                 layout.clear_terminal_ids();
+                layout.normalize();
             }
         }
 
@@ -692,6 +707,7 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
     for project in &mut data.projects {
         if let Some(ref mut layout) = project.layout {
             layout.clear_terminal_ids();
+            layout.normalize();
         }
     }
 
