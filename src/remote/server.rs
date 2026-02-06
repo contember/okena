@@ -34,6 +34,9 @@ impl RemoteServer {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+        // Clean up stale remote.json from a previous crash
+        cleanup_stale_remote_json();
+
         // Try to bind to a port
         let listener = runtime.block_on(async {
             // Try preferred range first
@@ -163,5 +166,46 @@ fn remove_remote_json() {
     let path = remote_json_path();
     if path.exists() {
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Clean up stale remote.json left behind by a crashed process.
+fn cleanup_stale_remote_json() {
+    let path = remote_json_path();
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+    };
+
+    if let Some(pid) = json.get("pid").and_then(|v| v.as_u64()) {
+        if !is_process_alive(pid as u32) {
+            log::info!("Removing stale remote.json (pid {} is dead)", pid);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Check if a process with the given PID is still running.
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // signal 0 checks if process exists without sending a signal
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, assume the process may be alive to avoid
+        // accidentally removing a valid remote.json. The stale file is
+        // harmless — the port will simply fail to bind and we'll pick another.
+        let _ = pid;
+        true
     }
 }
