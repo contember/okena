@@ -158,9 +158,12 @@ impl TerminalPane {
             shell_type,
         };
 
-        // Create terminal if we have an ID
+        // Create terminal: either reconnect to existing PTY or create new one
         if let Some(ref id) = pane.terminal_id {
             pane.create_terminal_for_existing_pty(id.clone(), cx);
+        } else {
+            // No terminal ID - create a new terminal immediately
+            pane.create_new_terminal(cx);
         }
 
         // Start background loops
@@ -911,11 +914,6 @@ impl TerminalPane {
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-
-        // Create terminal if needed
-        if self.terminal.is_none() && self.terminal_id.is_none() {
-            self.create_new_terminal(cx);
-        }
 
         let focus_handle = self.focus_handle.clone();
         let id_suffix = self.id_suffix();
