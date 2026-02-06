@@ -203,7 +203,7 @@ impl DiffViewer {
     /// Render a single side-by-side line.
     fn render_side_by_side_line(
         &self,
-        _idx: usize,
+        idx: usize,
         line: &SideBySideLine,
         t: &ThemeColors,
         _cx: &mut Context<Self>,
@@ -212,47 +212,49 @@ impl DiffViewer {
         let line_height = font_size * 1.6;
 
         if line.is_header {
-            // Header spans both columns
-            div()
-                .flex()
+            // Chunk header - full width separator with border (same style as unified view)
+            return div()
+                .id(ElementId::Name(format!("sbs-header-{}", idx).into()))
+                .w_full()
                 .h(px(line_height))
-                .text_size(px(font_size * 0.9))
+                .flex()
+                .items_center()
                 .font_family("monospace")
-                .bg(rgb(t.diff_hunk_header_bg))
+                .bg(rgba(t.diff_hunk_header_bg, 0.6))
+                .border_y_1()
+                .border_color(rgb(t.border))
+                .px(px(12.0))
                 .child(
                     div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .pl(px(12.0))
+                        .text_size(px(font_size * 0.85))
                         .text_color(rgb(t.diff_hunk_header_fg))
                         .children(line.header_spans.iter().map(|span| {
                             div().text_color(span.color).child(span.text.clone())
                         })),
-                )
-        } else {
-            // Two-column layout
-            let left = line.left.clone();
-            let right = line.right.clone();
-            let line_num_width = self.line_num_width;
-            let border_color = t.border;
-
-            div()
-                .w_full()
-                .h(px(line_height))
-                .text_size(px(font_size))
-                .font_family("monospace")
-                .flex()
-                .child(self.render_side_column_content(&left, t, true, line_num_width, line_height))
-                .child(
-                    div()
-                        .w(px(1.0))
-                        .h(px(line_height))
-                        .bg(rgb(border_color))
-                        .flex_shrink_0(),
-                )
-                .child(self.render_side_column_content(&right, t, false, line_num_width, line_height))
+                );
         }
+
+        // Two-column layout
+        let left = line.left.clone();
+        let right = line.right.clone();
+        let border_color = t.border;
+
+        div()
+            .id(ElementId::Name(format!("sbs-line-{}", idx).into()))
+            .w_full()
+            .h(px(line_height))
+            .text_size(px(font_size))
+            .font_family("monospace")
+            .flex()
+            .child(self.render_side_column_content(&left, t, font_size, line_height))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(line_height))
+                    .bg(rgb(border_color))
+                    .flex_shrink_0(),
+            )
+            .child(self.render_side_column_content(&right, t, font_size, line_height))
     }
 
     /// Render one column (left or right) of a side-by-side line.
@@ -260,10 +262,13 @@ impl DiffViewer {
         &self,
         content: &Option<SideContent>,
         t: &ThemeColors,
-        _is_left: bool,
-        line_num_width: usize,
+        font_size: f32,
         line_height: f32,
     ) -> Div {
+        // Character width for monospace font (approximately 0.6 of font size)
+        let char_width = font_size * 0.6;
+        let num_col_width = (self.line_num_width as f32) * char_width + 4.0;
+
         match content {
             Some(c) => {
                 // Two-level background: light tint for the line, stronger for changed words
@@ -286,9 +291,9 @@ impl DiffViewer {
 
                 // Format line number - show empty for 0
                 let line_num = if c.line_num > 0 {
-                    format!("{:>width$}", c.line_num, width = line_num_width)
+                    format!("{:>width$}", c.line_num, width = self.line_num_width)
                 } else {
-                    " ".repeat(line_num_width)
+                    " ".repeat(self.line_num_width)
                 };
 
                 let mut column = div()
@@ -308,17 +313,17 @@ impl DiffViewer {
                     .flex()
                     .items_center()
                     .h_full()
-                    .pl(px(8.0))
                     .child(
                         div()
-                            .w(px((line_num_width * 8) as f32))
+                            .w(px(num_col_width))
+                            .pr(px(4.0))
                             .text_color(rgb(t.text_muted))
                             .text_right()
                             .child(line_num),
                     )
                     .child(
                         div()
-                            .w(px(24.0))
+                            .w(px(20.0))
                             .text_center()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(indicator_color))
