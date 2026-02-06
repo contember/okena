@@ -167,8 +167,7 @@ impl Muxy {
         ) {
             Ok(server) => {
                 let port = server.port();
-                let code = self.auth_store.get_or_create_code();
-                self.remote_info.set_active(port, code);
+                self.remote_info.set_active(port, self.auth_store.clone());
                 log::info!("Remote server started on port {}", port);
                 self.remote_server = Some(server);
             }

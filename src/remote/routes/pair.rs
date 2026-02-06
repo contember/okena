@@ -1,4 +1,4 @@
-use crate::remote::auth::PairError;
+use crate::remote::auth::{PairError, TOKEN_TTL_SECS};
 use crate::remote::routes::AppState;
 use crate::remote::types::{PairRequest, PairResponse};
 use axum::Json;
@@ -17,7 +17,7 @@ pub async fn post_pair(
             StatusCode::OK,
             Json(serde_json::to_value(PairResponse {
                 token,
-                expires_in: 86400,
+                expires_in: TOKEN_TTL_SECS,
             })
             .unwrap()),
         )

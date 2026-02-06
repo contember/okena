@@ -5,6 +5,7 @@ pub mod routes;
 pub mod server;
 pub mod types;
 
+use crate::remote::auth::AuthStore;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -15,8 +16,8 @@ pub struct RemoteInfo {
 }
 
 struct RemoteInfoInner {
-    pub port: Option<u16>,
-    pub pairing_code: Option<String>,
+    port: Option<u16>,
+    auth_store: Option<Arc<AuthStore>>,
 }
 
 impl RemoteInfo {
@@ -24,33 +25,32 @@ impl RemoteInfo {
         Self {
             inner: Arc::new(Mutex::new(RemoteInfoInner {
                 port: None,
-                pairing_code: None,
+                auth_store: None,
             })),
         }
     }
 
-    pub fn set_active(&self, port: u16, code: String) {
+    pub fn set_active(&self, port: u16, auth_store: Arc<AuthStore>) {
         let mut inner = self.inner.lock();
         inner.port = Some(port);
-        inner.pairing_code = Some(code);
+        inner.auth_store = Some(auth_store);
     }
 
     pub fn set_inactive(&self) {
         let mut inner = self.inner.lock();
         inner.port = None;
-        inner.pairing_code = None;
-    }
-
-    #[allow(dead_code)]
-    pub fn update_code(&self, code: String) {
-        self.inner.lock().pairing_code = Some(code);
+        inner.auth_store = None;
     }
 
     /// Returns (port, pairing_code) if server is active.
+    /// The pairing code is always fresh (regenerated if expired).
     pub fn status(&self) -> Option<(u16, String)> {
         let inner = self.inner.lock();
-        match (inner.port, inner.pairing_code.as_ref()) {
-            (Some(port), Some(code)) => Some((port, code.clone())),
+        match (inner.port, inner.auth_store.as_ref()) {
+            (Some(port), Some(auth_store)) => {
+                let code = auth_store.get_or_create_code();
+                Some((port, code))
+            }
             _ => None,
         }
     }

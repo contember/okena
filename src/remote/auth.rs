@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Token time-to-live in seconds (24 hours).
+pub const TOKEN_TTL_SECS: u64 = 86400;
+
 /// A stored token record.
 #[allow(dead_code)]
 pub struct TokenRecord {
@@ -173,14 +176,19 @@ impl AuthStore {
         Ok(token)
     }
 
-    /// Validate a bearer token. Returns true if valid.
+    /// Validate a bearer token. Returns true if valid and not expired.
     pub fn validate_token(&self, token: &str) -> bool {
         let inner = self.inner.lock();
         let candidate_hmac = compute_hmac(&inner.app_secret, token.as_bytes());
+        let now = Instant::now();
 
         for record in &inner.tokens {
             if constant_time_eq(&record.token_hmac, &candidate_hmac) {
-                *record.last_used_at.lock() = Instant::now();
+                // Check token expiration (24 hours)
+                if now.duration_since(record.created_at) >= Duration::from_secs(TOKEN_TTL_SECS) {
+                    return false;
+                }
+                *record.last_used_at.lock() = now;
                 return true;
             }
         }
