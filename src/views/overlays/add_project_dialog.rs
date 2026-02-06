@@ -16,6 +16,7 @@ pub struct AddProjectDialog {
     path_input: Entity<PathAutoCompleteState>,
     pending_name_value: Option<String>,
     pending_path_value: Option<String>,
+    initial_focus_done: bool,
 }
 
 pub enum AddProjectDialogEvent {
@@ -36,6 +37,7 @@ impl AddProjectDialog {
             path_input,
             pending_name_value: None,
             pending_path_value: None,
+            initial_focus_done: false,
         }
     }
 
@@ -177,7 +179,13 @@ impl Render for AddProjectDialog {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        window.focus(&focus_handle, cx);
+        // Only focus the name input on first render, not on every re-render
+        if !self.initial_focus_done {
+            self.initial_focus_done = true;
+            self.name_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
 
         // Apply pending values from async operations
         if let Some(name_value) = self.pending_name_value.take() {
@@ -186,7 +194,7 @@ impl Render for AddProjectDialog {
         }
         if let Some(path_value) = self.pending_path_value.take() {
             self.path_input
-                .update(cx, |i, cx| i.set_value(&path_value, cx));
+                .update(cx, |i, cx| i.set_value_quiet(&path_value, cx));
         }
 
         let has_suggestions = self.path_input.read(cx).has_suggestions();
