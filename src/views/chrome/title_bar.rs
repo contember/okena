@@ -65,6 +65,9 @@ impl TitleBar {
                 cx.stop_propagation();
                 this.close_menu(cx);
             }))
+            .on_mouse_move(|_, _, cx| {
+                cx.stop_propagation();
+            })
             .child(
                 // Menu panel
                 div()
