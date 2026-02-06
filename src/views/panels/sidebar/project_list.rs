@@ -71,20 +71,14 @@ impl Sidebar {
                 div()
                     .id(ElementId::Name(format!("project-row-{}", project.id).into()))
                     .h(px(24.0))
-                    .pl(px(6.0))  // Left padding (reduced to account for border)
-                    .pr(px(8.0))  // Right padding
+                    .pl(px(8.0))
+                    .pr(px(8.0))
                     .flex()
                     .items_center()
                     .gap(px(4.0))
                     .cursor_pointer()
-                    .border_l_2()
-                    .when(is_focused, |d| {
-                        d.border_color(rgb(t.border_active))
-                    })
-                    .when(!is_focused, |d| {
-                        d.border_color(rgba(0x00000000))  // Transparent border to reserve space
-                    })
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
+                    .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     // Drag source
                     .on_drag(ProjectDrag { project_id: project_id_for_drag.clone(), project_name: project_name_for_drag.clone() }, move |drag, _position, _window, cx| {
                         cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
@@ -129,7 +123,7 @@ impl Sidebar {
                             })),
                     )
                     .child({
-                        // Project folder icon - clickable for color picker
+                        // Project color dot - clickable for color picker
                         let folder_color = t.get_folder_color(project.folder_color);
                         let project_id_for_color = project.id.clone();
                         div()
@@ -143,10 +137,12 @@ impl Sidebar {
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.7))
                             .child(
-                                svg()
-                                    .path("icons/folder.svg")
-                                    .size(px(14.0))
-                                    .text_color(rgb(folder_color))
+                                div()
+                                    .flex_shrink_0()
+                                    .w(px(8.0))
+                                    .h(px(8.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(folder_color))
                             )
                             .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
                                 this.show_color_picker(project_id_for_color.clone(), cx);
@@ -344,14 +340,8 @@ impl Sidebar {
                     .items_center()
                     .gap(px(4.0))
                     .cursor_pointer()
-                    .border_l_2()
-                    .when(is_focused, |d| {
-                        d.border_color(rgb(t.border_active))
-                    })
-                    .when(!is_focused, |d| {
-                        d.border_color(rgba(0x00000000))
-                    })
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
+                    .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .on_mouse_down(MouseButton::Right, cx.listener({
                         let project_id = project_id_for_context_menu.clone();
                         move |this, event: &MouseDownEvent, _window, cx| {
@@ -662,7 +652,7 @@ impl Sidebar {
                             .rounded(px(2.0))
                             .child(
                                 SimpleInput::new(input)
-                                    .text_size(px(11.0))
+                                    .text_size(px(12.0))
                             )
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
@@ -689,7 +679,7 @@ impl Sidebar {
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(t.text_primary))
                         .text_ellipsis()
                         .child(terminal_name)
@@ -914,7 +904,7 @@ impl Sidebar {
                             .rounded(px(2.0))
                             .child(
                                 SimpleInput::new(input)
-                                    .text_size(px(11.0))
+                                    .text_size(px(12.0))
                             )
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
@@ -941,7 +931,7 @@ impl Sidebar {
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(t.text_primary))
                         .text_ellipsis()
                         .child(terminal_name)

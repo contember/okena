@@ -454,8 +454,6 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .bg(rgb(t.bg_secondary))
-            .border_r_1()
-            .border_color(rgb(t.border))
             .child(self.render_header(cx))
             .when(show_add_dialog, |d| d.child(self.render_add_dialog(window, cx)))
             .child(self.render_projects_header(cx))

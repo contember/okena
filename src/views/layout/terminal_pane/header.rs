@@ -301,10 +301,26 @@ impl Render for TerminalHeader {
                                 .id("terminal-header-name")
                                 .flex_1()
                                 .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
                                 .text_size(px(12.0))
-                                .text_color(rgb(t.text_primary))
                                 .text_ellipsis()
-                                .child(terminal_name)
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(rgb(t.success))
+                                        .child(">")
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_color(rgb(t.text_primary))
+                                        .text_ellipsis()
+                                        .child(terminal_name)
+                                )
                                 .on_click(cx.listener({
                                     let name = terminal_name_for_rename;
                                     move |this, _, window, cx| {

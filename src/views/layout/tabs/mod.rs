@@ -355,14 +355,15 @@ impl LayoutContainer {
                 .relative()
                 .px(px(8.0))
                 .py(px(4.0))
-                .rounded_t(px(4.0))
+                .border_r_1()
+                .border_color(rgb(t.border))
                 .text_size(px(12.0))
                 .when(is_active, |d| {
-                    d.bg(rgb(t.bg_primary))
+                    d.bg(rgb(t.bg_hover))
                         .text_color(rgb(t.text_primary))
                 })
                 .when(!is_active, |d| {
-                    d.bg(rgb(t.bg_secondary))
+                    d.bg(rgb(t.bg_header))
                         .text_color(rgb(t.text_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                 })
@@ -530,18 +531,24 @@ impl LayoutContainer {
             .child(
                 // Tab bar
                 div()
+                    .group("tab-bar-row")
                     .h(px(28.0))
-                    .px(px(4.0))
+                    .px(px(0.0))
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(0.0))
                     .bg(rgb(t.bg_header))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
                     .children(tab_elements)
                     .child(end_drop_zone)
-                    .child(shell_indicator)
-                    .child(action_buttons),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .opacity(0.0)
+                            .group_hover("tab-bar-row", |s| s.opacity(1.0))
+                            .child(shell_indicator)
+                            .child(action_buttons),
+                    ),
             )
             .children(context_menu)
             .child(
