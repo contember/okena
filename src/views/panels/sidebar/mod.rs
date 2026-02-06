@@ -239,7 +239,10 @@ impl Sidebar {
 
     fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
-            ws.request_context_menu(&project_id, position, cx);
+            ws.push_overlay_request(crate::workspace::state::OverlayRequest::ContextMenu {
+                project_id,
+                position,
+            }, cx);
         });
     }
 
@@ -353,7 +356,10 @@ impl Sidebar {
                             )
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.request_add_project_dialog(cx);
+                                    ws.push_overlay_request(
+                                        crate::workspace::state::OverlayRequest::AddProjectDialog,
+                                        cx,
+                                    );
                                 });
                             })),
                     ),
@@ -462,22 +468,19 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        // Check for pending project rename request from context menu
-        let pending_rename = self.workspace.read(cx).pending_project_rename.clone();
-        if let Some(request) = pending_rename {
-            self.workspace.update(cx, |ws, cx| {
-                ws.clear_project_rename_request(cx);
-            });
-            self.start_project_rename(request.project_id, request.project_name, window, cx);
-        }
-
-        // Check for pending folder rename request from context menu
-        let pending_folder_rename = self.workspace.read(cx).pending_folder_rename.clone();
-        if let Some(request) = pending_folder_rename {
-            self.workspace.update(cx, |ws, cx| {
-                ws.clear_folder_rename_request(cx);
-            });
-            self.start_folder_rename(request.folder_id, request.folder_name, window, cx);
+        // Drain sidebar requests
+        let sidebar_requests: Vec<_> = self.workspace.update(cx, |ws, _cx| {
+            ws.sidebar_requests.drain(..).collect()
+        });
+        for request in sidebar_requests {
+            match request {
+                crate::workspace::state::SidebarRequest::RenameProject { project_id, project_name } => {
+                    self.start_project_rename(project_id, project_name, window, cx);
+                }
+                crate::workspace::state::SidebarRequest::RenameFolder { folder_id, folder_name } => {
+                    self.start_folder_rename(folder_id, folder_name, window, cx);
+                }
+            }
         }
 
         let workspace = self.workspace.read(cx);

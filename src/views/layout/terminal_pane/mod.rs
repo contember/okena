@@ -189,12 +189,11 @@ impl TerminalPane {
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.workspace.update(cx, |ws, cx| {
-                        ws.request_shell_selector(
-                            &self.project_id,
-                            terminal_id,
-                            current_shell.clone(),
-                            cx,
-                        );
+                        ws.push_overlay_request(crate::workspace::state::OverlayRequest::ShellSelector {
+                            project_id: self.project_id.clone(),
+                            terminal_id: terminal_id.clone(),
+                            current_shell: current_shell.clone(),
+                        }, cx);
                     });
                 }
             }
