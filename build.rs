@@ -8,8 +8,8 @@ fn main() {
         if std::path::Path::new(icon_path).exists() {
             let mut res = winresource::WindowsResource::new();
             res.set_icon(icon_path);
-            res.set("FileDescription", "Term Manager");
-            res.set("ProductName", "Term Manager");
+            res.set("FileDescription", "Okena");
+            res.set("ProductName", "Okena");
 
             if let Err(e) = res.compile() {
                 eprintln!("Warning: Failed to set Windows icon: {}", e);
@@ -21,5 +21,4 @@ fn main() {
 
     // Rerun if icon changes
     println!("cargo:rerun-if-changed=assets/app-icon.ico");
-    println!("cargo:rerun-if-changed=assets/app-icon-simple.svg");
 }

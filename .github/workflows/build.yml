@@ -20,10 +20,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: term-manager-linux-x64
+            artifact: okena-linux-x64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: term-manager-macos-arm64
+            artifact: okena-macos-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: okena-macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: okena-windows-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -61,82 +67,40 @@ jobs:
             pkg-config \
             cmake
 
+      - name: Check compilation
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: cargo check --release --target ${{ matrix.target }}
+
       - name: Build
+        if: startsWith(github.ref, 'refs/tags/v')
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare artifact (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p dist/icons
-          cp target/${{ matrix.target }}/release/term-manager dist/
-          chmod +x dist/term-manager
+          cp target/${{ matrix.target }}/release/okena dist/
+          chmod +x dist/okena
           # Bundle icons for Linux installation
-          cp assets/app-icon-simple.svg dist/icons/
           cp assets/app-icon-16.png assets/app-icon-32.png assets/app-icon-48.png \
              assets/app-icon-64.png assets/app-icon-128.png assets/app-icon-256.png \
              assets/app-icon-512.png dist/icons/
-          cp term-manager.desktop dist/
+          cp okena.desktop dist/
 
       - name: Create macOS app bundle
-        if: runner.os == 'macOS'
-        run: |
-          chmod +x scripts/bundle-macos.sh
-          ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist/
-          retention-days: 7
-
-  # Intel Mac and Windows only run for tag pushes
-  build-extra:
-    if: startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: term-manager-macos-x64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: term-manager-windows-x64
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.93"
-          targets: ${{ matrix.target }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.target }}
-          save-if: true
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Create macOS app bundle
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
         run: |
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
 
       - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir dist
-          copy target\${{ matrix.target }}\release\term-manager.exe dist\
+          copy target\${{ matrix.target }}\release\okena.exe dist\
 
       - name: Upload artifact
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -145,7 +109,7 @@ jobs:
 
   # Create release when a tag is pushed
   release:
-    needs: [build, build-extra]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -171,7 +135,7 @@ jobs:
               # macOS: DMG is already created, just move it
               mv "$dir"/*.dmg "../" 2>/dev/null || true
               # Also create a zip of the .app for those who prefer it
-              cd "$dir" && zip -r "../../${name}.zip" "Term Manager.app" && cd ..
+              cd "$dir" && zip -r "../../${name}.zip" "Okena.app" && cd ..
             else
               tar -czvf "../${name}.tar.gz" -C "$dir" .
             fi
@@ -182,21 +146,21 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
 
           # Calculate SHA256 from local zip files
-          ARM64_SHA=$(sha256sum term-manager-macos-arm64.zip | cut -d' ' -f1)
-          X64_SHA=$(sha256sum term-manager-macos-x64.zip | cut -d' ' -f1)
+          ARM64_SHA=$(sha256sum okena-macos-arm64.zip | cut -d' ' -f1)
+          X64_SHA=$(sha256sum okena-macos-x64.zip | cut -d' ' -f1)
 
           # Update cask
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/term-manager.rb
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/term-manager.rb
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/term-manager.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/okena.rb
+          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/okena.rb
+          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/okena.rb
 
-          cat Casks/term-manager.rb
+          cat Casks/okena.rb
 
       - name: Commit cask update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/term-manager.rb
+          git add Casks/okena.rb
           git commit -m "chore: update homebrew cask for ${GITHUB_REF#refs/tags/}"
           git push origin HEAD:main
 

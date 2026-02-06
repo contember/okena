@@ -1,4 +1,4 @@
-# Term Manager - Development Notes
+# Okena - Development Notes
 
 Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 
@@ -23,7 +23,7 @@ cargo run
 ```
 src/
 ├── main.rs               # Entry point, GPUI setup, window creation
-├── app.rs                # TermManager - main app state, PTY event routing
+├── app.rs                # Okena - main app state, PTY event routing
 ├── settings.rs           # Global settings (theme, font, shell, session backend)
 ├── theme.rs              # ThemeMode, FolderColor, color utilities
 ├── assets.rs             # Embedded fonts and icons
@@ -43,7 +43,7 @@ src/
 
 | Module | Key File | Purpose |
 |--------|----------|---------|
-| App | `app.rs` | TermManager entity - owns RootView, Workspace, routes PTY events |
+| App | `app.rs` | Okena entity - owns RootView, Workspace, routes PTY events |
 | Terminal | `terminal/terminal.rs` | Wraps alacritty_terminal, ANSI processing, selection, search |
 | PTY | `terminal/pty_manager.rs` | PTY lifecycle, async I/O via smol + async_channel |
 | Shell | `terminal/shell_config.rs` | Shell detection (bash/zsh/fish/cmd/PowerShell/WSL) |
@@ -92,13 +92,13 @@ Path-based navigation: `Vec<usize>` indexes into the tree.
 - `RootView` - overlay states, sidebar animation
 
 **Event Flow:**
-1. PTY events: `PtyManager` → async_channel → `TermManager` → `Terminal`
+1. PTY events: `PtyManager` → async_channel → `Okena` → `Terminal`
 2. State mutations: trigger notify → observers update UI
 3. Workspace changes: debounced 500ms save to disk
 
 ### Configuration Files
 
-Located in `~/.config/term-manager/`:
+Located in `~/.config/okena/`:
 - `workspace.json` - projects, layouts, terminal state
 - `settings.json` - font, theme, shell, session backend
 - `keybindings.json` - custom keyboard shortcuts

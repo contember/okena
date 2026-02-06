@@ -192,12 +192,42 @@ impl Render for StatusBar {
                             )
                     )
             )
-            // Right side - version and time
-            .child(
-                div()
+            // Right side - remote info + version + time
+            .child({
+                let mut right = div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(8.0));
+
+                // Show remote server pairing code if active
+                if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>() {
+                    if let Some((port, code)) = remote_info.0.status() {
+                        let code_for_click = code.clone();
+                        right = right.child(
+                            div()
+                                .id("remote-info")
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .child(
+                                    div()
+                                        .text_color(rgb(t.term_cyan))
+                                        .child(format!("REMOTE :{}", port))
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(t.term_yellow))
+                                        .child(code)
+                                )
+                                .on_click(move |_, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code_for_click.clone()));
+                                })
+                        );
+                    }
+                }
+
+                right
                     .child(
                         div()
                             .text_color(rgb(t.text_muted))
@@ -208,6 +238,6 @@ impl Render for StatusBar {
                             .text_color(rgb(t.text_secondary))
                             .child(time_str)
                     )
-            )
+            })
     }
 }
