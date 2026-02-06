@@ -13,10 +13,13 @@ pub enum DragState {
     Split {
         project_id: String,
         layout_path: Vec<usize>,
-        #[allow(dead_code)] // Reserved for future resize improvements
         child_index: usize,
         direction: SplitDirection,
         container_bounds: Bounds<Pixels>,
+        /// Mouse position at drag start (for delta-based resize)
+        initial_mouse_pos: Point<Pixels>,
+        /// Sizes snapshot at drag start
+        initial_sizes: Vec<f32>,
     },
     /// Resizing project columns
     ProjectColumn {
@@ -60,7 +63,7 @@ pub fn compute_resize(
     cx: &mut App,
 ) {
     match drag_state {
-        DragState::Split { project_id, layout_path, child_index, direction, container_bounds } => {
+        DragState::Split { project_id, layout_path, child_index, direction, container_bounds, initial_mouse_pos, initial_sizes } => {
             let bounds = *container_bounds;
             let is_horizontal = *direction == SplitDirection::Horizontal;
             let divider_index = *child_index;
@@ -75,26 +78,7 @@ pub fn compute_resize(
                 return;
             }
 
-            let pos = if is_horizontal {
-                f32::from(mouse_pos.y) - f32::from(bounds.origin.y)
-            } else {
-                f32::from(mouse_pos.x) - f32::from(bounds.origin.x)
-            };
-
-            // Get current sizes from workspace
-            let current_sizes = workspace.read(cx).project(project_id).and_then(|p| {
-                p.layout.as_ref()?.get_at_path(layout_path)
-            }).and_then(|node| {
-                if let crate::workspace::state::LayoutNode::Split { sizes, .. } = node {
-                    Some(sizes.clone())
-                } else {
-                    None
-                }
-            });
-
-            let Some(sizes) = current_sizes else { return };
-            let num_children = sizes.len();
-
+            let num_children = initial_sizes.len();
             if num_children < 2 {
                 return;
             }
@@ -107,22 +91,22 @@ pub fn compute_resize(
                 return;
             }
 
-            // Calculate cumulative size before the left child (offset where the pair starts)
-            let offset: f32 = sizes[..left_child].iter().sum();
-
             // Combined size of the two adjacent children
-            let combined_size = sizes[left_child] + sizes[right_child];
+            let combined_size = initial_sizes[left_child] + initial_sizes[right_child];
 
-            // Convert mouse position to percentage
-            let pos_percent = pos / container_size * 100.0;
+            // Delta-based resize: compute mouse movement since drag start
+            let delta = if is_horizontal {
+                f32::from(mouse_pos.y) - f32::from(initial_mouse_pos.y)
+            } else {
+                f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x)
+            };
+            let delta_percent = delta / container_size * 100.0;
 
-            // Calculate new size for left child (relative to container start)
-            // Then clamp to ensure minimum 5% for each child within the combined area
-            let left_size = (pos_percent - offset).clamp(5.0, combined_size - 5.0);
+            let left_size = (initial_sizes[left_child] + delta_percent).clamp(5.0, combined_size - 5.0);
             let right_size = combined_size - left_size;
 
             // Build new sizes: keep all others unchanged, update only the two adjacent
-            let mut new_sizes = sizes.clone();
+            let mut new_sizes = initial_sizes.clone();
             new_sizes[left_child] = left_size;
             new_sizes[right_child] = right_size;
 
@@ -179,6 +163,7 @@ pub fn compute_resize(
 
 /// Render an inline split divider handle element
 pub fn render_split_divider(
+    workspace: Entity<Workspace>,
     project_id: String,
     child_index: usize,
     direction: SplitDirection,
@@ -209,14 +194,28 @@ pub fn render_split_divider(
             let project_id = project_id.clone();
             let layout_path = layout_path.clone();
             let container_bounds = container_bounds.clone();
-            move |_event, _window, cx| {
+            move |event, _window, cx| {
                 let bounds = *container_bounds.borrow();
+
+                // Snapshot current sizes for delta-based resize
+                let initial_sizes = workspace.read(cx).project(&project_id).and_then(|p| {
+                    p.layout.as_ref()?.get_at_path(&layout_path)
+                }).and_then(|node| {
+                    if let crate::workspace::state::LayoutNode::Split { sizes, .. } = node {
+                        Some(sizes.clone())
+                    } else {
+                        None
+                    }
+                }).unwrap_or_default();
+
                 *active_drag.borrow_mut() = Some(DragState::Split {
                     project_id: project_id.clone(),
                     layout_path: layout_path.clone(),
                     child_index,
                     direction,
                     container_bounds: bounds,
+                    initial_mouse_pos: event.position,
+                    initial_sizes,
                 });
                 cx.stop_propagation();
             }
