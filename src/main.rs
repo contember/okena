@@ -12,6 +12,7 @@ mod simple_root;
 mod terminal;
 mod theme;
 mod ui;
+mod updater;
 mod views;
 mod workspace;
 
@@ -71,6 +72,12 @@ fn set_app_menus(cx: &mut App) {
 }
 
 fn main() {
+    // Handle --version before initializing anything (used by updater validation)
+    if std::env::args().any(|a| a == "--version") {
+        println!("okena {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     env_logger::init();
 
     Application::new().with_assets(Assets).run(|cx: &mut App| {

@@ -7,7 +7,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -18,6 +18,7 @@ use gpui::prelude::*;
 use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -786,6 +787,129 @@ impl Render for RootView {
             // Handle open settings file action
             .on_action(cx.listener(|_this, _: &OpenSettingsFile, _window, _cx| {
                 open_settings_file();
+            }))
+            // Handle check for updates action
+            .on_action(cx.listener(|_this, _: &CheckForUpdates, _window, cx| {
+                if let Some(update_info) = cx.try_global::<crate::updater::GlobalUpdateInfo>() {
+                    let info = update_info.0.clone();
+
+                    // Prevent concurrent manual checks
+                    if !info.try_start_manual() {
+                        return;
+                    }
+
+                    info.set_status(crate::updater::UpdateStatus::Checking);
+                    let token = info.current_token();
+                    cx.notify();
+                    cx.spawn(async move |_this, cx| {
+                        match crate::updater::checker::check_for_update().await {
+                            Ok(Some(release)) => {
+                                if info.is_homebrew() {
+                                    info.set_status(crate::updater::UpdateStatus::BrewUpdate {
+                                        version: release.version,
+                                    });
+                                    let _ = _this.update(cx, |_, cx| cx.notify());
+                                } else {
+                                    // Set downloading status and notify before the blocking download
+                                    info.set_status(crate::updater::UpdateStatus::Downloading {
+                                        version: release.version.clone(),
+                                        progress: 0,
+                                    });
+                                    let _ = _this.update(cx, |_, cx| cx.notify());
+
+                                    // Download with periodic UI refresh for progress
+                                    let download = crate::updater::downloader::download_asset(
+                                        release.asset_url,
+                                        release.asset_name,
+                                        release.version.clone(),
+                                        info.clone(),
+                                        token,
+                                        release.checksum_url,
+                                    );
+                                    let mut download = std::pin::pin!(download);
+
+                                    let download_result: anyhow::Result<std::path::PathBuf> = loop {
+                                        let polled = std::future::poll_fn(|task_cx| {
+                                            match download.as_mut().poll(task_cx) {
+                                                std::task::Poll::Ready(r) => std::task::Poll::Ready(Some(r)),
+                                                std::task::Poll::Pending => std::task::Poll::Ready(None),
+                                            }
+                                        }).await;
+                                        match polled {
+                                            Some(r) => break r,
+                                            None => {
+                                                smol::Timer::after(std::time::Duration::from_millis(250)).await;
+                                                let _ = _this.update(cx, |_, cx| cx.notify());
+                                            }
+                                        }
+                                    };
+
+                                    match download_result {
+                                        Ok(path) => {
+                                            info.set_status(crate::updater::UpdateStatus::Ready {
+                                                version: release.version,
+                                                path,
+                                            });
+                                            let _ = _this.update(cx, |_, cx| cx.notify());
+                                        }
+                                        Err(e) => {
+                                            log::error!("Download failed: {}", e);
+                                            info.set_status(crate::updater::UpdateStatus::Failed {
+                                                error: e.to_string(),
+                                            });
+                                            let _ = _this.update(cx, |_, cx| cx.notify());
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                info.set_status(crate::updater::UpdateStatus::Idle);
+                                let _ = _this.update(cx, |_, cx| cx.notify());
+                            }
+                            Err(e) => {
+                                log::error!("Update check failed: {}", e);
+                                info.set_status(crate::updater::UpdateStatus::Failed {
+                                    error: e.to_string(),
+                                });
+                                let _ = _this.update(cx, |_, cx| cx.notify());
+                            }
+                        }
+
+                        info.finish_manual();
+                    })
+                    .detach();
+                }
+            }))
+            // Handle install update action (dispatched from status bar)
+            .on_action(cx.listener(|_this, _: &InstallUpdate, _window, cx| {
+                if let Some(update_info) = cx.try_global::<crate::updater::GlobalUpdateInfo>() {
+                    let info = update_info.0.clone();
+                    if let crate::updater::UpdateStatus::Ready { version, path } = info.status() {
+                        info.set_status(crate::updater::UpdateStatus::Installing {
+                            version: version.clone(),
+                        });
+                        cx.notify();
+                        cx.spawn(async move |_this, cx| {
+                            let result = smol::unblock({
+                                move || crate::updater::installer::install_update(&path)
+                            }).await;
+                            match result {
+                                Ok(_) => {
+                                    info.set_status(crate::updater::UpdateStatus::ReadyToRestart {
+                                        version,
+                                    });
+                                }
+                                Err(e) => {
+                                    log::error!("Install failed: {}", e);
+                                    info.set_status(crate::updater::UpdateStatus::Failed {
+                                        error: e.to_string(),
+                                    });
+                                }
+                            }
+                            let _ = _this.update(cx, |_, cx| cx.notify());
+                        }).detach();
+                    }
+                }
             }))
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {

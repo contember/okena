@@ -227,6 +227,141 @@ impl Render for StatusBar {
                     }
                 }
 
+                // Show update status if available
+                if let Some(update_info) = cx.try_global::<crate::updater::GlobalUpdateInfo>() {
+                    let info = &update_info.0;
+                    if !info.is_dismissed() {
+                        match info.status() {
+                            crate::updater::UpdateStatus::Ready { version, .. } => {
+                                right = right.child(
+                                    div()
+                                        .id("update-ready")
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .bg(rgb(t.term_green))
+                                        .text_color(rgb(t.bg_primary))
+                                        .text_size(px(10.0))
+                                        .child(format!("Update v{}", version))
+                                        .on_click(move |_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(crate::keybindings::InstallUpdate),
+                                                cx,
+                                            );
+                                        })
+                                );
+                            }
+                            crate::updater::UpdateStatus::Installing { version } => {
+                                right = right.child(
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .text_color(rgb(t.term_yellow))
+                                        .text_size(px(10.0))
+                                        .child(format!("Installing v{}...", version))
+                                );
+                            }
+                            crate::updater::UpdateStatus::ReadyToRestart { version } => {
+                                right = right.child(
+                                    div()
+                                        .id("update-restart")
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .bg(rgb(t.term_green))
+                                        .text_color(rgb(t.bg_primary))
+                                        .text_size(px(10.0))
+                                        .child(format!("Restart to v{}", version))
+                                        .on_click(move |_, _, cx| {
+                                            crate::updater::installer::restart_app(cx);
+                                        })
+                                );
+                            }
+                            crate::updater::UpdateStatus::Downloading { version, progress } => {
+                                right = right.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(t.term_yellow))
+                                                .text_size(px(10.0))
+                                                .child(format!("Downloading v{}... {}%", version, progress))
+                                        )
+                                );
+                            }
+                            crate::updater::UpdateStatus::Checking => {
+                                right = right.child(
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .text_size(px(10.0))
+                                        .child("Checking for updates...")
+                                );
+                            }
+                            crate::updater::UpdateStatus::Failed { ref error } => {
+                                let info_dismiss = info.clone();
+                                right = right.child(
+                                    div()
+                                        .id("update-failed")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(t.term_red))
+                                                .text_size(px(10.0))
+                                                .child(format!("Update failed: {}", error))
+                                        )
+                                        .child(
+                                            div()
+                                                .id("update-failed-dismiss")
+                                                .cursor_pointer()
+                                                .text_color(rgb(t.text_muted))
+                                                .text_size(px(10.0))
+                                                .child("x")
+                                                .on_click(move |_, _, _cx| {
+                                                    info_dismiss.dismiss();
+                                                })
+                                        )
+                                );
+                            }
+                            crate::updater::UpdateStatus::BrewUpdate { version } => {
+                                let info_dismiss = info.clone();
+                                right = right.child(
+                                    div()
+                                        .id("update-brew")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.0))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(t.text_muted))
+                                                .text_size(px(10.0))
+                                                .child(format!("v{} — brew upgrade okena", version))
+                                        )
+                                        .child(
+                                            div()
+                                                .id("update-dismiss")
+                                                .cursor_pointer()
+                                                .text_color(rgb(t.text_muted))
+                                                .text_size(px(10.0))
+                                                .child("x")
+                                                .on_click(move |_, _, _cx| {
+                                                    info_dismiss.dismiss();
+                                                })
+                                        )
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 right
                     .child(
                         div()

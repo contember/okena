@@ -4,7 +4,7 @@ use crate::keybindings::{
     ShowFileSearch, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
     SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
     FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
-    Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree,
+    Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree, CheckForUpdates, InstallUpdate,
 };
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
@@ -117,6 +117,8 @@ impl CommandPalette {
                 "OpenSettingsFile" => window.dispatch_action(Box::new(OpenSettingsFile), cx),
                 "ShowFileSearch" => window.dispatch_action(Box::new(ShowFileSearch), cx),
                 "ShowDiffViewer" => window.dispatch_action(Box::new(ShowDiffViewer), cx),
+                "CheckForUpdates" => window.dispatch_action(Box::new(CheckForUpdates), cx),
+                "InstallUpdate" => window.dispatch_action(Box::new(InstallUpdate), cx),
                 _ => {
                     log::warn!("Unknown action in command palette: {}", action);
                 }
