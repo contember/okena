@@ -262,7 +262,7 @@ impl Muxy {
                         };
                         match found {
                             Some(term) => {
-                                term.send_input(&format!("{}\n", command));
+                                term.send_input(&format!("{}\r", command));
                                 CommandResult::Ok(None)
                             }
                             None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
