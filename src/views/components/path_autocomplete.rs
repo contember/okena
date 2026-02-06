@@ -24,6 +24,8 @@ pub struct PathAutoCompleteState {
     focus_handle: FocusHandle,
     /// Scroll handle for suggestions dropdown
     suggestions_scroll: ScrollHandle,
+    /// When true, suppress the next InputChangedEvent from triggering suggestions
+    suppress_suggestions: bool,
 }
 
 impl PathAutoCompleteState {
@@ -48,6 +50,7 @@ impl PathAutoCompleteState {
             show_suggestions: false,
             focus_handle,
             suggestions_scroll: ScrollHandle::new(),
+            suppress_suggestions: false,
         }
     }
 
@@ -60,6 +63,15 @@ impl PathAutoCompleteState {
             input.set_value(value, cx);
         });
         self.update_suggestions(cx);
+    }
+
+    /// Set value without triggering suggestions (e.g. from Browse picker)
+    pub fn set_value_quiet(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
+        self.suppress_suggestions = true;
+        self.input.update(cx, |input, cx| {
+            input.set_value(value, cx);
+        });
+        self.hide_suggestions(cx);
     }
 
     #[allow(dead_code)]
@@ -135,6 +147,10 @@ impl PathAutoCompleteState {
     }
 
     fn on_input_changed(&mut self, cx: &mut Context<Self>) {
+        if self.suppress_suggestions {
+            self.suppress_suggestions = false;
+            return;
+        }
         self.update_suggestions(cx);
     }
 
@@ -342,9 +358,9 @@ impl Render for PathAutoCompleteState {
             .w_full()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                // Stop all key events from bubbling to prevent terminal interference
-                cx.stop_propagation();
-                this.handle_key_down(event, cx);
+                if this.handle_key_down(event, cx) {
+                    cx.stop_propagation();
+                }
             }))
             .child(
                 div()
