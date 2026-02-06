@@ -342,6 +342,8 @@ impl Render for PathAutoCompleteState {
             .w_full()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // Stop all key events from bubbling to prevent terminal interference
+                cx.stop_propagation();
                 this.handle_key_down(event, cx);
             }))
             .child(

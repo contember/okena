@@ -174,6 +174,8 @@ impl Sidebar {
                                         cx.stop_propagation();
                                     })
                                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        // Stop all keys from bubbling
+                                        cx.stop_propagation();
                                         match event.keystroke.key.as_str() {
                                             "enter" => this.finish_project_rename(cx),
                                             "escape" => this.cancel_project_rename(cx),
@@ -415,6 +417,8 @@ impl Sidebar {
                                         cx.stop_propagation();
                                     })
                                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        // Stop all keys from bubbling
+                                        cx.stop_propagation();
                                         match event.keystroke.key.as_str() {
                                             "enter" => this.finish_project_rename(cx),
                                             "escape" => this.cancel_project_rename(cx),
@@ -667,6 +671,8 @@ impl Sidebar {
                                 cx.stop_propagation();
                             })
                             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                // Stop all keys from bubbling
+                                cx.stop_propagation();
                                 match event.keystroke.key.as_str() {
                                     "enter" => this.finish_rename(cx),
                                     "escape" => this.cancel_rename(cx),
@@ -917,6 +923,8 @@ impl Sidebar {
                                 cx.stop_propagation();
                             })
                             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                // Stop all keys from bubbling
+                                cx.stop_propagation();
                                 match event.keystroke.key.as_str() {
                                     "enter" => this.finish_rename(cx),
                                     "escape" => this.cancel_rename(cx),

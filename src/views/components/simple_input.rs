@@ -7,6 +7,17 @@ use std::time::Duration;
 /// Event emitted when input value changes
 pub struct InputChangedEvent;
 
+/// Result of key handling
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KeyHandled {
+    /// Key was handled, stop propagation
+    Handled,
+    /// Key was not handled, let parent handle (e.g., Enter, Escape with no selection)
+    NotHandled,
+    /// Key was ignored (modifier-only, function keys), don't stop propagation
+    Ignored,
+}
+
 /// A simple text input state that doesn't rely on gpui-component's Root entity
 pub struct SimpleInputState {
     focus_handle: FocusHandle,
@@ -160,37 +171,119 @@ impl SimpleInputState {
         cx.notify();
     }
 
-    fn move_cursor_left(&mut self, cx: &mut Context<Self>) {
-        self.selection = None;
+    fn move_cursor_left(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
         if self.cursor_position > 0 {
+            let old_pos = self.cursor_position;
             self.cursor_position -= 1;
+
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else if self.selection.is_some() {
+                // Move cursor to start of selection
+                self.cursor_position = self.selection.as_ref().unwrap().start;
+                self.selection = None;
+            }
+            if !extend_selection {
+                self.selection = None;
+            }
             self.reset_cursor_blink();
+            cx.notify();
+        } else if !extend_selection && self.selection.is_some() {
+            self.selection = None;
             cx.notify();
         }
     }
 
-    fn move_cursor_right(&mut self, cx: &mut Context<Self>) {
-        self.selection = None;
+    fn move_cursor_right(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
         let char_count = self.value.chars().count();
         if self.cursor_position < char_count {
+            let old_pos = self.cursor_position;
             self.cursor_position += 1;
+
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else if self.selection.is_some() {
+                // Move cursor to end of selection
+                self.cursor_position = self.selection.as_ref().unwrap().end;
+                self.selection = None;
+            }
+            if !extend_selection {
+                self.selection = None;
+            }
             self.reset_cursor_blink();
+            cx.notify();
+        } else if !extend_selection && self.selection.is_some() {
+            self.selection = None;
             cx.notify();
         }
     }
 
-    fn move_to_start(&mut self, cx: &mut Context<Self>) {
-        self.selection = None;
+    fn move_to_start(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        let old_pos = self.cursor_position;
         self.cursor_position = 0;
+
+        if extend_selection && old_pos > 0 {
+            self.extend_selection(old_pos, 0);
+        } else {
+            self.selection = None;
+        }
         self.reset_cursor_blink();
         cx.notify();
     }
 
-    fn move_to_end(&mut self, cx: &mut Context<Self>) {
-        self.selection = None;
-        self.cursor_position = self.value.chars().count();
+    fn move_to_end(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        let old_pos = self.cursor_position;
+        let char_count = self.value.chars().count();
+        self.cursor_position = char_count;
+
+        if extend_selection && old_pos < char_count {
+            self.extend_selection(old_pos, char_count);
+        } else {
+            self.selection = None;
+        }
         self.reset_cursor_blink();
         cx.notify();
+    }
+
+    /// Extend selection from anchor to new position
+    fn extend_selection(&mut self, anchor: usize, new_pos: usize) {
+        let (start, end) = if let Some(ref sel) = self.selection {
+            // Extend existing selection
+            if anchor == sel.end {
+                // Extending from end
+                if new_pos < sel.start {
+                    (new_pos, sel.start)
+                } else {
+                    (sel.start, new_pos)
+                }
+            } else {
+                // Extending from start
+                if new_pos > sel.end {
+                    (sel.end, new_pos)
+                } else {
+                    (new_pos, sel.end)
+                }
+            }
+        } else {
+            // Start new selection
+            (anchor.min(new_pos), anchor.max(new_pos))
+        };
+        if start != end {
+            self.selection = Some(start..end);
+        } else {
+            self.selection = None;
+        }
+    }
+
+    /// Clear selection without other side effects
+    fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.selection.is_some() {
+            self.selection = None;
+            cx.notify();
+            true
+        } else {
+            false
+        }
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
@@ -217,53 +310,66 @@ impl SimpleInputState {
         start..end
     }
 
-    fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    /// Handle key down event. Returns KeyHandled enum indicating how the key was processed.
+    fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> KeyHandled {
         let key = event.keystroke.key.as_str();
         let modifiers = &event.keystroke.modifiers;
+        let extend_selection = modifiers.shift;
 
         // Handle special keys
         match key {
             "backspace" => {
                 self.delete_backward(cx);
-                return true;
+                return KeyHandled::Handled;
             }
             "delete" => {
                 self.delete_forward(cx);
-                return true;
+                return KeyHandled::Handled;
             }
             "left" => {
                 if modifiers.platform || modifiers.control {
-                    self.move_to_start(cx);
+                    self.move_to_start(extend_selection, cx);
                 } else {
-                    self.move_cursor_left(cx);
+                    self.move_cursor_left(extend_selection, cx);
                 }
-                return true;
+                return KeyHandled::Handled;
             }
             "right" => {
                 if modifiers.platform || modifiers.control {
-                    self.move_to_end(cx);
+                    self.move_to_end(extend_selection, cx);
                 } else {
-                    self.move_cursor_right(cx);
+                    self.move_cursor_right(extend_selection, cx);
                 }
-                return true;
+                return KeyHandled::Handled;
             }
             "home" => {
-                self.move_to_start(cx);
-                return true;
+                self.move_to_start(extend_selection, cx);
+                return KeyHandled::Handled;
             }
             "end" => {
-                self.move_to_end(cx);
-                return true;
+                self.move_to_end(extend_selection, cx);
+                return KeyHandled::Handled;
             }
             "a" if modifiers.platform || modifiers.control => {
                 self.select_all(cx);
-                return true;
+                return KeyHandled::Handled;
             }
-            // Skip special keys that shouldn't insert text
-            "enter" | "escape" | "tab" | "shift" | "control" | "alt" | "meta" | "capslock"
+            "escape" => {
+                // If there's a selection, clear it. Otherwise let parent handle.
+                if self.clear_selection(cx) {
+                    return KeyHandled::Handled;
+                }
+                return KeyHandled::NotHandled;
+            }
+            // These keys are handled by parent (enter for confirm, tab for focus)
+            "enter" | "tab" => {
+                return KeyHandled::NotHandled;
+            }
+            // Skip modifier-only and function keys
+            "shift" | "control" | "alt" | "meta" | "capslock"
             | "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "f7" | "f8" | "f9" | "f10" | "f11"
             | "f12" | "up" | "down" | "pageup" | "pagedown" => {
-                return false;
+                return KeyHandled::Ignored;
             }
             _ => {}
         }
@@ -273,11 +379,16 @@ impl SimpleInputState {
             // Skip control characters (except for normal space/printable)
             if !s.is_empty() && !s.chars().next().map_or(true, |c| c.is_control() && c != ' ') {
                 self.insert_text(s, cx);
-                return true;
+                return KeyHandled::Handled;
             }
         }
 
-        false
+        KeyHandled::Ignored
+    }
+
+    /// Check if this input has a selection
+    pub fn has_selection(&self) -> bool {
+        self.selection.is_some()
     }
 }
 
@@ -321,7 +432,9 @@ impl Render for SimpleInputState {
                 this.focus(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.handle_key_down(event, cx);
+                if this.handle_key_down(event, cx) == KeyHandled::Handled {
+                    cx.stop_propagation();
+                }
             }))
             // Optional icon
             .when_some(icon, |d, icon_path| {

@@ -209,7 +209,6 @@ impl SearchBar {
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "enter" => {
-                cx.stop_propagation();
                 if event.keystroke.modifiers.shift {
                     self.prev_match(cx);
                 } else {
@@ -217,7 +216,6 @@ impl SearchBar {
                 }
             }
             "escape" => {
-                cx.stop_propagation();
                 self.close(cx);
             }
             _ => {
@@ -265,6 +263,8 @@ impl Render for SearchBar {
                             cx.stop_propagation();
                         })
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                            // Stop propagation for all keys to prevent terminal interference
+                            cx.stop_propagation();
                             this.handle_key_down(event, cx);
                         }))
                         .into_any_element()

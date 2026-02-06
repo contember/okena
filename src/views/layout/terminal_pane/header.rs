@@ -279,9 +279,19 @@ impl Render for TerminalHeader {
                                 .on_key_down(cx.listener(
                                     |this, event: &KeyDownEvent, _window, cx| {
                                         match event.keystroke.key.as_str() {
-                                            "enter" => this.finish_rename(cx),
-                                            "escape" => this.cancel_rename(cx),
-                                            _ => {}
+                                            "enter" => {
+                                                cx.stop_propagation();
+                                                this.finish_rename(cx);
+                                            }
+                                            "escape" => {
+                                                cx.stop_propagation();
+                                                this.cancel_rename(cx);
+                                            }
+                                            _ => {
+                                                // Stop propagation for all other printable characters
+                                                // to prevent them from going to the terminal
+                                                cx.stop_propagation();
+                                            }
                                         }
                                     },
                                 ))

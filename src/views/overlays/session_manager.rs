@@ -1,6 +1,6 @@
 use crate::settings::settings_entity;
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput, SimpleInputState};
 use crate::workspace::persistence::{
     config_dir, delete_session, export_workspace, import_workspace, list_sessions,
     load_session, rename_session, save_session, session_exists, SessionInfo,
@@ -14,13 +14,17 @@ pub struct SessionManager {
     workspace: Entity<Workspace>,
     focus_handle: FocusHandle,
     sessions: Vec<SessionInfo>,
-    new_session_name: String,
-    rename_session_name: String,
+    /// Input for new session name
+    new_session_input: Entity<SimpleInputState>,
+    /// Input for renaming session (created when rename starts)
+    rename_input: Option<Entity<SimpleInputState>>,
     renaming_session: Option<String>,
     error_message: Option<String>,
     show_delete_confirmation: Option<String>,
-    export_path: String,
-    import_path: String,
+    /// Input for export path
+    export_path_input: Entity<SimpleInputState>,
+    /// Input for import path
+    import_path_input: Entity<SimpleInputState>,
     active_tab: SessionManagerTab,
 }
 
@@ -36,21 +40,35 @@ impl SessionManager {
         let focus_handle = cx.focus_handle();
 
         // Default export path
-        let export_path = dirs::home_dir()
+        let default_export_path = dirs::home_dir()
             .map(|p| p.join("workspace-export.json").to_string_lossy().to_string())
             .unwrap_or_else(|| "workspace-export.json".to_string());
+
+        let new_session_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("Enter session name...")
+        });
+
+        let export_path_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Enter export path...")
+                .default_value(default_export_path)
+        });
+
+        let import_path_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("Enter path to import...")
+        });
 
         Self {
             workspace,
             focus_handle,
             sessions,
-            new_session_name: String::new(),
-            rename_session_name: String::new(),
+            new_session_input,
+            rename_input: None,
             renaming_session: None,
             error_message: None,
             show_delete_confirmation: None,
-            export_path,
-            import_path: String::new(),
+            export_path_input,
+            import_path_input,
             active_tab: SessionManagerTab::Sessions,
         }
     }
@@ -65,7 +83,7 @@ impl SessionManager {
     }
 
     fn save_new_session(&mut self, cx: &mut Context<Self>) {
-        let name = self.new_session_name.trim().to_string();
+        let name = self.new_session_input.read(cx).value().trim().to_string();
         if name.is_empty() {
             self.error_message = Some("Session name cannot be empty".to_string());
             cx.notify();
@@ -81,7 +99,9 @@ impl SessionManager {
         let data = self.workspace.read(cx).data.clone();
         match save_session(&name, &data) {
             Ok(()) => {
-                self.new_session_name.clear();
+                self.new_session_input.update(cx, |input, cx| {
+                    input.set_value("", cx);
+                });
                 self.refresh_sessions();
                 self.error_message = None;
             }
@@ -107,29 +127,43 @@ impl SessionManager {
         }
     }
 
-    fn start_rename(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn start_rename(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let rename_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Session name...")
+                .default_value(name)
+        });
+        rename_input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        self.rename_input = Some(rename_input);
         self.renaming_session = Some(name.to_string());
-        self.rename_session_name = name.to_string();
         cx.notify();
     }
 
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         self.renaming_session = None;
-        self.rename_session_name.clear();
+        self.rename_input = None;
         cx.notify();
     }
 
     fn confirm_rename(&mut self, cx: &mut Context<Self>) {
+        let new_name = self.rename_input
+            .as_ref()
+            .map(|input| input.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+
         if let Some(old_name) = self.renaming_session.take() {
-            let new_name = self.rename_session_name.trim().to_string();
             if new_name.is_empty() {
                 self.error_message = Some("Session name cannot be empty".to_string());
+                self.rename_input = None;
                 cx.notify();
                 return;
             }
 
             if new_name != old_name && session_exists(&new_name) {
                 self.error_message = Some(format!("Session '{}' already exists", new_name));
+                self.rename_input = None;
                 cx.notify();
                 return;
             }
@@ -146,7 +180,7 @@ impl SessionManager {
                 }
             }
         }
-        self.rename_session_name.clear();
+        self.rename_input = None;
         cx.notify();
     }
 
@@ -175,7 +209,7 @@ impl SessionManager {
     }
 
     fn export_current(&mut self, cx: &mut Context<Self>) {
-        let path = self.export_path.trim();
+        let path = self.export_path_input.read(cx).value().trim().to_string();
         if path.is_empty() {
             self.error_message = Some("Export path cannot be empty".to_string());
             cx.notify();
@@ -183,7 +217,7 @@ impl SessionManager {
         }
 
         let data = self.workspace.read(cx).data.clone();
-        match export_workspace(&data, std::path::Path::new(path)) {
+        match export_workspace(&data, std::path::Path::new(&path)) {
             Ok(()) => {
                 self.error_message = None;
                 // Show success message briefly
@@ -197,14 +231,14 @@ impl SessionManager {
     }
 
     fn import_from_file(&mut self, cx: &mut Context<Self>) {
-        let path = self.import_path.trim();
+        let path = self.import_path_input.read(cx).value().trim().to_string();
         if path.is_empty() {
             self.error_message = Some("Import path cannot be empty".to_string());
             cx.notify();
             return;
         }
 
-        match import_workspace(std::path::Path::new(path)) {
+        match import_workspace(std::path::Path::new(&path)) {
             Ok(data) => {
                 cx.emit(SessionManagerEvent::SwitchWorkspace(data));
                 self.error_message = None;
@@ -373,8 +407,8 @@ impl SessionManager {
                                 .child("Rename")
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _, _window, cx| {
-                                        this.start_rename(&name_for_rename, cx);
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.start_rename(&name_for_rename, window, cx);
                                     }),
                                 ),
                         )
@@ -400,79 +434,90 @@ impl SessionManager {
                 )
             })
             .when(is_renaming, |d| {
-                // Rename mode
-                let rename_name = self.rename_session_name.clone();
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .w_full()
-                        .child(
-                            div()
-                                .flex_1()
-                                .px(px(8.0))
-                                .py(px(4.0))
-                                .bg(rgb(t.bg_secondary))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(rgb(t.border_active))
-                                .text_size(px(13.0))
-                                .text_color(rgb(t.text_primary))
-                                .child(rename_name),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .id("rename-confirm")
-                                        .cursor_pointer()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.button_primary_bg))
-                                        .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.button_primary_fg))
-                                        .child("Save")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.confirm_rename(cx);
-                                            }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id("rename-cancel")
-                                        .cursor_pointer()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Cancel")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.cancel_rename(cx);
-                                            }),
-                                        ),
-                                ),
-                        ),
-                )
+                // Rename mode with SimpleInput
+                if let Some(ref rename_input) = self.rename_input {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .w_full()
+                            .child(
+                                div()
+                                    .id("rename-input-wrapper")
+                                    .flex_1()
+                                    .bg(rgb(t.bg_secondary))
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(rgb(t.border_active))
+                                    .child(SimpleInput::new(rename_input).text_size(px(13.0)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        match event.keystroke.key.as_str() {
+                                            "enter" => this.confirm_rename(cx),
+                                            "escape" => this.cancel_rename(cx),
+                                            _ => {}
+                                        }
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .id("rename-confirm")
+                                            .cursor_pointer()
+                                            .px(px(10.0))
+                                            .py(px(4.0))
+                                            .rounded(px(4.0))
+                                            .bg(rgb(t.button_primary_bg))
+                                            .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(t.button_primary_fg))
+                                            .child("Save")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _window, cx| {
+                                                    this.confirm_rename(cx);
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("rename-cancel")
+                                            .cursor_pointer()
+                                            .px(px(10.0))
+                                            .py(px(4.0))
+                                            .rounded(px(4.0))
+                                            .bg(rgb(t.bg_secondary))
+                                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(t.text_primary))
+                                            .child("Cancel")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _window, cx| {
+                                                    this.cancel_rename(cx);
+                                                }),
+                                            ),
+                                    ),
+                            ),
+                    )
+                } else {
+                    d
+                }
             })
     }
 
-    fn render_sessions_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sessions_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let sessions = self.sessions.clone();
-        let new_name = self.new_session_name.clone();
+        let new_session_input = self.new_session_input.clone();
 
         div()
             .flex()
@@ -493,24 +538,22 @@ impl SessionManager {
                             .gap(px(8.0))
                             .child(
                                 div()
+                                    .id("new-session-input-wrapper")
                                     .flex_1()
-                                    .px(px(10.0))
-                                    .py(px(8.0))
                                     .bg(rgb(t.bg_secondary))
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border))
-                                    .text_size(px(13.0))
-                                    .text_color(if new_name.is_empty() {
-                                        rgb(t.text_muted)
-                                    } else {
-                                        rgb(t.text_primary)
+                                    .child(SimpleInput::new(&new_session_input).text_size(px(13.0)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
                                     })
-                                    .child(if new_name.is_empty() {
-                                        "Enter session name...".to_string()
-                                    } else {
-                                        new_name
-                                    }),
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        if event.keystroke.key.as_str() == "enter" {
+                                            this.save_new_session(cx);
+                                        }
+                                    })),
                             )
                             .child(
                                 div()
@@ -560,10 +603,10 @@ impl SessionManager {
             )
     }
 
-    fn render_export_import_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_export_import_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let export_path = self.export_path.clone();
-        let import_path = self.import_path.clone();
+        let export_path_input = self.export_path_input.clone();
+        let import_path_input = self.import_path_input.clone();
 
         div()
             .flex()
@@ -600,17 +643,23 @@ impl SessionManager {
                             .mt(px(4.0))
                             .child(
                                 div()
+                                    .id("export-path-input-wrapper")
                                     .flex_1()
-                                    .px(px(10.0))
-                                    .py(px(8.0))
                                     .bg(rgb(t.bg_secondary))
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border))
-                                    .text_size(px(12.0))
                                     .font_family("monospace")
-                                    .text_color(rgb(t.text_primary))
-                                    .child(export_path),
+                                    .child(SimpleInput::new(&export_path_input).text_size(px(12.0)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        if event.keystroke.key.as_str() == "enter" {
+                                            this.export_current(cx);
+                                        }
+                                    })),
                             )
                             .child(
                                 div()
@@ -660,25 +709,23 @@ impl SessionManager {
                             .mt(px(4.0))
                             .child(
                                 div()
+                                    .id("import-path-input-wrapper")
                                     .flex_1()
-                                    .px(px(10.0))
-                                    .py(px(8.0))
                                     .bg(rgb(t.bg_secondary))
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border))
-                                    .text_size(px(12.0))
                                     .font_family("monospace")
-                                    .text_color(if import_path.is_empty() {
-                                        rgb(t.text_muted)
-                                    } else {
-                                        rgb(t.text_primary)
+                                    .child(SimpleInput::new(&import_path_input).text_size(px(12.0)))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
                                     })
-                                    .child(if import_path.is_empty() {
-                                        "Enter path to import...".to_string()
-                                    } else {
-                                        import_path
-                                    }),
+                                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                        cx.stop_propagation();
+                                        if event.keystroke.key.as_str() == "enter" {
+                                            this.import_from_file(cx);
+                                        }
+                                    })),
                             )
                             .child(
                                 div()
@@ -750,7 +797,10 @@ impl Render for SessionManager {
             .items_center()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
+                    // Only close if not renaming (escape in rename input is handled there)
+                    if this.renaming_session.is_none() {
+                        this.close(cx);
+                    }
                 }
             }))
             .on_mouse_down(

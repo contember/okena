@@ -31,7 +31,7 @@ pub use rename_state::{
     cancel_rename, finish_rename, is_renaming, rename_input, start_rename, start_rename_with_blur,
     RenameState,
 };
-pub use simple_input::{SimpleInput, SimpleInputState};
+pub use simple_input::{KeyHandled, SimpleInput, SimpleInputState};
 pub use syntax::{highlight_content, HighlightedLine};
 pub use code_view::{
     get_scrollbar_geometry, get_selected_text, start_scrollbar_drag, update_scrollbar_drag,
