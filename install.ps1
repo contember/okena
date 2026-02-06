@@ -1,5 +1,5 @@
 # Term Manager Windows Installer
-# Usage: irm https://raw.githubusercontent.com/contember/term-manager/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
 # Or: .\install.ps1 [-Version "1.0.0"]
 
 param(
@@ -8,9 +8,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "contember/term-manager"
+$Repo = "contember/okena"
 $InstallDir = "$env:LOCALAPPDATA\Programs\Term Manager"
-$BinName = "term-manager.exe"
+$BinName = "okena.exe"
 
 # Get version
 if (-not $Version) {
@@ -27,10 +27,10 @@ if (-not $Version) {
 Write-Host "Installing Term Manager v$Version..."
 
 # Download
-$Artifact = "term-manager-windows-x64"
+$Artifact = "okena-windows-x64"
 $DownloadUrl = "https://github.com/$Repo/releases/download/v$Version/$Artifact.zip"
 $TempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
-$ZipPath = Join-Path $TempDir "term-manager.zip"
+$ZipPath = Join-Path $TempDir "okena.zip"
 
 Write-Host "Downloading from $DownloadUrl..."
 Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath -UseBasicParsing
@@ -76,6 +76,6 @@ Write-Host ""
 Write-Host "  Location: $InstallDir\$BinName"
 Write-Host "  Shortcut: $ShortcutPath"
 Write-Host ""
-Write-Host "Launch from Start Menu or run: term-manager"
+Write-Host "Launch from Start Menu or run: okena"
 Write-Host ""
 Write-Host "Note: You may need to restart your terminal for PATH changes to take effect."

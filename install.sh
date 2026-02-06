@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REPO="contember/term-manager"
+REPO="contember/okena"
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -39,14 +39,14 @@ trap "rm -rf $TMP_DIR" EXIT
 
 if [ "$OS" = "darwin" ]; then
   # macOS installation
-  ARTIFACT="term-manager-macos-${ARCH}"
+  ARTIFACT="okena-macos-${ARCH}"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARTIFACT}.zip"
 
   echo "Downloading from ${DOWNLOAD_URL}..."
-  curl -sL "$DOWNLOAD_URL" -o "$TMP_DIR/term-manager.zip"
+  curl -sL "$DOWNLOAD_URL" -o "$TMP_DIR/okena.zip"
 
   echo "Extracting..."
-  unzip -q "$TMP_DIR/term-manager.zip" -d "$TMP_DIR"
+  unzip -q "$TMP_DIR/okena.zip" -d "$TMP_DIR"
 
   # Remove old installation if exists
   if [ -d "/Applications/Term Manager.app" ]; then
@@ -72,7 +72,7 @@ if [ "$OS" = "darwin" ]; then
 
 else
   # Linux installation
-  ARTIFACT="term-manager-linux-x64"
+  ARTIFACT="okena-linux-x64"
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/v${VERSION}/${ARTIFACT}.tar.gz"
 
   echo "Downloading from ${DOWNLOAD_URL}..."
@@ -81,29 +81,29 @@ else
   # Install binary
   INSTALL_DIR="${HOME}/.local/bin"
   mkdir -p "$INSTALL_DIR"
-  mv "$TMP_DIR/term-manager" "$INSTALL_DIR/"
-  chmod +x "$INSTALL_DIR/term-manager"
+  mv "$TMP_DIR/okena" "$INSTALL_DIR/"
+  chmod +x "$INSTALL_DIR/okena"
 
   # Install icons
   ICON_DIR="${HOME}/.local/share/icons/hicolor"
   for size in 16 32 48 64 128 256 512; do
     mkdir -p "$ICON_DIR/${size}x${size}/apps"
     if [ -f "$TMP_DIR/icons/app-icon-${size}.png" ]; then
-      cp "$TMP_DIR/icons/app-icon-${size}.png" "$ICON_DIR/${size}x${size}/apps/term-manager.png"
+      cp "$TMP_DIR/icons/app-icon-${size}.png" "$ICON_DIR/${size}x${size}/apps/okena.png"
     fi
   done
 
   # Install scalable icon
   mkdir -p "$ICON_DIR/scalable/apps"
   if [ -f "$TMP_DIR/icons/app-icon-simple.svg" ]; then
-    cp "$TMP_DIR/icons/app-icon-simple.svg" "$ICON_DIR/scalable/apps/term-manager.svg"
+    cp "$TMP_DIR/icons/app-icon-simple.svg" "$ICON_DIR/scalable/apps/okena.svg"
   fi
 
   # Install desktop entry
   DESKTOP_DIR="${HOME}/.local/share/applications"
   mkdir -p "$DESKTOP_DIR"
-  if [ -f "$TMP_DIR/term-manager.desktop" ]; then
-    cp "$TMP_DIR/term-manager.desktop" "$DESKTOP_DIR/"
+  if [ -f "$TMP_DIR/okena.desktop" ]; then
+    cp "$TMP_DIR/okena.desktop" "$DESKTOP_DIR/"
   fi
 
   # Update icon cache
@@ -119,8 +119,8 @@ else
   echo ""
   echo "✓ Term Manager installed successfully"
   echo ""
-  echo "  Binary: $INSTALL_DIR/term-manager"
-  echo "  Desktop entry: $DESKTOP_DIR/term-manager.desktop"
+  echo "  Binary: $INSTALL_DIR/okena"
+  echo "  Desktop entry: $DESKTOP_DIR/okena.desktop"
   echo ""
 
   # Check if ~/.local/bin is in PATH
@@ -132,5 +132,5 @@ else
     echo ""
   fi
 
-  echo "Launch from your application menu or run: term-manager"
+  echo "Launch from your application menu or run: okena"
 fi
