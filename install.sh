@@ -31,7 +31,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-echo "Installing Term Manager v${VERSION} for ${OS}/${ARCH}..."
+echo "Installing Okena v${VERSION} for ${OS}/${ARCH}..."
 
 # Create temp directory
 TMP_DIR=$(mktemp -d)
@@ -49,24 +49,24 @@ if [ "$OS" = "darwin" ]; then
   unzip -q "$TMP_DIR/okena.zip" -d "$TMP_DIR"
 
   # Remove old installation if exists
-  if [ -d "/Applications/Term Manager.app" ]; then
+  if [ -d "/Applications/Okena.app" ]; then
     echo "Removing existing installation..."
-    rm -rf "/Applications/Term Manager.app"
+    rm -rf "/Applications/Okena.app"
   fi
 
   echo "Installing to /Applications..."
-  mv "$TMP_DIR/Term Manager.app" "/Applications/"
+  mv "$TMP_DIR/Okena.app" "/Applications/"
 
   # Remove quarantine attribute
   echo "Removing quarantine attribute..."
-  xattr -rd com.apple.quarantine "/Applications/Term Manager.app" 2>/dev/null || true
+  xattr -rd com.apple.quarantine "/Applications/Okena.app" 2>/dev/null || true
 
   # Ad-hoc code signing
   echo "Signing application..."
-  codesign --force --deep --sign - "/Applications/Term Manager.app" 2>/dev/null || true
+  codesign --force --deep --sign - "/Applications/Okena.app" 2>/dev/null || true
 
   echo ""
-  echo "✓ Term Manager installed to /Applications/Term Manager.app"
+  echo "✓ Okena installed to /Applications/Okena.app"
   echo ""
   echo "You can now launch it from Applications or Spotlight."
 
@@ -117,7 +117,7 @@ else
   fi
 
   echo ""
-  echo "✓ Term Manager installed successfully"
+  echo "✓ Okena installed successfully"
   echo ""
   echo "  Binary: $INSTALL_DIR/okena"
   echo "  Desktop entry: $DESKTOP_DIR/okena.desktop"

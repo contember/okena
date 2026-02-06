@@ -1,4 +1,4 @@
-# Homebrew Cask for Term Manager
+# Homebrew Cask for Okena
 # This file is automatically updated by CI on release.
 # To install: brew tap contember/okena && brew install --cask okena
 
@@ -10,7 +10,7 @@ cask "okena" do
          intel: "49298159dd5caf8fcad4e5d02823966185c9558bb38bb17f8f3c91cff962c112"
 
   url "https://github.com/contember/okena/releases/download/v#{version}/okena-macos-#{arch}.zip"
-  name "Term Manager"
+  name "Okena"
   desc "Terminal multiplexer for managing multiple terminal sessions"
   homepage "https://github.com/contember/okena"
 
@@ -19,7 +19,7 @@ cask "okena" do
     strategy :github_latest
   end
 
-  app "Term Manager.app"
+  app "Okena.app"
 
   zap trash: [
     "~/.config/okena",

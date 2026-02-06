@@ -1,4 +1,4 @@
-# Term Manager Windows Installer
+# Okena Windows Installer
 # Usage: irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
 # Or: .\install.ps1 [-Version "1.0.0"]
 
@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "contember/okena"
-$InstallDir = "$env:LOCALAPPDATA\Programs\Term Manager"
+$InstallDir = "$env:LOCALAPPDATA\Programs\Okena"
 $BinName = "okena.exe"
 
 # Get version
@@ -24,7 +24,7 @@ if (-not $Version) {
     }
 }
 
-Write-Host "Installing Term Manager v$Version..."
+Write-Host "Installing Okena v$Version..."
 
 # Download
 $Artifact = "okena-windows-x64"
@@ -57,7 +57,7 @@ if ($UserPath -notlike "*$InstallDir*") {
 
 # Create Start Menu shortcut
 $StartMenuDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
-$ShortcutPath = Join-Path $StartMenuDir "Term Manager.lnk"
+$ShortcutPath = Join-Path $StartMenuDir "Okena.lnk"
 
 Write-Host "Creating Start Menu shortcut..."
 $WshShell = New-Object -ComObject WScript.Shell
@@ -71,7 +71,7 @@ $Shortcut.Save()
 Remove-Item -Recurse -Force $TempDir
 
 Write-Host ""
-Write-Host "Term Manager installed successfully!" -ForegroundColor Green
+Write-Host "Okena installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Location: $InstallDir\$BinName"
 Write-Host "  Shortcut: $ShortcutPath"
