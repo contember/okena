@@ -556,7 +556,7 @@ impl Sidebar {
 
             for (id, is_minimized) in &minimized_states {
                 container = container.child(
-                    self.render_terminal_item(&project_id, id, project, *is_minimized, window, cx)
+                    self.render_terminal_item(&project_id, id, project, *is_minimized, 28.0, "", cx)
                 );
             }
         }
