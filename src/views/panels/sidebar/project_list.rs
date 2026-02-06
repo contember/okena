@@ -305,7 +305,7 @@ impl Sidebar {
 
                 // Show all terminals (minimized ones will be dimmed with different icon)
                 let terminal_elements: Vec<_> = minimized_states.iter().map(|(id, is_minimized)| {
-                    self.render_terminal_item(&project_id, id, project, *is_minimized, window, cx).into_any_element()
+                    self.render_terminal_item(&project_id, id, project, *is_minimized, 28.0, "", cx).into_any_element()
                 }).collect();
 
                 d.children(terminal_elements)
@@ -539,258 +539,11 @@ impl Sidebar {
                 };
 
                 let terminal_elements: Vec<_> = minimized_states.iter().map(|(id, is_minimized)| {
-                    self.render_worktree_terminal_item(&project_id, id, project, *is_minimized, window, cx).into_any_element()
+                    self.render_terminal_item(&project_id, id, project, *is_minimized, 48.0, "wt-", cx).into_any_element()
                 }).collect();
 
                 d.children(terminal_elements)
             })
-    }
-
-    /// Renders a terminal item inside a worktree project (extra indentation)
-    fn render_worktree_terminal_item(
-        &self,
-        project_id: &str,
-        terminal_id: &str,
-        project: &ProjectData,
-        is_minimized: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // Reuse the standard terminal item but override the left padding
-        let t = theme(cx);
-        let workspace = self.workspace.clone();
-        let workspace_for_focus = self.workspace.clone();
-        let workspace_for_minimize = self.workspace.clone();
-        let project_id = project_id.to_string();
-        let project_id_for_focus = project_id.clone();
-        let project_id_for_minimize = project_id.clone();
-        let project_id_for_rename = project_id.clone();
-        let terminal_id_owned = terminal_id.to_string();
-        let terminal_id_for_focus = terminal_id.to_string();
-        let terminal_id_for_minimize = terminal_id.to_string();
-        let terminal_id_for_rename = terminal_id.to_string();
-
-        let (terminal_name, has_bell) = {
-            let terminals = self.terminals.lock();
-            if let Some(terminal) = terminals.get(terminal_id) {
-                let name = if let Some(custom_name) = project.terminal_names.get(terminal_id) {
-                    custom_name.clone()
-                } else {
-                    terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
-                };
-                (name, terminal.has_bell())
-            } else {
-                let name = project.terminal_names.get(terminal_id)
-                    .cloned()
-                    .unwrap_or_else(|| terminal_id.chars().take(8).collect());
-                (name, false)
-            }
-        };
-
-        let is_renaming = is_renaming(&self.terminal_rename, &(project_id.clone(), terminal_id.to_string()));
-
-        let is_focused = {
-            let ws = self.workspace.read(cx);
-            ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
-                if let Some(proj) = ws.project(&project_id) {
-                    proj.layout.as_ref()
-                        .and_then(|l| l.find_terminal_path(&terminal_id_for_focus))
-                        .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
-                } else {
-                    false
-                }
-            })
-        };
-
-        let terminal_name_for_rename = terminal_name.clone();
-
-        div()
-            .id(ElementId::Name(format!("wt-terminal-item-{}", terminal_id).into()))
-            .group("terminal-item")
-            .h(px(22.0))
-            .pl(px(48.0))  // Extra indentation for worktree terminals
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_minimized, |d| d.opacity(0.5))
-            .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
-            .on_click({
-                let workspace = workspace_for_focus.clone();
-                let project_id = project_id_for_focus.clone();
-                let terminal_id = terminal_id_for_focus.clone();
-                move |_, _window, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
-                    });
-                }
-            })
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        svg()
-                            .path(if has_bell {
-                                "icons/bell.svg"
-                            } else if is_minimized {
-                                "icons/terminal-minimized.svg"
-                            } else {
-                                "icons/terminal.svg"
-                            })
-                            .size(px(12.0))
-                            .text_color(if has_bell {
-                                rgb(t.border_bell)
-                            } else if is_minimized {
-                                rgb(t.text_muted)
-                            } else {
-                                rgb(t.success)
-                            })
-                    ),
-            )
-            .child(
-                if is_renaming {
-                    if let Some(input) = rename_input(&self.terminal_rename) {
-                        div()
-                            .id("wt-terminal-rename-input")
-                            .flex_1()
-                            .min_w_0()
-                            .bg(rgb(t.bg_hover))
-                            .rounded(px(2.0))
-                            .child(
-                                SimpleInput::new(input)
-                                    .text_size(px(12.0))
-                            )
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(|_, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                // Stop all keys from bubbling
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_rename(cx),
-                                    "escape" => this.cancel_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().min_w_0().into_any_element()
-                    }
-                } else {
-                    div()
-                        .id(ElementId::Name(format!("wt-terminal-name-{}", terminal_id).into()))
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_size(px(12.0))
-                        .text_color(rgb(t.text_primary))
-                        .text_ellipsis()
-                        .child(terminal_name)
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_click(cx.listener({
-                            let workspace = workspace_for_focus.clone();
-                            let project_id = project_id_for_rename;
-                            let project_id_for_focus = project_id_for_focus.clone();
-                            let terminal_id = terminal_id_for_rename;
-                            let terminal_id_for_focus = terminal_id_for_focus.clone();
-                            let name = terminal_name_for_rename;
-                            move |this, _event: &ClickEvent, window, cx| {
-                                if this.check_double_click(&terminal_id) {
-                                    this.start_rename(project_id.clone(), terminal_id.clone(), name.clone(), window, cx);
-                                } else {
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.focus_terminal_by_id(&project_id_for_focus, &terminal_id_for_focus, cx);
-                                    });
-                                }
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .into_any_element()
-                },
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .gap(px(2.0))
-                    .opacity(0.0)
-                    .group_hover("terminal-item", |s| s.opacity(1.0))
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("wt-minimize-{}", terminal_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                workspace_for_minimize.update(cx, |ws, cx| {
-                                    ws.toggle_terminal_minimized_by_id(&project_id_for_minimize, &terminal_id_for_minimize, cx);
-                                });
-                            })
-                            .child(
-                                svg()
-                                    .path("icons/minimize.svg")
-                                    .size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .tooltip({
-                                let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
-                                move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("wt-fullscreen-{}", terminal_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                workspace.update(cx, |ws, cx| {
-                                    ws.set_fullscreen_terminal(
-                                        project_id.clone(),
-                                        terminal_id_owned.clone(),
-                                        cx,
-                                    );
-                                });
-                            })
-                            .child(
-                                svg()
-                                    .path("icons/fullscreen.svg")
-                                    .size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
-                            .tooltip(|_window, cx| Tooltip::new("Fullscreen").build(_window, cx)),
-                    ),
-            )
     }
 
     pub(super) fn render_terminal_item(
@@ -799,7 +552,8 @@ impl Sidebar {
         terminal_id: &str,
         project: &ProjectData,
         is_minimized: bool,
-        _window: &mut Window,
+        left_padding: f32,
+        id_prefix: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
@@ -854,10 +608,10 @@ impl Sidebar {
         let terminal_name_for_rename = terminal_name.clone();
 
         div()
-            .id(ElementId::Name(format!("terminal-item-{}", terminal_id).into()))
+            .id(ElementId::Name(format!("{}terminal-item-{}", id_prefix, terminal_id).into()))
             .group("terminal-item")
             .h(px(22.0))
-            .pl(px(28.0))
+            .pl(px(left_padding))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -910,7 +664,7 @@ impl Sidebar {
                 if is_renaming {
                     if let Some(input) = rename_input(&self.terminal_rename) {
                         div()
-                            .id("terminal-rename-input")
+                            .id(ElementId::Name(format!("{}terminal-rename-input", id_prefix).into()))
                             .flex_1()
                             .min_w_0()
                             .bg(rgb(t.bg_hover))
@@ -940,7 +694,7 @@ impl Sidebar {
                     }
                 } else {
                     div()
-                        .id(ElementId::Name(format!("terminal-name-{}", terminal_id).into()))
+                        .id(ElementId::Name(format!("{}terminal-name-{}", id_prefix, terminal_id).into()))
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
@@ -984,7 +738,7 @@ impl Sidebar {
                     .child(
                         // Minimize/restore button
                         div()
-                            .id(ElementId::Name(format!("minimize-{}", terminal_id).into()))
+                            .id(ElementId::Name(format!("{}minimize-{}", id_prefix, terminal_id).into()))
                             .cursor_pointer()
                             .w(px(18.0))
                             .h(px(18.0))
@@ -1016,7 +770,7 @@ impl Sidebar {
                     .child(
                         // Fullscreen button
                         div()
-                            .id(ElementId::Name(format!("fullscreen-{}", terminal_id).into()))
+                            .id(ElementId::Name(format!("{}fullscreen-{}", id_prefix, terminal_id).into()))
                             .cursor_pointer()
                             .w(px(18.0))
                             .h(px(18.0))
