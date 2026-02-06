@@ -183,25 +183,27 @@ pub fn keyboard_hints_footer(hints: &[(&str, &str)], t: &ThemeColors) -> Div {
 pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
     let mut container = div()
         .flex()
-        .rounded(RADIUS_STD)
+        .rounded(px(6.0))
         .bg(rgb(t.bg_secondary))
-        .p(px(2.0));
+        .p(px(3.0));
 
     for (i, &(label, is_active)) in options.iter().enumerate() {
         let mut button = div()
-            .px(SPACE_MD)
-            .py(px(3.0))
-            .rounded(RADIUS_MD)
-            .text_size(TEXT_MS)
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(4.0))
+            .text_size(px(12.0))
             .cursor_pointer();
 
         if is_active {
             button = button
                 .bg(rgb(t.bg_primary))
-                .text_color(rgb(t.text_primary));
+                .text_color(rgb(t.text_primary))
+                .shadow_sm();
         } else {
             button = button
-                .text_color(rgb(t.text_muted));
+                .text_color(rgb(t.text_muted))
+                .hover(|s| s.text_color(rgb(t.text_secondary)));
         }
 
         // Add small gap between buttons

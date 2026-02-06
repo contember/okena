@@ -8,6 +8,14 @@ use crate::ui::Selection2DExtension;
 use gpui::prelude::*;
 use gpui::*;
 
+/// Helper to create rgba from u32 color and alpha.
+fn rgba(color: u32, alpha: f32) -> Rgba {
+    let r = ((color >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
+    let b = (color & 0xFF) as f32 / 255.0;
+    Rgba { r, g, b, a: alpha }
+}
+
 impl DiffViewer {
     /// Calculate column position from x coordinate.
     pub(super) fn x_to_column(&self, x: f32, gutter_width: f32) -> usize {
@@ -25,8 +33,16 @@ impl DiffViewer {
         t: &ThemeColors,
         gutter_width: f32,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Stateful<Div> {
         let has_selection = self.selection.line_has_selection(line_index);
+        let font_size = self.file_font_size;
+        let line_height = font_size * 1.6;
+        let is_header = line.line_type == DiffLineType::Header;
+
+        // Chunk header is rendered completely differently - full width separator
+        if is_header {
+            return self.render_chunk_header(line, t, font_size, line_height, line_index);
+        }
 
         let old_num = line
             .old_line_num
@@ -37,18 +53,20 @@ impl DiffViewer {
             .map(|n| format!("{:>width$}", n, width = self.line_num_width))
             .unwrap_or_else(|| " ".repeat(self.line_num_width));
 
-        let (indicator, bg_color, indicator_color) = match line.line_type {
-            DiffLineType::Added => ("+", Some(t.diff_added_bg), t.diff_added_fg),
-            DiffLineType::Removed => ("-", Some(t.diff_removed_bg), t.diff_removed_fg),
-            DiffLineType::Header => ("", Some(t.diff_hunk_header_bg), t.diff_hunk_header_fg),
-            DiffLineType::Context => (" ", None, t.text_secondary),
+        // Two-level background: light tint for the line, context has no tint
+        let (indicator, line_bg, indicator_color) = match line.line_type {
+            DiffLineType::Added => ("+", Some(rgba(t.diff_added_bg, 0.4)), t.diff_added_fg),
+            DiffLineType::Removed => ("-", Some(rgba(t.diff_removed_bg, 0.4)), t.diff_removed_fg),
+            DiffLineType::Context => (" ", None, t.text_muted),
+            DiffLineType::Header => unreachable!(),
         };
 
-        let is_header = line.line_type == DiffLineType::Header;
         let spans = line.spans.clone();
         let plain_text = line.plain_text.clone();
-        let font_size = self.file_font_size;
-        let line_height = font_size * 1.5;
+
+        // Character width for monospace font (approximately 0.6 of font size)
+        let char_width = font_size * 0.6;
+        let num_col_width = (self.line_num_width as f32) * char_width + 8.0;
 
         div()
             .id(ElementId::Name(format!("diff-line-{}", line_index).into()))
@@ -56,7 +74,7 @@ impl DiffViewer {
             .h(px(line_height))
             .text_size(px(font_size))
             .font_family("monospace")
-            .when(bg_color.is_some(), |d| d.bg(rgb(bg_color.unwrap())))
+            .when(line_bg.is_some(), |d| d.bg(line_bg.unwrap()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -81,47 +99,81 @@ impl DiffViewer {
                     cx.notify();
                 }),
             )
-            .when(!is_header, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_shrink_0()
-                        .child(
-                            div()
-                                .w(px((self.line_num_width * 8) as f32))
-                                .text_color(rgb(t.text_muted))
-                                .text_right()
-                                .child(old_num),
-                        )
-                        .child(
-                            div()
-                                .w(px((self.line_num_width * 8 + 8) as f32))
-                                .pl(px(8.0))
-                                .text_color(rgb(t.text_muted))
-                                .text_right()
-                                .child(new_num),
-                        )
-                        .child(
-                            div()
-                                .w(px(16.0))
-                                .text_center()
-                                .text_color(rgb(indicator_color))
-                                .child(indicator),
-                        ),
-                )
-            })
+            // Gutter with line numbers
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .h_full()
+                    .child(
+                        div()
+                            .w(px(num_col_width))
+                            .pr(px(4.0))
+                            .text_color(rgb(t.text_muted))
+                            .text_right()
+                            .child(old_num),
+                    )
+                    .child(
+                        div()
+                            .w(px(num_col_width))
+                            .pr(px(4.0))
+                            .text_color(rgb(t.text_muted))
+                            .text_right()
+                            .child(new_num),
+                    )
+                    .child(
+                        div()
+                            .w(px(20.0))
+                            .text_center()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(indicator_color))
+                            .child(indicator),
+                    ),
+            )
+            // Content
             .child(if has_selection {
-                self.render_line_with_selection(line_index, &plain_text, &spans, is_header)
+                self.render_line_with_selection(line_index, &plain_text, &spans, false)
             } else {
                 div()
                     .flex_1()
                     .flex()
+                    .items_center()
+                    .pl(px(4.0))
                     .overflow_hidden()
-                    .when(is_header, |d| d.font_weight(FontWeight::MEDIUM).pl(px(8.0)))
                     .children(spans.iter().map(|span| {
                         div().text_color(span.color).child(span.text.clone())
                     }))
             })
+    }
+
+    /// Render a chunk header (@@ ... @@) as a full-width separator.
+    fn render_chunk_header(
+        &self,
+        line: &DisplayLine,
+        t: &ThemeColors,
+        font_size: f32,
+        line_height: f32,
+        line_index: usize,
+    ) -> Stateful<Div> {
+        div()
+            .id(ElementId::Name(format!("diff-header-{}", line_index).into()))
+            .w_full()
+            .h(px(line_height))
+            .flex()
+            .items_center()
+            .bg(rgba(t.diff_hunk_header_bg, 0.6))
+            .border_y_1()
+            .border_color(rgb(t.border))
+            .px(px(12.0))
+            .child(
+                div()
+                    .text_size(px(font_size * 0.85))
+                    .text_color(rgb(t.diff_hunk_header_fg))
+                    .children(line.spans.iter().map(|span| {
+                        div().text_color(span.color).child(span.text.clone())
+                    })),
+            )
     }
 
     /// Render a line with selection highlighting.
@@ -130,13 +182,13 @@ impl DiffViewer {
         line_index: usize,
         plain_text: &str,
         spans: &[HighlightedSpan],
-        is_header: bool,
+        _is_header: bool,
     ) -> Div {
         let selection_bg = Rgba {
-            r: 0.2,
-            g: 0.4,
-            b: 0.7,
-            a: 0.4,
+            r: 0.25,
+            g: 0.45,
+            b: 0.75,
+            a: 0.35,
         };
 
         let ((start_line, start_col), (end_line, end_col)) = match self.selection.normalized() {
@@ -145,8 +197,9 @@ impl DiffViewer {
                 return div()
                     .flex_1()
                     .flex()
+                    .items_center()
+                    .pl(px(4.0))
                     .overflow_hidden()
-                    .when(is_header, |d| d.font_weight(FontWeight::MEDIUM).pl(px(8.0)))
                     .children(spans.iter().map(|span| {
                         div().text_color(span.color).child(span.text.clone())
                     }));
@@ -214,8 +267,9 @@ impl DiffViewer {
         div()
             .flex_1()
             .flex()
+            .items_center()
+            .pl(px(4.0))
             .overflow_hidden()
-            .when(is_header, |d| d.font_weight(FontWeight::MEDIUM).pl(px(8.0)))
             .children(elements)
     }
 

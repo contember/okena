@@ -22,6 +22,15 @@ impl DiffViewMode {
     }
 }
 
+/// A range of characters that changed within a line.
+#[derive(Clone, Debug)]
+pub struct ChangedRange {
+    /// Start column (character index).
+    pub start: usize,
+    /// End column (exclusive).
+    pub end: usize,
+}
+
 /// Content for one side of a side-by-side line.
 #[derive(Clone)]
 pub struct SideContent {
@@ -31,6 +40,8 @@ pub struct SideContent {
     /// Plain text content (for selection/copy - future use).
     #[allow(dead_code)]
     pub plain_text: String,
+    /// Ranges of characters that actually changed (for word-level highlighting).
+    pub changed_ranges: Vec<ChangedRange>,
 }
 
 /// A paired line for side-by-side view.

@@ -22,8 +22,8 @@ impl DiffViewer {
         let is_unified = self.view_mode == DiffViewMode::Unified;
 
         div()
-            .px(px(16.0))
-            .py(px(10.0))
+            .px(px(20.0))
+            .py(px(14.0))
             .border_b_1()
             .border_color(rgb(t.border))
             .flex()
@@ -33,35 +33,48 @@ impl DiffViewer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(16.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(px(15.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
-                            .child("Git Diff"),
+                            .child("Changes"),
                     )
                     .when(has_files, |d| {
                         d.child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(8.0))
+                                .gap(px(6.0))
+                                .pl(px(8.0))
+                                .border_l_1()
+                                .border_color(rgb(t.border))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(t.text_muted))
-                                        .child(format!("{} files", self.files.len())),
+                                        .child(format!(
+                                            "{} {}",
+                                            self.files.len(),
+                                            if self.files.len() == 1 { "file" } else { "files" }
+                                        )),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child("·"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
                                         .text_color(rgb(t.diff_added_fg))
                                         .child(format!("+{}", total_added)),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(t.diff_removed_fg))
                                         .child(format!("-{}", total_removed)),
                                 ),
@@ -72,40 +85,44 @@ impl DiffViewer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(8.0))
+                    // Whitespace toggle
                     .child(
                         div()
                             .id("ignore-whitespace-toggle")
                             .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(rgb(if ignore_whitespace {
-                                t.button_primary_bg
-                            } else {
-                                t.border
-                            }))
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
                             .bg(rgb(if ignore_whitespace {
                                 t.button_primary_bg
                             } else {
                                 t.bg_secondary
                             }))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .hover(|s| s.opacity(0.85))
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.toggle_ignore_whitespace(cx)
                             }))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(px(12.0))
                                     .text_color(rgb(if ignore_whitespace {
                                         t.button_primary_fg
                                     } else {
                                         t.text_secondary
                                     }))
-                                    .child("Ignore Whitespace"),
+                                    .child("Whitespace"),
                             ),
                     )
+                    // Separator
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(20.0))
+                            .bg(rgb(t.border))
+                            .mx(px(4.0)),
+                    )
+                    // View mode toggle
                     .child(
                         div()
                             .id("view-mode-toggle")
@@ -115,6 +132,7 @@ impl DiffViewer {
                                 t,
                             )),
                     )
+                    // Diff mode toggle
                     .child(
                         div()
                             .id("diff-mode-toggle")
@@ -124,18 +142,30 @@ impl DiffViewer {
                                 t,
                             )),
                     )
+                    // Separator
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(20.0))
+                            .bg(rgb(t.border))
+                            .mx(px(4.0)),
+                    )
+                    // Close button
                     .child(
                         div()
                             .id("close-button")
                             .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_secondary)))
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                             .child(
                                 div()
-                                    .text_size(px(18.0))
+                                    .text_size(px(16.0))
                                     .text_color(rgb(t.text_muted))
                                     .child("×"),
                             ),
@@ -206,14 +236,15 @@ impl DiffViewer {
             .flex_col()
             .child(
                 div()
-                    .px(px(12.0))
-                    .py(px(8.0))
+                    .px(px(16.0))
+                    .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text_secondary))
-                    .child("CHANGED FILES"),
+                    .text_color(rgb(t.text_muted))
+                    .line_height(px(11.0))
+                    .child("Files"),
             )
             .child(
                 div()
@@ -221,7 +252,7 @@ impl DiffViewer {
                     .flex_1()
                     .overflow_y_scroll()
                     .track_scroll(&self.tree_scroll_handle)
-                    .py(px(4.0))
+                    .py(px(6.0))
                     .children(tree_elements),
             )
     }
@@ -261,12 +292,12 @@ impl DiffViewer {
             .min_h_0()
             .child(
                 div()
-                    .px(px(12.0))
-                    .py(px(8.0))
+                    .px(px(16.0))
+                    .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .bg(rgb(t.bg_header))
-                    .text_size(px(self.file_font_size))
+                    .text_size(px(12.0))
                     .font_family("monospace")
                     .text_color(rgb(t.text_secondary))
                     .child(file_path),
@@ -388,8 +419,8 @@ impl DiffViewer {
 
     pub(super) fn render_footer(&self, t: &ThemeColors, has_selection: bool) -> impl IntoElement {
         div()
-            .px(px(12.0))
-            .py(px(6.0))
+            .px(px(16.0))
+            .py(px(8.0))
             .border_t_1()
             .border_color(rgb(t.border))
             .flex()
@@ -399,12 +430,11 @@ impl DiffViewer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(16.0))
+                    .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t))
-                    .child(self.render_hint("Tab", "toggle mode", t))
-                    .child(self.render_hint("S", "split view", t))
-                    .child(self.render_hint("W", "whitespace", t))
-                    .child(self.render_hint("↑↓", "files", t))
+                    .child(self.render_hint("Tab", "staged/unstaged", t))
+                    .child(self.render_hint("S", "split", t))
+                    .child(self.render_hint("↑↓", "navigate", t))
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {
                             "⌘C"
@@ -415,12 +445,18 @@ impl DiffViewer {
                         t,
                     )),
             )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(t.text_muted))
-                    .when(has_selection, |d| d.child("Selection active")),
-            )
+            .when(has_selection, |d| {
+                d.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(t.bg_selection))
+                        .text_size(px(11.0))
+                        .text_color(rgb(t.text_secondary))
+                        .child("Selection active"),
+                )
+            })
     }
 
     pub(super) fn render_hint(
@@ -432,20 +468,23 @@ impl DiffViewer {
         div()
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(5.0))
             .child(
                 div()
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
                     .bg(rgb(t.bg_secondary))
-                    .text_size(px(10.0))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(t.text_muted))
                     .child(key.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(11.0))
                     .text_color(rgb(t.text_muted))
                     .child(action.to_string()),
             )
@@ -461,7 +500,7 @@ impl DiffViewer {
         let mut elements: Vec<AnyElement> = Vec::new();
 
         for (name, child) in &node.children {
-            let indent = depth * 12;
+            let indent = depth * 14;
             let has_content = !child.files.is_empty() || !child.children.is_empty();
 
             if has_content {
@@ -469,13 +508,12 @@ impl DiffViewer {
                     div()
                         .flex()
                         .items_center()
-                        .py(px(2.0))
-                        .pl(px(indent as f32 + 8.0))
+                        .h(px(26.0))
+                        .pl(px(indent as f32 + 12.0))
                         .child(
                             div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(t.text_secondary))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text_muted))
                                 .child(format!("{}/", name)),
                         )
                         .into_any_element(),
@@ -487,7 +525,7 @@ impl DiffViewer {
 
         for &file_index in &node.files {
             if let Some(file) = self.files.get(file_index) {
-                let indent = depth * 12;
+                let indent = depth * 14;
                 let is_selected = file_index == self.selected_file_index;
                 let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let added = file.added;
@@ -495,59 +533,61 @@ impl DiffViewer {
                 let is_new = file.is_new;
                 let is_deleted = file.is_deleted;
 
+                // Status indicator styling
+                let (status_char, status_color) = if is_new {
+                    ("A", t.diff_added_fg)
+                } else if is_deleted {
+                    ("D", t.diff_removed_fg)
+                } else {
+                    ("M", t.text_muted)
+                };
+
                 elements.push(
                     div()
                         .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
-                        .py(px(3.0))
-                        .pl(px(indent as f32 + 8.0))
-                        .pr(px(8.0))
+                        .gap(px(8.0))
+                        .h(px(28.0))
+                        .pl(px(indent as f32 + 12.0))
+                        .pr(px(12.0))
+                        .mx(px(4.0))
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.select_file(file_index, cx);
                         }))
+                        // Status badge
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .w(px(12.0))
-                                .text_color(if is_new {
-                                    rgb(t.diff_added_fg)
-                                } else if is_deleted {
-                                    rgb(t.diff_removed_fg)
-                                } else {
-                                    rgb(t.text_muted)
-                                })
-                                .child(if is_new {
-                                    "A"
-                                } else if is_deleted {
-                                    "D"
-                                } else {
-                                    "M"
-                                }),
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(status_color))
+                                .child(status_char),
                         )
+                        // Filename
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(12.0))
+                                .text_size(px(13.0))
                                 .text_color(rgb(t.text_primary))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .child(filename.to_string()),
                         )
+                        // Line counts - more subtle
                         .when(added > 0 || removed > 0, |d| {
                             d.child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(2.0))
+                                    .gap(px(4.0))
+                                    .text_size(px(11.0))
                                     .when(added > 0, |d| {
                                         d.child(
                                             div()
-                                                .text_size(px(10.0))
                                                 .text_color(rgb(t.diff_added_fg))
                                                 .child(format!("+{}", added)),
                                         )
@@ -555,7 +595,6 @@ impl DiffViewer {
                                     .when(removed > 0, |d| {
                                         d.child(
                                             div()
-                                                .text_size(px(10.0))
                                                 .text_color(rgb(t.diff_removed_fg))
                                                 .child(format!("-{}", removed)),
                                         )

@@ -1,11 +1,60 @@
 //! Side-by-side diff view transformation and rendering.
 
-use super::types::{DisplayLine, SideBySideLine, SideContent};
+use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideContent};
 use super::DiffViewer;
 use crate::git::DiffLineType;
 use crate::theme::ThemeColors;
 use gpui::prelude::*;
 use gpui::*;
+
+/// Compute the changed character ranges between two strings.
+/// Returns (old_ranges, new_ranges) - the ranges in each string that differ.
+fn compute_changed_ranges(old: &str, new: &str) -> (Vec<ChangedRange>, Vec<ChangedRange>) {
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+
+    // Find common prefix length
+    let prefix_len = old_chars
+        .iter()
+        .zip(new_chars.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // Find common suffix length (but don't overlap with prefix)
+    let old_remaining = old_chars.len() - prefix_len;
+    let new_remaining = new_chars.len() - prefix_len;
+    let suffix_len = old_chars
+        .iter()
+        .rev()
+        .zip(new_chars.iter().rev())
+        .take(old_remaining.min(new_remaining))
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let old_change_end = old_chars.len() - suffix_len;
+    let new_change_end = new_chars.len() - suffix_len;
+
+    // If there's an actual change in the middle
+    let old_ranges = if prefix_len < old_change_end {
+        vec![ChangedRange {
+            start: prefix_len,
+            end: old_change_end,
+        }]
+    } else {
+        vec![]
+    };
+
+    let new_ranges = if prefix_len < new_change_end {
+        vec![ChangedRange {
+            start: prefix_len,
+            end: new_change_end,
+        }]
+    } else {
+        vec![]
+    };
+
+    (old_ranges, new_ranges)
+}
 
 /// Transform unified diff lines into side-by-side format.
 ///
@@ -38,6 +87,7 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                     line_type: DiffLineType::Context,
                     spans: line.spans.clone(),
                     plain_text: line.plain_text.clone(),
+                    changed_ranges: vec![],
                 };
                 result.push(SideBySideLine {
                     left: Some(content.clone()),
@@ -66,20 +116,32 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                     i += 1;
                 }
 
-                // Pair them up
+                // Pair them up with word-level diff
                 let max_len = removed_lines.len().max(added_lines.len());
                 for j in 0..max_len {
+                    // Compute changed ranges if both sides exist
+                    let (old_ranges, new_ranges) =
+                        if let (Some(old_line), Some(new_line)) =
+                            (removed_lines.get(j), added_lines.get(j))
+                        {
+                            compute_changed_ranges(&old_line.plain_text, &new_line.plain_text)
+                        } else {
+                            (vec![], vec![])
+                        };
+
                     let left = removed_lines.get(j).map(|l| SideContent {
                         line_num: l.old_line_num.unwrap_or(0),
                         line_type: DiffLineType::Removed,
                         spans: l.spans.clone(),
                         plain_text: l.plain_text.clone(),
+                        changed_ranges: old_ranges,
                     });
                     let right = added_lines.get(j).map(|l| SideContent {
                         line_num: l.new_line_num.unwrap_or(0),
                         line_type: DiffLineType::Added,
                         spans: l.spans.clone(),
                         plain_text: l.plain_text.clone(),
+                        changed_ranges: new_ranges,
                     });
                     result.push(SideBySideLine {
                         left,
@@ -91,7 +153,15 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                 }
             }
             DiffLineType::Added => {
-                // Pure addition without preceding removal
+                // Pure addition without preceding removal - highlight entire line
+                let full_range = if !line.plain_text.is_empty() {
+                    vec![ChangedRange {
+                        start: 0,
+                        end: line.plain_text.chars().count(),
+                    }]
+                } else {
+                    vec![]
+                };
                 result.push(SideBySideLine {
                     left: None,
                     right: Some(SideContent {
@@ -99,6 +169,7 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                         line_type: DiffLineType::Added,
                         spans: line.spans.clone(),
                         plain_text: line.plain_text.clone(),
+                        changed_ranges: full_range,
                     }),
                     is_header: false,
                     header_text: String::new(),
@@ -138,14 +209,14 @@ impl DiffViewer {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let font_size = self.file_font_size;
-        let line_height = font_size * 1.5;
+        let line_height = font_size * 1.6;
 
         if line.is_header {
             // Header spans both columns
             div()
                 .flex()
                 .h(px(line_height))
-                .text_size(px(font_size))
+                .text_size(px(font_size * 0.9))
                 .font_family("monospace")
                 .bg(rgb(t.diff_hunk_header_bg))
                 .child(
@@ -153,14 +224,14 @@ impl DiffViewer {
                         .flex_1()
                         .flex()
                         .items_center()
-                        .pl(px(8.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .pl(px(12.0))
+                        .text_color(rgb(t.diff_hunk_header_fg))
                         .children(line.header_spans.iter().map(|span| {
                             div().text_color(span.color).child(span.text.clone())
                         })),
                 )
         } else {
-            // Two-column layout using a table-like structure
+            // Two-column layout
             let left = line.left.clone();
             let right = line.right.clone();
             let line_num_width = self.line_num_width;
@@ -189,20 +260,36 @@ impl DiffViewer {
         &self,
         content: &Option<SideContent>,
         t: &ThemeColors,
-        is_left: bool,
+        _is_left: bool,
         line_num_width: usize,
         line_height: f32,
     ) -> Div {
         match content {
             Some(c) => {
-                let (indicator, bg_color, indicator_color) = match c.line_type {
-                    DiffLineType::Added => ("+", Some(t.diff_added_bg), t.diff_added_fg),
-                    DiffLineType::Removed => ("-", Some(t.diff_removed_bg), t.diff_removed_fg),
-                    DiffLineType::Context => (" ", None, t.text_secondary),
-                    DiffLineType::Header => ("", None, t.text_secondary),
+                // Two-level background: light tint for the line, stronger for changed words
+                let (indicator, line_bg, word_bg, indicator_color) = match c.line_type {
+                    DiffLineType::Added => (
+                        "+",
+                        Some(rgba(t.diff_added_bg, 0.35)),
+                        Some(rgba(t.diff_added_bg, 0.8)),
+                        t.diff_added_fg,
+                    ),
+                    DiffLineType::Removed => (
+                        "-",
+                        Some(rgba(t.diff_removed_bg, 0.35)),
+                        Some(rgba(t.diff_removed_bg, 0.8)),
+                        t.diff_removed_fg,
+                    ),
+                    DiffLineType::Context => (" ", None, None, t.text_muted),
+                    DiffLineType::Header => ("", None, None, t.text_secondary),
                 };
 
-                let line_num = format!("{:>width$}", c.line_num, width = line_num_width);
+                // Format line number - show empty for 0
+                let line_num = if c.line_num > 0 {
+                    format!("{:>width$}", c.line_num, width = line_num_width)
+                } else {
+                    " ".repeat(line_num_width)
+                };
 
                 let mut column = div()
                     .flex_1()
@@ -211,14 +298,17 @@ impl DiffViewer {
                     .items_center()
                     .overflow_hidden();
 
-                if let Some(bg) = bg_color {
-                    column = column.bg(rgb(bg));
+                if let Some(bg) = line_bg {
+                    column = column.bg(bg);
                 }
 
                 // Gutter with line number and indicator
                 let gutter = div()
                     .flex_shrink_0()
                     .flex()
+                    .items_center()
+                    .h_full()
+                    .pl(px(8.0))
                     .child(
                         div()
                             .w(px((line_num_width * 8) as f32))
@@ -228,35 +318,95 @@ impl DiffViewer {
                     )
                     .child(
                         div()
-                            .w(px(16.0))
+                            .w(px(24.0))
                             .text_center()
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(indicator_color))
                             .child(indicator),
                     );
 
-                // Content with syntax highlighted spans
-                let mut content_div = div().flex_1().flex().overflow_hidden();
-                for span in &c.spans {
-                    content_div = content_div.child(
-                        div().text_color(span.color).child(span.text.clone())
-                    );
-                }
+                // Content with word-level highlighting
+                let content_div = self.render_spans_with_word_highlight(
+                    &c.spans,
+                    &c.changed_ranges,
+                    word_bg,
+                );
 
                 column.child(gutter).child(content_div)
             }
             None => {
-                // Empty side - show muted background
-                let bg = if is_left {
-                    t.diff_removed_bg
-                } else {
-                    t.diff_added_bg
-                };
+                // Empty side - very subtle background
                 div()
                     .flex_1()
                     .h(px(line_height))
-                    .bg(rgba(bg, 0.3))
+                    .bg(rgba(t.bg_secondary, 0.5))
             }
         }
+    }
+
+    /// Render spans with word-level highlighting for changed ranges.
+    fn render_spans_with_word_highlight(
+        &self,
+        spans: &[super::types::HighlightedSpan],
+        changed_ranges: &[ChangedRange],
+        word_bg: Option<Rgba>,
+    ) -> Div {
+        let mut content_div = div().flex_1().flex().pl(px(4.0)).overflow_hidden();
+
+        if changed_ranges.is_empty() || word_bg.is_none() {
+            // No word-level highlighting, just render spans normally
+            for span in spans {
+                content_div = content_div.child(div().text_color(span.color).child(span.text.clone()));
+            }
+            return content_div;
+        }
+
+        let word_bg = word_bg.unwrap();
+        let mut current_col = 0;
+
+        for span in spans {
+            let span_chars: Vec<char> = span.text.chars().collect();
+            let span_len = span_chars.len();
+            let span_end = current_col + span_len;
+
+            // Check if any changed range overlaps this span
+            let mut char_idx = 0;
+            while char_idx < span_len {
+                let global_idx = current_col + char_idx;
+
+                // Find if this character is in a changed range
+                let in_changed = changed_ranges
+                    .iter()
+                    .any(|r| global_idx >= r.start && global_idx < r.end);
+
+                // Find the extent of this segment (changed or unchanged)
+                let segment_start = char_idx;
+                while char_idx < span_len {
+                    let g_idx = current_col + char_idx;
+                    let is_changed = changed_ranges
+                        .iter()
+                        .any(|r| g_idx >= r.start && g_idx < r.end);
+                    if is_changed != in_changed {
+                        break;
+                    }
+                    char_idx += 1;
+                }
+
+                // Render this segment
+                let segment: String = span_chars[segment_start..char_idx].iter().collect();
+                if !segment.is_empty() {
+                    let mut seg_div = div().text_color(span.color);
+                    if in_changed {
+                        seg_div = seg_div.bg(word_bg).rounded(px(2.0));
+                    }
+                    content_div = content_div.child(seg_div.child(segment));
+                }
+            }
+
+            current_col = span_end;
+        }
+
+        content_div
     }
 }
 
