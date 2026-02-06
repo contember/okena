@@ -33,6 +33,10 @@ impl TitleBar {
         }
     }
 
+    pub fn is_menu_open(&self) -> bool {
+        self.menu_open
+    }
+
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         self.menu_open = !self.menu_open;
         cx.notify();
@@ -41,6 +45,92 @@ impl TitleBar {
     fn close_menu(&mut self, cx: &mut Context<Self>) {
         self.menu_open = false;
         cx.notify();
+    }
+
+    /// Render the app dropdown menu overlay (must be called from a parent with full window coverage).
+    pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        let traffic_light_padding = if cfg!(target_os = "macos") {
+            px(80.0)
+        } else {
+            px(8.0)
+        };
+
+        div()
+            .id("app-menu-backdrop")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.close_menu(cx);
+            }))
+            .child(
+                // Menu panel
+                div()
+                    .absolute()
+                    .top(px(32.0))
+                    .left(traffic_light_padding + px(40.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(4.0))
+                    .shadow_xl()
+                    .min_w(px(200.0))
+                    .py(px(4.0))
+                    .id("app-menu-panel")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // Settings
+                    .child(
+                        menu_item("app-menu-settings", "icons/edit.svg", "Open Settings", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowSettings), cx);
+                            })),
+                    )
+                    // Theme
+                    .child(
+                        menu_item("app-menu-theme", "icons/eye.svg", "Select Theme", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowThemeSelector), cx);
+                            })),
+                    )
+                    // Command Palette
+                    .child(
+                        menu_item("app-menu-command-palette", "icons/search.svg", "Command Palette", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowCommandPalette), cx);
+                            })),
+                    )
+                    // Keyboard Shortcuts
+                    .child(
+                        menu_item("app-menu-keybindings", "icons/keyboard.svg", "Keyboard Shortcuts", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowKeybindings), cx);
+                            })),
+                    )
+                    // Separator
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .mx(px(8.0))
+                            .my(px(4.0))
+                            .bg(rgb(t.border)),
+                    )
+                    // Exit
+                    .child(
+                        menu_item("app-menu-exit", "icons/close.svg", "Exit", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(Quit), cx);
+                            })),
+                    ),
+            )
     }
 
     fn render_window_control(
@@ -132,11 +222,8 @@ impl Render for TitleBar {
 
         let workspace = self.workspace.clone();
 
-        let menu_open = self.menu_open;
-
         div()
             .id("title-bar")
-            .relative()
             .h(px(32.0))
             .w_full()
             .flex_shrink_0()
@@ -285,88 +372,5 @@ impl Render for TitleBar {
                         )
                     }),
             )
-            // App dropdown menu
-            .when(menu_open, |d| {
-                d.child(
-                    // Backdrop - covers full window for click-outside-to-close
-                    div()
-                        .id("app-menu-backdrop")
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .w(px(5000.0))
-                        .h(px(5000.0))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.close_menu(cx);
-                        }))
-                        .child(
-                            // Menu panel
-                            div()
-                                .absolute()
-                                .top(px(32.0))
-                                .left(traffic_light_padding + px(40.0))
-                                .bg(rgb(t.bg_primary))
-                                .border_1()
-                                .border_color(rgb(t.border))
-                                .rounded(px(4.0))
-                                .shadow_xl()
-                                .min_w(px(200.0))
-                                .py(px(4.0))
-                                .id("app-menu-panel")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                // Settings
-                                .child(
-                                    menu_item("app-menu-settings", "icons/edit.svg", "Open Settings", &t)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_menu(cx);
-                                            window.dispatch_action(Box::new(ShowSettings), cx);
-                                        })),
-                                )
-                                // Theme
-                                .child(
-                                    menu_item("app-menu-theme", "icons/eye.svg", "Select Theme", &t)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_menu(cx);
-                                            window.dispatch_action(Box::new(ShowThemeSelector), cx);
-                                        })),
-                                )
-                                // Command Palette
-                                .child(
-                                    menu_item("app-menu-command-palette", "icons/search.svg", "Command Palette", &t)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_menu(cx);
-                                            window.dispatch_action(Box::new(ShowCommandPalette), cx);
-                                        })),
-                                )
-                                // Keyboard Shortcuts
-                                .child(
-                                    menu_item("app-menu-keybindings", "icons/keyboard.svg", "Keyboard Shortcuts", &t)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_menu(cx);
-                                            window.dispatch_action(Box::new(ShowKeybindings), cx);
-                                        })),
-                                )
-                                // Separator
-                                .child(
-                                    div()
-                                        .h(px(1.0))
-                                        .mx(px(8.0))
-                                        .my(px(4.0))
-                                        .bg(rgb(t.border)),
-                                )
-                                // Exit
-                                .child(
-                                    menu_item("app-menu-exit", "icons/close.svg", "Exit", &t)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_menu(cx);
-                                            window.dispatch_action(Box::new(Quit), cx);
-                                        })),
-                                ),
-                        ),
-                )
-            })
     }
 }
