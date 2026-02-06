@@ -6,7 +6,7 @@ use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 
-use super::{Sidebar, ProjectDrag, ProjectDragView};
+use super::{Sidebar, ProjectDrag, ProjectDragView, FolderDrag};
 use crate::workspace::state::ProjectData;
 
 impl Sidebar {
@@ -91,6 +91,19 @@ impl Sidebar {
                         if drag.project_id != project_id_for_drag {
                             workspace_for_drop.update(cx, |ws, cx| {
                                 ws.move_project(&drag.project_id, index, cx);
+                            });
+                        }
+                    }))
+                    // Drop target for folder reordering among projects
+                    .drag_over::<FolderDrag>(move |style, _, _, _| {
+                        style.border_t_2().border_color(rgb(t.border_active))
+                    })
+                    .on_drop(cx.listener({
+                        let workspace = self.workspace.clone();
+                        let target_index = index;
+                        move |_this, drag: &FolderDrag, _window, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.move_item_in_order(&drag.folder_id, target_index, cx);
                             });
                         }
                     }))
@@ -300,7 +313,7 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    fn render_worktree_item(&self, project: &ProjectData, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &ProjectData, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let workspace_for_focus = self.workspace.clone();

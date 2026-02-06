@@ -97,6 +97,10 @@ impl Workspace {
         self.data.projects.retain(|p| p.id != project_id);
         // Remove from project order
         self.data.project_order.retain(|id| id != project_id);
+        // Remove from any folder's project_ids
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
         // Remove from widths
         self.data.project_widths.remove(project_id);
         // Clear focus if this was the focused project
@@ -116,9 +120,15 @@ impl Workspace {
         }
     }
 
-    /// Move a project to a new position in the order
+    /// Move a project to a new position in the top-level order.
+    /// Also removes the project from any folder it may be in.
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
-        // Find current index
+        // Remove from any folder first
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+
+        // Find current index in project_order
         if let Some(current_index) = self.data.project_order.iter().position(|id| id == project_id) {
             // Remove from current position
             let id = self.data.project_order.remove(current_index);
@@ -131,8 +141,12 @@ impl Workspace {
             // Insert at new position
             let target = target.min(self.data.project_order.len());
             self.data.project_order.insert(target, id);
-            cx.notify();
+        } else {
+            // Project wasn't in project_order (was only in a folder) - insert at target
+            let target = new_index.min(self.data.project_order.len());
+            self.data.project_order.insert(target, project_id.to_string());
         }
+        cx.notify();
     }
 
     /// Update project column widths

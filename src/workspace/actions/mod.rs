@@ -8,6 +8,7 @@
 //! - `terminal`: Terminal-specific actions
 
 mod focus;
+mod folder;
 mod layout;
 mod project;
 mod requests;
