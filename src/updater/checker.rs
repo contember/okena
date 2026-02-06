@@ -26,7 +26,7 @@ fn check_blocking() -> Result<Option<ReleaseAsset>> {
         .context("failed to build HTTP client")?;
 
     let http_resp = client
-        .get("https://api.github.com/repos/contember/term-manager/releases/latest")
+        .get("https://api.github.com/repos/contember/okena/releases/latest")
         .send()
         .context("failed to fetch latest release")?;
 
