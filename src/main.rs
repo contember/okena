@@ -23,7 +23,7 @@ use gpui_component::Root;
 use crate::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
-use crate::app::Muxy;
+use crate::app::Okena;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
 use crate::terminal::pty_manager::PtyManager;
@@ -39,20 +39,20 @@ fn quit(_: &Quit, cx: &mut App) {
 /// About action handler - shows about dialog
 fn about(_: &About, _cx: &mut App) {
     // TODO: Show about dialog when GPUI supports it
-    log::info!("Muxy - A fast, native terminal multiplexer");
+    log::info!("Okena - A fast, native terminal multiplexer");
 }
 
 /// Set up macOS application menu
 fn set_app_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
-            name: "Muxy".into(),
+            name: "Okena".into(),
             items: vec![
-                MenuItem::action("About Muxy", About),
+                MenuItem::action("About Okena", About),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Quit Muxy", Quit),
+                MenuItem::action("Quit Okena", Quit),
             ],
         },
         Menu {
@@ -122,7 +122,7 @@ fn main() {
                     None
                 } else {
                     Some(TitlebarOptions {
-                        title: Some("Muxy".into()),
+                        title: Some("Okena".into()),
                         appears_transparent: true,
                         ..Default::default()
                     })
@@ -142,7 +142,7 @@ fn main() {
                     width: px(400.0),
                     height: px(300.0),
                 }),
-                app_id: Some("muxy".to_string()),
+                app_id: Some("okena".to_string()),
                 ..Default::default()
             },
             |window, cx| {
@@ -179,10 +179,10 @@ fn main() {
                     .detach();
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
-                let muxy = cx.new(|cx| {
-                    Muxy::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
+                let okena = cx.new(|cx| {
+                    Okena::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
                 });
-                cx.new(|cx| Root::new(muxy, window, cx))
+                cx.new(|cx| Root::new(okena, window, cx))
             },
         )
         .expect("Failed to create main window");

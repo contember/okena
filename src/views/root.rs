@@ -63,7 +63,7 @@ impl RootView {
 
         // Create title bar entity
         let workspace_for_title = workspace.clone();
-        let title_bar = cx.new(|_cx| TitleBar::new("Muxy", workspace_for_title));
+        let title_bar = cx.new(|_cx| TitleBar::new("Okena", workspace_for_title));
 
         // Create status bar entity
         let status_bar = cx.new(StatusBar::new);

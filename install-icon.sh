@@ -1,20 +1,20 @@
 #!/bin/bash
-# Install Muxy icon and desktop entry
+# Install Okena icon and desktop entry
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSETS_DIR="$SCRIPT_DIR/assets"
-DESKTOP_SOURCE="$SCRIPT_DIR/muxy.desktop"
+DESKTOP_SOURCE="$SCRIPT_DIR/okena.desktop"
 
-echo "Installing Muxy icons..."
+echo "Installing Okena icons..."
 
 # Install PNG icons at various sizes
 for size in 16 32 48 64 128 256 512; do
     ICON_DIR="$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
     mkdir -p "$ICON_DIR"
     if [ -f "$ASSETS_DIR/app-icon-${size}.png" ]; then
-        cp "$ASSETS_DIR/app-icon-${size}.png" "$ICON_DIR/muxy.png"
+        cp "$ASSETS_DIR/app-icon-${size}.png" "$ICON_DIR/okena.png"
         echo "  Installed ${size}x${size} PNG icon"
     fi
 done
@@ -22,7 +22,7 @@ done
 # Install desktop entry
 DESKTOP_DIR="$HOME/.local/share/applications"
 mkdir -p "$DESKTOP_DIR"
-cp "$DESKTOP_SOURCE" "$DESKTOP_DIR/muxy.desktop"
+cp "$DESKTOP_SOURCE" "$DESKTOP_DIR/okena.desktop"
 echo "Installed desktop entry"
 
 # Update icon cache

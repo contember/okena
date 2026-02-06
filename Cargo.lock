@@ -3560,46 +3560,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "muxy"
-version = "0.3.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "async-channel 2.5.0",
- "axum",
- "base64",
- "core-text",
- "data-encoding",
- "dirs 5.0.1",
- "env_logger",
- "futures",
- "gpui",
- "gpui-component",
- "hmac",
- "libc",
- "log",
- "parking_lot",
- "portable-pty",
- "pulldown-cmark",
- "rand 0.8.5",
- "regex",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2",
- "smol",
- "subtle",
- "syntect",
- "sysinfo 0.33.1",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tower-http",
- "uuid",
- "winresource",
-]
-
-[[package]]
 name = "naga"
 version = "25.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4016,6 +3976,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "okena"
+version = "0.3.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel 2.5.0",
+ "axum",
+ "base64",
+ "core-text",
+ "data-encoding",
+ "dirs 5.0.1",
+ "env_logger",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "hmac",
+ "libc",
+ "log",
+ "parking_lot",
+ "portable-pty",
+ "pulldown-cmark",
+ "rand 0.8.5",
+ "regex",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smol",
+ "subtle",
+ "syntect",
+ "sysinfo 0.33.1",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tower-http",
+ "uuid",
+ "winresource",
 ]
 
 [[package]]

@@ -29,7 +29,7 @@ impl RemoteServer {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
-            .thread_name("muxy-remote")
+            .thread_name("okena-remote")
             .build()?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

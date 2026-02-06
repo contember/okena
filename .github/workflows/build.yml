@@ -20,16 +20,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: muxy-linux-x64
+            artifact: okena-linux-x64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: muxy-macos-arm64
+            artifact: okena-macos-arm64
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            artifact: muxy-macos-x64
+            artifact: okena-macos-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: muxy-windows-x64
+            artifact: okena-windows-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -79,13 +79,13 @@ jobs:
         if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p dist/icons
-          cp target/${{ matrix.target }}/release/muxy dist/
-          chmod +x dist/muxy
+          cp target/${{ matrix.target }}/release/okena dist/
+          chmod +x dist/okena
           # Bundle icons for Linux installation
           cp assets/app-icon-16.png assets/app-icon-32.png assets/app-icon-48.png \
              assets/app-icon-64.png assets/app-icon-128.png assets/app-icon-256.png \
              assets/app-icon-512.png dist/icons/
-          cp muxy.desktop dist/
+          cp okena.desktop dist/
 
       - name: Create macOS app bundle
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
@@ -97,7 +97,7 @@ jobs:
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir dist
-          copy target\${{ matrix.target }}\release\muxy.exe dist\
+          copy target\${{ matrix.target }}\release\okena.exe dist\
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/v')
@@ -135,7 +135,7 @@ jobs:
               # macOS: DMG is already created, just move it
               mv "$dir"/*.dmg "../" 2>/dev/null || true
               # Also create a zip of the .app for those who prefer it
-              cd "$dir" && zip -r "../../${name}.zip" "Muxy.app" && cd ..
+              cd "$dir" && zip -r "../../${name}.zip" "Okena.app" && cd ..
             else
               tar -czvf "../${name}.tar.gz" -C "$dir" .
             fi
@@ -146,21 +146,21 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
 
           # Calculate SHA256 from local zip files
-          ARM64_SHA=$(sha256sum muxy-macos-arm64.zip | cut -d' ' -f1)
-          X64_SHA=$(sha256sum muxy-macos-x64.zip | cut -d' ' -f1)
+          ARM64_SHA=$(sha256sum okena-macos-arm64.zip | cut -d' ' -f1)
+          X64_SHA=$(sha256sum okena-macos-x64.zip | cut -d' ' -f1)
 
           # Update cask
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/muxy.rb
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/muxy.rb
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/muxy.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/okena.rb
+          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/okena.rb
+          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/okena.rb
 
-          cat Casks/muxy.rb
+          cat Casks/okena.rb
 
       - name: Commit cask update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/muxy.rb
+          git add Casks/okena.rb
           git commit -m "chore: update homebrew cask for ${GITHUB_REF#refs/tags/}"
           git push origin HEAD:main
 

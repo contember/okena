@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Main application state and view
-pub struct Muxy {
+pub struct Okena {
     root_view: Entity<RootView>,
     workspace: Entity<Workspace>,
     pty_manager: Arc<PtyManager>,
@@ -41,7 +41,7 @@ pub struct Muxy {
     remote_info: RemoteInfo,
 }
 
-impl Muxy {
+impl Okena {
     pub fn new(
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
@@ -201,7 +201,7 @@ impl Muxy {
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
 
-        cx.spawn(async move |_this: WeakEntity<Muxy>, cx| {
+        cx.spawn(async move |_this: WeakEntity<Okena>, cx| {
             loop {
                 let msg: BridgeMessage = match bridge_rx.recv().await {
                     Ok(msg) => msg,
@@ -390,7 +390,7 @@ impl Muxy {
         let terminals = self.terminals.clone();
         let broadcaster = self.pty_broadcaster.clone();
 
-        cx.spawn(async move |this: WeakEntity<Muxy>, cx| {
+        cx.spawn(async move |this: WeakEntity<Okena>, cx| {
             loop {
                 let event = match pty_events.recv().await {
                     Ok(event) => event,
@@ -525,7 +525,7 @@ impl Muxy {
     }
 }
 
-impl Render for Muxy {
+impl Render for Okena {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.root_view.clone())
     }

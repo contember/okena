@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>muxy</string>
+    <string>okena</string>
     <key>CFBundleIdentifier</key>
-    <string>com.contember.muxy</string>
+    <string>com.contember.okena</string>
     <key>CFBundleName</key>
-    <string>Muxy</string>
+    <string>Okena</string>
     <key>CFBundleDisplayName</key>
-    <string>Muxy</string>
+    <string>Okena</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>

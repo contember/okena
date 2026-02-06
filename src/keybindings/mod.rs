@@ -10,7 +10,7 @@ pub use config::{
 
 // Define actions
 actions!(
-    muxy,
+    okena,
     [
         Quit,
         About,

@@ -1,4 +1,4 @@
-# Muxy
+# Okena
 
 A fast, native terminal multiplexer built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI framework from Zed editor).
 Tabs, splits, detachable windows, command palette, and automatic workspace restore.
@@ -10,43 +10,43 @@ Tabs, splits, detachable windows, command palette, and automatic workspace resto
 **Homebrew (recommended):**
 
 ```bash
-brew tap contember/muxy
-brew install --cask muxy
+brew tap contember/okena
+brew install --cask okena
 ```
 
 **Or install script:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/contember/muxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
 ```
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/contember/muxy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/muxy` with desktop entry and icons.
+Installs to `~/.local/bin/okena` with desktop entry and icons.
 
 ### Windows
 
 **PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/contember/muxy/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\Programs\Muxy` with Start Menu shortcut.
+Installs to `%LOCALAPPDATA%\Programs\Okena` with Start Menu shortcut.
 
 ### Manual Download
 
-Download from the [Releases](https://github.com/contember/muxy/releases) page or get development builds:
+Download from the [Releases](https://github.com/contember/okena/releases) page or get development builds:
 
 | Platform | Download |
 |----------|----------|
-| macOS (Apple Silicon) | [muxy-macos-arm64.zip](https://nightly.link/contember/muxy/workflows/build/main/muxy-macos-arm64.zip) |
-| Linux (x64) | [muxy-linux-x64.zip](https://nightly.link/contember/muxy/workflows/build/main/muxy-linux-x64.zip) |
-| Windows (x64) | [muxy-windows-x64.zip](https://nightly.link/contember/muxy/workflows/build/main/muxy-windows-x64.zip) |
+| macOS (Apple Silicon) | [okena-macos-arm64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-macos-arm64.zip) |
+| Linux (x64) | [okena-linux-x64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-linux-x64.zip) |
+| Windows (x64) | [okena-windows-x64.zip](https://nightly.link/contember/okena/workflows/build/main/okena-windows-x64.zip) |
 
 ## Features
 
@@ -151,11 +151,11 @@ cargo run
 | Toggle sidebar | Cmd+B | Ctrl+B |
 | Settings | Cmd+, | Ctrl+, |
 
-All shortcuts are customizable via `~/.config/muxy/keybindings.json`.
+All shortcuts are customizable via `~/.config/okena/keybindings.json`.
 
 ## Configuration
 
-Settings are stored in `~/.config/muxy/`:
+Settings are stored in `~/.config/okena/`:
 
 | File | Purpose |
 |------|---------|

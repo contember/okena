@@ -297,7 +297,7 @@ impl CustomThemeColors {
 pub fn get_themes_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("muxy")
+        .join("okena")
         .join("themes")
 }
 

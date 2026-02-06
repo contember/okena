@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# macOS App Bundle Script for Muxy
+# macOS App Bundle Script for Okena
 # Usage: ./scripts/bundle-macos.sh [--target <target>] [--skip-build] [--dmg]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,8 +11,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 TARGET=""
 SKIP_BUILD=false
 CREATE_DMG=false
-APP_NAME="Muxy"
-BUNDLE_ID="com.contember.muxy"
+APP_NAME="Okena"
+BUNDLE_ID="com.contember.okena"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,7 +46,7 @@ if [[ -z "$TARGET" ]]; then
     fi
 fi
 
-echo "==> Building Muxy for macOS"
+echo "==> Building Okena for macOS"
 echo "    Target: $TARGET"
 
 cd "$PROJECT_ROOT"
@@ -62,14 +62,14 @@ if [[ "$SKIP_BUILD" == false ]]; then
 fi
 
 # Verify binary exists (check target-specific path first, then default)
-BINARY_PATH="target/$TARGET/release/muxy"
+BINARY_PATH="target/$TARGET/release/okena"
 if [[ ! -f "$BINARY_PATH" ]]; then
     # Try default release path (when built without --target)
-    BINARY_PATH="target/release/muxy"
+    BINARY_PATH="target/release/okena"
     if [[ ! -f "$BINARY_PATH" ]]; then
         echo "Error: Binary not found"
-        echo "Checked: target/$TARGET/release/muxy"
-        echo "Checked: target/release/muxy"
+        echo "Checked: target/$TARGET/release/okena"
+        echo "Checked: target/release/okena"
         echo "Run without --skip-build or build first with: cargo build --release"
         exit 1
     fi
@@ -91,8 +91,8 @@ mkdir -p "$RESOURCES_DIR"
 
 # Copy binary
 echo "==> Copying binary..."
-cp "$BINARY_PATH" "$MACOS_DIR/muxy"
-chmod +x "$MACOS_DIR/muxy"
+cp "$BINARY_PATH" "$MACOS_DIR/okena"
+chmod +x "$MACOS_DIR/okena"
 
 # Create Info.plist with version
 echo "==> Creating Info.plist..."
@@ -134,7 +134,7 @@ echo "==> App bundle created at: $APP_BUNDLE"
 # Create DMG if requested
 if [[ "$CREATE_DMG" == true ]]; then
     echo "==> Creating DMG..."
-    DMG_NAME="Muxy-$VERSION-$TARGET.dmg"
+    DMG_NAME="Okena-$VERSION-$TARGET.dmg"
     DMG_PATH="$DIST_DIR/$DMG_NAME"
 
     # Remove existing DMG

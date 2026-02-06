@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Muxy
+Name=Okena
 Comment=Terminal multiplexer for managing multiple terminal sessions
-Exec=muxy
-Icon=muxy
+Exec=okena
+Icon=okena
 Terminal=false
 Categories=System;TerminalEmulator;Utility;
 Keywords=terminal;console;shell;command;pty;
-StartupWMClass=muxy
+StartupWMClass=okena
 X-GNOME-UsesNotifications=true

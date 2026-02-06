@@ -1,6 +1,6 @@
 # Remote Control API
 
-Muxy includes a local HTTP/WebSocket server for remote control — useful for mobile companion apps or access via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
+Okena includes a local HTTP/WebSocket server for remote control — useful for mobile companion apps or access via [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
 
 ## Quick Start
 
@@ -19,13 +19,13 @@ Muxy includes a local HTTP/WebSocket server for remote control — useful for mo
 - Server **always** binds to `127.0.0.1` only — never exposed to the network
 - For remote access, use a tunnel (e.g. Cloudflare Tunnel, SSH port forwarding)
 - Pairing codes are 8-character base32, valid for 60 seconds, single-use
-- Tokens are stored as HMAC-SHA256 digests (never plaintext) using a persistent app secret (`~/.config/muxy/remote_secret`)
+- Tokens are stored as HMAC-SHA256 digests (never plaintext) using a persistent app secret (`~/.config/okena/remote_secret`)
 - Rate limiting: 5 attempts per IP per minute, 30 globally per minute
 - 300ms delay on every failed pairing attempt
 
 ## Configuration
 
-In `~/.config/muxy/settings.json`:
+In `~/.config/okena/settings.json`:
 
 ```json
 {
@@ -33,7 +33,7 @@ In `~/.config/muxy/settings.json`:
 }
 ```
 
-When running, the server writes `~/.config/muxy/remote.json`:
+When running, the server writes `~/.config/okena/remote.json`:
 
 ```json
 {
