@@ -320,15 +320,29 @@ fn parse_hunk_header(header: &str) -> (usize, usize) {
 
 /// Get diff for a repository path.
 pub fn get_diff(path: &Path, mode: DiffMode) -> Result<DiffResult, String> {
+    get_diff_with_options(path, mode, false)
+}
+
+/// Get diff for a repository path with options.
+pub fn get_diff_with_options(
+    path: &Path,
+    mode: DiffMode,
+    ignore_whitespace: bool,
+) -> Result<DiffResult, String> {
     let path_str = path.to_str().ok_or("Invalid path")?;
 
     // Build git diff command based on mode
     // WorkingTree: unstaged changes (working tree vs index)
     // Staged: staged changes (index vs HEAD)
-    let args = match mode {
+    let mut args = match mode {
         DiffMode::WorkingTree => vec!["-C", path_str, "diff"],
         DiffMode::Staged => vec!["-C", path_str, "diff", "--cached"],
     };
+
+    // Add -w flag to ignore whitespace changes
+    if ignore_whitespace {
+        args.push("-w");
+    }
 
     let output = Command::new("git")
         .args(&args)

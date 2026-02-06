@@ -130,6 +130,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set diff ignore whitespace option
+    pub fn set_diff_ignore_whitespace(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.diff_ignore_whitespace = value;
+        self.save_and_notify(cx);
+    }
+
     /// Save and notify - common logic for all setters
     fn save_and_notify(&mut self, cx: &mut Context<Self>) {
         self.save_debounced(cx);

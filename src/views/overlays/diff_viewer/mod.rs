@@ -9,7 +9,7 @@ mod scrollbar;
 mod syntax;
 mod types;
 
-use crate::git::{get_diff, is_git_repo, DiffMode, DiffResult};
+use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult};
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
@@ -39,6 +39,8 @@ pub struct DiffViewer {
     focus_handle: FocusHandle,
     diff_mode: DiffMode,
     view_mode: DiffViewMode,
+    /// Ignore whitespace changes in diff.
+    ignore_whitespace: bool,
     project_path: String,
     files: Vec<DiffDisplayFile>,
     file_tree: FileTreeNode,
@@ -63,11 +65,13 @@ impl DiffViewer {
         let settings = settings_entity(cx).read(cx);
         let file_font_size = settings.settings.file_font_size;
         let view_mode = settings.settings.diff_view_mode;
+        let ignore_whitespace = settings.settings.diff_ignore_whitespace;
 
         let mut viewer = Self {
             focus_handle,
             diff_mode: DiffMode::WorkingTree,
             view_mode,
+            ignore_whitespace,
             project_path: project_path.clone(),
             files: Vec::new(),
             file_tree: FileTreeNode::default(),
@@ -112,7 +116,7 @@ impl DiffViewer {
         self.side_by_side_lines.clear();
 
         let path = std::path::Path::new(&self.project_path);
-        match get_diff(path, mode) {
+        match get_diff_with_options(path, mode, self.ignore_whitespace) {
             Ok(result) => {
                 if result.is_empty() {
                     self.error_message =
@@ -180,6 +184,16 @@ impl DiffViewer {
         // Save to global settings
         settings_entity(cx).update(cx, |settings, cx| {
             settings.set_diff_view_mode(self.view_mode, cx);
+        });
+        cx.notify();
+    }
+
+    fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+        self.load_diff(self.diff_mode);
+        // Save to global settings
+        settings_entity(cx).update(cx, |settings, cx| {
+            settings.set_diff_ignore_whitespace(self.ignore_whitespace, cx);
         });
         cx.notify();
     }
@@ -331,6 +345,7 @@ impl Render for DiffViewer {
                     }
                     "tab" => this.toggle_mode(cx),
                     "s" => this.toggle_view_mode(cx),
+                    "w" => this.toggle_ignore_whitespace(cx),
                     "up" => this.prev_file(cx),
                     "down" => this.next_file(cx),
                     "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
@@ -366,7 +381,7 @@ impl Render for DiffViewer {
                     .max_w(px(1400.0))
                     .h(relative(0.88))
                     .max_h(px(950.0))
-                    .child(self.render_header(&t, has_files, total_added, total_removed, is_working, cx))
+                    .child(self.render_header(&t, has_files, total_added, total_removed, is_working, self.ignore_whitespace, cx))
                     .child(self.render_content(&t, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
                     .child(self.render_footer(&t, has_selection)),
             )

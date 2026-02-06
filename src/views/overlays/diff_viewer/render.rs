@@ -16,6 +16,7 @@ impl DiffViewer {
         total_added: usize,
         total_removed: usize,
         is_working: bool,
+        ignore_whitespace: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_unified = self.view_mode == DiffViewMode::Unified;
@@ -72,6 +73,39 @@ impl DiffViewer {
                     .flex()
                     .items_center()
                     .gap(px(12.0))
+                    .child(
+                        div()
+                            .id("ignore-whitespace-toggle")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(if ignore_whitespace {
+                                t.button_primary_bg
+                            } else {
+                                t.border
+                            }))
+                            .bg(rgb(if ignore_whitespace {
+                                t.button_primary_bg
+                            } else {
+                                t.bg_secondary
+                            }))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.toggle_ignore_whitespace(cx)
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(if ignore_whitespace {
+                                        t.button_primary_fg
+                                    } else {
+                                        t.text_secondary
+                                    }))
+                                    .child("Ignore Whitespace"),
+                            ),
+                    )
                     .child(
                         div()
                             .id("view-mode-toggle")
@@ -369,6 +403,7 @@ impl DiffViewer {
                     .child(self.render_hint("Esc", "close", t))
                     .child(self.render_hint("Tab", "toggle mode", t))
                     .child(self.render_hint("S", "split view", t))
+                    .child(self.render_hint("W", "whitespace", t))
                     .child(self.render_hint("↑↓", "files", t))
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {

@@ -132,6 +132,10 @@ pub struct AppSettings {
     /// Enable remote control server (default: false)
     #[serde(default)]
     pub remote_server_enabled: bool,
+
+    /// Whether to ignore whitespace changes in diff viewer
+    #[serde(default)]
+    pub diff_ignore_whitespace: bool,
 }
 
 impl Default for AppSettings {
@@ -156,6 +160,7 @@ impl Default for AppSettings {
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
+            diff_ignore_whitespace: false,
         }
     }
 }
