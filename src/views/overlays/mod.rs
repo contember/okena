@@ -14,6 +14,7 @@
 //! - Theme selector
 //! - Worktree dialog
 
+pub mod add_project_dialog;
 pub mod command_palette;
 pub mod context_menu;
 pub mod detached_terminal;
@@ -30,6 +31,7 @@ mod terminal_overlay_utils;
 pub mod theme_selector;
 pub mod worktree_dialog;
 
+pub use add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 pub use command_palette::CommandPalette;
 pub use detached_terminal::DetachedTerminalView;
 pub use diff_viewer::DiffViewMode;
