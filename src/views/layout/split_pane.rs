@@ -60,9 +60,10 @@ pub fn compute_resize(
     cx: &mut App,
 ) {
     match drag_state {
-        DragState::Split { project_id, layout_path, direction, container_bounds, .. } => {
+        DragState::Split { project_id, layout_path, child_index, direction, container_bounds } => {
             let bounds = *container_bounds;
             let is_horizontal = *direction == SplitDirection::Horizontal;
+            let divider_index = *child_index;
 
             let container_size = if is_horizontal {
                 f32::from(bounds.size.height)
@@ -80,8 +81,51 @@ pub fn compute_resize(
                 f32::from(mouse_pos.x) - f32::from(bounds.origin.x)
             };
 
-            let percent = (pos / container_size * 100.0).clamp(10.0, 90.0);
-            let new_sizes = vec![percent, 100.0 - percent];
+            // Get current sizes from workspace
+            let current_sizes = workspace.read(cx).project(project_id).and_then(|p| {
+                p.layout.as_ref()?.get_at_path(layout_path)
+            }).and_then(|node| {
+                if let crate::workspace::state::LayoutNode::Split { sizes, .. } = node {
+                    Some(sizes.clone())
+                } else {
+                    None
+                }
+            });
+
+            let Some(sizes) = current_sizes else { return };
+            let num_children = sizes.len();
+
+            if num_children < 2 {
+                return;
+            }
+
+            // Divider N is between child N and child N+1
+            let left_child = divider_index;
+            let right_child = divider_index + 1;
+
+            if right_child >= num_children {
+                return;
+            }
+
+            // Calculate cumulative size before the left child (offset where the pair starts)
+            let offset: f32 = sizes[..left_child].iter().sum();
+
+            // Combined size of the two adjacent children
+            let combined_size = sizes[left_child] + sizes[right_child];
+
+            // Convert mouse position to percentage
+            let pos_percent = pos / container_size * 100.0;
+
+            // Calculate new size for left child (relative to container start)
+            // Then clamp to ensure minimum 5% for each child within the combined area
+            let left_size = (pos_percent - offset).clamp(5.0, combined_size - 5.0);
+            let right_size = combined_size - left_size;
+
+            // Build new sizes: keep all others unchanged, update only the two adjacent
+            let mut new_sizes = sizes.clone();
+            new_sizes[left_child] = left_size;
+            new_sizes[right_child] = right_size;
+
             let project_id = project_id.clone();
             let layout_path = layout_path.clone();
 
