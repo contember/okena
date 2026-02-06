@@ -150,6 +150,7 @@ pub enum OverlayRequest {
     FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
     ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
     AddProjectDialog,
+    DiffViewer { path: String, file: Option<String> },
 }
 
 /// Requests consumed by Sidebar::render()

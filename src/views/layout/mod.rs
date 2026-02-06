@@ -14,5 +14,4 @@ pub mod terminal_pane;
 
 pub use layout_container::LayoutContainer;
 pub use navigation::{get_pane_map, register_pane_bounds, NavigationDirection};
-pub use split_pane::init_split_drag_context;
 pub use terminal_pane::TerminalPane;

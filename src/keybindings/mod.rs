@@ -60,32 +60,6 @@ actions!(
     ]
 );
 
-/// Pending diff viewer path (set before dispatching ShowDiffViewer from project header).
-static PENDING_DIFF_PATH: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
-
-/// Pending diff file to select (set before dispatching ShowDiffViewer).
-static PENDING_DIFF_FILE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
-
-/// Set a pending diff path to be used by the next ShowDiffViewer action.
-pub fn set_pending_diff_path(path: String) {
-    *PENDING_DIFF_PATH.lock() = Some(path);
-}
-
-/// Set a pending diff file to select in the diff viewer.
-pub fn set_pending_diff_file(file: String) {
-    *PENDING_DIFF_FILE.lock() = Some(file);
-}
-
-/// Take the pending diff path (returns and clears it).
-pub fn take_pending_diff_path() -> Option<String> {
-    PENDING_DIFF_PATH.lock().take()
-}
-
-/// Take the pending diff file (returns and clears it).
-pub fn take_pending_diff_file() -> Option<String> {
-    PENDING_DIFF_FILE.lock().take()
-}
-
 /// Global keybinding configuration (thread-safe)
 static KEYBINDING_CONFIG: RwLock<Option<KeybindingConfig>> = RwLock::new(None);
 

@@ -30,7 +30,7 @@ pub use layout::split_pane;
 #[allow(unused_imports)]
 pub use layout::terminal_pane;
 #[allow(unused_imports)]
-pub use layout::{get_pane_map, init_split_drag_context, register_pane_bounds, NavigationDirection};
+pub use layout::{get_pane_map, register_pane_bounds, NavigationDirection};
 #[allow(unused_imports)]
 pub use layout::{LayoutContainer, TerminalPane};
 

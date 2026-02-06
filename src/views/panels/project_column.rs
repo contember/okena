@@ -1,10 +1,11 @@
 use crate::git::{self, FileDiffSummary};
-use crate::keybindings::{set_pending_diff_path, set_pending_diff_file, ShowDiffViewer};
+use crate::git::GitStatus;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout_container::LayoutContainer;
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{ProjectData, Workspace};
+use crate::views::split_pane::ActiveDrag;
+use crate::workspace::state::{OverlayRequest, ProjectData, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -34,6 +35,10 @@ pub struct ProjectColumn {
     diff_popover_project_path: String,
     /// Hover token to cancel pending popover show
     hover_token: Arc<AtomicU64>,
+    /// Cached git status (fetched asynchronously)
+    cached_git_status: Option<GitStatus>,
+    /// Shared drag state for resize operations
+    active_drag: ActiveDrag,
 }
 
 impl ProjectColumn {
@@ -42,7 +47,16 @@ impl ProjectColumn {
         project_id: String,
         pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
+        active_drag: ActiveDrag,
+        cx: &mut Context<Self>,
     ) -> Self {
+        // Spawn initial async git status fetch
+        let project_path = workspace.read(cx).project(&project_id)
+            .map(|p| p.path.clone());
+        if let Some(path) = project_path {
+            Self::spawn_git_status_refresh(path, cx);
+        }
+
         Self {
             workspace,
             project_id,
@@ -53,7 +67,33 @@ impl ProjectColumn {
             diff_file_summaries: Vec::new(),
             diff_popover_project_path: String::new(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            cached_git_status: None,
+            active_drag,
         }
+    }
+
+    /// Spawn an async task to fetch git status and schedule the next refresh.
+    fn spawn_git_status_refresh(project_path: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let path = project_path.clone();
+            let status = smol::unblock(move || {
+                git::get_git_status(Path::new(&path))
+            }).await;
+
+            let should_continue = this.update(cx, |this, cx| {
+                this.cached_git_status = status;
+                cx.notify();
+                true
+            }).unwrap_or(false);
+
+            if should_continue {
+                // Schedule next refresh after cache TTL
+                smol::Timer::after(Duration::from_secs(5)).await;
+                let _ = this.update(cx, |_this, cx| {
+                    Self::spawn_git_status_refresh(project_path, cx);
+                });
+            }
+        }).detach();
     }
 
     fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -182,11 +222,14 @@ impl ProjectColumn {
                             .items_center()
                             .justify_between()
                             .gap(px(12.0))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.hide_diff_popover(cx);
-                                set_pending_diff_path(project_path_for_click.clone());
-                                set_pending_diff_file(file_path.clone());
-                                window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.push_overlay_request(OverlayRequest::DiffViewer {
+                                        path: project_path_for_click.clone(),
+                                        file: Some(file_path.clone()),
+                                    }, cx);
+                                });
                             }))
                             .child(
                                 div()
@@ -271,6 +314,7 @@ impl ProjectColumn {
             let project_id = self.project_id.clone();
             let pty_manager = self.pty_manager.clone();
             let terminals = self.terminals.clone();
+            let active_drag = self.active_drag.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
@@ -280,6 +324,7 @@ impl ProjectColumn {
                     vec![],
                     pty_manager,
                     terminals,
+                    active_drag,
                 )
             }));
         }
@@ -384,7 +429,7 @@ impl ProjectColumn {
     }
 
     fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = git::get_git_status(Path::new(&project.path));
+        let status = self.cached_git_status.clone();
         let is_worktree = project.worktree_info.is_some();
         let main_repo_path = project.worktree_info.as_ref()
             .map(|w| w.main_repo_path.clone())
@@ -467,12 +512,15 @@ impl ProjectColumn {
                                         this.hide_diff_popover(cx);
                                     }
                                 }))
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
-                                    // Set the path and dispatch ShowDiffViewer
-                                    set_pending_diff_path(project_path.clone());
-                                    window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.push_overlay_request(OverlayRequest::DiffViewer {
+                                            path: project_path.clone(),
+                                            file: None,
+                                        }, cx);
+                                    });
                                 }))
                                 .child(
                                     div()

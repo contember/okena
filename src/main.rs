@@ -29,7 +29,6 @@ use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
-use crate::views::split_pane::init_split_drag_context;
 use crate::workspace::persistence;
 
 /// Quit action handler
@@ -98,9 +97,6 @@ fn main() {
 
         // Register keybindings
         keybindings::register_keybindings(cx);
-
-        // Initialize split drag context for resize handling
-        init_split_drag_context(cx);
 
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);
