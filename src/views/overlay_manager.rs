@@ -21,7 +21,7 @@ use crate::views::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::workspace::state::{ContextMenuRequest, FolderContextMenuRequest, Workspace, WorkspaceData};
+use crate::workspace::state::{ContextMenuRequest, FolderContextMenuRequest, Workspace, WorkspaceData, SidebarRequest};
 
 /// Trait for overlay events that support closing.
 ///
@@ -623,9 +623,6 @@ impl OverlayManager {
     /// Hide context menu.
     pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
         self.context_menu = None;
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_context_menu_request(cx);
-        });
         cx.notify();
     }
 
@@ -641,14 +638,11 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::RenameFolder { folder_id, folder_name } => {
                     this.hide_folder_context_menu(cx);
-                    // Use pending_project_rename mechanism to trigger rename in sidebar
-                    // We need to signal the sidebar to rename a folder
                     this.workspace.update(cx, |ws, cx| {
-                        ws.pending_folder_rename = Some(crate::workspace::state::FolderRenameRequest {
+                        ws.push_sidebar_request(SidebarRequest::RenameFolder {
                             folder_id: folder_id.clone(),
                             folder_name: folder_name.clone(),
-                        });
-                        cx.notify();
+                        }, cx);
                     });
                 }
                 FolderContextMenuEvent::DeleteFolder { folder_id } => {
@@ -668,9 +662,6 @@ impl OverlayManager {
     /// Hide folder context menu.
     pub fn hide_folder_context_menu(&mut self, cx: &mut Context<Self>) {
         self.folder_context_menu = None;
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_folder_context_menu_request(cx);
-        });
         cx.notify();
     }
 

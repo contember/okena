@@ -52,7 +52,11 @@ impl LayoutContainer {
                     move |_, _window, cx| {
                         cx.stop_propagation();
                         workspace.update(cx, |ws, cx| {
-                            ws.request_shell_selector(&project_id, &tid, shell_type.clone(), cx);
+                            ws.push_overlay_request(crate::workspace::state::OverlayRequest::ShellSelector {
+                                project_id: project_id.clone(),
+                                terminal_id: tid.clone(),
+                                current_shell: shell_type.clone(),
+                            }, cx);
                         });
                     }
                 })

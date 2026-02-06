@@ -2,7 +2,7 @@ use crate::theme::FolderColor;
 use crate::workspace::focus::FocusManager;
 use gpui::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// A folder that groups projects in the sidebar
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -127,13 +127,6 @@ pub struct FocusedTerminalState {
     pub layout_path: Vec<usize>,
 }
 
-/// Request to show worktree dialog
-#[derive(Clone, Debug)]
-pub struct WorktreeDialogRequest {
-    pub project_id: String,
-    pub project_path: String,
-}
-
 /// Request to show context menu at a position
 #[derive(Clone, Debug)]
 pub struct ContextMenuRequest {
@@ -149,26 +142,21 @@ pub struct FolderContextMenuRequest {
     pub position: gpui::Point<gpui::Pixels>,
 }
 
-/// Request to show shell selector overlay
+/// Requests consumed by RootView::process_pending_requests()
 #[derive(Clone, Debug)]
-pub struct ShellSelectorRequest {
-    pub project_id: String,
-    pub terminal_id: String,
-    pub current_shell: crate::terminal::shell_config::ShellType,
+pub enum OverlayRequest {
+    WorktreeDialog { project_id: String, project_path: String },
+    ContextMenu { project_id: String, position: gpui::Point<gpui::Pixels> },
+    FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
+    ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
+    AddProjectDialog,
 }
 
-/// Request to rename a project (triggered from context menu)
+/// Requests consumed by Sidebar::render()
 #[derive(Clone, Debug)]
-pub struct ProjectRenameRequest {
-    pub project_id: String,
-    pub project_name: String,
-}
-
-/// Request to rename a folder (triggered from context menu)
-#[derive(Clone, Debug)]
-pub struct FolderRenameRequest {
-    pub folder_id: String,
-    pub folder_name: String,
+pub enum SidebarRequest {
+    RenameProject { project_id: String, project_name: String },
+    RenameFolder { folder_id: String, folder_name: String },
 }
 
 /// GPUI Entity for workspace state
@@ -186,20 +174,10 @@ pub struct Workspace {
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
-    /// Pending request to show worktree dialog
-    pub worktree_dialog_request: Option<WorktreeDialogRequest>,
-    /// Pending request to show context menu
-    pub context_menu_request: Option<ContextMenuRequest>,
-    /// Pending request to show folder context menu
-    pub folder_context_menu_request: Option<FolderContextMenuRequest>,
-    /// Pending request to show shell selector
-    pub shell_selector_request: Option<ShellSelectorRequest>,
-    /// Pending request to rename a project
-    pub pending_project_rename: Option<ProjectRenameRequest>,
-    /// Pending request to rename a folder
-    pub pending_folder_rename: Option<FolderRenameRequest>,
-    /// Pending request to show add project dialog
-    pub add_project_requested: bool,
+    /// Pending overlay requests (consumed by RootView::process_pending_requests)
+    pub overlay_requests: VecDeque<OverlayRequest>,
+    /// Pending sidebar requests (consumed by Sidebar::render)
+    pub sidebar_requests: VecDeque<SidebarRequest>,
     /// Last access time for each project (for sorting in project switcher)
     pub project_access_times: HashMap<String, std::time::Instant>,
 }
@@ -213,13 +191,8 @@ impl Workspace {
             focused_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
-            worktree_dialog_request: None,
-            context_menu_request: None,
-            folder_context_menu_request: None,
-            shell_selector_request: None,
-            pending_project_rename: None,
-            pending_folder_rename: None,
-            add_project_requested: false,
+            overlay_requests: VecDeque::new(),
+            sidebar_requests: VecDeque::new(),
             project_access_times: HashMap::new(),
         }
     }

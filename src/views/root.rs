@@ -127,7 +127,10 @@ impl RootView {
             }
             OverlayManagerEvent::RenameProject { project_id, project_name } => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.request_project_rename(project_id, project_name, cx);
+                    ws.push_sidebar_request(crate::workspace::state::SidebarRequest::RenameProject {
+                        project_id: project_id.clone(),
+                        project_name: project_name.clone(),
+                    }, cx);
                 });
             }
             OverlayManagerEvent::CloseWorktree { project_id } => {
@@ -536,73 +539,59 @@ impl RootView {
 
     /// Process pending overlay requests from workspace state.
     ///
-    /// This handles requests that are set in workspace state and need to trigger
-    /// overlay creation in the OverlayManager. Each request is processed once and then
-    /// cleared from the workspace.
+    /// Drains the overlay request queue and dispatches each request to the
+    /// OverlayManager. Requests for already-open overlays are silently dropped.
     fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
-        // Check for worktree dialog request
-        if let Some(request) = self.workspace.read(cx).worktree_dialog_request.clone() {
-            if !self.overlay_manager.read(cx).has_worktree_dialog() {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_worktree_dialog(request.project_id, request.project_path, cx);
-                });
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_worktree_dialog_request(cx);
-                });
-            }
-        }
+        use crate::workspace::state::OverlayRequest;
 
-        // Check for context menu request
-        if let Some(request) = self.workspace.read(cx).context_menu_request.clone() {
-            if !self.overlay_manager.read(cx).has_context_menu() {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_context_menu(request.clone(), cx);
-                });
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_context_menu_request(cx);
-                });
-            }
-        }
+        let requests: Vec<_> = self.workspace.update(cx, |ws, _cx| {
+            ws.overlay_requests.drain(..).collect()
+        });
 
-        // Check for folder context menu request
-        if let Some(request) = self.workspace.read(cx).folder_context_menu_request.clone() {
-            if !self.overlay_manager.read(cx).has_folder_context_menu() {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_folder_context_menu(request.clone(), cx);
-                });
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_folder_context_menu_request(cx);
-                });
+        for request in requests {
+            match request {
+                OverlayRequest::WorktreeDialog { project_id, project_path } => {
+                    if !self.overlay_manager.read(cx).has_worktree_dialog() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_worktree_dialog(project_id, project_path, cx);
+                        });
+                    }
+                }
+                OverlayRequest::ContextMenu { project_id, position } => {
+                    if !self.overlay_manager.read(cx).has_context_menu() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_context_menu(
+                                crate::workspace::state::ContextMenuRequest { project_id, position },
+                                cx,
+                            );
+                        });
+                    }
+                }
+                OverlayRequest::FolderContextMenu { folder_id, folder_name, position } => {
+                    if !self.overlay_manager.read(cx).has_folder_context_menu() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_folder_context_menu(
+                                crate::workspace::state::FolderContextMenuRequest { folder_id, folder_name, position },
+                                cx,
+                            );
+                        });
+                    }
+                }
+                OverlayRequest::ShellSelector { project_id, terminal_id, current_shell } => {
+                    if !self.overlay_manager.read(cx).has_shell_selector() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_shell_selector(current_shell, project_id, terminal_id, cx);
+                        });
+                    }
+                }
+                OverlayRequest::AddProjectDialog => {
+                    if !self.overlay_manager.read(cx).has_add_project_dialog() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.toggle_add_project_dialog(cx);
+                        });
+                    }
+                }
             }
-        }
-
-        // Check for shell selector request
-        if let Some(request) = self.workspace.read(cx).shell_selector_request.clone() {
-            if !self.overlay_manager.read(cx).has_shell_selector() {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.show_shell_selector(
-                        request.current_shell,
-                        request.project_id,
-                        request.terminal_id,
-                        cx,
-                    );
-                });
-                self.workspace.update(cx, |ws, cx| {
-                    ws.clear_shell_selector_request(cx);
-                });
-            }
-        }
-
-        // Check for add project dialog request
-        if self.workspace.read(cx).add_project_requested {
-            if !self.overlay_manager.read(cx).has_add_project_dialog() {
-                self.overlay_manager.update(cx, |om, cx| {
-                    om.toggle_add_project_dialog(cx);
-                });
-            }
-            self.workspace.update(cx, |ws, cx| {
-                ws.clear_add_project_dialog_request(cx);
-            });
         }
     }
 

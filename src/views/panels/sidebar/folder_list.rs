@@ -92,7 +92,11 @@ impl Sidebar {
                     let folder_name = folder.name.clone();
                     move |_this, event: &MouseDownEvent, _window, cx| {
                         _this.workspace.update(cx, |ws, cx| {
-                            ws.request_folder_context_menu(&folder_id, &folder_name, event.position, cx);
+                            ws.push_overlay_request(crate::workspace::state::OverlayRequest::FolderContextMenu {
+                                folder_id: folder_id.clone(),
+                                folder_name: folder_name.clone(),
+                                position: event.position,
+                            }, cx);
                         });
                         cx.stop_propagation();
                     }
