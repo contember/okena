@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/app-icon-128.png" width="128" alt="Okena">
+</p>
+
 # Okena
 
 A fast, native terminal multiplexer built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (the UI framework from Zed editor).
@@ -7,17 +11,15 @@ Tabs, splits, detachable windows, command palette, and automatic workspace resto
 
 ### macOS
 
-**Homebrew (recommended):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
+```
+
+**Homebrew** (auto-update disabled):
 
 ```bash
 brew tap contember/okena
 brew install --cask okena
-```
-
-**Or install script:**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
 ```
 
 ### Linux
@@ -26,17 +28,13 @@ curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | b
 curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin/okena` with desktop entry and icons.
-
 ### Windows
-
-**PowerShell:**
 
 ```powershell
 irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
 ```
 
-Installs to `%LOCALAPPDATA%\Programs\Okena` with Start Menu shortcut.
+The install script includes built-in auto-update support. On macOS and Linux, Okena is installed to `~/.local/bin/okena`. On Windows, it installs to `%LOCALAPPDATA%\Programs\Okena` with a Start Menu shortcut.
 
 ### Manual Download
 
