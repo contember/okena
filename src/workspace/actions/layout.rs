@@ -132,7 +132,7 @@ impl Workspace {
             // Closing root - remove layout (project becomes bookmark)
             self.close_terminal(project_id, path, cx);
             // Clear focused terminal since there's nothing to focus
-            self.focused_terminal = None;
+            self.focus_manager.clear_focus();
             return;
         }
 
@@ -404,9 +404,9 @@ impl Workspace {
         }
 
         // Clear focused terminal if it was in this project
-        if let Some(ref focused) = self.focused_terminal {
+        if let Some(ref focused) = self.focus_manager.focused_terminal_state() {
             if focused.project_id == project_id {
-                self.focused_terminal = None;
+                self.focus_manager.clear_focus();
             }
         }
 

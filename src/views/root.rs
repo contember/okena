@@ -195,7 +195,6 @@ impl RootView {
             // Clear focus state via FocusManager
             ws.focus_manager.clear_focus();
             ws.focus_manager.clear_stack();
-            ws.focused_terminal = None; // Keep legacy field in sync
             ws.detached_terminals.clear();
             cx.notify();
         });
@@ -562,13 +561,6 @@ impl RootView {
 
         for request in requests {
             match request {
-                OverlayRequest::WorktreeDialog { project_id, project_path } => {
-                    if !self.overlay_manager.read(cx).has_worktree_dialog() {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.show_worktree_dialog(project_id, project_path, cx);
-                        });
-                    }
-                }
                 OverlayRequest::ContextMenu { project_id, position } => {
                     if !self.overlay_manager.read(cx).has_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {

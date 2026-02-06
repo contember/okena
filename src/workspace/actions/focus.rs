@@ -2,7 +2,7 @@
 //!
 //! Actions for managing terminal and project focus, including fullscreen mode.
 
-use crate::workspace::state::{FocusedTerminalState, Workspace};
+use crate::workspace::state::Workspace;
 use gpui::*;
 
 impl Workspace {
@@ -20,11 +20,7 @@ impl Workspace {
                 if let Some(ref layout) = project.layout {
                     // Find the first terminal's path
                     if let Some(first_path) = Self::find_first_terminal_path(layout) {
-                        self.focus_manager.focus_terminal(pid.clone(), first_path.clone());
-                        self.focused_terminal = Some(FocusedTerminalState {
-                            project_id: pid.clone(),
-                            layout_path: first_path,
-                        });
+                        self.focus_manager.focus_terminal(pid.clone(), first_path);
                     }
                 }
             }
@@ -84,12 +80,6 @@ impl Workspace {
         // Also focus the project
         self.focused_project_id = Some(project_id.clone());
 
-        // Sync focused_terminal for visual indicator
-        self.focused_terminal = Some(FocusedTerminalState {
-            project_id,
-            layout_path,
-        });
-
         cx.notify();
     }
 
@@ -118,20 +108,13 @@ impl Workspace {
         self.fullscreen_terminal = None;
 
         // Use FocusManager for focus restoration
-        if let Some(restored) = self.focus_manager.exit_fullscreen() {
-            // Restore the focused terminal state for visual indicator
-            self.focused_terminal = Some(FocusedTerminalState {
-                project_id: restored.project_id,
-                layout_path: restored.layout_path,
-            });
-        }
+        self.focus_manager.exit_fullscreen();
 
         cx.notify();
     }
 
     /// Set focused terminal (for visual indicator)
     ///
-    /// This updates both the FocusManager and the legacy focused_terminal state.
     /// Focus events propagate: terminal focus -> pane focus -> project awareness
     pub fn set_focused_terminal(
         &mut self,
@@ -145,11 +128,6 @@ impl Workspace {
         // Record project access time for recency sorting
         self.touch_project(&project_id);
 
-        // Update legacy state for compatibility
-        self.focused_terminal = Some(FocusedTerminalState {
-            project_id,
-            layout_path,
-        });
         cx.notify();
     }
 
@@ -160,7 +138,7 @@ impl Workspace {
     pub fn clear_focused_terminal(&mut self, cx: &mut Context<Self>) {
         // Use FocusManager to save focus for restoration
         self.focus_manager.enter_modal();
-        // Don't clear focused_terminal - visual indicator remains during modal
+        // Visual indicator remains during modal (FocusManager keeps current_focus)
         cx.notify();
     }
 
@@ -169,12 +147,7 @@ impl Workspace {
     /// Called when exiting a modal context to restore the previous focus.
     pub fn restore_focused_terminal(&mut self, cx: &mut Context<Self>) {
         // Use FocusManager to restore focus
-        if let Some(restored) = self.focus_manager.exit_modal() {
-            self.focused_terminal = Some(FocusedTerminalState {
-                project_id: restored.project_id,
-                layout_path: restored.layout_path,
-            });
-        }
+        self.focus_manager.exit_modal();
         cx.notify();
     }
 
