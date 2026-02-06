@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::terminal::shell_config::ShellType;
 use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
@@ -104,6 +105,12 @@ macro_rules! toggle_overlay {
 }
 
 // Implement CloseEvent for existing overlay events
+
+impl CloseEvent for AddProjectDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, AddProjectDialogEvent::Close)
+    }
+}
 
 impl CloseEvent for KeybindingsHelpEvent {
     fn is_close(&self) -> bool {
@@ -210,6 +217,7 @@ pub struct OverlayManager {
     workspace: Entity<Workspace>,
 
     // Simple toggle overlays
+    add_project_dialog: OverlaySlot<AddProjectDialog>,
     keybindings_help: OverlaySlot<KeybindingsHelp>,
     theme_selector: OverlaySlot<ThemeSelector>,
     command_palette: OverlaySlot<CommandPalette>,
@@ -233,6 +241,7 @@ impl OverlayManager {
     pub fn new(workspace: Entity<Workspace>) -> Self {
         Self {
             workspace,
+            add_project_dialog: OverlaySlot::new(),
             keybindings_help: OverlaySlot::new(),
             theme_selector: OverlaySlot::new(),
             command_palette: OverlaySlot::new(),
@@ -251,6 +260,11 @@ impl OverlayManager {
     // ========================================================================
     // Visibility checks
     // ========================================================================
+
+    /// Check if add project dialog is open.
+    pub fn has_add_project_dialog(&self) -> bool {
+        self.add_project_dialog.is_open()
+    }
 
     /// Check if keybindings help is open.
     pub fn has_keybindings_help(&self) -> bool {
@@ -315,6 +329,27 @@ impl OverlayManager {
     // ========================================================================
     // Simple toggle overlays
     // ========================================================================
+
+    /// Toggle add project dialog overlay.
+    pub fn toggle_add_project_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.add_project_dialog.is_open() {
+            self.add_project_dialog.close();
+            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| AddProjectDialog::new(workspace, cx));
+            cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
+                if event.is_close() {
+                    this.add_project_dialog.close();
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                    cx.notify();
+                }
+            }).detach();
+            self.add_project_dialog.set(entity);
+            self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        }
+        cx.notify();
+    }
 
     /// Toggle keybindings help overlay.
     pub fn toggle_keybindings_help(&mut self, cx: &mut Context<Self>) {
@@ -709,6 +744,11 @@ impl OverlayManager {
     // ========================================================================
     // Render helpers
     // ========================================================================
+
+    /// Get add project dialog entity for rendering.
+    pub fn render_add_project_dialog(&self) -> Option<Entity<AddProjectDialog>> {
+        self.add_project_dialog.render()
+    }
 
     /// Get keybindings help entity for rendering.
     pub fn render_keybindings_help(&self) -> Option<Entity<KeybindingsHelp>> {

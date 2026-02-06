@@ -7,7 +7,7 @@ use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
 use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -648,6 +648,7 @@ impl Render for RootView {
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);
+        let has_add_project_dialog = om.has_add_project_dialog();
         let has_keybindings_help = om.has_keybindings_help();
         let has_session_manager = om.has_session_manager();
         let has_theme_selector = om.has_theme_selector();
@@ -782,6 +783,13 @@ impl Render for RootView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowSettings, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(cx));
+                }
+            }))
+            // Handle new project action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &NewProject, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_add_project_dialog(cx));
                 }
             }))
             // Handle open settings file action
@@ -1123,6 +1131,10 @@ impl Render for RootView {
                 } else {
                     d
                 }
+            })
+            // Add project dialog overlay (renders on top of everything)
+            .when(has_add_project_dialog, |d| {
+                d.children(self.overlay_manager.read(cx).render_add_project_dialog())
             })
     }
 }

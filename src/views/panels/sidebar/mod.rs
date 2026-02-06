@@ -6,16 +6,15 @@
 //! - Drag-and-drop project reordering
 //! - Folder color customization
 
-mod add_dialog;
 mod color_picker;
 mod project_list;
 
-use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
+use crate::keybindings::{format_keystroke, get_config, NewProject, ShowKeybindings};
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
     cancel_rename, finish_rename, start_rename_with_blur,
-    RenameState, SimpleInputState, PathAutoCompleteState,
+    RenameState,
 };
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{ProjectData, Workspace};
@@ -55,12 +54,6 @@ impl Render for ProjectDragView {
 pub struct Sidebar {
     workspace: Entity<Workspace>,
     expanded_projects: HashSet<String>,
-    pub(super) show_add_dialog: bool,
-    pub(super) name_input: Option<Entity<SimpleInputState>>,
-    pub(super) path_input: Option<Entity<PathAutoCompleteState>>,
-    /// Pending values to set on inputs (for async updates)
-    pub(super) pending_name_value: Option<String>,
-    pub(super) pending_path_value: Option<String>,
     pub(super) terminals: TerminalsRegistry,
     /// Terminal rename state: (project_id, terminal_id)
     pub(super) terminal_rename: Option<RenameState<(String, String)>>,
@@ -70,8 +63,6 @@ pub struct Sidebar {
     pub(super) project_rename: Option<RenameState<String>>,
     /// Double-click detector for projects
     project_click_detector: ClickDetector<String>,
-    /// Whether to create project without terminal (bookmark mode)
-    pub(super) create_without_terminal: bool,
     /// Project ID for which color picker is shown
     color_picker_project_id: Option<String>,
 }
@@ -81,17 +72,11 @@ impl Sidebar {
         Self {
             workspace,
             expanded_projects: HashSet::new(),
-            show_add_dialog: false,
-            name_input: None,
-            path_input: None,
-            pending_name_value: None,
-            pending_path_value: None,
             terminals,
             terminal_rename: None,
             terminal_click_detector: ClickDetector::new(),
             project_rename: None,
             project_click_detector: ClickDetector::new(),
-            create_without_terminal: false,
             color_picker_project_id: None,
         }
     }
@@ -195,83 +180,6 @@ impl Sidebar {
         });
     }
 
-    pub(super) fn ensure_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.name_input.is_none() {
-            self.name_input = Some(cx.new(|cx| {
-                SimpleInputState::new(cx)
-                    .placeholder("Enter project name...")
-            }));
-        }
-        if self.path_input.is_none() {
-            self.path_input = Some(cx.new(|cx| {
-                PathAutoCompleteState::new(cx)
-            }));
-        }
-    }
-
-    pub(super) fn add_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
-        let path = self.path_input.as_ref().map(|i| i.read(cx).value(cx)).unwrap_or_default();
-
-        if !name.is_empty() && !path.is_empty() {
-            let with_terminal = !self.create_without_terminal;
-            self.workspace.update(cx, |ws, cx| {
-                ws.add_project(name, path, with_terminal, cx);
-            });
-            // Clear inputs
-            if let Some(ref input) = self.name_input {
-                input.update(cx, |i, cx| i.set_value("", cx));
-            }
-            if let Some(ref input) = self.path_input {
-                input.update(cx, |i, cx| i.set_value("", cx));
-            }
-            self.show_add_dialog = false;
-            self.create_without_terminal = false;
-            // Exit modal mode to restore terminal focus
-            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_quick_path(&mut self, name: &str, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let name_str = name.to_string();
-        let path_str = path.to_string();
-        if let Some(ref input) = self.name_input {
-            input.update(cx, |i, cx| i.set_value(&name_str, cx));
-        }
-        if let Some(ref input) = self.path_input {
-            input.update(cx, |i, cx| i.set_value(&path_str, cx));
-        }
-        cx.notify();
-    }
-
-    pub(super) fn open_folder_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select project folder".into()),
-        });
-
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(selected_paths))) = paths.await {
-                if let Some(path) = selected_paths.first() {
-                    let path_str = path.to_string_lossy().to_string();
-                    let name_str = path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Project".to_string());
-
-                    this.update(cx, |this, cx| {
-                        // Store pending values to be applied in next render
-                        this.pending_path_value = Some(path_str);
-                        this.pending_name_value = Some(name_str);
-                        cx.notify();
-                    }).ok();
-                }
-            }
-        }).detach();
-    }
-
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         div()
@@ -302,16 +210,9 @@ impl Sidebar {
                     .text_size(px(14.0))
                     .text_color(rgb(t.text_secondary))
                     .child("+")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.show_add_dialog = !this.show_add_dialog;
-                        // Enter/exit modal mode to prevent terminal from stealing focus
-                        if this.show_add_dialog {
-                            this.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
-                        } else {
-                            this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                        }
-                        cx.notify();
-                    })),
+                    .on_click(|_, _, cx| {
+                        cx.dispatch_action(&NewProject);
+                    }),
             )
     }
 
@@ -439,13 +340,7 @@ impl Render for Sidebar {
             main_index += 1;
         }
 
-        let show_add_dialog = self.show_add_dialog;
         let color_picker_project_id = self.color_picker_project_id.clone();
-
-        // Check if we have suggestions to show (must be checked before dialog renders)
-        let has_suggestions = self.path_input.as_ref()
-            .map(|input| input.read(cx).has_suggestions())
-            .unwrap_or(false);
 
         div()
             .relative()
@@ -455,7 +350,6 @@ impl Render for Sidebar {
             .flex_col()
             .bg(rgb(t.bg_secondary))
             .child(self.render_header(cx))
-            .when(show_add_dialog, |d| d.child(self.render_add_dialog(window, cx)))
             .child(self.render_projects_header(cx))
             .child(
                 div()
@@ -472,10 +366,6 @@ impl Render for Sidebar {
                     ),
             )
             .child(self.render_keybindings_hint(cx))
-            // Path suggestions overlay - rendered LAST to appear on top of everything
-            .when(show_add_dialog && has_suggestions, |d| {
-                d.child(self.render_path_suggestions(cx))
-            })
             // Color picker overlay
             .when(color_picker_project_id.is_some(), |d| {
                 let project_id = color_picker_project_id.unwrap();
