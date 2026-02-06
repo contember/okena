@@ -33,27 +33,10 @@ pub enum DragState {
 
 pub type ActiveDrag = Rc<RefCell<Option<DragState>>>;
 
-/// Global context for drag operations - stored in App global
-pub struct DragContext {
-    pub active_drag: ActiveDrag,
+/// Create a new active drag handle.
+pub fn new_active_drag() -> ActiveDrag {
+    Rc::new(RefCell::new(None))
 }
-
-impl Global for DragContext {}
-
-/// Initialize drag context (call once at app startup)
-pub fn init_drag_context(cx: &mut App) {
-    cx.set_global(DragContext {
-        active_drag: Rc::new(RefCell::new(None)),
-    });
-}
-
-/// Get the active drag state
-pub fn get_active_drag(cx: &App) -> ActiveDrag {
-    cx.global::<DragContext>().active_drag.clone()
-}
-
-// Legacy alias - TODO: update callers to use init_drag_context directly
-pub fn init_split_drag_context(cx: &mut App) { init_drag_context(cx) }
 
 /// Helper to compute and apply resize based on mouse position
 pub fn compute_resize(
@@ -169,11 +152,12 @@ pub fn render_split_divider(
     direction: SplitDirection,
     layout_path: Vec<usize>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    active_drag: &ActiveDrag,
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
     let is_horizontal = direction == SplitDirection::Horizontal;
-    let active_drag = get_active_drag(cx);
+    let active_drag = active_drag.clone();
 
     div()
         .id(ElementId::Name(format!("split-handle-{}-{}", project_id, child_index).into()))
@@ -234,10 +218,11 @@ pub fn render_project_divider(
     divider_index: usize,
     project_ids: Vec<String>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    active_drag: &ActiveDrag,
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
-    let active_drag = get_active_drag(cx);
+    let active_drag = active_drag.clone();
 
     div()
         .id(ElementId::Name(format!("project-divider-{}", divider_index).into()))
@@ -273,9 +258,9 @@ pub fn render_project_divider(
 }
 
 /// Render the sidebar resize divider
-pub fn render_sidebar_divider(cx: &App) -> impl IntoElement {
+pub fn render_sidebar_divider(active_drag: &ActiveDrag, cx: &App) -> impl IntoElement {
     let t = theme(cx);
-    let active_drag = get_active_drag(cx);
+    let active_drag = active_drag.clone();
 
     div()
         .id("sidebar-divider")

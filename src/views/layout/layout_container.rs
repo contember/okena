@@ -9,7 +9,7 @@
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
-use crate::views::split_pane::render_split_divider;
+use crate::views::split_pane::{ActiveDrag, render_split_divider};
 use crate::views::terminal_pane::TerminalPane;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
@@ -39,6 +39,8 @@ pub struct LayoutContainer {
     /// Animation state for recently dropped tab (tab_index, animation_progress)
     /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     pub(super) drop_animation: Option<(usize, f32)>,
+    /// Shared drag state for resize operations
+    pub(super) active_drag: ActiveDrag,
 }
 
 impl LayoutContainer {
@@ -49,6 +51,7 @@ impl LayoutContainer {
         layout_path: Vec<usize>,
         pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
+        active_drag: ActiveDrag,
     ) -> Self {
         Self {
             workspace,
@@ -65,6 +68,7 @@ impl LayoutContainer {
             })),
             tab_context_menu: None,
             drop_animation: None,
+            active_drag,
         }
     }
 
@@ -190,6 +194,7 @@ impl LayoutContainer {
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
@@ -258,6 +263,7 @@ impl LayoutContainer {
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
@@ -272,6 +278,7 @@ impl LayoutContainer {
                     direction,
                     self.layout_path.clone(),
                     container_bounds_ref.clone(),
+                    &self.active_drag,
                     cx,
                 );
                 elements.push(divider.into_any_element());

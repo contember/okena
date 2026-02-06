@@ -227,15 +227,15 @@ pub struct OverlayManager {
 
     // Parametric overlays
     shell_selector: OverlaySlot<ShellSelectorOverlay>,
-    worktree_dialog: Option<Entity<WorktreeDialog>>,
-    context_menu: Option<Entity<ContextMenu>>,
-    folder_context_menu: Option<Entity<FolderContextMenu>>,
-    session_manager: Option<Entity<SessionManager>>,
+    worktree_dialog: OverlaySlot<WorktreeDialog>,
+    context_menu: OverlaySlot<ContextMenu>,
+    folder_context_menu: OverlaySlot<FolderContextMenu>,
+    session_manager: OverlaySlot<SessionManager>,
 
     // File search and viewer
-    file_search: Option<Entity<FileSearchDialog>>,
-    file_viewer: Option<Entity<FileViewer>>,
-    diff_viewer: Option<Entity<DiffViewer>>,
+    file_search: OverlaySlot<FileSearchDialog>,
+    file_viewer: OverlaySlot<FileViewer>,
+    diff_viewer: OverlaySlot<DiffViewer>,
 }
 
 impl OverlayManager {
@@ -250,13 +250,13 @@ impl OverlayManager {
             settings_panel: OverlaySlot::new(),
             project_switcher: OverlaySlot::new(),
             shell_selector: OverlaySlot::new(),
-            worktree_dialog: None,
-            context_menu: None,
-            folder_context_menu: None,
-            session_manager: None,
-            file_search: None,
-            file_viewer: None,
-            diff_viewer: None,
+            worktree_dialog: OverlaySlot::new(),
+            context_menu: OverlaySlot::new(),
+            folder_context_menu: OverlaySlot::new(),
+            session_manager: OverlaySlot::new(),
+            file_search: OverlaySlot::new(),
+            file_viewer: OverlaySlot::new(),
+            diff_viewer: OverlaySlot::new(),
         }
     }
 
@@ -276,7 +276,7 @@ impl OverlayManager {
 
     /// Check if session manager is open.
     pub fn has_session_manager(&self) -> bool {
-        self.session_manager.is_some()
+        self.session_manager.is_open()
     }
 
     /// Check if theme selector is open.
@@ -306,32 +306,32 @@ impl OverlayManager {
 
     /// Check if worktree dialog is open.
     pub fn has_worktree_dialog(&self) -> bool {
-        self.worktree_dialog.is_some()
+        self.worktree_dialog.is_open()
     }
 
     /// Check if context menu is open.
     pub fn has_context_menu(&self) -> bool {
-        self.context_menu.is_some()
+        self.context_menu.is_open()
     }
 
     /// Check if folder context menu is open.
     pub fn has_folder_context_menu(&self) -> bool {
-        self.folder_context_menu.is_some()
+        self.folder_context_menu.is_open()
     }
 
     /// Check if file search is open.
     pub fn has_file_search(&self) -> bool {
-        self.file_search.is_some()
+        self.file_search.is_open()
     }
 
     /// Check if file viewer is open.
     pub fn has_file_viewer(&self) -> bool {
-        self.file_viewer.is_some()
+        self.file_viewer.is_open()
     }
 
     /// Check if diff viewer is open.
     pub fn has_diff_viewer(&self) -> bool {
-        self.diff_viewer.is_some()
+        self.diff_viewer.is_open()
     }
 
     // ========================================================================
@@ -451,26 +451,26 @@ impl OverlayManager {
 
     /// Toggle session manager overlay.
     pub fn toggle_session_manager(&mut self, cx: &mut Context<Self>) {
-        if self.session_manager.is_some() {
-            self.session_manager = None;
+        if self.session_manager.is_open() {
+            self.session_manager.close();
         } else {
             let workspace = self.workspace.clone();
             let manager = cx.new(|cx| SessionManager::new(workspace, cx));
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {
-                        this.session_manager = None;
+                        this.session_manager.close();
                         cx.notify();
                     }
                     SessionManagerEvent::SwitchWorkspace(data) => {
-                        this.session_manager = None;
+                        this.session_manager.close();
                         cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
                         cx.notify();
                     }
                 }
             })
             .detach();
-            self.session_manager = Some(manager);
+            self.session_manager.set(manager);
         }
         cx.notify();
     }
@@ -542,7 +542,7 @@ impl OverlayManager {
             }
         })
         .detach();
-        self.worktree_dialog = Some(dialog);
+        self.worktree_dialog.set(dialog);
         // Clear focused terminal during modal
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -552,7 +552,7 @@ impl OverlayManager {
 
     /// Close worktree dialog.
     pub fn hide_worktree_dialog(&mut self, cx: &mut Context<Self>) {
-        self.worktree_dialog = None;
+        self.worktree_dialog.close();
         // Restore focus after modal
         self.workspace.update(cx, |ws, cx| {
             ws.restore_focused_terminal(cx);
@@ -616,13 +616,13 @@ impl OverlayManager {
         })
         .detach();
 
-        self.context_menu = Some(menu);
+        self.context_menu.set(menu);
         cx.notify();
     }
 
     /// Hide context menu.
     pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
+        self.context_menu.close();
         cx.notify();
     }
 
@@ -655,13 +655,13 @@ impl OverlayManager {
         })
         .detach();
 
-        self.folder_context_menu = Some(menu);
+        self.folder_context_menu.set(menu);
         cx.notify();
     }
 
     /// Hide folder context menu.
     pub fn hide_folder_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.folder_context_menu = None;
+        self.folder_context_menu.close();
         cx.notify();
     }
 
@@ -671,7 +671,7 @@ impl OverlayManager {
 
     /// Toggle file search dialog for a project.
     pub fn toggle_file_search(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
-        if self.file_search.is_some() {
+        if self.file_search.is_open() {
             self.hide_file_search(cx);
         } else {
             self.show_file_search(project_path, cx);
@@ -697,7 +697,7 @@ impl OverlayManager {
         })
         .detach();
 
-        self.file_search = Some(dialog);
+        self.file_search.set(dialog);
         // Clear focused terminal during modal
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -707,7 +707,7 @@ impl OverlayManager {
 
     /// Hide file search dialog.
     pub fn hide_file_search(&mut self, cx: &mut Context<Self>) {
-        self.file_search = None;
+        self.file_search.close();
         // Restore focus after modal
         self.workspace.update(cx, |ws, cx| {
             ws.restore_focused_terminal(cx);
@@ -732,7 +732,7 @@ impl OverlayManager {
         })
         .detach();
 
-        self.file_viewer = Some(viewer);
+        self.file_viewer.set(viewer);
         // Clear focused terminal during modal
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -742,7 +742,7 @@ impl OverlayManager {
 
     /// Hide file viewer.
     pub fn hide_file_viewer(&mut self, cx: &mut Context<Self>) {
-        self.file_viewer = None;
+        self.file_viewer.close();
         // Restore focus after modal
         self.workspace.update(cx, |ws, cx| {
             ws.restore_focused_terminal(cx);
@@ -767,7 +767,7 @@ impl OverlayManager {
         })
         .detach();
 
-        self.diff_viewer = Some(viewer);
+        self.diff_viewer.set(viewer);
         // Clear focused terminal during modal
         self.workspace.update(cx, |ws, cx| {
             ws.clear_focused_terminal(cx);
@@ -777,7 +777,7 @@ impl OverlayManager {
 
     /// Hide diff viewer.
     pub fn hide_diff_viewer(&mut self, cx: &mut Context<Self>) {
-        self.diff_viewer = None;
+        self.diff_viewer.close();
         // Restore focus after modal
         self.workspace.update(cx, |ws, cx| {
             ws.restore_focused_terminal(cx);
@@ -801,7 +801,7 @@ impl OverlayManager {
 
     /// Get session manager entity for rendering.
     pub fn render_session_manager(&self) -> Option<Entity<SessionManager>> {
-        self.session_manager.clone()
+        self.session_manager.render()
     }
 
     /// Get theme selector entity for rendering.
@@ -831,32 +831,32 @@ impl OverlayManager {
 
     /// Get worktree dialog entity for rendering.
     pub fn render_worktree_dialog(&self) -> Option<Entity<WorktreeDialog>> {
-        self.worktree_dialog.clone()
+        self.worktree_dialog.render()
     }
 
     /// Get context menu entity for rendering.
     pub fn render_context_menu(&self) -> Option<Entity<ContextMenu>> {
-        self.context_menu.clone()
+        self.context_menu.render()
     }
 
     /// Get folder context menu entity for rendering.
     pub fn render_folder_context_menu(&self) -> Option<Entity<FolderContextMenu>> {
-        self.folder_context_menu.clone()
+        self.folder_context_menu.render()
     }
 
     /// Get file search dialog entity for rendering.
     pub fn render_file_search(&self) -> Option<Entity<FileSearchDialog>> {
-        self.file_search.clone()
+        self.file_search.render()
     }
 
     /// Get file viewer entity for rendering.
     pub fn render_file_viewer(&self) -> Option<Entity<FileViewer>> {
-        self.file_viewer.clone()
+        self.file_viewer.render()
     }
 
     /// Get diff viewer entity for rendering.
     pub fn render_diff_viewer(&self) -> Option<Entity<DiffViewer>> {
-        self.diff_viewer.clone()
+        self.diff_viewer.render()
     }
 }
 

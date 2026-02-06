@@ -6,8 +6,8 @@ use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::views::project_column::ProjectColumn;
 use crate::views::sidebar_controller::{SidebarController, AnimationTarget, FRAME_TIME_MS};
 use crate::views::sidebar::Sidebar;
-use crate::views::split_pane::{get_active_drag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, take_pending_diff_path, take_pending_diff_file, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
+use crate::views::split_pane::{new_active_drag, ActiveDrag, compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
 use crate::settings::{open_settings_file, settings};
 use crate::views::status_bar::StatusBar;
 use crate::views::title_bar::TitleBar;
@@ -43,6 +43,8 @@ pub struct RootView {
     status_bar: Entity<StatusBar>,
     /// Centralized overlay manager
     overlay_manager: Entity<OverlayManager>,
+    /// Shared drag state for resize operations
+    active_drag: ActiveDrag,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
 }
@@ -94,6 +96,7 @@ impl RootView {
             title_bar,
             status_bar,
             overlay_manager,
+            active_drag: new_active_drag(),
             focus_handle,
         };
 
@@ -221,13 +224,16 @@ impl RootView {
                 let workspace_clone = self.workspace.clone();
                 let pty_manager_clone = self.pty_manager.clone();
                 let terminals_clone = self.terminals.clone();
+                let active_drag_clone = self.active_drag.clone();
                 let id = project_id.clone();
-                let entity = cx.new(move |_cx| {
+                let entity = cx.new(move |cx| {
                     ProjectColumn::new(
                         workspace_clone,
                         id,
                         pty_manager_clone,
                         terminals_clone,
+                        active_drag_clone,
+                        cx,
                     )
                 });
                 self.project_columns.insert(project_id.clone(), entity);
@@ -301,6 +307,7 @@ impl RootView {
                         i,
                         visible_projects.clone(),
                         container_bounds.clone(),
+                        &self.active_drag,
                         cx,
                     );
                     elements.push(divider.into_any_element());
@@ -596,6 +603,11 @@ impl RootView {
                         });
                     }
                 }
+                OverlayRequest::DiffViewer { path, file } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_diff_viewer(path, file, cx);
+                    });
+                }
             }
         }
     }
@@ -683,7 +695,7 @@ impl Render for RootView {
         clear_pane_map();
 
         // Get active drag for global mouse handling
-        let active_drag = get_active_drag(cx);
+        let active_drag = self.active_drag.clone();
         let workspace = self.workspace.clone();
 
         // Capture sidebar state for mouse move handler
@@ -970,30 +982,26 @@ impl Render for RootView {
                     overlay_manager.update(cx, |om, cx| om.toggle_project_switcher(cx));
                 }
             }))
-            // Handle show diff viewer action
+            // Handle show diff viewer action (from keybinding or command palette - no path data)
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
                 let workspace = workspace.clone();
                 move |_this, _: &ShowDiffViewer, _window, cx| {
-                    // Check for pending path first (from project header click)
-                    let project_path = take_pending_diff_path().or_else(|| {
-                        // Otherwise get the focused or first visible project path
-                        workspace.read(cx).focus_manager.focused_terminal_state()
-                            .map(|f| f.project_id.clone())
-                            .or_else(|| {
-                                workspace.read(cx).visible_projects()
-                                    .first()
-                                    .map(|p| p.id.clone())
-                            })
-                            .and_then(|id| {
-                                workspace.read(cx).project(&id).map(|p| p.path.clone())
-                            })
-                    });
+                    // Get the focused or first visible project path
+                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                        .map(|f| f.project_id.clone())
+                        .or_else(|| {
+                            workspace.read(cx).visible_projects()
+                                .first()
+                                .map(|p| p.id.clone())
+                        })
+                        .and_then(|id| {
+                            workspace.read(cx).project(&id).map(|p| p.path.clone())
+                        });
 
                     if let Some(path) = project_path {
-                        let select_file = take_pending_diff_file();
                         overlay_manager.update(cx, |om, cx| {
-                            om.show_diff_viewer(path, select_file, cx);
+                            om.show_diff_viewer(path, None, cx);
                         });
                     }
                 }
@@ -1053,7 +1061,7 @@ impl Render for RootView {
                     )
                     // Sidebar resize divider (only when sidebar is visible)
                     .when(self.sidebar_ctrl.should_render(), |d| {
-                        d.child(render_sidebar_divider(cx))
+                        d.child(render_sidebar_divider(&self.active_drag, cx))
                     })
                     .child(
                         // Main area
@@ -1086,11 +1094,7 @@ impl Render for RootView {
             })
             // Session manager overlay (renders on top of everything)
             .when(has_session_manager, |d| {
-                if let Some(manager) = self.overlay_manager.read(cx).render_session_manager() {
-                    d.child(manager)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_session_manager())
             })
             // Theme selector overlay (renders on top of everything)
             .when(has_theme_selector, |d| {
@@ -1114,51 +1118,27 @@ impl Render for RootView {
             })
             // Worktree dialog overlay (renders on top of everything)
             .when(has_worktree_dialog, |d| {
-                if let Some(dialog) = self.overlay_manager.read(cx).render_worktree_dialog() {
-                    d.child(dialog)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_worktree_dialog())
             })
             // Context menu overlay (renders on top of everything)
             .when(has_context_menu, |d| {
-                if let Some(menu) = self.overlay_manager.read(cx).render_context_menu() {
-                    d.child(menu)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_context_menu())
             })
             // Folder context menu overlay
             .when(has_folder_context_menu, |d| {
-                if let Some(menu) = self.overlay_manager.read(cx).render_folder_context_menu() {
-                    d.child(menu)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_folder_context_menu())
             })
             // File search overlay (renders on top of everything)
             .when(has_file_search, |d| {
-                if let Some(dialog) = self.overlay_manager.read(cx).render_file_search() {
-                    d.child(dialog)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_file_search())
             })
             // File viewer overlay (renders on top of everything)
             .when(has_file_viewer, |d| {
-                if let Some(viewer) = self.overlay_manager.read(cx).render_file_viewer() {
-                    d.child(viewer)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_file_viewer())
             })
             // Diff viewer overlay (renders on top of everything)
             .when(has_diff_viewer, |d| {
-                if let Some(viewer) = self.overlay_manager.read(cx).render_diff_viewer() {
-                    d.child(viewer)
-                } else {
-                    d
-                }
+                d.children(self.overlay_manager.read(cx).render_diff_viewer())
             })
             // Add project dialog overlay (renders on top of everything)
             .when(has_add_project_dialog, |d| {

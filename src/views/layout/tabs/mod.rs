@@ -268,6 +268,7 @@ impl LayoutContainer {
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
@@ -568,6 +569,7 @@ impl LayoutContainer {
                                     child_path.clone(),
                                     self.pty_manager.clone(),
                                     self.terminals.clone(),
+                                    self.active_drag.clone(),
                                 )
                             })
                         })
