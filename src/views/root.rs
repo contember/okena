@@ -60,7 +60,7 @@ impl RootView {
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|_cx| Sidebar::new(workspace.clone(), terminals.clone()));
+        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), terminals.clone(), cx));
 
         // Create title bar entity
         let workspace_for_title = workspace.clone();
@@ -74,6 +74,11 @@ impl RootView {
 
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
+
+        // Observe Workspace to process overlay requests outside of render()
+        cx.observe(&workspace, |this, _workspace, cx| {
+            this.process_pending_requests(cx);
+        }).detach();
 
         // Create focus handle for global keybindings
         let focus_handle = cx.focus_handle();
@@ -655,9 +660,6 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-
-        // Process any pending overlay requests from workspace
-        self.process_pending_requests(cx);
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);

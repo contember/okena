@@ -19,7 +19,7 @@ use crate::views::components::{
     RenameState,
 };
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{FolderData, ProjectData, Workspace};
+use crate::workspace::state::{FolderData, ProjectData, SidebarRequest, Workspace};
 use gpui::*;
 use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -110,10 +110,25 @@ pub struct Sidebar {
     folder_click_detector: ClickDetector<String>,
     /// Folder ID for which color picker is shown
     color_picker_folder_id: Option<String>,
+    /// Sidebar requests drained from Workspace by observer, applied in render() (needs Window)
+    pending_sidebar_requests: Vec<SidebarRequest>,
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, terminals: TerminalsRegistry) -> Self {
+    pub fn new(workspace: Entity<Workspace>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+        // Observe Workspace to drain sidebar requests outside of render().
+        // Requests are stored in pending_sidebar_requests and applied in render()
+        // where Window access is available (needed for focus/rename).
+        cx.observe(&workspace, |this, _workspace, cx| {
+            let requests: Vec<_> = this.workspace.update(cx, |ws, _cx| {
+                ws.sidebar_requests.drain(..).collect()
+            });
+            if !requests.is_empty() {
+                this.pending_sidebar_requests.extend(requests);
+                cx.notify();
+            }
+        }).detach();
+
         Self {
             workspace,
             expanded_projects: HashSet::new(),
@@ -126,6 +141,7 @@ impl Sidebar {
             folder_rename: None,
             folder_click_detector: ClickDetector::new(),
             color_picker_folder_id: None,
+            pending_sidebar_requests: Vec::new(),
         }
     }
 
@@ -468,16 +484,14 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        // Drain sidebar requests
-        let sidebar_requests: Vec<_> = self.workspace.update(cx, |ws, _cx| {
-            ws.sidebar_requests.drain(..).collect()
-        });
-        for request in sidebar_requests {
+        // Process pending sidebar requests (drained from Workspace by observer)
+        let pending = std::mem::take(&mut self.pending_sidebar_requests);
+        for request in pending {
             match request {
-                crate::workspace::state::SidebarRequest::RenameProject { project_id, project_name } => {
+                SidebarRequest::RenameProject { project_id, project_name } => {
                     self.start_project_rename(project_id, project_name, window, cx);
                 }
-                crate::workspace::state::SidebarRequest::RenameFolder { folder_id, folder_name } => {
+                SidebarRequest::RenameFolder { folder_id, folder_name } => {
                     self.start_folder_rename(folder_id, folder_name, window, cx);
                 }
             }
