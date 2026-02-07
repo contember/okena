@@ -1,9 +1,8 @@
 use crate::theme::FolderColor;
 use crate::workspace::focus::FocusManager;
-use crate::workspace::requests::{OverlayRequest, SidebarRequest};
 use gpui::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 /// A folder that groups projects in the sidebar
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,10 +133,6 @@ pub struct Workspace {
     pub(crate) data: WorkspaceData,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
-    /// Pending overlay requests (consumed by RootView::process_pending_requests)
-    pub overlay_requests: VecDeque<OverlayRequest>,
-    /// Pending sidebar requests (consumed by Sidebar::render)
-    pub sidebar_requests: VecDeque<SidebarRequest>,
     /// Last access time for each project (for sorting in project switcher)
     pub project_access_times: HashMap<String, std::time::Instant>,
     /// Monotonic counter incremented only on persistent data mutations.
@@ -150,8 +145,6 @@ impl Workspace {
         Self {
             data,
             focus_manager: FocusManager::new(),
-            overlay_requests: VecDeque::new(),
-            sidebar_requests: VecDeque::new(),
             project_access_times: HashMap::new(),
             data_version: 0,
         }

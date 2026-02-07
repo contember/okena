@@ -21,6 +21,7 @@ use crate::views::overlays::session_manager::{SessionManager, SessionManagerEven
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
 use crate::workspace::state::{Workspace, WorkspaceData};
 
@@ -216,6 +217,7 @@ pub enum OverlayManagerEvent {
 /// separate slots since they are positioned popups, not full-screen modals.
 pub struct OverlayManager {
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
 
     /// The single active modal overlay (only one can be open at a time).
     active_modal: Option<AnyView>,
@@ -230,9 +232,10 @@ pub struct OverlayManager {
 
 impl OverlayManager {
     /// Create a new OverlayManager.
-    pub fn new(workspace: Entity<Workspace>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>) -> Self {
         Self {
             workspace,
+            request_broker,
             active_modal: None,
             modal_type_id: None,
             context_menu: OverlaySlot::new(),
@@ -561,8 +564,8 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::RenameFolder { folder_id, folder_name } => {
                     this.hide_folder_context_menu(cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.push_sidebar_request(SidebarRequest::RenameFolder {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_sidebar_request(SidebarRequest::RenameFolder {
                             folder_id: folder_id.clone(),
                             folder_name: folder_name.clone(),
                         }, cx);

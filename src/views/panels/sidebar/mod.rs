@@ -24,6 +24,7 @@ use crate::views::components::{
     RenameState,
 };
 use crate::views::root::TerminalsRegistry;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::SidebarRequest;
 use crate::workspace::state::{FolderData, ProjectData, Workspace};
 use gpui::*;
@@ -45,6 +46,7 @@ pub(super) enum SidebarCursorItem {
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
     workspace: Entity<Workspace>,
+    pub(super) request_broker: Entity<RequestBroker>,
     expanded_projects: HashSet<String>,
     pub(super) terminals: TerminalsRegistry,
     /// Terminal rename state: (project_id, terminal_id)
@@ -76,16 +78,16 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
-        // Observe Workspace to drain sidebar requests outside of render().
+    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+        // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
-        cx.observe(&workspace, |this, _workspace, cx| {
-            if this.workspace.read(cx).sidebar_requests.is_empty() {
+        cx.observe(&request_broker, |this, _broker, cx| {
+            if !this.request_broker.read(cx).has_sidebar_requests() {
                 return;
             }
-            let requests: Vec<_> = this.workspace.update(cx, |ws, _cx| {
-                ws.sidebar_requests.drain(..).collect()
+            let requests = this.request_broker.update(cx, |broker, _cx| {
+                broker.drain_sidebar_requests()
             });
             this.pending_sidebar_requests.extend(requests);
             cx.notify();
@@ -93,6 +95,7 @@ impl Sidebar {
 
         Self {
             workspace,
+            request_broker,
             expanded_projects: HashSet::new(),
             terminals,
             terminal_rename: None,
@@ -220,8 +223,8 @@ impl Sidebar {
     }
 
     fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.push_overlay_request(crate::workspace::requests::OverlayRequest::ContextMenu {
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ContextMenu {
                 project_id,
                 position,
             }, cx);
@@ -587,8 +590,8 @@ impl Sidebar {
                                     .child("Add Project"),
                             )
                             .on_click(cx.listener(|this, _, _window, cx| {
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.push_overlay_request(
+                                this.request_broker.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(
                                         crate::workspace::requests::OverlayRequest::AddProjectDialog,
                                         cx,
                                     );

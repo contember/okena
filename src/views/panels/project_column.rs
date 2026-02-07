@@ -5,6 +5,7 @@ use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::root::TerminalsRegistry;
 use crate::views::layout::split_pane::ActiveDrag;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::OverlayRequest;
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::prelude::*;
@@ -22,6 +23,7 @@ const HOVER_DELAY_MS: u64 = 400;
 /// A single project column with header and layout
 pub struct ProjectColumn {
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     project_id: String,
     #[allow(dead_code)]
     pty_manager: Arc<PtyManager>,
@@ -46,6 +48,7 @@ pub struct ProjectColumn {
 impl ProjectColumn {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
@@ -61,6 +64,7 @@ impl ProjectColumn {
 
         Self {
             workspace,
+            request_broker,
             project_id,
             pty_manager,
             terminals,
@@ -226,8 +230,8 @@ impl ProjectColumn {
                             .gap(px(12.0))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.hide_diff_popover(cx);
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.push_overlay_request(OverlayRequest::DiffViewer {
+                                this.request_broker.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(OverlayRequest::DiffViewer {
                                         path: project_path_for_click.clone(),
                                         file: Some(file_path.clone()),
                                     }, cx);
@@ -307,6 +311,7 @@ impl ProjectColumn {
     fn ensure_layout_container(&mut self, project_path: String, cx: &mut Context<Self>) {
         if self.layout_container.is_none() {
             let workspace = self.workspace.clone();
+            let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let pty_manager = self.pty_manager.clone();
             let terminals = self.terminals.clone();
@@ -315,6 +320,7 @@ impl ProjectColumn {
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
                     workspace,
+                    request_broker,
                     project_id,
                     project_path,
                     vec![],
@@ -505,8 +511,8 @@ impl ProjectColumn {
                                 .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.push_overlay_request(OverlayRequest::DiffViewer {
+                                    this.request_broker.update(cx, |broker, cx| {
+                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
                                             path: project_path.clone(),
                                             file: None,
                                         }, cx);
