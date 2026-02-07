@@ -326,6 +326,28 @@ impl Workspace {
         false
     }
 
+    /// Helper to mutate a layout node at a path, normalize the root layout, then notify.
+    /// Use this instead of `with_layout_node` when the mutation may create nested splits
+    /// that should be flattened (e.g. splitting a terminal).
+    /// Returns true if the mutation was applied.
+    pub fn with_layout_node_normalized<F>(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>, f: F) -> bool
+    where
+        F: FnOnce(&mut LayoutNode) -> bool,
+    {
+        if let Some(project) = self.project_mut(project_id) {
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    if f(node) {
+                        layout.normalize();
+                        self.notify_data(cx);
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Helper to mutate a project, with automatic notify.
     /// Returns true if the mutation was applied.
     pub fn with_project<F>(&mut self, project_id: &str, cx: &mut Context<Self>, f: F) -> bool

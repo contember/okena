@@ -15,7 +15,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
-        self.with_layout_node(project_id, path, cx, |node| {
+        self.with_layout_node_normalized(project_id, path, cx, |node| {
             log::info!("Found node at path, splitting...");
             let old_node = node.clone();
             *node = LayoutNode::Split {
@@ -26,13 +26,6 @@ impl Workspace {
             log::info!("Split complete");
             true
         });
-
-        // Normalize to flatten if parent was already a same-direction split
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
-                layout.normalize();
-            }
-        }
     }
 
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group
