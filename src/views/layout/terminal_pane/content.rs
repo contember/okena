@@ -53,8 +53,6 @@ pub struct TerminalContent {
     search_current_index: Option<usize>,
     /// Context menu position (if open)
     context_menu_position: Option<Point<Pixels>>,
-    /// Whether terminal is focused
-    is_focused: bool,
     /// Project ID for pane registration
     project_id: String,
     /// Layout path for pane registration
@@ -88,7 +86,6 @@ impl TerminalContent {
             search_matches: Arc::new(Vec::new()),
             search_current_index: None,
             context_menu_position: None,
-            is_focused: false,
             project_id,
             layout_path,
             workspace,
@@ -117,11 +114,6 @@ impl TerminalContent {
     ) {
         self.search_matches = matches;
         self.search_current_index = current_index;
-    }
-
-    /// Set focused state.
-    pub fn set_focused(&mut self, focused: bool) {
-        self.is_focused = focused;
     }
 
     /// Mark scroll activity.
@@ -471,9 +463,9 @@ impl TerminalContent {
 }
 
 impl Render for TerminalContent {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let term_bg = if self.is_focused {
+        let term_bg = if self.focus_handle.is_focused(window) {
             t.term_background
         } else {
             t.term_background_unfocused

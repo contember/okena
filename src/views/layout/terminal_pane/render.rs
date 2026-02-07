@@ -69,11 +69,6 @@ impl Render for TerminalPane {
 
         let is_focused = focus_handle.is_focused(window);
 
-        // Update content focus state
-        self.content.update(cx, |content, _| {
-            content.set_focused(is_focused);
-        });
-
         // Bell handling
         let has_bell = self.terminal.as_ref().map_or(false, |t| t.has_bell());
         if is_focused && has_bell {
