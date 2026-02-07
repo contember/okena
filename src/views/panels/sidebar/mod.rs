@@ -81,13 +81,14 @@ impl Sidebar {
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
         cx.observe(&workspace, |this, _workspace, cx| {
+            if this.workspace.read(cx).sidebar_requests.is_empty() {
+                return;
+            }
             let requests: Vec<_> = this.workspace.update(cx, |ws, _cx| {
                 ws.sidebar_requests.drain(..).collect()
             });
-            if !requests.is_empty() {
-                this.pending_sidebar_requests.extend(requests);
-                cx.notify();
-            }
+            this.pending_sidebar_requests.extend(requests);
+            cx.notify();
         }).detach();
 
         Self {
