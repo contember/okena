@@ -174,6 +174,9 @@ pub struct Workspace {
     pub sidebar_requests: VecDeque<SidebarRequest>,
     /// Last access time for each project (for sorting in project switcher)
     pub project_access_times: HashMap<String, std::time::Instant>,
+    /// Monotonic counter incremented only on persistent data mutations.
+    /// The auto-save observer compares this to skip saves for UI-only changes.
+    data_version: u64,
 }
 
 impl Workspace {
@@ -187,7 +190,20 @@ impl Workspace {
             overlay_requests: VecDeque::new(),
             sidebar_requests: VecDeque::new(),
             project_access_times: HashMap::new(),
+            data_version: 0,
         }
+    }
+
+    /// Current data version (incremented on persistent data mutations)
+    pub fn data_version(&self) -> u64 {
+        self.data_version
+    }
+
+    /// Notify that persistent data changed. Bumps version and calls cx.notify().
+    /// Use this instead of cx.notify() when mutating `self.data`.
+    pub fn notify_data(&mut self, cx: &mut Context<Self>) {
+        self.data_version += 1;
+        cx.notify();
     }
 
     /// Record that a project was accessed (for sorting by recency)
@@ -277,7 +293,7 @@ impl Workspace {
             if let Some(ref mut layout) = project.layout {
                 if let Some(node) = layout.get_at_path_mut(path) {
                     if f(node) {
-                        cx.notify();
+                        self.notify_data(cx);
                         return true;
                     }
                 }
@@ -294,7 +310,7 @@ impl Workspace {
     {
         if let Some(project) = self.project_mut(project_id) {
             if f(project) {
-                cx.notify();
+                self.notify_data(cx);
                 return true;
             }
         }
