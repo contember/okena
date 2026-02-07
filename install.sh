@@ -57,13 +57,8 @@ if [ "$OS" = "darwin" ]; then
   echo "Installing to /Applications..."
   mv "$TMP_DIR/Okena.app" "/Applications/"
 
-  # Remove quarantine attribute
-  echo "Removing quarantine attribute..."
+  # Remove quarantine attribute (curl doesn't usually set it, but just in case)
   xattr -rd com.apple.quarantine "/Applications/Okena.app" 2>/dev/null || true
-
-  # Ad-hoc code signing
-  echo "Signing application..."
-  codesign --force --deep --sign - "/Applications/Okena.app" 2>/dev/null || true
 
   echo ""
   echo "✓ Okena installed to /Applications/Okena.app"
