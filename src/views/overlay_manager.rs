@@ -8,8 +8,8 @@ use gpui::*;
 use std::path::PathBuf;
 
 use crate::terminal::shell_config::ShellType;
-use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
-use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
+use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
@@ -17,10 +17,10 @@ use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEven
 use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
 use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
-use crate::views::session_manager::{SessionManager, SessionManagerEvent};
-use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
-use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
-use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
+use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
+use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use crate::workspace::state::{ContextMenuRequest, FolderContextMenuRequest, Workspace, WorkspaceData, SidebarRequest};
 
 /// Trait for overlay events that support closing.

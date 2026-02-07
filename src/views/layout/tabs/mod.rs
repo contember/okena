@@ -9,7 +9,7 @@ mod context_menu;
 mod shell_selector;
 
 use crate::theme::{theme, with_alpha};
-use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;

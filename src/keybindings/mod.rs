@@ -1,12 +1,17 @@
 mod config;
+mod descriptions;
+mod types;
 
 use gpui::*;
 use parking_lot::RwLock;
 
 pub use config::{
-    get_action_descriptions, get_keybindings_path, load_keybindings, save_keybindings,
+    get_keybindings_path, load_keybindings, save_keybindings,
     KeybindingConfig,
 };
+pub use descriptions::get_action_descriptions;
+#[allow(unused_imports)]
+pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
 // Define actions
 actions!(
@@ -215,5 +220,3 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("up", "↑")
         .replace("down", "↓")
 }
-
-

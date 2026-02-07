@@ -9,7 +9,7 @@ use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::ui::ClickDetector;
 use crate::views::components::{cancel_rename, finish_rename, start_rename, rename_input, RenameState, SimpleInput};
-use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;

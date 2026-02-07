@@ -2,7 +2,7 @@ use crate::git;
 use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, input_container};
-use crate::views::simple_input::{SimpleInput, SimpleInputState};
+use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
