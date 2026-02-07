@@ -246,14 +246,27 @@ impl ResolvedBackend {
                     .output();
             }
             Self::Dtach => {
-                // dtach doesn't have a kill command - we just remove the socket
-                // The session will terminate when no clients are attached
-                // and the shell exits
                 let socket_path = get_dtach_socket_path(session_name);
                 if socket_path.exists() {
-                    // Send SIGHUP to the dtach process via the socket
-                    // This is a bit hacky but works - we connect and immediately disconnect
-                    // which causes dtach to send SIGHUP to the child if configured
+                    #[cfg(unix)]
+                    {
+                        if let Ok(output) = Command::new("lsof")
+                            .args(["-t", "-U"])
+                            .arg(&socket_path)
+                            .output()
+                        {
+                            if let Ok(pid_str) = String::from_utf8(output.stdout) {
+                                for line in pid_str.lines() {
+                                    if let Ok(pid) = line.trim().parse::<i32>() {
+                                        unsafe {
+                                            libc::kill(pid, libc::SIGTERM);
+                                        }
+                                        log::debug!("Sent SIGTERM to dtach process {} for session {}", pid, session_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let _ = std::fs::remove_file(&socket_path);
                     log::debug!("Removed dtach socket: {:?}", socket_path);
                 }
