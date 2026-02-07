@@ -158,6 +158,17 @@ Settings are stored in `~/.config/okena/`:
 - **portable-pty** - PTY management
 - **smol** - Async runtime
 
+## A Note on Authorship
+
+> **This codebase has not been contaminated by human hands.**
+>
+> Every line of code, every architectural decision, every meticulously placed semicolon — pure, unfiltered Claude Opus.
+> The human's contribution was limited to typing vague requirements like "make it work" and then pressing `Enter` to approve tool calls with the mass-produced enthusiasm of a factory worker.
+>
+> If you find a bug, rest assured — it's not a bug. It's the AI testing whether you're paying attention.
+>
+> *Humans are kindly thanked for providing electricity.*
+
 ## License
 
 MIT

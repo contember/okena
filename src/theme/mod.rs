@@ -102,16 +102,6 @@ impl AppTheme {
         self.colors = Self::colors_for_mode(self.mode, self.system_is_dark, self.custom_colors);
     }
 
-    /// Check if current mode is dark
-    #[allow(dead_code)]
-    pub fn is_dark(&self) -> bool {
-        match self.mode {
-            ThemeMode::Dark | ThemeMode::PastelDark | ThemeMode::HighContrast => true,
-            ThemeMode::Light => false,
-            ThemeMode::Custom => self.custom_colors.map(|_| true).unwrap_or(true), // Assume dark for custom
-            ThemeMode::Auto => self.system_is_dark,
-        }
-    }
 }
 
 /// Wrapper for global theme entity

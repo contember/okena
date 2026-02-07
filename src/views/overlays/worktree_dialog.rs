@@ -1,10 +1,12 @@
 use crate::git;
+use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, input_container};
-use crate::views::simple_input::{SimpleInput, SimpleInputState};
+use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::h_flex;
 use std::path::PathBuf;
 
 /// Events emitted by the worktree dialog
@@ -241,13 +243,13 @@ impl Render for WorktreeDialog {
             .id("worktree-dialog-backdrop")
             .track_focus(&focus_handle)
             .key_context("WorktreeDialog")
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let search_focused = this.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
 
                 match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.close(cx);
-                    }
                     "up" => {
                         if search_focused {
                             if let Some(idx) = this.selected_branch_index {
@@ -313,9 +315,7 @@ impl Render for WorktreeDialog {
                             .border_b_1()
                             .border_color(rgb(t.border))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(8.0))
                                     .child(
                                         svg()

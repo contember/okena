@@ -43,7 +43,7 @@ pub fn restart_app(cx: &mut gpui::App) {
         // Spawn the new instance first, then quit. If spawn fails we
         // keep the current process running instead of leaving the user
         // with nothing.
-        match std::process::Command::new(&exe).args(&args).spawn() {
+        match crate::process::command(&exe.to_string_lossy()).args(&args).spawn() {
             Ok(_) => {
                 log::info!("Restarting okena...");
                 cx.quit();
@@ -58,7 +58,7 @@ pub fn restart_app(cx: &mut gpui::App) {
 fn validate_binary(binary: &Path) -> Result<()> {
     let old_path = binary.with_extension(if cfg!(windows) { "exe.old" } else { "old" });
 
-    let mut child = std::process::Command::new(binary)
+    let mut child = crate::process::command(&binary.to_string_lossy())
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -118,7 +118,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
 
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         // Linux: tar xzf
-        let status = std::process::Command::new("tar")
+        let status = crate::process::command("tar")
             .args(["xzf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
             .status()
             .context("failed to run tar")?;
@@ -129,7 +129,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         // macOS / Windows
         #[cfg(unix)]
         {
-            let status = std::process::Command::new("unzip")
+            let status = crate::process::command("unzip")
                 .args(["-o", &archive.to_string_lossy().into_owned(), "-d", &dest.to_string_lossy().into_owned()])
                 .status()
                 .context("failed to run unzip")?;
@@ -140,7 +140,7 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
         #[cfg(windows)]
         {
             // Windows 10+ has tar that can handle zip
-            let status = std::process::Command::new("tar")
+            let status = crate::process::command("tar")
                 .args(["-xf", &archive.to_string_lossy(), "-C", &dest.to_string_lossy()])
                 .status()
                 .context("failed to run tar on Windows")?;

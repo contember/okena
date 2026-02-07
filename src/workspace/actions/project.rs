@@ -37,7 +37,7 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
         self.data.project_order.push(id.clone());
-        cx.notify();
+        self.notify_data(cx);
 
         hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
     }
@@ -47,7 +47,7 @@ impl Workspace {
         if let Some(project) = self.project_mut(project_id) {
             if project.layout.is_none() {
                 project.layout = Some(LayoutNode::new_terminal());
-                cx.notify();
+                self.notify_data(cx);
             }
         }
     }
@@ -66,7 +66,7 @@ impl Workspace {
                 // Project has no layout - create one with a terminal
                 project.layout = Some(LayoutNode::new_terminal());
             }
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -97,28 +97,36 @@ impl Workspace {
         self.data.projects.retain(|p| p.id != project_id);
         // Remove from project order
         self.data.project_order.retain(|id| id != project_id);
+        // Remove from any folder's project_ids
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
         // Remove from widths
         self.data.project_widths.remove(project_id);
         // Clear focus if this was the focused project
-        if self.focused_project_id.as_deref() == Some(project_id) {
-            self.focused_project_id = None;
+        if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
+            self.focus_manager.set_focused_project_id(None);
         }
         // Exit fullscreen if this project's terminal was in fullscreen
-        if let Some(fs) = &self.fullscreen_terminal {
-            if fs.project_id == project_id {
-                self.fullscreen_terminal = None;
-            }
+        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
+            self.focus_manager.exit_fullscreen();
         }
-        cx.notify();
+        self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
             hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
         }
     }
 
-    /// Move a project to a new position in the order
+    /// Move a project to a new position in the top-level order.
+    /// Also removes the project from any folder it may be in.
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
-        // Find current index
+        // Remove from any folder first
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+
+        // Find current index in project_order
         if let Some(current_index) = self.data.project_order.iter().position(|id| id == project_id) {
             // Remove from current position
             let id = self.data.project_order.remove(current_index);
@@ -131,14 +139,18 @@ impl Workspace {
             // Insert at new position
             let target = target.min(self.data.project_order.len());
             self.data.project_order.insert(target, id);
-            cx.notify();
+        } else {
+            // Project wasn't in project_order (was only in a folder) - insert at target
+            let target = new_index.min(self.data.project_order.len());
+            self.data.project_order.insert(target, project_id.to_string());
         }
+        self.notify_data(cx);
     }
 
     /// Update project column widths
     pub fn update_project_widths(&mut self, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
         self.data.project_widths = widths;
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Get project width or default equal distribution
@@ -218,7 +230,7 @@ impl Workspace {
         self.data.projects.push(project);
         self.data.project_order.insert(parent_index + 1, id.clone());
 
-        cx.notify();
+        self.notify_data(cx);
 
         hooks::fire_on_worktree_create(
             &new_project_hooks,

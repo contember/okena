@@ -1,9 +1,11 @@
 //! Project context menu overlay.
 
 use crate::git;
+use crate::keybindings::Cancel;
 use crate::theme::theme;
-use crate::views::components::{menu_item, menu_item_with_color};
-use crate::workspace::state::{ContextMenuRequest, Workspace};
+use crate::views::components::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
+use crate::workspace::requests::ContextMenuRequest;
+use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 
@@ -89,7 +91,9 @@ impl Render for ContextMenu {
         let t = theme(cx);
 
         // Focus on first render
-        window.focus(&self.focus_handle, cx);
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
 
         let position = self.request.position;
 
@@ -107,13 +111,12 @@ impl Render for ContextMenu {
         div()
             .track_focus(&self.focus_handle)
             .key_context("ContextMenu")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
-                }
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
             }))
             .absolute()
             .inset_0()
+            .occlude()
             .id("context-menu-backdrop")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
@@ -121,28 +124,12 @@ impl Render for ContextMenu {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
             }))
-            .child(
-                div()
-                    .absolute()
-                    .left(position.x)
-                    .top(position.y)
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(4.0))
-                    .shadow_xl()
-                    .min_w(px(160.0))
-                    .py(px(4.0))
-                    .id("project-context-menu")
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_mouse_down(MouseButton::Right, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_scroll_wheel(|_, _, cx| {
-                        cx.stop_propagation();
-                    })
+            .child(deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(
+                        context_menu_panel("project-context-menu", &t)
                     // Add Terminal option
                     .child(
                         menu_item("context-menu-add-terminal", "icons/plus.svg", "Add Terminal", &t)
@@ -163,13 +150,7 @@ impl Render for ContextMenu {
                         )
                     })
                     // Separator
-                    .child(
-                        div()
-                            .h(px(1.0))
-                            .mx(px(8.0))
-                            .my(px(4.0))
-                            .bg(rgb(t.border)),
-                    )
+                    .child(menu_separator(&t))
                     // Rename option
                     .child(
                         menu_item("context-menu-rename", "icons/edit.svg", "Rename Project", &t)
@@ -203,7 +184,8 @@ impl Render for ContextMenu {
                                 this.delete_project(cx);
                             })),
                     ),
-            )
+                ),
+            ))
     }
 }
 

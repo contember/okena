@@ -5,62 +5,49 @@
 //! - Renaming terminals and projects
 //! - Drag-and-drop project reordering
 //! - Folder color customization
+//! - Organizing projects into collapsible folders
 
-mod add_dialog;
 mod color_picker;
+pub(super) mod drag;
+mod folder_list;
+mod item_widgets;
 mod project_list;
 
-use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
+use crate::keybindings::{
+    format_keystroke, get_config, ShowKeybindings, SidebarConfirm, SidebarDown,
+    SidebarEscape, SidebarToggleExpand, SidebarUp,
+};
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
     cancel_rename, finish_rename, start_rename_with_blur,
-    RenameState, SimpleInputState, PathAutoCompleteState,
+    RenameState,
 };
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{ProjectData, Workspace};
+use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::requests::SidebarRequest;
+use crate::workspace::state::{FolderData, ProjectData, Workspace};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-/// Drag payload for project reordering
-#[derive(Clone)]
-pub(super) struct ProjectDrag {
-    pub project_id: String,
-    pub project_name: String,
-}
+use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
 
-/// Drag preview view
-pub(super) struct ProjectDragView {
-    pub name: String,
-}
-
-impl Render for ProjectDragView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .py(px(4.0))
-            .bg(rgb(0x2d2d2d))
-            .border_1()
-            .border_color(rgb(0x404040))
-            .rounded(px(4.0))
-            .shadow_lg()
-            .text_size(px(12.0))
-            .text_color(rgb(0xffffff))
-            .child(self.name.clone())
-    }
+/// Identifies each visible row in the sidebar for keyboard cursor navigation.
+#[derive(Clone, Debug)]
+pub(super) enum SidebarCursorItem {
+    Folder { folder_id: String },
+    Project { project_id: String },
+    WorktreeProject { project_id: String },
+    Terminal { project_id: String, terminal_id: String },
 }
 
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
     workspace: Entity<Workspace>,
+    pub(super) request_broker: Entity<RequestBroker>,
     expanded_projects: HashSet<String>,
-    pub(super) show_add_dialog: bool,
-    pub(super) name_input: Option<Entity<SimpleInputState>>,
-    pub(super) path_input: Option<Entity<PathAutoCompleteState>>,
-    /// Pending values to set on inputs (for async updates)
-    pub(super) pending_name_value: Option<String>,
-    pub(super) pending_path_value: Option<String>,
     pub(super) terminals: TerminalsRegistry,
     /// Terminal rename state: (project_id, terminal_id)
     pub(super) terminal_rename: Option<RenameState<(String, String)>>,
@@ -70,29 +57,60 @@ pub struct Sidebar {
     pub(super) project_rename: Option<RenameState<String>>,
     /// Double-click detector for projects
     project_click_detector: ClickDetector<String>,
-    /// Whether to create project without terminal (bookmark mode)
-    pub(super) create_without_terminal: bool,
     /// Project ID for which color picker is shown
     color_picker_project_id: Option<String>,
+    /// Folder rename state
+    pub(super) folder_rename: Option<RenameState<String>>,
+    /// Double-click detector for folders
+    folder_click_detector: ClickDetector<String>,
+    /// Folder ID for which color picker is shown
+    color_picker_folder_id: Option<String>,
+    /// Sidebar requests drained from Workspace by observer, applied in render() (needs Window)
+    pending_sidebar_requests: Vec<SidebarRequest>,
+    /// Focus handle for keyboard event capture
+    focus_handle: FocusHandle,
+    /// Scroll handle for programmatic scrolling
+    scroll_handle: ScrollHandle,
+    /// Current keyboard cursor position (index into flat item list)
+    cursor_index: Option<usize>,
+    /// Saved focus handle to restore when leaving sidebar
+    pub saved_focus: Option<FocusHandle>,
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, terminals: TerminalsRegistry) -> Self {
+    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+        // Observe RequestBroker to drain sidebar requests outside of render().
+        // Requests are stored in pending_sidebar_requests and applied in render()
+        // where Window access is available (needed for focus/rename).
+        cx.observe(&request_broker, |this, _broker, cx| {
+            if !this.request_broker.read(cx).has_sidebar_requests() {
+                return;
+            }
+            let requests = this.request_broker.update(cx, |broker, _cx| {
+                broker.drain_sidebar_requests()
+            });
+            this.pending_sidebar_requests.extend(requests);
+            cx.notify();
+        }).detach();
+
         Self {
             workspace,
+            request_broker,
             expanded_projects: HashSet::new(),
-            show_add_dialog: false,
-            name_input: None,
-            path_input: None,
-            pending_name_value: None,
-            pending_path_value: None,
             terminals,
             terminal_rename: None,
             terminal_click_detector: ClickDetector::new(),
             project_rename: None,
             project_click_detector: ClickDetector::new(),
-            create_without_terminal: false,
             color_picker_project_id: None,
+            folder_rename: None,
+            folder_click_detector: ClickDetector::new(),
+            color_picker_folder_id: None,
+            pending_sidebar_requests: Vec::new(),
+            focus_handle: cx.focus_handle(),
+            scroll_handle: ScrollHandle::new(),
+            cursor_index: None,
+            saved_focus: None,
         }
     }
 
@@ -174,11 +192,19 @@ impl Sidebar {
 
     pub(super) fn show_color_picker(&mut self, project_id: String, cx: &mut Context<Self>) {
         self.color_picker_project_id = Some(project_id);
+        self.color_picker_folder_id = None;
+        cx.notify();
+    }
+
+    pub(super) fn show_folder_color_picker(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        self.color_picker_folder_id = Some(folder_id);
+        self.color_picker_project_id = None;
         cx.notify();
     }
 
     fn hide_color_picker(&mut self, cx: &mut Context<Self>) {
         self.color_picker_project_id = None;
+        self.color_picker_folder_id = None;
         cx.notify();
     }
 
@@ -189,87 +215,314 @@ impl Sidebar {
         self.hide_color_picker(cx);
     }
 
-    fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(super) fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
-            ws.request_context_menu(&project_id, position, cx);
+            ws.set_folder_item_color(folder_id, color, cx);
+        });
+        self.hide_color_picker(cx);
+    }
+
+    fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.request_broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ContextMenu {
+                project_id,
+                position,
+            }, cx);
         });
     }
 
-    pub(super) fn ensure_inputs(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.name_input.is_none() {
-            self.name_input = Some(cx.new(|cx| {
-                SimpleInputState::new(cx)
-                    .placeholder("Enter project name...")
-            }));
-        }
-        if self.path_input.is_none() {
-            self.path_input = Some(cx.new(|cx| {
-                PathAutoCompleteState::new(cx)
-            }));
-        }
+    /// Check for double-click on folder and return true if detected
+    pub(super) fn check_folder_double_click(&mut self, folder_id: &str) -> bool {
+        self.folder_click_detector.check(folder_id.to_string())
     }
 
-    pub(super) fn add_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.name_input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
-        let path = self.path_input.as_ref().map(|i| i.read(cx).value(cx)).unwrap_or_default();
+    pub(super) fn start_folder_rename(&mut self, folder_id: String, current_name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.folder_rename = Some(start_rename_with_blur(
+            folder_id,
+            &current_name,
+            "Folder name...",
+            |this, _window, cx| this.finish_folder_rename(cx),
+            window,
+            cx,
+        ));
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
+    }
 
-        if !name.is_empty() && !path.is_empty() {
-            let with_terminal = !self.create_without_terminal;
+    pub(super) fn finish_folder_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some((folder_id, new_name)) = finish_rename(&mut self.folder_rename, cx) {
             self.workspace.update(cx, |ws, cx| {
-                ws.add_project(name, path, with_terminal, cx);
+                ws.rename_folder(&folder_id, new_name, cx);
             });
-            // Clear inputs
-            if let Some(ref input) = self.name_input {
-                input.update(cx, |i, cx| i.set_value("", cx));
+        }
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        cx.notify();
+    }
+
+    pub(super) fn cancel_folder_rename(&mut self, cx: &mut Context<Self>) {
+        cancel_rename(&mut self.folder_rename);
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        cx.notify();
+    }
+
+    fn create_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder_id = self.workspace.update(cx, |ws, cx| {
+            ws.create_folder("New Folder".to_string(), cx)
+        });
+        // Immediately start renaming the new folder
+        self.start_folder_rename(folder_id, "New Folder".to_string(), window, cx);
+    }
+
+    /// Public accessor for the focus handle (used by RootView for FocusSidebar)
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    /// Initialize cursor to the focused project or first item
+    pub fn activate_cursor(&mut self, cx: &mut Context<Self>) {
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() {
+            self.cursor_index = None;
+            return;
+        }
+        // Try to place cursor on the focused project
+        let focused_id = self.workspace.read(cx).focused_project_id().cloned();
+        if let Some(ref focused_id) = focused_id {
+            if let Some(pos) = items.iter().position(|item| match item {
+                SidebarCursorItem::Project { project_id } |
+                SidebarCursorItem::WorktreeProject { project_id } => project_id == focused_id,
+                _ => false,
+            }) {
+                self.cursor_index = Some(pos);
+                cx.notify();
+                return;
             }
-            if let Some(ref input) = self.path_input {
-                input.update(cx, |i, cx| i.set_value("", cx));
+        }
+        self.cursor_index = Some(0);
+        cx.notify();
+    }
+
+    /// Build a flat list of cursor items matching the visual render order
+    fn build_cursor_items(&self, cx: &mut Context<Self>) -> Vec<SidebarCursorItem> {
+        let workspace = self.workspace.read(cx);
+        let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect();
+        let all_project_ids: HashSet<&str> = workspace.data().projects.iter()
+            .map(|p| p.id.as_str()).collect();
+
+        // Build worktree children map
+        let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
+        for project in &workspace.data().projects {
+            if let Some(ref wt_info) = project.worktree_info {
+                if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                    worktree_children_map
+                        .entry(wt_info.parent_project_id.clone())
+                        .or_default()
+                        .push(project);
+                }
             }
-            self.show_add_dialog = false;
-            self.create_without_terminal = false;
-            // Exit modal mode to restore terminal focus
-            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-            cx.notify();
+        }
+
+        let mut cursor_items = Vec::new();
+
+        for id in &workspace.data().project_order {
+            // Check if this is a folder
+            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
+                cursor_items.push(SidebarCursorItem::Folder { folder_id: folder.id.clone() });
+
+                if !folder.collapsed {
+                    for pid in &folder.project_ids {
+                        if let Some(&project) = all_projects.get(pid.as_str()) {
+                            // Skip worktree children that have a parent in the project list
+                            if project.worktree_info.as_ref().map_or(false, |w| {
+                                all_project_ids.contains(w.parent_project_id.as_str())
+                            }) {
+                                continue;
+                            }
+                            self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Top-level project (not a worktree child of another)
+            if let Some(&project) = all_projects.get(id.as_str()) {
+                if project.worktree_info.as_ref().map_or(false, |w| {
+                    all_project_ids.contains(w.parent_project_id.as_str())
+                }) {
+                    continue;
+                }
+                self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+            }
+        }
+
+        cursor_items
+    }
+
+    /// Helper: push a project row + its expanded terminals + worktree children into cursor items
+    fn push_project_cursor_items(
+        &self,
+        project: &ProjectData,
+        worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
+        cursor_items: &mut Vec<SidebarCursorItem>,
+    ) {
+        cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
+
+        // Expanded terminal items
+        if self.expanded_projects.contains(&project.id) {
+            if let Some(ref layout) = project.layout {
+                for tid in layout.collect_terminal_ids() {
+                    cursor_items.push(SidebarCursorItem::Terminal {
+                        project_id: project.id.clone(),
+                        terminal_id: tid,
+                    });
+                }
+            }
+        }
+
+        // Worktree children (always visible below parent)
+        if let Some(children) = worktree_children_map.get(&project.id) {
+            for child in children {
+                cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
+
+                // Expanded terminal items for worktree child
+                if self.expanded_projects.contains(&child.id) {
+                    if let Some(ref layout) = child.layout {
+                        for tid in layout.collect_terminal_ids() {
+                            cursor_items.push(SidebarCursorItem::Terminal {
+                                project_id: child.id.clone(),
+                                terminal_id: tid,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
-    pub(super) fn set_quick_path(&mut self, name: &str, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let name_str = name.to_string();
-        let path_str = path.to_string();
-        if let Some(ref input) = self.name_input {
-            input.update(cx, |i, cx| i.set_value(&name_str, cx));
+    /// Clamp cursor to valid range
+    fn validate_cursor(&mut self, item_count: usize) {
+        if item_count == 0 {
+            self.cursor_index = None;
+        } else if let Some(ref mut idx) = self.cursor_index {
+            if *idx >= item_count {
+                *idx = item_count - 1;
+            }
         }
-        if let Some(ref input) = self.path_input {
-            input.update(cx, |i, cx| i.set_value(&path_str, cx));
+    }
+
+    /// Check if any rename or color picker is active (blocks keyboard nav)
+    fn is_interactive_mode_active(&self) -> bool {
+        self.terminal_rename.is_some()
+            || self.project_rename.is_some()
+            || self.folder_rename.is_some()
+            || self.color_picker_project_id.is_some()
+            || self.color_picker_folder_id.is_some()
+    }
+
+    fn handle_sidebar_up(&mut self, _: &SidebarUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() { return; }
+        match self.cursor_index {
+            Some(idx) if idx > 0 => self.cursor_index = Some(idx - 1),
+            None => self.cursor_index = Some(items.len() - 1),
+            _ => {}
+        }
+        self.scroll_to_cursor(items.len());
+        cx.notify();
+    }
+
+    fn handle_sidebar_down(&mut self, _: &SidebarDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() { return; }
+        match self.cursor_index {
+            Some(idx) if idx < items.len() - 1 => self.cursor_index = Some(idx + 1),
+            None => self.cursor_index = Some(0),
+            _ => {}
+        }
+        self.scroll_to_cursor(items.len());
+        cx.notify();
+    }
+
+    fn handle_sidebar_confirm(&mut self, _: &SidebarConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        let Some(idx) = self.cursor_index else { return };
+        let Some(item) = items.get(idx) else { return };
+
+        match item.clone() {
+            SidebarCursorItem::Project { project_id } |
+            SidebarCursorItem::WorktreeProject { project_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(Some(project_id), cx);
+                });
+                // Restore focus to terminal
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
+            SidebarCursorItem::Terminal { project_id, terminal_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
+            SidebarCursorItem::Folder { folder_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_folder_collapsed(&folder_id, cx);
+                });
+            }
         }
         cx.notify();
     }
 
-    pub(super) fn open_folder_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select project folder".into()),
-        });
+    fn handle_sidebar_toggle_expand(&mut self, _: &SidebarToggleExpand, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        let Some(idx) = self.cursor_index else { return };
+        let Some(item) = items.get(idx) else { return };
 
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(selected_paths))) = paths.await {
-                if let Some(path) = selected_paths.first() {
-                    let path_str = path.to_string_lossy().to_string();
-                    let name_str = path.file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Project".to_string());
-
-                    this.update(cx, |this, cx| {
-                        // Store pending values to be applied in next render
-                        this.pending_path_value = Some(path_str);
-                        this.pending_name_value = Some(name_str);
-                        cx.notify();
-                    }).ok();
-                }
+        match item.clone() {
+            SidebarCursorItem::Folder { folder_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_folder_collapsed(&folder_id, cx);
+                });
             }
-        }).detach();
+            SidebarCursorItem::Project { project_id } |
+            SidebarCursorItem::WorktreeProject { project_id } => {
+                self.toggle_expanded(&project_id);
+            }
+            SidebarCursorItem::Terminal { .. } => {}
+        }
+        cx.notify();
+    }
+
+    fn handle_sidebar_escape(&mut self, _: &SidebarEscape, window: &mut Window, cx: &mut Context<Self>) {
+        self.cursor_index = None;
+        if let Some(ref saved) = self.saved_focus {
+            window.focus(saved, cx);
+        }
+        self.saved_focus = None;
+        cx.notify();
+    }
+
+    /// Scroll the sidebar to keep the cursor item visible
+    fn scroll_to_cursor(&self, item_count: usize) {
+        if let Some(idx) = self.cursor_index {
+            if item_count > 0 {
+                self.scroll_handle.scroll_to_item(idx);
+            }
+        }
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -291,27 +544,60 @@ impl Sidebar {
                     .child("EXPLORER"),
             )
             .child(
-                // Add project button
-                div()
-                    .id("add-project-btn")
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .text_size(px(14.0))
-                    .text_color(rgb(t.text_secondary))
-                    .child("+")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.show_add_dialog = !this.show_add_dialog;
-                        // Enter/exit modal mode to prevent terminal from stealing focus
-                        if this.show_add_dialog {
-                            this.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
-                        } else {
-                            this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                        }
-                        cx.notify();
-                    })),
+                h_flex()
+                    .gap(px(2.0))
+                    .child(
+                        // New folder button
+                        div()
+                            .id("new-folder-btn")
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .child(
+                                svg()
+                                    .path("icons/folder.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.text_secondary))
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.create_folder(window, cx);
+                            })),
+                    )
+                    .child(
+                        // Add project button
+                        div()
+                            .id("add-project-btn")
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("+"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("Add Project"),
+                            )
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.request_broker.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(
+                                        crate::workspace::requests::OverlayRequest::AddProjectDialog,
+                                        cx,
+                                    );
+                                });
+                            })),
+                    ),
             )
     }
 
@@ -398,54 +684,268 @@ impl Sidebar {
     }
 }
 
+/// Lightweight projection of ProjectData for sidebar rendering.
+/// Avoids cloning the full LayoutNode tree, path, hidden_terminals, and hooks
+/// which are never used by the sidebar.
+pub(super) struct SidebarProjectInfo {
+    pub id: String,
+    pub name: String,
+    pub is_visible: bool,
+    pub folder_color: FolderColor,
+    pub has_layout: bool,
+    pub terminal_ids: Vec<String>,
+    pub terminal_names: HashMap<String, String>,
+}
+
+impl SidebarProjectInfo {
+    fn from_project(project: &ProjectData) -> Self {
+        Self {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            is_visible: project.is_visible,
+            folder_color: project.folder_color,
+            has_layout: project.layout.is_some(),
+            terminal_ids: project.layout.as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default(),
+            terminal_names: project.terminal_names.clone(),
+        }
+    }
+}
+
+/// An item in the sidebar's top-level ordering: either a project or a folder
+enum SidebarItem {
+    Project {
+        project: SidebarProjectInfo,
+        index: usize,
+        worktree_children: Vec<SidebarProjectInfo>,
+    },
+    Folder {
+        folder: FolderData,
+        index: usize,
+        projects: Vec<SidebarProjectInfo>,
+        worktree_children: HashMap<String, Vec<SidebarProjectInfo>>,
+    },
+}
+
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        // Check for pending project rename request from context menu
-        let pending_rename = self.workspace.read(cx).pending_project_rename.clone();
-        if let Some(request) = pending_rename {
-            self.workspace.update(cx, |ws, cx| {
-                ws.clear_project_rename_request(cx);
-            });
-            self.start_project_rename(request.project_id, request.project_name, window, cx);
+        // Process pending sidebar requests (drained from Workspace by observer)
+        let pending = std::mem::take(&mut self.pending_sidebar_requests);
+        for request in pending {
+            match request {
+                SidebarRequest::RenameProject { project_id, project_name } => {
+                    self.start_project_rename(project_id, project_name, window, cx);
+                }
+                SidebarRequest::RenameFolder { folder_id, folder_name } => {
+                    self.start_folder_rename(folder_id, folder_name, window, cx);
+                }
+            }
+        }
+
+        // Clear cursor when sidebar loses focus
+        if self.cursor_index.is_some() && !self.focus_handle.is_focused(window) {
+            self.cursor_index = None;
         }
 
         let workspace = self.workspace.read(cx);
-        // Get projects in order from project_order
-        let ordered_projects: Vec<ProjectData> = workspace.data.project_order
-            .iter()
-            .filter_map(|id| workspace.data.projects.iter().find(|p| &p.id == id).cloned())
+
+        // Collect all projects for lookup
+        let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
+            .map(|p| (p.id.as_str(), p))
             .collect();
 
-        // Collect all project IDs for orphan detection
-        let all_project_ids: HashSet<&str> = ordered_projects.iter().map(|p| p.id.as_str()).collect();
-
-        // Split into main projects and worktree children grouped by parent
-        let mut worktree_children: HashMap<String, Vec<ProjectData>> = HashMap::new();
-        let mut main_projects: Vec<(ProjectData, usize)> = Vec::new();
-        let mut main_index = 0;
-        for project in &ordered_projects {
+        // Build worktree children map (child project -> parent project)
+        let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
+        let all_project_ids: HashSet<&str> = workspace.data().projects.iter().map(|p| p.id.as_str()).collect();
+        for project in &workspace.data().projects {
             if let Some(ref wt_info) = project.worktree_info {
                 if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
-                    worktree_children
+                    worktree_children_map
                         .entry(wt_info.parent_project_id.clone())
                         .or_default()
-                        .push(project.clone());
-                    continue;
+                        .push(SidebarProjectInfo::from_project(project));
                 }
             }
-            main_projects.push((project.clone(), main_index));
-            main_index += 1;
         }
 
-        let show_add_dialog = self.show_add_dialog;
-        let color_picker_project_id = self.color_picker_project_id.clone();
+        // Build sidebar items from project_order
+        let mut items: Vec<SidebarItem> = Vec::new();
+        let mut top_index = 0;
+        for id in &workspace.data().project_order {
+            // Check if this is a folder
+            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
+                let folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
+                    .filter_map(|pid| all_projects.get(pid.as_str()))
+                    .filter(|p| p.worktree_info.is_none() || !all_project_ids.contains(
+                        p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
+                    ))
+                    .map(|p| SidebarProjectInfo::from_project(p))
+                    .collect();
+                let mut folder_wt_children: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
+                for fp in &folder_projects {
+                    if let Some(children) = worktree_children_map.remove(&fp.id) {
+                        folder_wt_children.insert(fp.id.clone(), children);
+                    }
+                }
+                items.push(SidebarItem::Folder {
+                    folder: folder.clone(),
+                    index: top_index,
+                    projects: folder_projects,
+                    worktree_children: folder_wt_children,
+                });
+                top_index += 1;
+                continue;
+            }
 
-        // Check if we have suggestions to show (must be checked before dialog renders)
-        let has_suggestions = self.path_input.as_ref()
-            .map(|input| input.read(cx).has_suggestions())
-            .unwrap_or(false);
+            // Check if this is a top-level project (not a worktree child)
+            if let Some(&project) = all_projects.get(id.as_str()) {
+                if let Some(ref wt_info) = project.worktree_info {
+                    if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                        // This is a worktree child shown under its parent, skip
+                        continue;
+                    }
+                }
+                let wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
+                items.push(SidebarItem::Project {
+                    project: SidebarProjectInfo::from_project(project),
+                    index: top_index,
+                    worktree_children: wt_children,
+                });
+                top_index += 1;
+            }
+        }
+
+        let color_picker_project_id = self.color_picker_project_id.clone();
+        let color_picker_folder_id = self.color_picker_folder_id.clone();
+        let has_color_picker = color_picker_project_id.is_some() || color_picker_folder_id.is_some();
+
+        // Build cursor items and validate cursor position
+        let cursor_items = self.build_cursor_items(cx);
+        self.validate_cursor(cursor_items.len());
+        let cursor_index = self.cursor_index;
+
+        // Build flat elements with cursor tracking
+        let mut flat_elements: Vec<AnyElement> = Vec::new();
+        let mut flat_idx: usize = 0;
+
+        for item in items {
+            match item {
+                SidebarItem::Project { project, index, worktree_children } => {
+                    let is_cursor = cursor_index == Some(flat_idx);
+                    flat_elements.push(
+                        self.render_project_item(&project, index, is_cursor, window, cx).into_any_element()
+                    );
+                    flat_idx += 1;
+
+                    // Expanded terminals
+                    if self.expanded_projects.contains(&project.id) {
+                        let minimized_states: Vec<(String, bool)> = {
+                            let ws = self.workspace.read(cx);
+                            project.terminal_ids.iter().map(|id| {
+                                (id.clone(), ws.is_terminal_minimized(&project.id, id))
+                            }).collect()
+                        };
+                        for (tid, is_minimized) in &minimized_states {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            flat_elements.push(
+                                self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                            );
+                            flat_idx += 1;
+                        }
+                    }
+
+                    // Worktree children
+                    for child in &worktree_children {
+                        let is_cursor = cursor_index == Some(flat_idx);
+                        flat_elements.push(
+                            self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                        );
+                        flat_idx += 1;
+
+                        if self.expanded_projects.contains(&child.id) {
+                            let minimized_states: Vec<(String, bool)> = {
+                                let ws = self.workspace.read(cx);
+                                child.terminal_ids.iter().map(|id| {
+                                    (id.clone(), ws.is_terminal_minimized(&child.id, id))
+                                }).collect()
+                            };
+                            for (tid, is_minimized) in &minimized_states {
+                                let is_cursor = cursor_index == Some(flat_idx);
+                                flat_elements.push(
+                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                );
+                                flat_idx += 1;
+                            }
+                        }
+                    }
+                }
+                SidebarItem::Folder { folder, index, projects, worktree_children } => {
+                    let is_cursor = cursor_index == Some(flat_idx);
+                    flat_elements.push(
+                        self.render_folder_header(&folder, index, projects.len(), is_cursor, window, cx).into_any_element()
+                    );
+                    flat_idx += 1;
+
+                    // Folder children when not collapsed
+                    if !folder.collapsed {
+                        for fp in &projects {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            flat_elements.push(
+                                self.render_folder_project_item(fp, &folder.id, is_cursor, window, cx).into_any_element()
+                            );
+                            flat_idx += 1;
+
+                            // Expanded terminals for folder project
+                            if self.expanded_projects.contains(&fp.id) {
+                                let minimized_states: Vec<(String, bool)> = {
+                                    let ws = self.workspace.read(cx);
+                                    fp.terminal_ids.iter().map(|id| {
+                                        (id.clone(), ws.is_terminal_minimized(&fp.id, id))
+                                    }).collect()
+                                };
+                                for (tid, is_minimized) in &minimized_states {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    flat_elements.push(
+                                        self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+                                }
+                            }
+
+                            // Worktree children for folder project
+                            if let Some(wt_children) = worktree_children.get(&fp.id) {
+                                for child in wt_children {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    flat_elements.push(
+                                        self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+
+                                    if self.expanded_projects.contains(&child.id) {
+                                        let minimized_states: Vec<(String, bool)> = {
+                                            let ws = self.workspace.read(cx);
+                                            child.terminal_ids.iter().map(|id| {
+                                                (id.clone(), ws.is_terminal_minimized(&child.id, id))
+                                            }).collect()
+                                        };
+                                        for (tid, is_minimized) in &minimized_states {
+                                            let is_cursor = cursor_index == Some(flat_idx);
+                                            flat_elements.push(
+                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                            );
+                                            flat_idx += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         div()
             .relative()
@@ -454,31 +954,26 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .bg(rgb(t.bg_secondary))
+            .track_focus(&self.focus_handle)
+            .key_context("Sidebar")
+            .on_action(cx.listener(Self::handle_sidebar_up))
+            .on_action(cx.listener(Self::handle_sidebar_down))
+            .on_action(cx.listener(Self::handle_sidebar_confirm))
+            .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
+            .on_action(cx.listener(Self::handle_sidebar_escape))
             .child(self.render_header(cx))
-            .when(show_add_dialog, |d| d.child(self.render_add_dialog(window, cx)))
             .child(self.render_projects_header(cx))
             .child(
                 div()
                     .id("sidebar-scroll")
                     .flex_1()
                     .overflow_y_scroll()
-                    .children(
-                        main_projects
-                            .iter()
-                            .map(|(p, i)| {
-                                let children = worktree_children.get(&p.id);
-                                self.render_project_item_with_worktrees(p, *i, children, window, cx)
-                            }),
-                    ),
+                    .track_scroll(&self.scroll_handle)
+                    .children(flat_elements),
             )
             .child(self.render_keybindings_hint(cx))
-            // Path suggestions overlay - rendered LAST to appear on top of everything
-            .when(show_add_dialog && has_suggestions, |d| {
-                d.child(self.render_path_suggestions(cx))
-            })
             // Color picker overlay
-            .when(color_picker_project_id.is_some(), |d| {
-                let project_id = color_picker_project_id.unwrap();
+            .when(has_color_picker, |d: Div| {
                 d.child(
                     // Backdrop to close picker when clicking outside
                     div()
@@ -492,7 +987,14 @@ impl Render for Sidebar {
                             cx.stop_propagation();
                         })
                 )
-                .child(self.render_color_picker(&project_id, cx))
+                .when(color_picker_project_id.is_some(), |d: Div| {
+                    let project_id = color_picker_project_id.unwrap();
+                    d.child(self.render_color_picker(&project_id, cx))
+                })
+                .when(color_picker_folder_id.is_some(), |d: Div| {
+                    let folder_id = color_picker_folder_id.unwrap();
+                    d.child(self.render_folder_color_picker(&folder_id, cx))
+                })
             })
     }
 }

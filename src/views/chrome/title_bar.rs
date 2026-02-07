@@ -1,7 +1,9 @@
-use crate::keybindings::ToggleSidebar;
+use crate::keybindings::{Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector, ToggleSidebar};
 use crate::theme::theme;
+use crate::views::components::menu_item;
 use crate::workspace::state::Workspace;
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Window control button types
@@ -17,6 +19,7 @@ pub enum WindowControlType {
 pub struct TitleBar {
     title: SharedString,
     workspace: Entity<Workspace>,
+    menu_open: bool,
 }
 
 impl TitleBar {
@@ -27,7 +30,111 @@ impl TitleBar {
         Self {
             title: title.into(),
             workspace,
+            menu_open: false,
         }
+    }
+
+    pub fn is_menu_open(&self) -> bool {
+        self.menu_open
+    }
+
+    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_open = !self.menu_open;
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        cx.notify();
+    }
+
+    /// Render the app dropdown menu overlay (must be called from a parent with full window coverage).
+    pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        let traffic_light_padding = if cfg!(target_os = "macos") {
+            px(80.0)
+        } else {
+            px(8.0)
+        };
+
+        div()
+            .id("app-menu-backdrop")
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                this.close_menu(cx);
+            }))
+            .on_mouse_move(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(
+                // Menu panel
+                div()
+                    .absolute()
+                    .top(px(32.0))
+                    .left(traffic_light_padding + px(40.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(4.0))
+                    .shadow_xl()
+                    .min_w(px(200.0))
+                    .py(px(4.0))
+                    .id("app-menu-panel")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // Settings
+                    .child(
+                        menu_item("app-menu-settings", "icons/edit.svg", "Open Settings", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowSettings), cx);
+                            })),
+                    )
+                    // Theme
+                    .child(
+                        menu_item("app-menu-theme", "icons/eye.svg", "Select Theme", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowThemeSelector), cx);
+                            })),
+                    )
+                    // Command Palette
+                    .child(
+                        menu_item("app-menu-command-palette", "icons/search.svg", "Command Palette", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowCommandPalette), cx);
+                            })),
+                    )
+                    // Keyboard Shortcuts
+                    .child(
+                        menu_item("app-menu-keybindings", "icons/keyboard.svg", "Keyboard Shortcuts", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(ShowKeybindings), cx);
+                            })),
+                    )
+                    // Separator
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .mx(px(8.0))
+                            .my(px(4.0))
+                            .bg(rgb(t.border)),
+                    )
+                    // Exit
+                    .child(
+                        menu_item("app-menu-exit", "icons/close.svg", "Exit", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_menu(cx);
+                                window.dispatch_action(Box::new(Quit), cx);
+                            })),
+                    ),
+            )
     }
 
     fn render_window_control(
@@ -111,8 +218,7 @@ impl Render for TitleBar {
         // Get focused project info
         let focused_project = {
             let ws = self.workspace.read(cx);
-            ws.focused_project_id
-                .as_ref()
+            ws.focused_project_id()
                 .and_then(|id| ws.project(id))
                 .map(|p| p.name.clone())
         };
@@ -134,9 +240,7 @@ impl Render for TitleBar {
             .window_control_area(WindowControlArea::Drag)
             .child(
                 // Left side - sidebar toggle + title
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .pl(traffic_light_padding)
                     .child(
@@ -160,13 +264,41 @@ impl Render for TitleBar {
                                 window.dispatch_action(Box::new(ToggleSidebar), cx);
                             }),
                     )
-                    .child(
+                    .child({
+                        let menu_open = self.menu_open;
+                        let chevron = if menu_open { "▲" } else { "▼" };
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_primary))
-                            .child(self.title.clone()),
-                    ),
+                            .id("app-menu-trigger")
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .when(menu_open, |d| d.bg(rgb(t.bg_hover)))
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(t.text_primary))
+                                    .child(self.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(8.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(chevron),
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_menu(cx);
+                            }))
+                    }),
             )
             .child(
                 // Center - spacer
@@ -174,16 +306,12 @@ impl Render for TitleBar {
             )
             .child(
                 // Right side - focused project indicator + theme toggle + window controls
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .pr(px(4.0))
                     // Focused project indicator
                     .children(focused_project.map(|name| {
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(4.0))
                             .child(
                                 div()
@@ -227,9 +355,7 @@ impl Render for TitleBar {
                     }))
                     .when(needs_controls, |d| {
                         d.child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(2.0))
                                 .child(self.render_window_control(WindowControlType::Minimize, window, cx))
                                 .child(if is_maximized {

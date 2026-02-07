@@ -8,6 +8,7 @@ use super::terminal_overlay_utils::{
     create_terminal_content, get_or_create_terminal, handle_pending_focus, handle_terminal_key_input,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::FluentBuilder;
 use std::sync::Arc;
 
@@ -210,9 +211,7 @@ impl Render for DetachedTerminalView {
                             .child(terminal_name),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -240,9 +239,7 @@ impl Render for DetachedTerminalView {
                             // Window controls - only show if client-side decorations
                             .when(needs_controls, |d| {
                                 d.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
+                                    h_flex()
                                         .gap(px(2.0))
                                         // Minimize
                                         .child(

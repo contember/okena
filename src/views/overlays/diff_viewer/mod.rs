@@ -10,6 +10,7 @@ mod syntax;
 mod types;
 
 use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileDiff};
+use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
@@ -348,25 +349,27 @@ impl Render for DiffViewer {
 
         let theme_colors = Arc::new(t.clone());
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("diff-viewer-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                if this.selection.normalized().is_some() {
+                    this.selection.clear();
+                    cx.notify();
+                } else {
+                    this.close(cx);
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
 
                 match key {
-                    "escape" => {
-                        if this.selection.normalized().is_some() {
-                            this.selection.clear();
-                            cx.notify();
-                        } else {
-                            this.close(cx);
-                        }
-                    }
                     "tab" => this.toggle_mode(cx),
                     "s" => this.toggle_view_mode(cx),
                     "w" => this.toggle_ignore_whitespace(cx),

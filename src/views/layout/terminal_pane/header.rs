@@ -2,13 +2,14 @@
 //!
 //! An Entity with Render that displays terminal name, shell selector, and controls.
 
+use crate::keybindings::Cancel;
 use crate::settings::settings;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::ui::ClickDetector;
 use crate::views::components::{cancel_rename, finish_rename, start_rename, rename_input, RenameState, SimpleInput};
-use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -263,6 +264,7 @@ impl Render for TerminalHeader {
                         if let Some(input) = rename_input(&self.rename_state) {
                             div()
                                 .id("terminal-rename-input")
+                                .key_context("TerminalRename")
                                 .flex_1()
                                 .min_w_0()
                                 .bg(rgb(t.bg_secondary))
@@ -276,22 +278,14 @@ impl Render for TerminalHeader {
                                 .on_click(|_, _window, cx| {
                                     cx.stop_propagation();
                                 })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_rename(cx);
+                                }))
                                 .on_key_down(cx.listener(
                                     |this, event: &KeyDownEvent, _window, cx| {
-                                        match event.keystroke.key.as_str() {
-                                            "enter" => {
-                                                cx.stop_propagation();
-                                                this.finish_rename(cx);
-                                            }
-                                            "escape" => {
-                                                cx.stop_propagation();
-                                                this.cancel_rename(cx);
-                                            }
-                                            _ => {
-                                                // Stop propagation for all other printable characters
-                                                // to prevent them from going to the terminal
-                                                cx.stop_propagation();
-                                            }
+                                        cx.stop_propagation();
+                                        if event.keystroke.key.as_str() == "enter" {
+                                            this.finish_rename(cx);
                                         }
                                     },
                                 ))

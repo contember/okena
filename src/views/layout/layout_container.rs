@@ -9,8 +9,9 @@
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
-use crate::views::split_pane::render_split_divider;
-use crate::views::terminal_pane::TerminalPane;
+use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
+use crate::views::layout::terminal_pane::TerminalPane;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 /// Recursive layout container that renders terminal/split/tabs nodes
 pub struct LayoutContainer {
     pub(super) workspace: Entity<Workspace>,
+    pub(super) request_broker: Entity<RequestBroker>,
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
@@ -39,19 +41,24 @@ pub struct LayoutContainer {
     /// Animation state for recently dropped tab (tab_index, animation_progress)
     /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     pub(super) drop_animation: Option<(usize, f32)>,
+    /// Shared drag state for resize operations
+    pub(super) active_drag: ActiveDrag,
 }
 
 impl LayoutContainer {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
         pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
+        active_drag: ActiveDrag,
     ) -> Self {
         Self {
             workspace,
+            request_broker,
             project_id,
             project_path,
             layout_path,
@@ -65,6 +72,7 @@ impl LayoutContainer {
             })),
             tab_context_menu: None,
             drop_animation: None,
+            active_drag,
         }
     }
 
@@ -87,6 +95,7 @@ impl LayoutContainer {
 
         if needs_new_pane {
             let workspace = self.workspace.clone();
+            let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
             let layout_path = self.layout_path.clone();
@@ -96,6 +105,7 @@ impl LayoutContainer {
             self.terminal_pane = Some(cx.new(move |cx| {
                 TerminalPane::new(
                     workspace,
+                    request_broker,
                     project_id,
                     project_path,
                     layout_path,
@@ -129,15 +139,14 @@ impl LayoutContainer {
         cx: &Context<Self>,
     ) -> Option<usize> {
         let ws = self.workspace.read(cx);
-        let fs = ws.fullscreen_terminal.as_ref()?;
-        if fs.project_id != self.project_id {
+        let (fs_project_id, fs_terminal_id) = ws.focus_manager.fullscreen_state()?;
+        if fs_project_id != self.project_id {
             return None;
         }
-        let zoomed_tid = &fs.terminal_id;
 
         for (i, child) in children.iter().enumerate() {
             let ids = child.collect_terminal_ids();
-            if ids.iter().any(|id| id == zoomed_tid) {
+            if ids.iter().any(|id| id == fs_terminal_id) {
                 return Some(i);
             }
         }
@@ -185,11 +194,13 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
@@ -253,11 +264,13 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
@@ -266,11 +279,13 @@ impl LayoutContainer {
             // Add divider before this child (if not first visible child)
             if visible_idx > 0 {
                 let divider = render_split_divider(
+                    self.workspace.clone(),
                     self.project_id.clone(),
                     visible_idx - 1,
                     direction,
                     self.layout_path.clone(),
                     container_bounds_ref.clone(),
+                    &self.active_drag,
                     cx,
                 );
                 elements.push(divider.into_any_element());

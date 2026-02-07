@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::process::Command;
 
 use super::GitStatus;
+use crate::process::command;
 
 /// Get branches that are already checked out in worktrees
 fn get_worktree_branches(path: &Path) -> Vec<String> {
@@ -10,7 +10,7 @@ fn get_worktree_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "worktree", "list", "--porcelain"])
         .output()
         .ok();
@@ -53,7 +53,7 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
         args.push(branch);
     }
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
@@ -80,7 +80,7 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 
     args.push(path_str);
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
@@ -100,7 +100,7 @@ fn list_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "branch", "-a", "--format=%(refname:short)"])
         .output()
         .ok();
@@ -145,7 +145,7 @@ pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
 /// Returns None if not a git repository.
 pub fn get_status(path: &Path) -> Option<GitStatus> {
     // Check if we're in a git repo
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path.to_str()?, "rev-parse", "--is-inside-work-tree"])
         .output()
         .ok()?;
@@ -169,7 +169,7 @@ fn get_branch_name(path: &Path) -> Option<String> {
     let path_str = path.to_str()?;
 
     // Try to get branch name
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "symbolic-ref", "--short", "HEAD"])
         .output()
         .ok()?;
@@ -182,7 +182,7 @@ fn get_branch_name(path: &Path) -> Option<String> {
     }
 
     // Detached HEAD - get short commit hash
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "rev-parse", "--short", "HEAD"])
         .output()
         .ok()?;
@@ -205,7 +205,7 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     };
 
     // Get diff stats for staged + unstaged changes
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "diff", "--numstat", "HEAD"])
         .output()
         .ok();
@@ -231,7 +231,7 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     }
 
     // Also include untracked files (count lines)
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
         .output()
         .ok();

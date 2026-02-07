@@ -124,12 +124,6 @@ impl PaneMap {
         })
     }
 
-    /// Get all registered panes (for debugging)
-    #[allow(dead_code)]
-    pub fn panes(&self) -> &[PaneBounds] {
-        &self.panes
-    }
-
     /// Find the next pane in sequential order (cycles through all panes)
     pub fn find_next_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
         if self.panes.len() <= 1 {

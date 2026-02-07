@@ -1,10 +1,11 @@
 use crate::keybindings::{
     format_keystroke, get_action_descriptions, get_config, get_keybindings_path, reset_to_defaults,
-    ShowKeybindings,
+    Cancel, ShowKeybindings,
 };
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 
 /// Keybindings help overlay
@@ -85,9 +86,7 @@ impl KeybindingsHelp {
                                 .map(|d| d.name)
                                 .unwrap_or(action.as_str());
 
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .justify_between()
                                 .px(px(12.0))
                                 .py(px(8.0))
@@ -95,14 +94,10 @@ impl KeybindingsHelp {
                                     d.border_t_1().border_color(rgb(t.border))
                                 })
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
+                                    v_flex()
                                         .gap(px(2.0))
                                         .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
+                                            h_flex()
                                                 .gap(px(8.0))
                                                 .child(
                                                     div()
@@ -160,7 +155,9 @@ impl Render for KeybindingsHelp {
         let t = theme(cx);
 
         // Focus on first render
-        window.focus(&self.focus_handle, cx);
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
 
         let config = get_config();
         let customized = config.get_customized_actions();
@@ -200,10 +197,8 @@ impl Render for KeybindingsHelp {
             .on_action(cx.listener(|this, _: &ShowKeybindings, _window, cx| {
                 this.close(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
-                }
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
@@ -228,9 +223,7 @@ impl Render for KeybindingsHelp {
                                     .border_b_1()
                                     .border_color(rgb(t.border))
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(8.0))
                                             .child(
                                                 div()
@@ -238,9 +231,7 @@ impl Render for KeybindingsHelp {
                                                     .child("⚠️"),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
+                                                v_flex()
                                                     .gap(px(2.0))
                                                     .child(
                                                         div()
@@ -294,9 +285,7 @@ impl Render for KeybindingsHelp {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .gap(px(2.0))
                                     .child(
                                         div()
