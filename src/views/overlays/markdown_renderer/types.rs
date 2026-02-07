@@ -19,7 +19,7 @@ pub(super) enum Inline {
     Code(String),
     Bold(Vec<Inline>),
     Italic(Vec<Inline>),
-    Link { #[allow(dead_code)] url: String, children: Vec<Inline> },
+    Link { _url: String, children: Vec<Inline> },
 }
 
 /// Slice a string by character indices (not byte indices).

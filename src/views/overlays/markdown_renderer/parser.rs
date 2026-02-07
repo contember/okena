@@ -208,7 +208,7 @@ impl MarkdownDocument {
                         }
                     });
                     if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Link { url, children });
+                        last.push(Inline::Link { _url: url, children });
                     }
                 }
                 Event::Code(text) => {

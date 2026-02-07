@@ -380,42 +380,4 @@ impl Workspace {
         });
     }
 
-    /// Close all terminals in a project
-    /// Returns the list of terminal IDs that were closed (for PTY cleanup)
-    /// The project becomes a bookmark (no terminals) after this operation
-    #[allow(dead_code)]
-    pub fn close_all_terminals(&mut self, project_id: &str, cx: &mut Context<Self>) -> Vec<String> {
-        let terminal_ids = if let Some(project) = self.project(project_id) {
-            project.layout.as_ref()
-                .map(|l| l.collect_terminal_ids())
-                .unwrap_or_default()
-        } else {
-            return vec![];
-        };
-
-        // Clear the layout entirely (project becomes a bookmark)
-        if let Some(project) = self.project_mut(project_id) {
-            project.layout = None;
-            // Clear terminal names for removed terminals
-            for tid in &terminal_ids {
-                project.terminal_names.remove(tid);
-                project.hidden_terminals.remove(tid);
-            }
-        }
-
-        // Clear focused terminal if it was in this project
-        if let Some(ref focused) = self.focus_manager.focused_terminal_state() {
-            if focused.project_id == project_id {
-                self.focus_manager.clear_focus();
-            }
-        }
-
-        // Exit fullscreen if a terminal from this project was in fullscreen
-        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
-            self.focus_manager.exit_fullscreen();
-        }
-
-        self.notify_data(cx);
-        terminal_ids
-    }
 }

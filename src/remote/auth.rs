@@ -195,17 +195,6 @@ impl AuthStore {
         false
     }
 
-    /// Get the number of paired tokens.
-    #[allow(dead_code)]
-    pub fn token_count(&self) -> usize {
-        self.inner.lock().tokens.len()
-    }
-
-    /// Clear all stored tokens (for "disconnect all remotes" feature).
-    #[allow(dead_code)]
-    pub fn clear_tokens(&self) {
-        self.inner.lock().tokens.clear();
-    }
 }
 
 /// Pairing errors.

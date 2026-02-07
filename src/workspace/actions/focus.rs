@@ -73,19 +73,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Enter fullscreen mode for the first terminal in a project
-    #[allow(dead_code)]
-    pub fn fullscreen_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        if let Some(project) = self.project(&project_id) {
-            let terminal_ids = project.layout.as_ref()
-                .map(|l| l.collect_terminal_ids())
-                .unwrap_or_default();
-            if let Some(first_id) = terminal_ids.first().cloned() {
-                self.set_fullscreen_terminal(project_id, first_id, cx);
-            }
-        }
-    }
-
     /// Exit fullscreen mode
     ///
     /// Restores focus to the previously focused terminal and project view mode.

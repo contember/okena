@@ -230,10 +230,6 @@ impl Okena {
         self.remote_info.set_inactive();
     }
 
-    /// Get the remote server port (if running).
-    pub fn remote_server_port(&self) -> Option<u16> {
-        self.remote_server.as_ref().map(|s| s.port())
-    }
 
     /// Spawn the update checker loop (30s delay, check, optionally download, sleep 24h).
     /// Uses `try_start()` to prevent duplicate loops and respects cancellation via token.

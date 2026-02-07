@@ -6,7 +6,6 @@
 use crate::theme::ThemeColors;
 use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
-use gpui::prelude::*;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
 ///
@@ -175,25 +174,4 @@ pub fn sidebar_visibility_toggle(
         )
 }
 
-/// Item row container – h(24), padding, flex, hover/focus styling.
-///
-/// Caller chains `.on_drag()`, `.drag_over()`, `.on_drop()`, `.on_mouse_down(Right)`, `.child()`.
-#[allow(dead_code)]
-pub fn sidebar_row_container(
-    id: impl Into<ElementId>,
-    left_pad: f32,
-    is_focused: bool,
-    t: &ThemeColors,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(24.0))
-        .pl(px(left_pad))
-        .pr(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .cursor_pointer()
-        .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
-        .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-}
+

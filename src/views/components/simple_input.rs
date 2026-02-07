@@ -387,11 +387,6 @@ impl SimpleInputState {
         KeyHandled::Ignored
     }
 
-    /// Check if this input has a selection
-    #[allow(dead_code)]
-    pub fn has_selection(&self) -> bool {
-        self.selection.is_some()
-    }
 }
 
 impl Render for SimpleInputState {
