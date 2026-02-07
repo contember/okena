@@ -132,18 +132,14 @@ impl RootView {
                     }
                 }
                 OverlayRequest::ShellSelector { project_id, terminal_id, current_shell } => {
-                    if !self.overlay_manager.read(cx).has_shell_selector() {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.show_shell_selector(current_shell, project_id, terminal_id, cx);
-                        });
-                    }
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_shell_selector(current_shell, project_id, terminal_id, cx);
+                    });
                 }
                 OverlayRequest::AddProjectDialog => {
-                    if !self.overlay_manager.read(cx).has_add_project_dialog() {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.toggle_add_project_dialog(cx);
-                        });
-                    }
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.toggle_add_project_dialog(cx);
+                    });
                 }
                 OverlayRequest::DiffViewer { path, file } => {
                     self.overlay_manager.update(cx, |om, cx| {

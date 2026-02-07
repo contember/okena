@@ -113,20 +113,8 @@ impl Render for RootView {
 
         // Get overlay visibility state from overlay manager
         let om = self.overlay_manager.read(cx);
-        let has_add_project_dialog = om.has_add_project_dialog();
-        let has_keybindings_help = om.has_keybindings_help();
-        let has_session_manager = om.has_session_manager();
-        let has_theme_selector = om.has_theme_selector();
-        let has_command_palette = om.has_command_palette();
-        let has_settings_panel = om.has_settings_panel();
-        let has_project_switcher = om.has_project_switcher();
-        let has_shell_selector = om.has_shell_selector();
-        let has_worktree_dialog = om.has_worktree_dialog();
         let has_context_menu = om.has_context_menu();
         let has_folder_context_menu = om.has_folder_context_menu();
-        let has_file_search = om.has_file_search();
-        let has_file_viewer = om.has_file_viewer();
-        let has_diff_viewer = om.has_diff_viewer();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -526,61 +514,17 @@ impl Render for RootView {
             .when(self.title_bar.read(cx).is_menu_open(), |d| {
                 d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx)))
             })
-            // Keybindings help overlay (renders on top of everything)
-            .when(has_keybindings_help, |d| {
-                d.children(self.overlay_manager.read(cx).render_keybindings_help())
-            })
-            // Session manager overlay (renders on top of everything)
-            .when(has_session_manager, |d| {
-                d.children(self.overlay_manager.read(cx).render_session_manager())
-            })
-            // Theme selector overlay (renders on top of everything)
-            .when(has_theme_selector, |d| {
-                d.children(self.overlay_manager.read(cx).render_theme_selector())
-            })
-            // Command palette overlay (renders on top of everything)
-            .when(has_command_palette, |d| {
-                d.children(self.overlay_manager.read(cx).render_command_palette())
-            })
-            // Settings panel overlay (renders on top of everything)
-            .when(has_settings_panel, |d| {
-                d.children(self.overlay_manager.read(cx).render_settings_panel())
-            })
-            // Project switcher overlay (renders on top of everything)
-            .when(has_project_switcher, |d| {
-                d.children(self.overlay_manager.read(cx).render_project_switcher())
-            })
-            // Shell selector overlay (renders on top of everything)
-            .when(has_shell_selector, |d| {
-                d.children(self.overlay_manager.read(cx).render_shell_selector())
-            })
-            // Worktree dialog overlay (renders on top of everything)
-            .when(has_worktree_dialog, |d| {
-                d.children(self.overlay_manager.read(cx).render_worktree_dialog())
-            })
-            // Context menu overlay (renders on top of everything)
+            // Context menu overlay (positioned popup, separate from modals)
             .when(has_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_context_menu())
             })
-            // Folder context menu overlay
+            // Folder context menu overlay (positioned popup, separate from modals)
             .when(has_folder_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_folder_context_menu())
             })
-            // File search overlay (renders on top of everything)
-            .when(has_file_search, |d| {
-                d.children(self.overlay_manager.read(cx).render_file_search())
-            })
-            // File viewer overlay (renders on top of everything)
-            .when(has_file_viewer, |d| {
-                d.children(self.overlay_manager.read(cx).render_file_viewer())
-            })
-            // Diff viewer overlay (renders on top of everything)
-            .when(has_diff_viewer, |d| {
-                d.children(self.overlay_manager.read(cx).render_diff_viewer())
-            })
-            // Add project dialog overlay (renders on top of everything)
-            .when(has_add_project_dialog, |d| {
-                d.children(self.overlay_manager.read(cx).render_add_project_dialog())
+            // Single active modal overlay (renders on top of everything)
+            .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {
+                d.child(modal)
             })
     }
 }
