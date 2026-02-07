@@ -103,14 +103,6 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// State for a detached terminal (opened in separate window)
-#[derive(Clone, Debug)]
-pub struct DetachedTerminalState {
-    pub terminal_id: String,
-    pub project_id: String,
-    pub layout_path: Vec<usize>,
-}
-
 /// State for focused terminal (for visual indicator)
 #[derive(Clone, Debug, PartialEq)]
 pub struct FocusedTerminalState {
@@ -153,8 +145,6 @@ pub enum SidebarRequest {
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
-    /// Currently detached terminals (opened in separate windows)
-    pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
     /// Pending overlay requests (consumed by RootView::process_pending_requests)
@@ -172,7 +162,6 @@ impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
             data,
-            detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
             overlay_requests: VecDeque::new(),
             sidebar_requests: VecDeque::new(),
@@ -275,6 +264,20 @@ impl Workspace {
     /// Find which folder (if any) contains a given project
     pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
         self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
+    }
+
+    /// Collect all detached terminals across all projects by traversing layout trees.
+    /// Returns (terminal_id, project_id, layout_path) tuples.
+    pub fn collect_all_detached_terminals(&self) -> Vec<(String, String, Vec<usize>)> {
+        let mut result = Vec::new();
+        for project in &self.data.projects {
+            if let Some(ref layout) = project.layout {
+                for (terminal_id, layout_path) in layout.collect_detached_terminals() {
+                    result.push((terminal_id, project.id.clone(), layout_path));
+                }
+            }
+        }
+        result
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
