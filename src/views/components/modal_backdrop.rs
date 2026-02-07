@@ -4,6 +4,7 @@
 
 use crate::theme::ThemeColors;
 use gpui::*;
+use gpui_component::v_flex;
 
 /// Create a modal backdrop with click-to-close functionality.
 ///
@@ -94,7 +95,7 @@ where
     let title = title.into();
     let subtitle = subtitle.map(|s| s.into());
 
-    let mut title_section = div().flex().flex_col().gap(px(2.0)).child(
+    let mut title_section = v_flex().gap(px(2.0)).child(
         div()
             .text_size(px(16.0))
             .font_weight(FontWeight::SEMIBOLD)
