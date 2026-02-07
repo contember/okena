@@ -7,7 +7,6 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::grid::{Scroll, Dimensions};
-use async_channel::{Sender, unbounded};
 use parking_lot::Mutex;
 use regex::Regex;
 use std::sync::{Arc, OnceLock};
@@ -186,8 +185,6 @@ pub struct Terminal {
     has_bell: Arc<Mutex<bool>>,
     /// Dirty flag - set when terminal content changes, cleared after render
     dirty: std::sync::atomic::AtomicBool,
-    /// Channel for notifying subscribers when terminal content changes (event-driven, no polling)
-    dirty_notify: Sender<()>,
     /// Initial working directory (for resolving relative file paths in URL detection)
     initial_cwd: String,
 }
@@ -214,9 +211,6 @@ impl Terminal {
         );
         let term = Term::new(config, &term_size, event_listener);
 
-        // Create unbounded channel for dirty notifications (don't drop any updates)
-        let (dirty_notify, _) = unbounded();
-
         Self {
             term: Arc::new(Mutex::new(term)),
             processor: Mutex::new(Processor::new()),
@@ -232,7 +226,6 @@ impl Terminal {
             title,
             has_bell,
             dirty: std::sync::atomic::AtomicBool::new(false),
-            dirty_notify,
             initial_cwd,
         }
     }
@@ -244,9 +237,6 @@ impl Terminal {
 
         processor.advance(&mut *term, data);
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-
-        // Notify subscribers that content changed (non-blocking, coalesces rapid updates)
-        let _ = self.dirty_notify.try_send(());
     }
 
     /// Check if terminal has pending changes (and clear the flag)
