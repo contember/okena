@@ -133,15 +133,14 @@ impl LayoutContainer {
         cx: &Context<Self>,
     ) -> Option<usize> {
         let ws = self.workspace.read(cx);
-        let fs = ws.fullscreen_terminal.as_ref()?;
-        if fs.project_id != self.project_id {
+        let (fs_project_id, fs_terminal_id) = ws.focus_manager.fullscreen_state()?;
+        if fs_project_id != self.project_id {
             return None;
         }
-        let zoomed_tid = &fs.terminal_id;
 
         for (i, child) in children.iter().enumerate() {
             let ids = child.collect_terminal_ids();
-            if ids.iter().any(|id| id == zoomed_tid) {
+            if ids.iter().any(|id| id == fs_terminal_id) {
                 return Some(i);
             }
         }

@@ -14,12 +14,9 @@ impl TerminalPane {
     /// Check if this pane is currently zoomed (fullscreen).
     pub(super) fn is_zoomed(&self, cx: &Context<Self>) -> bool {
         let ws = self.workspace.read(cx);
-        if let Some(ref fs) = ws.fullscreen_terminal {
-            fs.project_id == self.project_id
-                && Some(&fs.terminal_id) == self.terminal_id.as_ref()
-        } else {
-            false
-        }
+        self.terminal_id.as_ref().map_or(false, |tid| {
+            ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
+        })
     }
 
     /// Get all terminal IDs in the current project (for zoom navigation).

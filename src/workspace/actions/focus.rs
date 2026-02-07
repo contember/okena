@@ -10,9 +10,11 @@ impl Workspace {
     ///
     /// This also focuses the first terminal in the project if one exists.
     pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
-        self.focused_project_id = project_id.clone();
-        // Exit fullscreen when changing focus
-        self.fullscreen_terminal = None;
+        // Clear fullscreen without restoring old project_id (we're overriding it)
+        self.focus_manager.clear_fullscreen_without_restore();
+
+        // Set the focused project via FocusManager
+        self.focus_manager.set_focused_project_id(project_id.clone());
 
         // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
@@ -63,22 +65,10 @@ impl Workspace {
 
         log::info!("layout_path for terminal: {:?}", layout_path);
 
-        // Use FocusManager for fullscreen entry
-        self.focus_manager.enter_fullscreen(project_id.clone(), layout_path.clone());
+        // Use FocusManager for fullscreen entry (saves current state + sets focused_project_id)
+        self.focus_manager.enter_fullscreen(project_id, layout_path, terminal_id.clone());
 
-        // Save previous focused_project_id before changing it
-        let previous_focused_project_id = self.focused_project_id.clone();
-
-        // Update legacy state for compatibility
-        self.fullscreen_terminal = Some(crate::workspace::state::FullscreenState {
-            project_id: project_id.clone(),
-            terminal_id: terminal_id.clone(),
-            previous_focused_project_id,
-        });
-        log::info!("fullscreen_terminal set to Some with terminal_id={}", terminal_id);
-
-        // Also focus the project
-        self.focused_project_id = Some(project_id.clone());
+        log::info!("fullscreen_terminal set via FocusManager with terminal_id={}", terminal_id);
 
         cx.notify();
     }
@@ -100,14 +90,7 @@ impl Workspace {
     ///
     /// Restores focus to the previously focused terminal and project view mode.
     pub fn exit_fullscreen(&mut self, cx: &mut Context<Self>) {
-        // Restore previous focused_project_id before clearing fullscreen state
-        if let Some(ref fs) = self.fullscreen_terminal {
-            self.focused_project_id = fs.previous_focused_project_id.clone();
-        }
-
-        self.fullscreen_terminal = None;
-
-        // Use FocusManager for focus restoration
+        // Use FocusManager for focus + project_id restoration
         self.focus_manager.exit_fullscreen();
 
         cx.notify();

@@ -104,14 +104,12 @@ impl Workspace {
         // Remove from widths
         self.data.project_widths.remove(project_id);
         // Clear focus if this was the focused project
-        if self.focused_project_id.as_deref() == Some(project_id) {
-            self.focused_project_id = None;
+        if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
+            self.focus_manager.set_focused_project_id(None);
         }
         // Exit fullscreen if this project's terminal was in fullscreen
-        if let Some(fs) = &self.fullscreen_terminal {
-            if fs.project_id == project_id {
-                self.fullscreen_terminal = None;
-            }
+        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
+            self.focus_manager.exit_fullscreen();
         }
         self.notify_data(cx);
 

@@ -218,8 +218,7 @@ impl Render for TitleBar {
         // Get focused project info
         let focused_project = {
             let ws = self.workspace.read(cx);
-            ws.focused_project_id
-                .as_ref()
+            ws.focused_project_id()
                 .and_then(|id| ws.project(id))
                 .map(|p| p.name.clone())
         };

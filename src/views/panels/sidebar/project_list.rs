@@ -43,7 +43,7 @@ impl Sidebar {
 
         let is_focused = {
             let ws = self.workspace.read(cx);
-            ws.focused_project_id.as_ref() == Some(&project.id)
+            ws.focused_project_id() == Some(&project.id)
         };
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
@@ -226,7 +226,7 @@ impl Sidebar {
 
         let is_focused = {
             let ws = self.workspace.read(cx);
-            ws.focused_project_id.as_ref() == Some(&project.id)
+            ws.focused_project_id() == Some(&project.id)
         };
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);

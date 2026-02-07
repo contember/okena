@@ -462,17 +462,17 @@ impl Okena {
                                 }
                             }).collect();
 
-                            let fullscreen = ws.fullscreen_terminal.as_ref().map(|fs| {
+                            let fullscreen = ws.focus_manager.fullscreen_state().map(|(pid, tid)| {
                                 ApiFullscreen {
-                                    project_id: fs.project_id.clone(),
-                                    terminal_id: fs.terminal_id.clone(),
+                                    project_id: pid.to_string(),
+                                    terminal_id: tid.to_string(),
                                 }
                             });
 
                             let resp = StateResponse {
                                 state_version: sv,
                                 projects,
-                                focused_project_id: ws.focused_project_id.clone(),
+                                focused_project_id: ws.focused_project_id().cloned(),
                                 fullscreen_terminal: fullscreen,
                             };
 
