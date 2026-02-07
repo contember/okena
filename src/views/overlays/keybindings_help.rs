@@ -155,7 +155,9 @@ impl Render for KeybindingsHelp {
         let t = theme(cx);
 
         // Focus on first render
-        window.focus(&self.focus_handle, cx);
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
 
         let config = get_config();
         let customized = config.get_customized_actions();

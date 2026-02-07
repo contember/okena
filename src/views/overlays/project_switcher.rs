@@ -196,7 +196,9 @@ impl Render for ProjectSwitcher {
         let search_placeholder = self.state.config.search_placeholder.clone().unwrap_or_default();
         let empty_message = self.state.config.empty_message.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("project-switcher-backdrop", &t)
             .track_focus(&focus_handle)

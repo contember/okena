@@ -488,7 +488,9 @@ impl Render for FileSearchDialog {
             .unwrap_or_else(|| "Project".to_string());
 
         // Focus on first render
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("file-search-backdrop", &t)
             .track_focus(&focus_handle)

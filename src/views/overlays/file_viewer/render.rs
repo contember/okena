@@ -286,7 +286,9 @@ impl Render for FileViewer {
         let has_markdown_selection = self.markdown_selection.normalized_non_empty().is_some();
 
         // Focus on first render
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("file-viewer-backdrop", &t)
             .track_focus(&focus_handle)

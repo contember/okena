@@ -318,7 +318,9 @@ impl Render for SettingsPanel {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("settings-panel-backdrop", &t)
             .track_focus(&focus_handle)
