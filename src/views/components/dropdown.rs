@@ -75,6 +75,7 @@ pub fn dropdown_overlay(
 ) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
+        .occlude()
         .absolute()
         .top(px(top))
         .right(px(right))

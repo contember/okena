@@ -26,6 +26,7 @@ impl Sidebar {
 
         div()
             .absolute()
+            .occlude()
             .top(px(60.0))
             .left(px(30.0))
             .bg(rgb(t.bg_primary))
@@ -91,6 +92,7 @@ impl Sidebar {
 
         div()
             .absolute()
+            .occlude()
             .top(px(60.0))
             .left(px(30.0))
             .bg(rgb(t.bg_primary))
