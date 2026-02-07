@@ -21,6 +21,7 @@ use crate::views::components::{
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{FolderData, ProjectData, SidebarRequest, Workspace};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
 
@@ -323,9 +324,7 @@ impl Sidebar {
                     .child("EXPLORER"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(2.0))
                     .child(
                         // New folder button

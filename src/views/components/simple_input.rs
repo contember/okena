@@ -1,6 +1,7 @@
 use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::h_flex;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -459,9 +460,7 @@ impl Render for SimpleInputState {
                 let selected = value[sel_start_byte..sel_end_byte].to_string();
                 let after_sel = value[sel_end_byte..].to_string();
 
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .text_color(rgb(t.text_primary))
                     .child(before_sel)
                     .child(
@@ -475,9 +474,7 @@ impl Render for SimpleInputState {
                     .into_any_element()
             } else {
                 // Normal rendering with cursor
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .text_color(rgb(t.text_primary))
                     .child(before_cursor)
                     .child(cursor_element)

@@ -3,6 +3,7 @@ use crate::theme::theme;
 use crate::views::components::menu_item;
 use crate::workspace::state::Workspace;
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Window control button types
@@ -240,9 +241,7 @@ impl Render for TitleBar {
             .window_control_area(WindowControlArea::Drag)
             .child(
                 // Left side - sidebar toggle + title
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .pl(traffic_light_padding)
                     .child(
@@ -308,16 +307,12 @@ impl Render for TitleBar {
             )
             .child(
                 // Right side - focused project indicator + theme toggle + window controls
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .pr(px(4.0))
                     // Focused project indicator
                     .children(focused_project.map(|name| {
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(4.0))
                             .child(
                                 div()
@@ -361,9 +356,7 @@ impl Render for TitleBar {
                     }))
                     .when(needs_controls, |d| {
                         d.child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(2.0))
                                 .child(self.render_window_control(WindowControlType::Minimize, window, cx))
                                 .child(if is_maximized {

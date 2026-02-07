@@ -358,9 +358,7 @@ impl MarkdownDocument {
                     offset = line_end;
                 }
 
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .rounded(px(6.0))
                     .bg(rgb(t.bg_primary))
                     .border_1()
@@ -629,9 +627,7 @@ impl MarkdownDocument {
             }
         }
 
-        let mut table = div()
-            .flex()
-            .flex_col()
+        let mut table = v_flex()
             .rounded(px(4.0))
             .border_1()
             .border_color(rgb(t.border))

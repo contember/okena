@@ -12,6 +12,7 @@ use crate::views::components::{
     ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Command entry for the palette
@@ -175,9 +176,7 @@ impl CommandPalette {
                     .flex_col()
                     .gap(px(2.0))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -197,9 +196,7 @@ impl CommandPalette {
             )
             .child(
                 // Right side: keybinding
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .children(keybinding.map(|kb| {
                         div()
                             .px(px(8.0))

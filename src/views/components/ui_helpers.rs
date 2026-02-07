@@ -3,6 +3,7 @@
 use crate::theme::ThemeColors;
 use crate::ui::tokens::*;
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 
 /// Context menu item with icon and label.
 ///
@@ -144,9 +145,7 @@ pub fn kbd(key: impl Into<SharedString>, t: &ThemeColors) -> Div {
 
 /// Keyboard key badge + description text (e.g., `[Enter] to select`).
 pub fn keyboard_hint(key: impl Into<SharedString>, description: impl Into<SharedString>, t: &ThemeColors) -> Div {
-    div()
-        .flex()
-        .items_center()
+    h_flex()
         .gap(SPACE_XS)
         .child(kbd(key, t))
         .child(
@@ -281,9 +280,7 @@ pub fn shell_indicator_chip(
         .bg(rgb(t.bg_secondary))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
-            div()
-                .flex()
-                .items_center()
+            h_flex()
                 .gap(SPACE_XS)
                 .child(
                     div()
@@ -318,9 +315,7 @@ pub fn input_container(t: &ThemeColors, focused: Option<bool>) -> Div {
 
 /// Labeled input field with a label above the input container.
 pub fn labeled_input(label: impl Into<SharedString>, t: &ThemeColors) -> Div {
-    div()
-        .flex()
-        .flex_col()
+    v_flex()
         .gap(SPACE_XS)
         .child(
             div()

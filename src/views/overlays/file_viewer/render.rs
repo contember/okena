@@ -9,6 +9,7 @@ use crate::views::components::{
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer};
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::sync::Arc;
 
@@ -371,9 +372,7 @@ impl Render for FileViewer {
                             .justify_between()
                             .child(
                                 // Left side: filename and path
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .gap(px(2.0))
                                     .child(
                                         div()
@@ -391,9 +390,7 @@ impl Render for FileViewer {
                             )
                             .child(
                                 // Right side: toggle (for markdown) and close button
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(12.0))
                                     .when(is_markdown, |d| {
                                         d.child(
@@ -705,9 +702,7 @@ impl Render for FileViewer {
                             }
                         }
 
-                        let content_div = div()
-                            .flex()
-                            .flex_col()
+                        let content_div = v_flex()
                             .gap(px(12.0))
                             .p(px(16.0))
                             .max_w(px(900.0))
@@ -741,16 +736,12 @@ impl Render for FileViewer {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(16.0))
                                     // Tab toggle (only for markdown)
                                     .when(is_markdown, |d| {
                                         d.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
+                                            h_flex()
                                                 .gap(px(4.0))
                                                 .child(
                                                     div()
@@ -772,9 +763,7 @@ impl Render for FileViewer {
                                     })
                                     // Copy
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(4.0))
                                             .child(
                                                 div()
@@ -795,9 +784,7 @@ impl Render for FileViewer {
                                     )
                                     // Select all
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(4.0))
                                             .child(
                                                 div()
@@ -817,9 +804,7 @@ impl Render for FileViewer {
                                             ),
                                     )
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(4.0))
                                             .child(
                                                 div()

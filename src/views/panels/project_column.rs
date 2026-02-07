@@ -9,6 +9,7 @@ use crate::workspace::state::{OverlayRequest, ProjectData, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::{h_flex, v_flex};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -232,14 +233,10 @@ impl ProjectColumn {
                                 });
                             }))
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .overflow_hidden()
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(4.0))
                                             .child(
                                                 div()
@@ -272,9 +269,7 @@ impl ProjectColumn {
                                     }),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(6.0))
                                     .flex_shrink_0()
                                     .text_size(px(10.0))
@@ -346,9 +341,7 @@ impl ProjectColumn {
             return div().into_any_element();
         }
 
-        div()
-            .flex()
-            .items_center()
+        h_flex()
             // Minimized terminals
             .children(
                 minimized_terminals.into_iter().map(|(terminal_id, layout_path)| {
@@ -444,9 +437,7 @@ impl ProjectColumn {
                 let project_path = project.path.clone();
                 let project_path_for_hover = project.path.clone();
 
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .flex_shrink_0()
                     .gap(px(6.0))
                     .text_size(px(10.0))
@@ -469,9 +460,7 @@ impl ProjectColumn {
                     })
                     // Branch name
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(3.0))
                             .child(
                                 svg()
@@ -564,9 +553,7 @@ impl ProjectColumn {
             .border_b_1()
             .border_color(rgb(t.border))
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(6.0))
                     .overflow_hidden()
                     .child(
@@ -592,9 +579,7 @@ impl ProjectColumn {
             )
             .child(
                 // Right side: minimized taskbar + controls
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     // Hidden terminals taskbar (minimized and detached)
                     .child(self.render_hidden_taskbar(project, t))
@@ -673,9 +658,7 @@ impl ProjectColumn {
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .items_center()
             .justify_center()
             .size_full()

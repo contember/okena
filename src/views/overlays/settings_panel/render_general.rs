@@ -2,6 +2,7 @@ use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::views::components::simple_input::SimpleInput;
 use gpui::*;
+use gpui_component::v_flex;
 
 use super::components::*;
 use super::SettingsPanel;
@@ -39,9 +40,7 @@ impl SettingsPanel {
                             .flex_col()
                             .gap(px(6.0))
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .gap(px(2.0))
                                     .child(
                                         div()

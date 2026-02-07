@@ -6,6 +6,7 @@ use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::v_flex;
 
 use super::{Sidebar, ProjectDrag, ProjectDragView, FolderDrag};
 use crate::workspace::state::ProjectData;
@@ -20,9 +21,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut container = div()
-            .flex()
-            .flex_col()
+        let mut container = v_flex()
             .child(self.render_project_item(project, index, window, cx));
 
         // Worktree children are always visible below their parent
@@ -64,9 +63,7 @@ impl Sidebar {
         let terminal_count = terminal_ids.len();
         let has_layout = project.layout.is_some();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .child(
                 // Project row
                 div()
@@ -341,9 +338,7 @@ impl Sidebar {
         let terminal_count = terminal_ids.len();
         let has_layout = project.layout.is_some();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .child(
                 // Worktree project row - indented under parent
                 div()

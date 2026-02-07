@@ -6,6 +6,7 @@ use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::v_flex;
 
 use super::{Sidebar, ProjectDrag, FolderDrag, FolderDragView};
 use crate::workspace::state::{FolderData, ProjectData};
@@ -39,9 +40,7 @@ impl Sidebar {
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
         let project_count = projects.len();
 
-        let mut container = div()
-            .flex()
-            .flex_col();
+        let mut container = v_flex();
 
         // Folder header row
         container = container.child(
@@ -309,9 +308,7 @@ impl Sidebar {
         let terminal_count = terminal_ids.len();
         let has_layout = project.layout.is_some();
 
-        let mut container = div()
-            .flex()
-            .flex_col();
+        let mut container = v_flex();
 
         container = container.child(
             div()

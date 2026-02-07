@@ -6,6 +6,7 @@ use crate::views::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::h_flex;
 use std::path::PathBuf;
 
 /// Events emitted by the worktree dialog
@@ -314,9 +315,7 @@ impl Render for WorktreeDialog {
                             .border_b_1()
                             .border_color(rgb(t.border))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(8.0))
                                     .child(
                                         svg()

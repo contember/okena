@@ -3,6 +3,7 @@ use crate::theme::{theme, with_alpha};
 use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
 use crate::workspace::persistence::{config_dir, SessionInfo};
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 
 use super::{SessionManager, SessionManagerTab};
@@ -23,9 +24,7 @@ impl SessionManager {
         let name_for_delete = name.clone();
         let name_for_delete_confirm = name.clone();
 
-        div()
-            .flex()
-            .items_center()
+        h_flex()
             .justify_between()
             .px(px(12.0))
             .py(px(10.0))
@@ -34,9 +33,7 @@ impl SessionManager {
             .when(is_deleting, |d| {
                 // Delete confirmation row
                 d.bg(with_alpha(t.error, 0.1)).child(
-                    div()
-                        .flex()
-                        .items_center()
+                    h_flex()
                         .justify_between()
                         .w_full()
                         .child(
@@ -46,9 +43,7 @@ impl SessionManager {
                                 .child(format!("Delete '{}'?", name)),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(8.0))
                                 .child(
                                     div()
@@ -93,9 +88,7 @@ impl SessionManager {
             .when(!is_deleting && !is_renaming, |d| {
                 // Normal row
                 d.child(
-                    div()
-                        .flex()
-                        .flex_col()
+                    v_flex()
                         .gap(px(2.0))
                         .child(
                             div()
@@ -105,9 +98,7 @@ impl SessionManager {
                                 .child(name.clone()),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(12.0))
                                 .child(
                                     div()
@@ -128,9 +119,7 @@ impl SessionManager {
                         ),
                 )
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
+                    h_flex()
                         .gap(px(6.0))
                         .child(
                             div()
@@ -195,9 +184,7 @@ impl SessionManager {
                 // Rename mode with SimpleInput
                 if let Some(ref rename_input) = self.rename_input {
                     d.child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .w_full()
                             .child(
@@ -222,9 +209,7 @@ impl SessionManager {
                                     })),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(6.0))
                                     .child(
                                         div()
@@ -277,9 +262,7 @@ impl SessionManager {
         let sessions = self.sessions.clone();
         let new_session_input = self.new_session_input.clone();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .flex_1()
             .min_h_0()
             .child(
@@ -290,9 +273,7 @@ impl SessionManager {
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -366,9 +347,7 @@ impl SessionManager {
         let export_path_input = self.export_path_input.clone();
         let import_path_input = self.import_path_input.clone();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .flex_1()
             .min_h_0()
             .px(px(16.0))
@@ -376,9 +355,7 @@ impl SessionManager {
             .gap(px(24.0))
             .child(
                 // Export section
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .gap(px(8.0))
                     .child(
                         div()
@@ -394,9 +371,7 @@ impl SessionManager {
                             .child("Save your current workspace configuration to a file that can be shared or backed up."),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .mt(px(4.0))
                             .child(
@@ -442,9 +417,7 @@ impl SessionManager {
             )
             .child(
                 // Import section
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .gap(px(8.0))
                     .child(
                         div()
@@ -460,9 +433,7 @@ impl SessionManager {
                             .child("Load a workspace configuration from an exported file. This will replace your current workspace."),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .mt(px(4.0))
                             .child(
@@ -508,9 +479,7 @@ impl SessionManager {
             )
             .child(
                 // Config directory info
-                div()
-                    .flex()
-                    .flex_col()
+                v_flex()
                     .gap(px(4.0))
                     .pt(px(16.0))
                     .border_t_1()

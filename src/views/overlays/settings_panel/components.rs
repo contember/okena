@@ -1,6 +1,7 @@
 use crate::theme::ThemeColors;
 use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use gpui::*;
+use gpui_component::v_flex;
 
 /// Available monospace font families
 pub(super) const FONT_FAMILIES: &[&str] = &[
@@ -71,9 +72,7 @@ pub(super) fn settings_row_with_desc(id: impl Into<SharedString>, label: &str, d
         .items_center()
         .justify_between()
         .child(
-            div()
-                .flex()
-                .flex_col()
+            v_flex()
                 .gap(px(2.0))
                 .child(
                     div()
@@ -170,9 +169,7 @@ pub(super) fn hook_input_row(
         .flex_col()
         .gap(px(6.0))
         .child(
-            div()
-                .flex()
-                .flex_col()
+            v_flex()
                 .gap(px(2.0))
                 .child(
                     div()
