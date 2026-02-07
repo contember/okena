@@ -5,6 +5,7 @@ use crate::keybindings::{
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 
 /// Keybindings help overlay
@@ -85,9 +86,7 @@ impl KeybindingsHelp {
                                 .map(|d| d.name)
                                 .unwrap_or(action.as_str());
 
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .justify_between()
                                 .px(px(12.0))
                                 .py(px(8.0))
@@ -95,14 +94,10 @@ impl KeybindingsHelp {
                                     d.border_t_1().border_color(rgb(t.border))
                                 })
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
+                                    v_flex()
                                         .gap(px(2.0))
                                         .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
+                                            h_flex()
                                                 .gap(px(8.0))
                                                 .child(
                                                     div()
@@ -226,9 +221,7 @@ impl Render for KeybindingsHelp {
                                     .border_b_1()
                                     .border_color(rgb(t.border))
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(8.0))
                                             .child(
                                                 div()
@@ -236,9 +229,7 @@ impl Render for KeybindingsHelp {
                                                     .child("⚠️"),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
+                                                v_flex()
                                                     .gap(px(2.0))
                                                     .child(
                                                         div()
@@ -292,9 +283,7 @@ impl Render for KeybindingsHelp {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .gap(px(2.0))
                                     .child(
                                         div()

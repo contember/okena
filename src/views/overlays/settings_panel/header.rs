@@ -2,6 +2,7 @@ use crate::settings::open_settings_file;
 use crate::theme::theme;
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
+use gpui_component::h_flex;
 
 use super::SettingsPanel;
 
@@ -23,9 +24,7 @@ impl SettingsPanel {
             )
             .child(
                 // Right: Edit in settings.json button
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .child(
                         div()
@@ -77,9 +76,7 @@ impl SettingsPanel {
             }
         };
 
-        div()
-            .flex()
-            .items_center()
+        h_flex()
             .gap(px(4.0))
             .child(
                 div()

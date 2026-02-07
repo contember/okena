@@ -10,6 +10,7 @@ use crate::views::components::{
     ListOverlayConfig, ListOverlayState,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Shell selector overlay for choosing a shell.
@@ -143,9 +144,7 @@ impl Render for ShellSelectorOverlay {
                                         }),
                                     )
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .justify_between()
                                             .child(
                                                 div()

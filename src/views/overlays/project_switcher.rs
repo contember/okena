@@ -14,6 +14,7 @@ use crate::views::components::{
 };
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Events emitted by the ProjectSwitcher overlay.
@@ -135,9 +136,7 @@ impl ProjectSwitcher {
                     .gap(px(2.0))
                     .overflow_hidden()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()

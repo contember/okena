@@ -10,6 +10,7 @@ use crate::views::components::{
     ListOverlayConfig,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 use std::path::PathBuf;
 
@@ -593,9 +594,7 @@ impl Render for FileSearchDialog {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(16.0))
                                     .child(keyboard_hint("Enter", "to open", &t))
                                     .child(keyboard_hint("Esc", "to close", &t)),

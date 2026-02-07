@@ -9,6 +9,7 @@ use crate::views::components::{
 };
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Theme selection entry with preview and info
@@ -229,9 +230,7 @@ impl ThemeSelector {
                     .flex_col()
                     .gap(px(1.0))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(2.0))
                             .child(
                                 div()
@@ -302,9 +301,7 @@ impl ThemeSelector {
                     .flex_col()
                     .gap(px(2.0))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()

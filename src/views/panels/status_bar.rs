@@ -1,5 +1,6 @@
 use crate::theme::theme;
 use gpui::*;
+use gpui_component::h_flex;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,15 +154,11 @@ impl Render for StatusBar {
             .text_size(px(11.0))
             // Left side - system stats
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(16.0))
                     // CPU
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(4.0))
                             .child(
                                 div()
@@ -176,9 +173,7 @@ impl Render for StatusBar {
                     )
                     // Memory
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(4.0))
                             .child(
                                 div()
@@ -194,9 +189,7 @@ impl Render for StatusBar {
             )
             // Right side - remote info + version + time
             .child({
-                let mut right = div()
-                    .flex()
-                    .items_center()
+                let mut right = h_flex()
                     .gap(px(8.0));
 
                 // Show remote server pairing code if active
@@ -281,9 +274,7 @@ impl Render for StatusBar {
                             }
                             crate::updater::UpdateStatus::Downloading { version, progress } => {
                                 right = right.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
+                                    h_flex()
                                         .gap(px(4.0))
                                         .child(
                                             div()

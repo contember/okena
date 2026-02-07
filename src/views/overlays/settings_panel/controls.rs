@@ -4,6 +4,7 @@ use crate::terminal::shell_config::ShellType;
 use crate::theme::theme;
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
+use gpui_component::h_flex;
 
 use super::components::*;
 use super::SettingsPanel;
@@ -26,9 +27,7 @@ impl SettingsPanel {
         let inc_fn = update_fn;
 
         settings_row(id.to_string(), label, &t, has_border).child(
-            div()
-                .flex()
-                .items_center()
+            h_flex()
                 .gap(px(4.0))
                 .child(
                     stepper_button(format!("{}-dec", id), "-", &t)
@@ -68,9 +67,7 @@ impl SettingsPanel {
         let inc_fn = update_fn;
 
         settings_row(id.to_string(), label, &t, has_border).child(
-            div()
-                .flex()
-                .items_center()
+            h_flex()
                 .gap(px(4.0))
                 .child(
                     stepper_button(format!("{}-dec", id), "-", &t)

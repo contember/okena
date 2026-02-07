@@ -6,6 +6,7 @@
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::h_flex;
 
 use super::TerminalPane;
 
@@ -114,9 +115,7 @@ impl TerminalPane {
             .border_color(rgb(t.border))
             .child(
                 // Left side: Terminal info
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(12.0))
                     .child(
                         div()
@@ -146,15 +145,11 @@ impl TerminalPane {
             )
             .child(
                 // Right side: Controls
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .when(has_multiple, |d| {
                         d.child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(4.0))
                                 .child(
                                     div()
