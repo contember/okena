@@ -529,14 +529,14 @@ impl Render for Sidebar {
         let workspace = self.workspace.read(cx);
 
         // Collect all projects for lookup
-        let all_projects: HashMap<&str, &ProjectData> = workspace.data.projects.iter()
+        let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
             .map(|p| (p.id.as_str(), p))
             .collect();
 
         // Build worktree children map (child project -> parent project)
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
-        let all_project_ids: HashSet<&str> = workspace.data.projects.iter().map(|p| p.id.as_str()).collect();
-        for project in &workspace.data.projects {
+        let all_project_ids: HashSet<&str> = workspace.data().projects.iter().map(|p| p.id.as_str()).collect();
+        for project in &workspace.data().projects {
             if let Some(ref wt_info) = project.worktree_info {
                 if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
                     worktree_children_map
@@ -550,9 +550,9 @@ impl Render for Sidebar {
         // Build sidebar items from project_order
         let mut items: Vec<SidebarItem> = Vec::new();
         let mut top_index = 0;
-        for id in &workspace.data.project_order {
+        for id in &workspace.data().project_order {
             // Check if this is a folder
-            if let Some(folder) = workspace.data.folders.iter().find(|f| &f.id == id) {
+            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 let folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
                     .filter_map(|pid| all_projects.get(pid.as_str()))
                     .filter(|p| p.worktree_info.is_none() || !all_project_ids.contains(

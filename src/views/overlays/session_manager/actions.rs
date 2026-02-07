@@ -31,7 +31,7 @@ impl SessionManager {
             return;
         }
 
-        let data = self.workspace.read(cx).data.clone();
+        let data = self.workspace.read(cx).data().clone();
         match save_session(&name, &data) {
             Ok(()) => {
                 self.new_session_input.update(cx, |input, cx| {
@@ -151,7 +151,7 @@ impl SessionManager {
             return;
         }
 
-        let data = self.workspace.read(cx).data.clone();
+        let data = self.workspace.read(cx).data().clone();
         match export_workspace(&data, std::path::Path::new(&path)) {
             Ok(()) => {
                 self.error_message = None;

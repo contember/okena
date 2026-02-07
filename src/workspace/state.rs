@@ -156,7 +156,7 @@ pub enum SidebarRequest {
 
 /// GPUI Entity for workspace state
 pub struct Workspace {
-    pub data: WorkspaceData,
+    pub(crate) data: WorkspaceData,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
     /// Pending overlay requests (consumed by RootView::process_pending_requests)
@@ -187,10 +187,23 @@ impl Workspace {
         self.data_version
     }
 
+    /// Read-only access to persistent workspace data.
+    pub fn data(&self) -> &WorkspaceData {
+        &self.data
+    }
+
     /// Notify that persistent data changed. Bumps version and calls cx.notify().
     /// Use this instead of cx.notify() when mutating `self.data`.
     pub fn notify_data(&mut self, cx: &mut Context<Self>) {
         self.data_version += 1;
+        cx.notify();
+    }
+
+    /// Replace workspace data wholesale (e.g. from disk reload).
+    /// Does NOT bump data_version — the data came from disk, not a user edit.
+    pub fn replace_data(&mut self, data: WorkspaceData, cx: &mut Context<Self>) {
+        self.data = data;
+        self.focus_manager.clear_all();
         cx.notify();
     }
 
@@ -254,7 +267,7 @@ impl Workspace {
     }
 
     /// Get a mutable project by ID
-    pub fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
+    pub(crate) fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
         self.data.projects.iter_mut().find(|p| p.id == id)
     }
 
@@ -264,7 +277,7 @@ impl Workspace {
     }
 
     /// Get a mutable folder by ID
-    pub fn folder_mut(&mut self, id: &str) -> Option<&mut FolderData> {
+    pub(crate) fn folder_mut(&mut self, id: &str) -> Option<&mut FolderData> {
         self.data.folders.iter_mut().find(|f| f.id == id)
     }
 
