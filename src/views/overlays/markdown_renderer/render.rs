@@ -3,6 +3,7 @@
 use crate::theme::ThemeColors;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui_component::{h_flex, v_flex};
 
 use super::types::{char_len, slice_by_chars, Inline, Node};
 use super::{MarkdownDocument, RenderedNode};
@@ -116,7 +117,7 @@ impl MarkdownDocument {
                             }
                         });
 
-                        let mut header_row = div().flex();
+                        let mut header_row = h_flex();
                         let mut cell_offset = 0usize;
                         for (i, header) in headers.iter().enumerate() {
                             let cell_len = Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 };
@@ -168,7 +169,7 @@ impl MarkdownDocument {
                             }
                         });
 
-                        let mut row_div = div().flex();
+                        let mut row_div = h_flex();
                         if row_idx % 2 == 1 {
                             row_div = row_div.bg(rgb(t.bg_secondary));
                         }
@@ -390,7 +391,7 @@ impl MarkdownDocument {
                     )
             }
             Node::List { ordered, items } => {
-                let mut list = div().flex().flex_col().gap(px(4.0)).pl(px(16.0));
+                let mut list = v_flex().gap(px(4.0)).pl(px(16.0));
                 let mut offset = 0usize;
 
                 for (i, item_inlines) in items.iter().enumerate() {

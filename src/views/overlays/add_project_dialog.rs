@@ -9,6 +9,7 @@ use crate::views::components::{
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::v_flex;
 
 pub struct AddProjectDialog {
     workspace: Entity<Workspace>,
@@ -123,7 +124,7 @@ impl AddProjectDialog {
                 cx.stop_propagation();
             })
             .child(
-                div().flex().flex_col().children(
+                v_flex().children(
                     suggestions
                         .iter()
                         .enumerate()
