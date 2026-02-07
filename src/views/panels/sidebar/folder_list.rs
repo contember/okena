@@ -2,12 +2,13 @@
 
 use crate::keybindings::Cancel;
 use crate::theme::theme;
-use crate::views::components::{is_renaming, rename_input, SimpleInput};
+use crate::views::components::is_renaming;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::v_flex;
 
+use super::item_widgets::*;
 use super::{Sidebar, ProjectDrag, FolderDrag, FolderDragView};
 use crate::workspace::state::{FolderData, ProjectData};
 use std::collections::HashMap;
@@ -102,72 +103,38 @@ impl Sidebar {
                     }
                 }))
                 .child(
-                    // Expand/collapse arrow
-                    div()
-                        .id(ElementId::Name(format!("folder-expand-{}", folder.id).into()))
-                        .flex_shrink_0()
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            svg()
-                                .path(if is_collapsed { "icons/chevron-right.svg" } else { "icons/chevron-down.svg" })
-                                .size(px(12.0))
-                                .text_color(rgb(t.text_secondary))
-                        )
-                        .on_click(cx.listener(move |_this, _, _window, cx| {
-                            workspace_for_toggle.update(cx, |ws, cx| {
-                                ws.toggle_folder_collapsed(&folder_id_for_toggle, cx);
-                            });
-                        })),
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("folder-expand-{}", folder.id).into()),
+                        !is_collapsed,
+                        &t,
+                    )
+                    .on_click(cx.listener(move |_this, _, _window, cx| {
+                        workspace_for_toggle.update(cx, |ws, cx| {
+                            ws.toggle_folder_collapsed(&folder_id_for_toggle, cx);
+                        });
+                    })),
                 )
                 .child({
-                    // Folder color dot
+                    // Folder color icon
                     let folder_color = t.get_folder_color(folder.folder_color);
                     let folder_id_for_color = folder.id.clone();
-                    div()
-                        .id(ElementId::Name(format!("folder-color-{}", folder.id).into()))
-                        .flex_shrink_0()
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.7))
-                        .child(
-                            svg()
-                                .path("icons/folder.svg")
-                                .size(px(14.0))
-                                .text_color(rgb(folder_color))
-                        )
-                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.show_folder_color_picker(folder_id_for_color.clone(), cx);
-                            cx.stop_propagation();
-                        }))
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("folder-color-{}", folder.id).into()),
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(folder_color)),
+                    )
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.show_folder_color_picker(folder_id_for_color.clone(), cx);
+                        cx.stop_propagation();
+                    }))
                 })
                 .child(
                     // Folder name (or input if renaming)
                     if is_renaming {
-                        if let Some(input) = rename_input(&self.folder_rename) {
-                            div()
-                                .id("folder-rename-input")
-                                .flex_1()
-                                .min_w_0()
-                                .bg(rgb(t.bg_hover))
-                                .rounded(px(2.0))
-                                .child(
-                                    SimpleInput::new(input)
-                                        .text_size(px(12.0))
-                                )
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(|_, _window, cx| {
-                                    cx.stop_propagation();
-                                })
+                        if let Some(input_el) = sidebar_rename_input("folder-rename-input", &self.folder_rename, &t) {
+                            input_el
                                 .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                                     this.cancel_folder_rename(cx);
                                 }))
@@ -183,27 +150,23 @@ impl Sidebar {
                             div().flex_1().into_any_element()
                         }
                     } else {
-                        div()
-                            .id(ElementId::Name(format!("folder-name-{}", folder.id).into()))
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_primary))
-                            .text_ellipsis()
-                            .child(folder_name)
-                            .on_click(cx.listener({
-                                let folder_id = folder_id_for_rename;
-                                let name = folder_name_for_rename;
-                                move |this, _event: &ClickEvent, window, cx| {
-                                    if this.check_folder_double_click(&folder_id) {
-                                        this.start_folder_rename(folder_id.clone(), name.clone(), window, cx);
-                                    }
-                                    cx.stop_propagation();
+                        sidebar_name_label(
+                            ElementId::Name(format!("folder-name-{}", folder.id).into()),
+                            folder_name,
+                            &t,
+                        )
+                        .font_weight(FontWeight::MEDIUM)
+                        .on_click(cx.listener({
+                            let folder_id = folder_id_for_rename;
+                            let name = folder_name_for_rename;
+                            move |this, _event: &ClickEvent, window, cx| {
+                                if this.check_folder_double_click(&folder_id) {
+                                    this.start_folder_rename(folder_id.clone(), name.clone(), window, cx);
                                 }
-                            }))
-                            .into_any_element()
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .into_any_element()
                     },
                 )
                 .child(
@@ -368,73 +331,39 @@ impl Sidebar {
                     }
                 }))
                 .child(
-                    // Expand arrow
-                    div()
-                        .id(ElementId::Name(format!("expand-fp-{}", project.id).into()))
-                        .flex_shrink_0()
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            svg()
-                                .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
-                                .size(px(12.0))
-                                .text_color(rgb(t.text_secondary))
-                        )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id_for_toggle);
-                            cx.notify();
-                        })),
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("expand-fp-{}", project.id).into()),
+                        is_expanded,
+                        &t,
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_expanded(&project_id_for_toggle);
+                        cx.notify();
+                    })),
                 )
                 .child({
                     // Project color dot
                     let folder_color = t.get_folder_color(project.folder_color);
                     let project_id_for_color = project.id.clone();
-                    div()
-                        .id(ElementId::Name(format!("fp-folder-icon-{}", project.id).into()))
-                        .flex_shrink_0()
-                        .w(px(16.0))
-                        .h(px(16.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.7))
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(folder_color))
-                        )
-                        .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.show_color_picker(project_id_for_color.clone(), cx);
-                            cx.stop_propagation();
-                        }))
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("fp-folder-icon-{}", project.id).into()),
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(folder_color)),
+                    )
+                    .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
+                        this.show_color_picker(project_id_for_color.clone(), cx);
+                        cx.stop_propagation();
+                    }))
                 })
                 .child(
                     // Project name (or input if renaming)
                     if is_renaming {
-                        if let Some(input) = rename_input(&self.project_rename) {
-                            div()
-                                .id("fp-project-rename-input")
-                                .flex_1()
-                                .min_w_0()
-                                .bg(rgb(t.bg_hover))
-                                .rounded(px(2.0))
-                                .child(
-                                    SimpleInput::new(input)
-                                        .text_size(px(12.0))
-                                )
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(|_, _window, cx| {
-                                    cx.stop_propagation();
-                                })
+                        if let Some(input_el) = sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t) {
+                            input_el
                                 .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                                     this.cancel_project_rename(cx);
                                 }))
@@ -450,98 +379,46 @@ impl Sidebar {
                             div().flex_1().into_any_element()
                         }
                     } else {
-                        div()
-                            .id(ElementId::Name(format!("fp-project-name-{}", project.id).into()))
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .text_ellipsis()
-                            .child(project_name)
-                            .on_click(cx.listener({
-                                let project_id = project_id_for_rename;
-                                let project_id_for_focus = project_id_for_focus.clone();
-                                let name = project_name_for_rename;
-                                move |this, _event: &ClickEvent, window, cx| {
-                                    if this.check_project_double_click(&project_id) {
-                                        this.start_project_rename(project_id.clone(), name.clone(), window, cx);
-                                    } else {
-                                        workspace_for_focus.update(cx, |ws, cx| {
-                                            ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
-                                        });
-                                    }
-                                    cx.stop_propagation();
+                        sidebar_name_label(
+                            ElementId::Name(format!("fp-project-name-{}", project.id).into()),
+                            project_name,
+                            &t,
+                        )
+                        .on_click(cx.listener({
+                            let project_id = project_id_for_rename;
+                            let project_id_for_focus = project_id_for_focus.clone();
+                            let name = project_name_for_rename;
+                            move |this, _event: &ClickEvent, window, cx| {
+                                if this.check_project_double_click(&project_id) {
+                                    this.start_project_rename(project_id.clone(), name.clone(), window, cx);
+                                } else {
+                                    workspace_for_focus.update(cx, |ws, cx| {
+                                        ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
+                                    });
                                 }
-                            }))
-                            .into_any_element()
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .into_any_element()
                     },
                 )
+                .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
                 .child(
-                    // Terminal count badge
-                    if has_layout {
-                        div()
-                            .flex_shrink_0()
-                            .px(px(4.0))
-                            .py(px(1.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_muted))
-                            .child(format!("{}", terminal_count))
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_shrink_0()
-                            .px(px(4.0))
-                            .py(px(1.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .child(
-                                svg()
-                                    .path("icons/bookmark.svg")
-                                    .size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                            )
-                            .into_any_element()
-                    },
-                )
-                .child(
-                    // Visibility toggle
                     {
                         let workspace = self.workspace.clone();
                         let is_visible = project.is_visible;
                         let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
-                        div()
-                            .id(ElementId::Name(format!("fp-visibility-{}", project.id).into()))
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_click(move |_, _window, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_visibility(&project_id_for_visibility, cx);
-                                });
-                            })
-                            .child(
-                                svg()
-                                    .path(if is_visible { "icons/eye.svg" } else { "icons/eye-off.svg" })
-                                    .size(px(12.0))
-                                    .text_color(if is_visible {
-                                        rgb(t.term_blue)
-                                    } else {
-                                        rgb(t.text_muted)
-                                    })
-                            )
-                            .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                        sidebar_visibility_toggle(
+                            ElementId::Name(format!("fp-visibility-{}", project.id).into()),
+                            is_visible,
+                            &t,
+                        )
+                        .on_click(move |_, _window, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.toggle_project_visibility(&project_id_for_visibility, cx);
+                            });
+                        })
+                        .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
                     },
                 ),
         );
