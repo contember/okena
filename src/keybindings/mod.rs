@@ -64,6 +64,12 @@ actions!(
         ResetZoom,
         CheckForUpdates,
         InstallUpdate,
+        FocusSidebar,
+        SidebarUp,
+        SidebarDown,
+        SidebarConfirm,
+        SidebarToggleExpand,
+        SidebarEscape,
     ]
 );
 
@@ -110,6 +116,17 @@ pub fn register_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
+    ]);
+
+    // Register sidebar navigation keybindings (not user-configurable)
+    cx.bind_keys([
+        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+        KeyBinding::new("enter", SidebarConfirm, Some("Sidebar")),
+        KeyBinding::new("space", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("left", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("right", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("escape", SidebarEscape, Some("Sidebar")),
     ]);
 
     // Register escape keybindings with context-based precedence:
@@ -197,6 +214,12 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
         "CheckForUpdates" => Some(KeyBinding::new(keystroke, CheckForUpdates, context)),
         "InstallUpdate" => Some(KeyBinding::new(keystroke, InstallUpdate, context)),
+        "FocusSidebar" => Some(KeyBinding::new(keystroke, FocusSidebar, context)),
+        "SidebarUp" => Some(KeyBinding::new(keystroke, SidebarUp, context)),
+        "SidebarDown" => Some(KeyBinding::new(keystroke, SidebarDown, context)),
+        "SidebarConfirm" => Some(KeyBinding::new(keystroke, SidebarConfirm, context)),
+        "SidebarToggleExpand" => Some(KeyBinding::new(keystroke, SidebarToggleExpand, context)),
+        "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

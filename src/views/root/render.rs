@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar};
 use crate::settings::open_settings_file;
 use crate::theme::theme;
 use crate::views::layout::navigation::clear_pane_map;
@@ -202,6 +202,20 @@ impl Render for RootView {
             // Handle toggle sidebar auto-hide action
             .on_action(cx.listener(|this, _: &ToggleSidebarAutoHide, _window, cx| {
                 this.toggle_sidebar_auto_hide(cx);
+            }))
+            // Handle focus sidebar action (keyboard navigation)
+            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
+                // Ensure sidebar is visible
+                if !this.sidebar_ctrl.is_open() && !this.sidebar_ctrl.is_hover_shown() {
+                    this.toggle_sidebar(cx);
+                }
+                let current_focus = window.focused(cx);
+                let handle = this.sidebar.read(cx).focus_handle().clone();
+                this.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.saved_focus = current_focus;
+                    sidebar.activate_cursor(cx);
+                });
+                window.focus(&handle, cx);
             }))
             // Handle show keybindings action
             .on_action(cx.listener({
