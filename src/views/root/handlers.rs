@@ -91,7 +91,6 @@ impl RootView {
             ws.data = data;
             // Clear all focus state via FocusManager (focus, focused_project_id, stack)
             ws.focus_manager.clear_all();
-            ws.detached_terminals.clear();
             cx.notify();
         });
 

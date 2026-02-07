@@ -415,9 +415,6 @@ impl Workspace {
             self.focus_manager.exit_fullscreen();
         }
 
-        // Remove any detached terminals from this project
-        self.detached_terminals.retain(|d| d.project_id != project_id);
-
         self.notify_data(cx);
         terminal_ids
     }

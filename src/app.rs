@@ -681,32 +681,22 @@ impl Okena {
     ) {
         let ws = workspace.read(cx);
         let current_detached: HashSet<String> = ws
-            .detached_terminals
-            .iter()
-            .map(|d| d.terminal_id.clone())
+            .collect_all_detached_terminals()
+            .into_iter()
+            .map(|(terminal_id, _, _)| terminal_id)
             .collect();
 
-        let new_detached: Vec<_> = ws
-            .detached_terminals
+        let new_ids: Vec<_> = current_detached
             .iter()
-            .filter(|d| !self.opened_detached_windows.contains(&d.terminal_id))
-            .cloned()
-            .collect();
-
-        let reattached: Vec<_> = self
-            .opened_detached_windows
-            .iter()
-            .filter(|id| !current_detached.contains(*id))
+            .filter(|id| !self.opened_detached_windows.contains(*id))
             .cloned()
             .collect();
 
         self.opened_detached_windows = current_detached;
 
-        for detached in new_detached {
-            self.open_detached_window(&detached.terminal_id, cx);
+        for terminal_id in new_ids {
+            self.open_detached_window(&terminal_id, cx);
         }
-
-        let _ = reattached;
     }
 
     fn open_detached_window(&self, terminal_id: &str, cx: &mut Context<Self>) {
