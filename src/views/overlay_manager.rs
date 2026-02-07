@@ -21,7 +21,8 @@ use crate::views::overlays::session_manager::{SessionManager, SessionManagerEven
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::workspace::state::{ContextMenuRequest, FolderContextMenuRequest, Workspace, WorkspaceData, SidebarRequest};
+use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
+use crate::workspace::state::{Workspace, WorkspaceData};
 
 /// Trait for overlay events that support closing.
 ///

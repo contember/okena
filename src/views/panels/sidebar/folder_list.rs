@@ -77,7 +77,7 @@ impl Sidebar {
                 let folder_name = folder_name.clone();
                 move |this, event: &MouseDownEvent, _window, cx| {
                     this.workspace.update(cx, |ws, cx| {
-                        ws.push_overlay_request(crate::workspace::state::OverlayRequest::FolderContextMenu {
+                        ws.push_overlay_request(crate::workspace::requests::OverlayRequest::FolderContextMenu {
                             folder_id: folder_id.clone(),
                             folder_name: folder_name.clone(),
                             position: event.position,

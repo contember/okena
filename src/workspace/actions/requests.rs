@@ -2,7 +2,8 @@
 //!
 //! Actions for managing UI dialogs and menus (context menu, shell selector, etc.)
 
-use crate::workspace::state::{OverlayRequest, SidebarRequest, Workspace};
+use crate::workspace::requests::{OverlayRequest, SidebarRequest};
+use crate::workspace::state::Workspace;
 use gpui::*;
 
 impl Workspace {
