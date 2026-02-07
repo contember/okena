@@ -99,7 +99,6 @@ macro_rules! toggle_overlay {
             })
             .detach();
             $self.open_modal(entity, $cx);
-            $self.workspace.update($cx, |ws, cx| ws.clear_focused_terminal(cx));
         }
         $cx.notify();
     };
@@ -260,10 +259,13 @@ impl OverlayManager {
     }
 
     /// Open a modal, closing any existing one first.
+    ///
+    /// Automatically clears terminal focus so keyboard input goes to the modal.
     fn open_modal<T: Render + 'static>(&mut self, entity: Entity<T>, cx: &mut Context<Self>) {
         self.close_modal(cx);
         self.active_modal = Some(entity.into());
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
@@ -303,7 +305,6 @@ impl OverlayManager {
                 }
             }).detach();
             self.open_modal(entity, cx);
-            self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         }
         cx.notify();
     }
@@ -377,7 +378,6 @@ impl OverlayManager {
             })
             .detach();
             self.open_modal(entity, cx);
-            self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         }
         cx.notify();
     }
@@ -442,7 +442,6 @@ impl OverlayManager {
             }
         }).detach();
         self.open_modal(entity, cx);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
@@ -474,7 +473,6 @@ impl OverlayManager {
         })
         .detach();
         self.open_modal(dialog, cx);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
@@ -622,7 +620,6 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(dialog, cx);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
@@ -644,7 +641,6 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(viewer, cx);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
@@ -666,7 +662,6 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(viewer, cx);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
     }
 
