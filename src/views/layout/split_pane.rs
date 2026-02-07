@@ -1,7 +1,7 @@
+use crate::elements::resize_handle::ResizeHandle;
 use crate::theme::theme;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::*;
-use gpui::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -156,61 +156,36 @@ pub fn render_split_divider(
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
-    let is_horizontal = direction == SplitDirection::Horizontal;
     let active_drag = active_drag.clone();
 
-    div()
-        .id(ElementId::Name(format!("split-handle-{}-{}", project_id, child_index).into()))
-        .group("split-handle")
-        .when(is_horizontal, |d| d.h(px(5.0)).w_full())
-        .when(!is_horizontal, |d| d.w(px(5.0)).h_full())
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(if is_horizontal {
-            CursorStyle::ResizeUpDown
-        } else {
-            CursorStyle::ResizeLeftRight
-        })
-        .on_mouse_down(MouseButton::Left, {
-            let active_drag = active_drag.clone();
-            let project_id = project_id.clone();
-            let layout_path = layout_path.clone();
-            let container_bounds = container_bounds.clone();
-            move |event, _window, cx| {
-                let bounds = *container_bounds.borrow();
+    ResizeHandle::new(
+        direction == SplitDirection::Horizontal,
+        t.border,
+        t.border_active,
+        move |mouse_pos, cx| {
+            let bounds = *container_bounds.borrow();
 
-                // Snapshot current sizes for delta-based resize
-                let initial_sizes = workspace.read(cx).project(&project_id).and_then(|p| {
-                    p.layout.as_ref()?.get_at_path(&layout_path)
-                }).and_then(|node| {
-                    if let crate::workspace::state::LayoutNode::Split { sizes, .. } = node {
-                        Some(sizes.clone())
-                    } else {
-                        None
-                    }
-                }).unwrap_or_default();
+            let initial_sizes = workspace.read(cx).project(&project_id).and_then(|p| {
+                p.layout.as_ref()?.get_at_path(&layout_path)
+            }).and_then(|node| {
+                if let crate::workspace::state::LayoutNode::Split { sizes, .. } = node {
+                    Some(sizes.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default();
 
-                *active_drag.borrow_mut() = Some(DragState::Split {
-                    project_id: project_id.clone(),
-                    layout_path: layout_path.clone(),
-                    child_index,
-                    direction,
-                    container_bounds: bounds,
-                    initial_mouse_pos: event.position,
-                    initial_sizes,
-                });
-                cx.stop_propagation();
-            }
-        })
-        .child(
-            div()
-                .when(is_horizontal, |d| d.h(px(1.0)).w_full())
-                .when(!is_horizontal, |d| d.w(px(1.0)).h_full())
-                .bg(rgb(t.border))
-                .group_hover("split-handle", |s| s.bg(rgb(t.border_active))),
-        )
+            *active_drag.borrow_mut() = Some(DragState::Split {
+                project_id: project_id.clone(),
+                layout_path: layout_path.clone(),
+                child_index,
+                direction,
+                container_bounds: bounds,
+                initial_mouse_pos: mouse_pos,
+                initial_sizes,
+            });
+        },
+    )
 }
 
 /// Render a project column divider
@@ -224,37 +199,19 @@ pub fn render_project_divider(
     let t = theme(cx);
     let active_drag = active_drag.clone();
 
-    div()
-        .id(ElementId::Name(format!("project-divider-{}", divider_index).into()))
-        .group("project-divider")
-        .w(px(5.0))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::ResizeLeftRight)
-        .on_mouse_down(MouseButton::Left, {
-            let active_drag = active_drag.clone();
-            let project_ids = project_ids.clone();
-            let container_bounds = container_bounds.clone();
-            move |_event, _window, cx| {
-                let bounds = *container_bounds.borrow();
-                *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
-                    divider_index,
-                    project_ids: project_ids.clone(),
-                    container_bounds: bounds,
-                });
-                cx.stop_propagation();
-            }
-        })
-        .child(
-            div()
-                .w(px(1.0))
-                .h_full()
-                .bg(rgb(t.border))
-                .group_hover("project-divider", |s| s.bg(rgb(t.border_active))),
-        )
+    ResizeHandle::new(
+        false,
+        t.border,
+        t.border_active,
+        move |_, _| {
+            let bounds = *container_bounds.borrow();
+            *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
+                divider_index,
+                project_ids: project_ids.clone(),
+                container_bounds: bounds,
+            });
+        },
+    )
 }
 
 /// Render the sidebar resize divider
@@ -262,28 +219,12 @@ pub fn render_sidebar_divider(active_drag: &ActiveDrag, cx: &App) -> impl IntoEl
     let t = theme(cx);
     let active_drag = active_drag.clone();
 
-    div()
-        .id("sidebar-divider")
-        .group("sidebar-divider")
-        .w(px(5.0))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor(CursorStyle::ResizeLeftRight)
-        .on_mouse_down(MouseButton::Left, {
-            let active_drag = active_drag.clone();
-            move |_event, _window, cx| {
-                *active_drag.borrow_mut() = Some(DragState::Sidebar);
-                cx.stop_propagation();
-            }
-        })
-        .child(
-            div()
-                .w(px(1.0))
-                .h_full()
-                .bg(rgb(t.border))
-                .group_hover("sidebar-divider", |s| s.bg(rgb(t.border_active))),
-        )
+    ResizeHandle::new(
+        false,
+        t.border,
+        t.border_active,
+        move |_, _| {
+            *active_drag.borrow_mut() = Some(DragState::Sidebar);
+        },
+    )
 }
