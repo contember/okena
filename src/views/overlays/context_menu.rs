@@ -1,6 +1,7 @@
 //! Project context menu overlay.
 
 use crate::git;
+use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{menu_item, menu_item_with_color};
 use crate::workspace::state::{ContextMenuRequest, Workspace};
@@ -107,10 +108,8 @@ impl Render for ContextMenu {
         div()
             .track_focus(&self.focus_handle)
             .key_context("ContextMenu")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
-                }
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
             }))
             .absolute()
             .inset_0()

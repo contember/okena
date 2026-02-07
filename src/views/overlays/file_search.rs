@@ -3,6 +3,7 @@
 //! Provides a searchable list of files in the active project,
 //! similar to VS Code's Cmd+P file picker.
 
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
     keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area,
@@ -493,9 +494,11 @@ impl Render for FileSearchDialog {
             .key_context(self.config.key_context.as_str())
             .items_start()
             .pt(px(80.0))
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => this.close(cx),
                     "up" => {
                         if this.select_prev() {
                             cx.notify();

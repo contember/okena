@@ -1,6 +1,6 @@
 use crate::keybindings::{
     format_keystroke, get_action_descriptions, get_config, get_keybindings_path, reset_to_defaults,
-    ShowKeybindings,
+    Cancel, ShowKeybindings,
 };
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
@@ -200,10 +200,8 @@ impl Render for KeybindingsHelp {
             .on_action(cx.listener(|this, _: &ShowKeybindings, _window, cx| {
                 this.close(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
-                }
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.close(cx);

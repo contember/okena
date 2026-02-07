@@ -1,3 +1,4 @@
+use crate::keybindings::Cancel;
 use crate::theme::{
     get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
@@ -356,6 +357,9 @@ impl Render for ThemeSelector {
             .track_focus(&focus_handle)
             .key_context("ThemeSelector")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),

@@ -2,6 +2,7 @@
 //!
 //! Displays available shells in a modal dialog for selection.
 
+use crate::keybindings::Cancel;
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::theme::theme;
 use crate::views::components::{
@@ -90,6 +91,9 @@ impl Render for ShellSelectorOverlay {
             .track_focus(&focus_handle)
             .key_context("ShellSelectorOverlay")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),

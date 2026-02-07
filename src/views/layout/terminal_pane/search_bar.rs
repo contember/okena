@@ -3,6 +3,7 @@
 //! An Entity with Render that handles search input, match navigation, and options.
 
 use crate::elements::terminal_element::SearchMatch;
+use crate::keybindings::CloseSearch;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
@@ -215,9 +216,6 @@ impl SearchBar {
                     self.next_match(cx);
                 }
             }
-            "escape" => {
-                self.close(cx);
-            }
             _ => {
                 // Update search on text change
                 self.perform_search(cx);
@@ -251,6 +249,7 @@ impl Render for SearchBar {
                 if let Some(ref input) = self.input {
                     div()
                         .id("search-input-wrapper")
+                        .key_context("SearchBar")
                         .flex_1()
                         .min_w(px(100.0))
                         .max_w(px(300.0))
@@ -262,6 +261,9 @@ impl Render for SearchBar {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
+                        .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| {
+                            this.close(cx);
+                        }))
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                             // Stop propagation for all keys to prevent terminal interference
                             cx.stop_propagation();

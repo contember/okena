@@ -1,5 +1,6 @@
 //! Add project modal dialog overlay.
 
+use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{
     button, button_primary, input_container, labeled_input, modal_backdrop, modal_content,
@@ -203,10 +204,8 @@ impl Render for AddProjectDialog {
             .track_focus(&focus_handle)
             .key_context("AddProjectDialog")
             .items_center()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    this.close(cx);
-                }
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                this.close(cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,

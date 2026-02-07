@@ -14,6 +14,8 @@ actions!(
     [
         Quit,
         About,
+        Cancel,
+        SendEscape,
         ToggleSidebar,
         ToggleSidebarAutoHide,
         ToggleFullscreen,
@@ -119,6 +121,18 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
     ]);
+
+    // Register escape keybindings with context-based precedence:
+    //   Global:             escape → Cancel        (overlays, sidebar rename)
+    //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
+    //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
+    //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
+    cx.bind_keys([
+        KeyBinding::new("escape", Cancel, None),
+        KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
+        KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
+        KeyBinding::new("escape", Cancel, Some("TerminalRename")),
+    ]);
 }
 
 /// Register keybindings from a configuration
@@ -149,6 +163,8 @@ fn register_bindings_from_config(cx: &mut App, config: &KeybindingConfig) {
 fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Option<KeyBinding> {
     // Map action names to actual actions
     match action {
+        "Cancel" => Some(KeyBinding::new(keystroke, Cancel, context)),
+        "SendEscape" => Some(KeyBinding::new(keystroke, SendEscape, context)),
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
         "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
         "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),

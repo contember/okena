@@ -5,6 +5,7 @@
 //! - Space: Toggle project visibility
 //! - Type to filter projects
 
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
@@ -203,6 +204,9 @@ impl Render for ProjectSwitcher {
             .key_context("ProjectSwitcher")
             .items_start()
             .pt(px(80.0))
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
                     ListOverlayAction::Close => this.close(cx),
