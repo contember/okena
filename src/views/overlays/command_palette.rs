@@ -1,11 +1,4 @@
-use crate::keybindings::{
-    format_keystroke, get_action_descriptions, get_config, Cancel,
-    ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowSettings, OpenSettingsFile,
-    ShowFileSearch, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
-    SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
-    FocusNextTerminal, FocusPrevTerminal, FocusLeft, FocusRight, FocusUp, FocusDown,
-    Copy, Paste, ScrollUp, ScrollDown, Search, CreateWorktree, CheckForUpdates, InstallUpdate,
-};
+use crate::keybindings::{format_keystroke, get_action_descriptions, get_config, Cancel};
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
@@ -18,8 +11,6 @@ use gpui::prelude::*;
 /// Command entry for the palette
 #[derive(Clone)]
 struct CommandEntry {
-    /// Action name (internal identifier)
-    action: String,
     /// Display name
     name: String,
     /// Description
@@ -28,6 +19,8 @@ struct CommandEntry {
     category: String,
     /// Primary keybinding (formatted for display)
     keybinding: Option<String>,
+    /// Factory to create the action for dispatch
+    factory: fn() -> Box<dyn gpui::Action>,
 }
 
 /// Command palette for quick access to all commands
@@ -53,11 +46,11 @@ impl CommandPalette {
                     .map(|e| format_keystroke(&e.keystroke));
 
                 CommandEntry {
-                    action: action.to_string(),
                     name: desc.name.to_string(),
                     description: desc.description.to_string(),
                     category: desc.category.to_string(),
                     keybinding,
+                    factory: desc.factory,
                 }
             })
             .collect();
@@ -87,45 +80,7 @@ impl CommandPalette {
     fn execute_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(filter_result) = self.state.filtered.get(index) {
             let command = &self.state.items[filter_result.index];
-            let action = command.action.as_str();
-
-            // Dispatch the appropriate action
-            match action {
-                "ToggleSidebar" => window.dispatch_action(Box::new(ToggleSidebar), cx),
-                "ToggleSidebarAutoHide" => window.dispatch_action(Box::new(ToggleSidebarAutoHide), cx),
-                "ClearFocus" => window.dispatch_action(Box::new(ClearFocus), cx),
-                "ShowKeybindings" => window.dispatch_action(Box::new(ShowKeybindings), cx),
-                "ShowSessionManager" => window.dispatch_action(Box::new(ShowSessionManager), cx),
-                "ShowThemeSelector" => window.dispatch_action(Box::new(ShowThemeSelector), cx),
-                "SplitVertical" => window.dispatch_action(Box::new(SplitVertical), cx),
-                "SplitHorizontal" => window.dispatch_action(Box::new(SplitHorizontal), cx),
-                "AddTab" => window.dispatch_action(Box::new(AddTab), cx),
-                "CloseTerminal" => window.dispatch_action(Box::new(CloseTerminal), cx),
-                "MinimizeTerminal" => window.dispatch_action(Box::new(MinimizeTerminal), cx),
-                "FocusNextTerminal" => window.dispatch_action(Box::new(FocusNextTerminal), cx),
-                "FocusPrevTerminal" => window.dispatch_action(Box::new(FocusPrevTerminal), cx),
-                "FocusLeft" => window.dispatch_action(Box::new(FocusLeft), cx),
-                "FocusRight" => window.dispatch_action(Box::new(FocusRight), cx),
-                "FocusUp" => window.dispatch_action(Box::new(FocusUp), cx),
-                "FocusDown" => window.dispatch_action(Box::new(FocusDown), cx),
-                "Copy" => window.dispatch_action(Box::new(Copy), cx),
-                "Paste" => window.dispatch_action(Box::new(Paste), cx),
-                "ScrollUp" => window.dispatch_action(Box::new(ScrollUp), cx),
-                "ScrollDown" => window.dispatch_action(Box::new(ScrollDown), cx),
-                "Search" => window.dispatch_action(Box::new(Search), cx),
-                "CreateWorktree" => window.dispatch_action(Box::new(CreateWorktree), cx),
-                "ShowSettings" => window.dispatch_action(Box::new(ShowSettings), cx),
-                "OpenSettingsFile" => window.dispatch_action(Box::new(OpenSettingsFile), cx),
-                "ShowFileSearch" => window.dispatch_action(Box::new(ShowFileSearch), cx),
-                "ShowDiffViewer" => window.dispatch_action(Box::new(ShowDiffViewer), cx),
-                "CheckForUpdates" => window.dispatch_action(Box::new(CheckForUpdates), cx),
-                "InstallUpdate" => window.dispatch_action(Box::new(InstallUpdate), cx),
-                _ => {
-                    log::warn!("Unknown action in command palette: {}", action);
-                }
-            }
-
-            // Close the palette after executing
+            window.dispatch_action((command.factory)(), cx);
             cx.emit(CommandPaletteEvent::Close);
         }
     }
@@ -136,7 +91,6 @@ impl CommandPalette {
                 cmd.name.clone(),
                 cmd.description.clone(),
                 cmd.category.clone(),
-                cmd.action.clone(),
             ]
         });
         self.state.set_filtered(filtered);
