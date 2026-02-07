@@ -1,256 +1,13 @@
-use crate::settings::settings_entity;
 use crate::theme::{theme, with_alpha};
-use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput, SimpleInputState};
-use crate::workspace::persistence::{
-    config_dir, delete_session, export_workspace, import_workspace, list_sessions,
-    load_session, rename_session, save_session, session_exists, SessionInfo,
-};
-use crate::workspace::state::{Workspace, WorkspaceData};
+use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
+use crate::workspace::persistence::{config_dir, SessionInfo};
 use gpui::*;
 use gpui::prelude::*;
 
-/// Session Manager overlay for managing multiple workspaces
-pub struct SessionManager {
-    workspace: Entity<Workspace>,
-    focus_handle: FocusHandle,
-    sessions: Vec<SessionInfo>,
-    /// Input for new session name
-    new_session_input: Entity<SimpleInputState>,
-    /// Input for renaming session (created when rename starts)
-    rename_input: Option<Entity<SimpleInputState>>,
-    renaming_session: Option<String>,
-    error_message: Option<String>,
-    show_delete_confirmation: Option<String>,
-    /// Input for export path
-    export_path_input: Entity<SimpleInputState>,
-    /// Input for import path
-    import_path_input: Entity<SimpleInputState>,
-    active_tab: SessionManagerTab,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum SessionManagerTab {
-    Sessions,
-    ExportImport,
-}
+use super::{SessionManager, SessionManagerTab};
 
 impl SessionManager {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let sessions = list_sessions().unwrap_or_default();
-        let focus_handle = cx.focus_handle();
-
-        // Default export path
-        let default_export_path = dirs::home_dir()
-            .map(|p| p.join("workspace-export.json").to_string_lossy().to_string())
-            .unwrap_or_else(|| "workspace-export.json".to_string());
-
-        let new_session_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter session name...")
-        });
-
-        let export_path_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Enter export path...")
-                .default_value(default_export_path)
-        });
-
-        let import_path_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Enter path to import...")
-        });
-
-        Self {
-            workspace,
-            focus_handle,
-            sessions,
-            new_session_input,
-            rename_input: None,
-            renaming_session: None,
-            error_message: None,
-            show_delete_confirmation: None,
-            export_path_input,
-            import_path_input,
-            active_tab: SessionManagerTab::Sessions,
-        }
-    }
-
-    fn close(&self, cx: &mut Context<Self>) {
-        cx.emit(SessionManagerEvent::Close);
-    }
-
-    fn refresh_sessions(&mut self) {
-        self.sessions = list_sessions().unwrap_or_default();
-        self.error_message = None;
-    }
-
-    fn save_new_session(&mut self, cx: &mut Context<Self>) {
-        let name = self.new_session_input.read(cx).value().trim().to_string();
-        if name.is_empty() {
-            self.error_message = Some("Session name cannot be empty".to_string());
-            cx.notify();
-            return;
-        }
-
-        if session_exists(&name) {
-            self.error_message = Some(format!("Session '{}' already exists", name));
-            cx.notify();
-            return;
-        }
-
-        let data = self.workspace.read(cx).data.clone();
-        match save_session(&name, &data) {
-            Ok(()) => {
-                self.new_session_input.update(cx, |input, cx| {
-                    input.set_value("", cx);
-                });
-                self.refresh_sessions();
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to save session: {}", e));
-            }
-        }
-        cx.notify();
-    }
-
-    fn load_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        let backend = settings_entity(cx).read(cx).settings.session_backend;
-        match load_session(name, backend) {
-            Ok(data) => {
-                // Emit event to notify parent to switch workspace
-                cx.emit(SessionManagerEvent::SwitchWorkspace(data));
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to load session: {}", e));
-                cx.notify();
-            }
-        }
-    }
-
-    fn start_rename(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let rename_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Session name...")
-                .default_value(name)
-        });
-        rename_input.update(cx, |input, cx| {
-            input.focus(window, cx);
-        });
-        self.rename_input = Some(rename_input);
-        self.renaming_session = Some(name.to_string());
-        cx.notify();
-    }
-
-    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.renaming_session = None;
-        self.rename_input = None;
-        cx.notify();
-    }
-
-    fn confirm_rename(&mut self, cx: &mut Context<Self>) {
-        let new_name = self.rename_input
-            .as_ref()
-            .map(|input| input.read(cx).value().trim().to_string())
-            .unwrap_or_default();
-
-        if let Some(old_name) = self.renaming_session.take() {
-            if new_name.is_empty() {
-                self.error_message = Some("Session name cannot be empty".to_string());
-                self.rename_input = None;
-                cx.notify();
-                return;
-            }
-
-            if new_name != old_name && session_exists(&new_name) {
-                self.error_message = Some(format!("Session '{}' already exists", new_name));
-                self.rename_input = None;
-                cx.notify();
-                return;
-            }
-
-            if new_name != old_name {
-                match rename_session(&old_name, &new_name) {
-                    Ok(()) => {
-                        self.refresh_sessions();
-                        self.error_message = None;
-                    }
-                    Err(e) => {
-                        self.error_message = Some(format!("Failed to rename session: {}", e));
-                    }
-                }
-            }
-        }
-        self.rename_input = None;
-        cx.notify();
-    }
-
-    fn confirm_delete(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.show_delete_confirmation = Some(name.to_string());
-        cx.notify();
-    }
-
-    fn cancel_delete(&mut self, cx: &mut Context<Self>) {
-        self.show_delete_confirmation = None;
-        cx.notify();
-    }
-
-    fn delete_session(&mut self, name: &str, cx: &mut Context<Self>) {
-        match delete_session(name) {
-            Ok(()) => {
-                self.show_delete_confirmation = None;
-                self.refresh_sessions();
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to delete session: {}", e));
-            }
-        }
-        cx.notify();
-    }
-
-    fn export_current(&mut self, cx: &mut Context<Self>) {
-        let path = self.export_path_input.read(cx).value().trim().to_string();
-        if path.is_empty() {
-            self.error_message = Some("Export path cannot be empty".to_string());
-            cx.notify();
-            return;
-        }
-
-        let data = self.workspace.read(cx).data.clone();
-        match export_workspace(&data, std::path::Path::new(&path)) {
-            Ok(()) => {
-                self.error_message = None;
-                // Show success message briefly
-                log::info!("Workspace exported to {}", path);
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to export: {}", e));
-            }
-        }
-        cx.notify();
-    }
-
-    fn import_from_file(&mut self, cx: &mut Context<Self>) {
-        let path = self.import_path_input.read(cx).value().trim().to_string();
-        if path.is_empty() {
-            self.error_message = Some("Import path cannot be empty".to_string());
-            cx.notify();
-            return;
-        }
-
-        match import_workspace(std::path::Path::new(&path)) {
-            Ok(data) => {
-                cx.emit(SessionManagerEvent::SwitchWorkspace(data));
-                self.error_message = None;
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Failed to import: {}", e));
-                cx.notify();
-            }
-        }
-    }
-
-    fn render_session_row(
+    pub(super) fn render_session_row(
         &self,
         session: &SessionInfo,
         cx: &mut Context<Self>,
@@ -514,7 +271,7 @@ impl SessionManager {
             })
     }
 
-    fn render_sessions_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_sessions_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let sessions = self.sessions.clone();
         let new_session_input = self.new_session_input.clone();
@@ -603,7 +360,7 @@ impl SessionManager {
             )
     }
 
-    fn render_export_import_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_export_import_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let export_path_input = self.export_path_input.clone();
         let import_path_input = self.import_path_input.clone();
@@ -774,13 +531,6 @@ impl SessionManager {
     }
 }
 
-pub enum SessionManagerEvent {
-    Close,
-    SwitchWorkspace(WorkspaceData),
-}
-
-impl EventEmitter<SessionManagerEvent> for SessionManager {}
-
 impl Render for SessionManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -907,5 +657,3 @@ impl Render for SessionManager {
             )
     }
 }
-
-impl_focusable!(SessionManager);
