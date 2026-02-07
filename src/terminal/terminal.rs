@@ -164,12 +164,19 @@ fn parse_path_line_col(s: &str) -> (String, Option<u32>, Option<u32>) {
     (s.to_string(), None, None)
 }
 
+/// Consolidated resize-related state, protected by a single mutex
+pub struct ResizeState {
+    pub size: TerminalSize,
+    last_pty_resize: std::time::Instant,
+    pending_pty_resize: Option<(u16, u16)>,
+}
+
 /// A terminal instance wrapping alacritty_terminal
 pub struct Terminal {
     term: Arc<Mutex<Term<ZedEventListener>>>,
     processor: Mutex<Processor>,
     pub terminal_id: String,
-    pub size: Mutex<TerminalSize>,
+    pub resize_state: Mutex<ResizeState>,
     pty_manager: Arc<PtyManager>,
     selection_state: Mutex<SelectionState>,
     scroll_offset: Mutex<i32>,
@@ -179,10 +186,6 @@ pub struct Terminal {
     has_bell: Arc<Mutex<bool>>,
     /// Dirty flag - set when terminal content changes, cleared after render
     dirty: std::sync::atomic::AtomicBool,
-    /// Last PTY resize timestamp for debouncing (only PTY resize is debounced, grid resize is immediate)
-    last_pty_resize: Mutex<std::time::Instant>,
-    /// Pending PTY resize (stored when debounced, applied on next resize or after timeout)
-    pending_pty_resize: Mutex<Option<(u16, u16)>>,
     /// Channel for notifying subscribers when terminal content changes (event-driven, no polling)
     dirty_notify: Sender<()>,
     /// Initial working directory (for resolving relative file paths in URL detection)
@@ -218,15 +221,17 @@ impl Terminal {
             term: Arc::new(Mutex::new(term)),
             processor: Mutex::new(Processor::new()),
             terminal_id,
-            size: Mutex::new(size),
+            resize_state: Mutex::new(ResizeState {
+                size,
+                last_pty_resize: std::time::Instant::now(),
+                pending_pty_resize: None,
+            }),
             pty_manager,
             selection_state: Mutex::new(SelectionState::default()),
             scroll_offset: Mutex::new(0),
             title,
             has_bell,
             dirty: std::sync::atomic::AtomicBool::new(false),
-            last_pty_resize: Mutex::new(std::time::Instant::now()),
-            pending_pty_resize: Mutex::new(None),
             dirty_notify,
             initial_cwd,
         }
@@ -321,8 +326,10 @@ impl Terminal {
     pub fn resize(&self, new_size: TerminalSize) {
         const DEBOUNCE_MS: u64 = 16;
 
-        // Always update local size and terminal grid immediately
-        *self.size.lock() = new_size;
+        // Always update local size immediately
+        self.resize_state.lock().size = new_size;
+
+        // Resize terminal grid (independent mutex)
         let mut term = self.term.lock();
         let term_size = TermSize::new(new_size.cols as usize, new_size.rows as usize);
         term.resize(term_size);
@@ -330,26 +337,28 @@ impl Terminal {
 
         // Debounce PTY resize to avoid excessive SIGWINCH signals
         let now = std::time::Instant::now();
-        let mut last_resize = self.last_pty_resize.lock();
-        let elapsed = now.duration_since(*last_resize);
+        let mut rs = self.resize_state.lock();
+        let elapsed = now.duration_since(rs.last_pty_resize);
 
         if elapsed.as_millis() >= DEBOUNCE_MS as u128 {
             // Enough time has passed - send resize immediately
-            // Also flush any pending resize
-            *self.pending_pty_resize.lock() = None;
-            *last_resize = now;
+            rs.pending_pty_resize = None;
+            rs.last_pty_resize = now;
+            drop(rs);
             self.pty_manager.resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
             // Store pending resize - will be applied on next resize that passes debounce
-            *self.pending_pty_resize.lock() = Some((new_size.cols, new_size.rows));
+            rs.pending_pty_resize = Some((new_size.cols, new_size.rows));
         }
     }
 
     /// Flush any pending PTY resize (call this when resize operations complete)
     pub fn flush_pending_resize(&self) {
-        if let Some((cols, rows)) = self.pending_pty_resize.lock().take() {
+        let mut rs = self.resize_state.lock();
+        if let Some((cols, rows)) = rs.pending_pty_resize.take() {
+            rs.last_pty_resize = std::time::Instant::now();
+            drop(rs);
             self.pty_manager.resize(&self.terminal_id, cols, rows);
-            *self.last_pty_resize.lock() = std::time::Instant::now();
         }
     }
 
@@ -486,8 +495,8 @@ impl Terminal {
 
     /// Get cell dimensions (width, height) for coordinate conversion
     pub fn cell_dimensions(&self) -> (f32, f32) {
-        let size = self.size.lock();
-        (size.cell_width, size.cell_height)
+        let rs = self.resize_state.lock();
+        (rs.size.cell_width, rs.size.cell_height)
     }
 
     /// Get the terminal title (from OSC sequences)

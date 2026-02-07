@@ -206,9 +206,9 @@ impl TerminalContent {
         let col = (x / cell_width).floor() as usize;
         let row = (y / cell_height).floor() as i32;
 
-        let size = terminal.size.lock();
-        let col = col.min(size.cols.saturating_sub(1) as usize);
-        let row = row.min(size.rows.saturating_sub(1) as i32);
+        let size = terminal.resize_state.lock();
+        let col = col.min(size.size.cols.saturating_sub(1) as usize);
+        let row = row.min(size.size.rows.saturating_sub(1) as i32);
 
         Some((col, row))
     }
