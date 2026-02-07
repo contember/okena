@@ -9,6 +9,7 @@
 
 mod color_picker;
 mod folder_list;
+mod item_widgets;
 mod project_list;
 
 use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
