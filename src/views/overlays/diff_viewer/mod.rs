@@ -349,7 +349,9 @@ impl Render for DiffViewer {
 
         let theme_colors = Arc::new(t.clone());
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("diff-viewer-backdrop", &t)
             .track_focus(&focus_handle)

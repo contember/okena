@@ -90,16 +90,19 @@ macro_rules! toggle_overlay {
     ($self:ident, $cx:ident, $field:ident, $event_type:ty, $factory:expr) => {
         if $self.$field.is_open() {
             $self.$field.close();
+            $self.workspace.update($cx, |ws, cx| ws.restore_focused_terminal(cx));
         } else {
             let entity = $cx.new($factory);
             $cx.subscribe(&entity, |this, _, event: &$event_type, cx| {
                 if event.is_close() {
                     this.$field.close();
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
                     cx.notify();
                 }
             })
             .detach();
             $self.$field.set(entity);
+            $self.workspace.update($cx, |ws, cx| ws.clear_focused_terminal(cx));
         }
         $cx.notify();
     };

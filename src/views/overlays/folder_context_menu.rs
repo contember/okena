@@ -60,7 +60,9 @@ impl Render for FolderContextMenu {
         let t = theme(cx);
 
         // Focus on first render
-        window.focus(&self.focus_handle, cx);
+        if !self.focus_handle.is_focused(window) {
+            window.focus(&self.focus_handle, cx);
+        }
 
         let position = self.request.position;
 

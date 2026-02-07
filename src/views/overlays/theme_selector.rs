@@ -348,7 +348,9 @@ impl Render for ThemeSelector {
         let config_title = self.state.config.title.clone();
         let config_subtitle = self.state.config.subtitle.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("theme-selector-backdrop", &t)
             .track_focus(&focus_handle)

@@ -509,7 +509,9 @@ impl Render for SessionManager {
         let active_tab = self.active_tab;
 
         // Focus on first render
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("session-manager-backdrop", &t)
             .track_focus(&focus_handle)

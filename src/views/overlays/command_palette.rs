@@ -229,7 +229,9 @@ impl Render for CommandPalette {
         let empty_message = self.state.config.empty_message.clone();
 
         // Focus on first render
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         div()
             .track_focus(&focus_handle)
