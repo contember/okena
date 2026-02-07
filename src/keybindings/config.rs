@@ -45,6 +45,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "FocusSidebar".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-1", None),
+                KeybindingEntry::new("ctrl-1", None),
+            ],
+        );
+        bindings.insert(
             "ClearFocus".to_string(),
             vec![
                 KeybindingEntry::new("cmd-0", None),

@@ -13,7 +13,10 @@ mod folder_list;
 mod item_widgets;
 mod project_list;
 
-use crate::keybindings::{format_keystroke, get_config, ShowKeybindings};
+use crate::keybindings::{
+    format_keystroke, get_config, ShowKeybindings, SidebarConfirm, SidebarDown,
+    SidebarEscape, SidebarToggleExpand, SidebarUp,
+};
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
@@ -28,6 +31,15 @@ use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
+
+/// Identifies each visible row in the sidebar for keyboard cursor navigation.
+#[derive(Clone, Debug)]
+pub(super) enum SidebarCursorItem {
+    Folder { folder_id: String },
+    Project { project_id: String },
+    WorktreeProject { project_id: String },
+    Terminal { project_id: String, terminal_id: String },
+}
 
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
@@ -52,6 +64,14 @@ pub struct Sidebar {
     color_picker_folder_id: Option<String>,
     /// Sidebar requests drained from Workspace by observer, applied in render() (needs Window)
     pending_sidebar_requests: Vec<SidebarRequest>,
+    /// Focus handle for keyboard event capture
+    focus_handle: FocusHandle,
+    /// Scroll handle for programmatic scrolling
+    scroll_handle: ScrollHandle,
+    /// Current keyboard cursor position (index into flat item list)
+    cursor_index: Option<usize>,
+    /// Saved focus handle to restore when leaving sidebar
+    pub saved_focus: Option<FocusHandle>,
 }
 
 impl Sidebar {
@@ -82,6 +102,10 @@ impl Sidebar {
             folder_click_detector: ClickDetector::new(),
             color_picker_folder_id: None,
             pending_sidebar_requests: Vec::new(),
+            focus_handle: cx.focus_handle(),
+            scroll_handle: ScrollHandle::new(),
+            cursor_index: None,
+            saved_focus: None,
         }
     }
 
@@ -242,6 +266,258 @@ impl Sidebar {
         });
         // Immediately start renaming the new folder
         self.start_folder_rename(folder_id, "New Folder".to_string(), window, cx);
+    }
+
+    /// Public accessor for the focus handle (used by RootView for FocusSidebar)
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    /// Initialize cursor to the focused project or first item
+    pub fn activate_cursor(&mut self, cx: &mut Context<Self>) {
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() {
+            self.cursor_index = None;
+            return;
+        }
+        // Try to place cursor on the focused project
+        let focused_id = self.workspace.read(cx).focused_project_id().cloned();
+        if let Some(ref focused_id) = focused_id {
+            if let Some(pos) = items.iter().position(|item| match item {
+                SidebarCursorItem::Project { project_id } |
+                SidebarCursorItem::WorktreeProject { project_id } => project_id == focused_id,
+                _ => false,
+            }) {
+                self.cursor_index = Some(pos);
+                cx.notify();
+                return;
+            }
+        }
+        self.cursor_index = Some(0);
+        cx.notify();
+    }
+
+    /// Build a flat list of cursor items matching the visual render order
+    fn build_cursor_items(&self, cx: &mut Context<Self>) -> Vec<SidebarCursorItem> {
+        let workspace = self.workspace.read(cx);
+        let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
+            .map(|p| (p.id.as_str(), p))
+            .collect();
+        let all_project_ids: HashSet<&str> = workspace.data().projects.iter()
+            .map(|p| p.id.as_str()).collect();
+
+        // Build worktree children map
+        let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
+        for project in &workspace.data().projects {
+            if let Some(ref wt_info) = project.worktree_info {
+                if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                    worktree_children_map
+                        .entry(wt_info.parent_project_id.clone())
+                        .or_default()
+                        .push(project);
+                }
+            }
+        }
+
+        let mut cursor_items = Vec::new();
+
+        for id in &workspace.data().project_order {
+            // Check if this is a folder
+            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
+                cursor_items.push(SidebarCursorItem::Folder { folder_id: folder.id.clone() });
+
+                if !folder.collapsed {
+                    for pid in &folder.project_ids {
+                        if let Some(&project) = all_projects.get(pid.as_str()) {
+                            // Skip worktree children that have a parent in the project list
+                            if project.worktree_info.as_ref().map_or(false, |w| {
+                                all_project_ids.contains(w.parent_project_id.as_str())
+                            }) {
+                                continue;
+                            }
+                            self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Top-level project (not a worktree child of another)
+            if let Some(&project) = all_projects.get(id.as_str()) {
+                if project.worktree_info.as_ref().map_or(false, |w| {
+                    all_project_ids.contains(w.parent_project_id.as_str())
+                }) {
+                    continue;
+                }
+                self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+            }
+        }
+
+        cursor_items
+    }
+
+    /// Helper: push a project row + its expanded terminals + worktree children into cursor items
+    fn push_project_cursor_items(
+        &self,
+        project: &ProjectData,
+        worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
+        cursor_items: &mut Vec<SidebarCursorItem>,
+    ) {
+        cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
+
+        // Expanded terminal items
+        if self.expanded_projects.contains(&project.id) {
+            if let Some(ref layout) = project.layout {
+                for tid in layout.collect_terminal_ids() {
+                    cursor_items.push(SidebarCursorItem::Terminal {
+                        project_id: project.id.clone(),
+                        terminal_id: tid,
+                    });
+                }
+            }
+        }
+
+        // Worktree children (always visible below parent)
+        if let Some(children) = worktree_children_map.get(&project.id) {
+            for child in children {
+                cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
+
+                // Expanded terminal items for worktree child
+                if self.expanded_projects.contains(&child.id) {
+                    if let Some(ref layout) = child.layout {
+                        for tid in layout.collect_terminal_ids() {
+                            cursor_items.push(SidebarCursorItem::Terminal {
+                                project_id: child.id.clone(),
+                                terminal_id: tid,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clamp cursor to valid range
+    fn validate_cursor(&mut self, item_count: usize) {
+        if item_count == 0 {
+            self.cursor_index = None;
+        } else if let Some(ref mut idx) = self.cursor_index {
+            if *idx >= item_count {
+                *idx = item_count - 1;
+            }
+        }
+    }
+
+    /// Check if any rename or color picker is active (blocks keyboard nav)
+    fn is_interactive_mode_active(&self) -> bool {
+        self.terminal_rename.is_some()
+            || self.project_rename.is_some()
+            || self.folder_rename.is_some()
+            || self.color_picker_project_id.is_some()
+            || self.color_picker_folder_id.is_some()
+    }
+
+    fn handle_sidebar_up(&mut self, _: &SidebarUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() { return; }
+        match self.cursor_index {
+            Some(idx) if idx > 0 => self.cursor_index = Some(idx - 1),
+            None => self.cursor_index = Some(items.len() - 1),
+            _ => {}
+        }
+        self.scroll_to_cursor(items.len());
+        cx.notify();
+    }
+
+    fn handle_sidebar_down(&mut self, _: &SidebarDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        if items.is_empty() { return; }
+        match self.cursor_index {
+            Some(idx) if idx < items.len() - 1 => self.cursor_index = Some(idx + 1),
+            None => self.cursor_index = Some(0),
+            _ => {}
+        }
+        self.scroll_to_cursor(items.len());
+        cx.notify();
+    }
+
+    fn handle_sidebar_confirm(&mut self, _: &SidebarConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        let Some(idx) = self.cursor_index else { return };
+        let Some(item) = items.get(idx) else { return };
+
+        match item.clone() {
+            SidebarCursorItem::Project { project_id } |
+            SidebarCursorItem::WorktreeProject { project_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(Some(project_id), cx);
+                });
+                // Restore focus to terminal
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
+            SidebarCursorItem::Terminal { project_id, terminal_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
+            SidebarCursorItem::Folder { folder_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_folder_collapsed(&folder_id, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn handle_sidebar_toggle_expand(&mut self, _: &SidebarToggleExpand, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_interactive_mode_active() { return; }
+        let items = self.build_cursor_items(cx);
+        let Some(idx) = self.cursor_index else { return };
+        let Some(item) = items.get(idx) else { return };
+
+        match item.clone() {
+            SidebarCursorItem::Folder { folder_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_folder_collapsed(&folder_id, cx);
+                });
+            }
+            SidebarCursorItem::Project { project_id } |
+            SidebarCursorItem::WorktreeProject { project_id } => {
+                self.toggle_expanded(&project_id);
+            }
+            SidebarCursorItem::Terminal { .. } => {}
+        }
+        cx.notify();
+    }
+
+    fn handle_sidebar_escape(&mut self, _: &SidebarEscape, window: &mut Window, cx: &mut Context<Self>) {
+        self.cursor_index = None;
+        if let Some(ref saved) = self.saved_focus {
+            window.focus(saved, cx);
+        }
+        self.saved_focus = None;
+        cx.notify();
+    }
+
+    /// Scroll the sidebar to keep the cursor item visible
+    fn scroll_to_cursor(&self, item_count: usize) {
+        if let Some(idx) = self.cursor_index {
+            if item_count > 0 {
+                self.scroll_handle.scroll_to_item(idx);
+            }
+        }
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -464,6 +740,11 @@ impl Render for Sidebar {
             }
         }
 
+        // Clear cursor when sidebar loses focus
+        if self.cursor_index.is_some() && !self.focus_handle.is_focused(window) {
+            self.cursor_index = None;
+        }
+
         let workspace = self.workspace.read(cx);
 
         // Collect all projects for lookup
@@ -536,6 +817,131 @@ impl Render for Sidebar {
         let color_picker_folder_id = self.color_picker_folder_id.clone();
         let has_color_picker = color_picker_project_id.is_some() || color_picker_folder_id.is_some();
 
+        // Build cursor items and validate cursor position
+        let cursor_items = self.build_cursor_items(cx);
+        self.validate_cursor(cursor_items.len());
+        let cursor_index = self.cursor_index;
+
+        // Build flat elements with cursor tracking
+        let mut flat_elements: Vec<AnyElement> = Vec::new();
+        let mut flat_idx: usize = 0;
+
+        for item in items {
+            match item {
+                SidebarItem::Project { project, index, worktree_children } => {
+                    let is_cursor = cursor_index == Some(flat_idx);
+                    flat_elements.push(
+                        self.render_project_item(&project, index, is_cursor, window, cx).into_any_element()
+                    );
+                    flat_idx += 1;
+
+                    // Expanded terminals
+                    if self.expanded_projects.contains(&project.id) {
+                        let minimized_states: Vec<(String, bool)> = {
+                            let ws = self.workspace.read(cx);
+                            project.terminal_ids.iter().map(|id| {
+                                (id.clone(), ws.is_terminal_minimized(&project.id, id))
+                            }).collect()
+                        };
+                        for (tid, is_minimized) in &minimized_states {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            flat_elements.push(
+                                self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                            );
+                            flat_idx += 1;
+                        }
+                    }
+
+                    // Worktree children
+                    for child in &worktree_children {
+                        let is_cursor = cursor_index == Some(flat_idx);
+                        flat_elements.push(
+                            self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                        );
+                        flat_idx += 1;
+
+                        if self.expanded_projects.contains(&child.id) {
+                            let minimized_states: Vec<(String, bool)> = {
+                                let ws = self.workspace.read(cx);
+                                child.terminal_ids.iter().map(|id| {
+                                    (id.clone(), ws.is_terminal_minimized(&child.id, id))
+                                }).collect()
+                            };
+                            for (tid, is_minimized) in &minimized_states {
+                                let is_cursor = cursor_index == Some(flat_idx);
+                                flat_elements.push(
+                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                );
+                                flat_idx += 1;
+                            }
+                        }
+                    }
+                }
+                SidebarItem::Folder { folder, index, projects, worktree_children } => {
+                    let is_cursor = cursor_index == Some(flat_idx);
+                    flat_elements.push(
+                        self.render_folder_header(&folder, index, projects.len(), is_cursor, window, cx).into_any_element()
+                    );
+                    flat_idx += 1;
+
+                    // Folder children when not collapsed
+                    if !folder.collapsed {
+                        for fp in &projects {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            flat_elements.push(
+                                self.render_folder_project_item(fp, &folder.id, is_cursor, window, cx).into_any_element()
+                            );
+                            flat_idx += 1;
+
+                            // Expanded terminals for folder project
+                            if self.expanded_projects.contains(&fp.id) {
+                                let minimized_states: Vec<(String, bool)> = {
+                                    let ws = self.workspace.read(cx);
+                                    fp.terminal_ids.iter().map(|id| {
+                                        (id.clone(), ws.is_terminal_minimized(&fp.id, id))
+                                    }).collect()
+                                };
+                                for (tid, is_minimized) in &minimized_states {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    flat_elements.push(
+                                        self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+                                }
+                            }
+
+                            // Worktree children for folder project
+                            if let Some(wt_children) = worktree_children.get(&fp.id) {
+                                for child in wt_children {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    flat_elements.push(
+                                        self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+
+                                    if self.expanded_projects.contains(&child.id) {
+                                        let minimized_states: Vec<(String, bool)> = {
+                                            let ws = self.workspace.read(cx);
+                                            child.terminal_ids.iter().map(|id| {
+                                                (id.clone(), ws.is_terminal_minimized(&child.id, id))
+                                            }).collect()
+                                        };
+                                        for (tid, is_minimized) in &minimized_states {
+                                            let is_cursor = cursor_index == Some(flat_idx);
+                                            flat_elements.push(
+                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                            );
+                                            flat_idx += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         div()
             .relative()
             .w_full()
@@ -543,6 +949,13 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .bg(rgb(t.bg_secondary))
+            .track_focus(&self.focus_handle)
+            .key_context("Sidebar")
+            .on_action(cx.listener(Self::handle_sidebar_up))
+            .on_action(cx.listener(Self::handle_sidebar_down))
+            .on_action(cx.listener(Self::handle_sidebar_confirm))
+            .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
+            .on_action(cx.listener(Self::handle_sidebar_escape))
             .child(self.render_header(cx))
             .child(self.render_projects_header(cx))
             .child(
@@ -550,25 +963,12 @@ impl Render for Sidebar {
                     .id("sidebar-scroll")
                     .flex_1()
                     .overflow_y_scroll()
-                    .children(
-                        items.into_iter().map(|item| {
-                            match item {
-                                SidebarItem::Project { project, index, worktree_children } => {
-                                    let children = if worktree_children.is_empty() { None } else { Some(&worktree_children) };
-                                    self.render_project_item_with_worktrees(&project, index, children, window, cx)
-                                        .into_any_element()
-                                }
-                                SidebarItem::Folder { folder, index, projects, worktree_children } => {
-                                    self.render_folder_item(&folder, index, &projects, &worktree_children, window, cx)
-                                        .into_any_element()
-                                }
-                            }
-                        }),
-                    ),
+                    .track_scroll(&self.scroll_handle)
+                    .children(flat_elements),
             )
             .child(self.render_keybindings_hint(cx))
             // Color picker overlay
-            .when(has_color_picker, |d| {
+            .when(has_color_picker, |d: Div| {
                 d.child(
                     // Backdrop to close picker when clicking outside
                     div()
@@ -582,11 +982,11 @@ impl Render for Sidebar {
                             cx.stop_propagation();
                         })
                 )
-                .when(color_picker_project_id.is_some(), |d| {
+                .when(color_picker_project_id.is_some(), |d: Div| {
                     let project_id = color_picker_project_id.unwrap();
                     d.child(self.render_color_picker(&project_id, cx))
                 })
-                .when(color_picker_folder_id.is_some(), |d| {
+                .when(color_picker_folder_id.is_some(), |d: Div| {
                     let folder_id = color_picker_folder_id.unwrap();
                     d.child(self.render_folder_color_picker(&folder_id, cx))
                 })
