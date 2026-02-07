@@ -35,21 +35,11 @@ impl Sidebar {
         container
     }
 
-    pub(super) fn render_project_item(&self, project: &ProjectData, index: usize, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_project_item(&self, project: &ProjectData, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
-        let workspace_for_focus = self.workspace.clone();
-        let workspace_for_drop = self.workspace.clone();
         let project_id = project.id.clone();
-        let project_id_for_focus = project.id.clone();
-        let project_id_for_toggle = project.id.clone();
-        let project_id_for_visibility = project.id.clone();
-        let project_id_for_rename = project.id.clone();
-        let project_id_for_context_menu = project.id.clone();
-        let project_id_for_drag = project.id.clone();
         let project_name = project.name.clone();
-        let project_name_for_rename = project.name.clone();
-        let project_name_for_drag = project.name.clone();
 
         let is_focused = {
             let ws = self.workspace.read(cx);
@@ -79,35 +69,34 @@ impl Sidebar {
                     .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
                     .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     // Drag source
-                    .on_drag(ProjectDrag { project_id: project_id_for_drag.clone(), project_name: project_name_for_drag.clone() }, move |drag, _position, _window, cx| {
+                    .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                         cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
                     })
                     // Drop target - show indicator line at top
                     .drag_over::<ProjectDrag>(move |style, _, _, _| {
                         style.border_t_2().border_color(rgb(t.border_active))
                     })
-                    .on_drop(cx.listener(move |_this, drag: &ProjectDrag, _window, cx| {
-                        if drag.project_id != project_id_for_drag {
-                            workspace_for_drop.update(cx, |ws, cx| {
-                                ws.move_project(&drag.project_id, index, cx);
-                            });
+                    .on_drop(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, drag: &ProjectDrag, _window, cx| {
+                            if drag.project_id != project_id {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.move_project(&drag.project_id, index, cx);
+                                });
+                            }
                         }
                     }))
                     // Drop target for folder reordering among projects
                     .drag_over::<FolderDrag>(move |style, _, _, _| {
                         style.border_t_2().border_color(rgb(t.border_active))
                     })
-                    .on_drop(cx.listener({
-                        let workspace = self.workspace.clone();
-                        let target_index = index;
-                        move |_this, drag: &FolderDrag, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.move_item_in_order(&drag.folder_id, target_index, cx);
-                            });
-                        }
+                    .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.move_item_in_order(&drag.folder_id, index, cx);
+                        });
                     }))
                     .on_mouse_down(MouseButton::Right, cx.listener({
-                        let project_id = project_id_for_context_menu.clone();
+                        let project_id = project_id.clone();
                         move |this, event: &MouseDownEvent, _window, cx| {
                             this.request_context_menu(project_id.clone(), event.position, cx);
                             cx.stop_propagation();
@@ -119,15 +108,18 @@ impl Sidebar {
                             is_expanded,
                             &t,
                         )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id_for_toggle);
-                            cx.notify();
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                this.toggle_expanded(&project_id);
+                                cx.notify();
+                            }
                         })),
                     )
                     .child({
                         // Project color dot - clickable for color picker
                         let folder_color = t.get_folder_color(project.folder_color);
-                        let project_id_for_color = project.id.clone();
+                        let project_id = project.id.clone();
                         sidebar_color_indicator(
                             ElementId::Name(format!("folder-icon-{}", project.id).into()),
                             div()
@@ -138,7 +130,7 @@ impl Sidebar {
                                 .bg(rgb(folder_color)),
                         )
                         .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                            this.show_color_picker(project_id_for_color.clone(), cx);
+                            this.show_color_picker(project_id.clone(), cx);
                             cx.stop_propagation();
                         }))
                     })
@@ -164,19 +156,18 @@ impl Sidebar {
                         } else {
                             sidebar_name_label(
                                 ElementId::Name(format!("project-name-{}", project.id).into()),
-                                project_name,
+                                project_name.clone(),
                                 &t,
                             )
                             .on_click(cx.listener({
-                                let project_id = project_id_for_rename;
-                                let project_id_for_focus = project_id_for_focus.clone();
-                                let name = project_name_for_rename;
+                                let project_id = project_id.clone();
+                                let project_name = project_name.clone();
                                 move |this, _event: &ClickEvent, window, cx| {
                                     if this.check_project_double_click(&project_id) {
-                                        this.start_project_rename(project_id.clone(), name.clone(), window, cx);
+                                        this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                                     } else {
-                                        workspace_for_focus.update(cx, |ws, cx| {
-                                            ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
+                                        this.workspace.update(cx, |ws, cx| {
+                                            ws.set_focused_project(Some(project_id.clone()), cx);
                                         });
                                     }
                                     cx.stop_propagation();
@@ -188,7 +179,6 @@ impl Sidebar {
                     .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
                     .child(
                         {
-                            let workspace = self.workspace.clone();
                             let is_visible = project.is_visible;
                             let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
                             sidebar_visibility_toggle(
@@ -196,11 +186,14 @@ impl Sidebar {
                                 is_visible,
                                 &t,
                             )
-                            .on_click(move |_, _window, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_visibility(&project_id_for_visibility, cx);
-                                });
-                            })
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                move |this, _, _window, cx| {
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.toggle_project_visibility(&project_id, cx);
+                                    });
+                                }
+                            }))
                             .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
                         },
                     ),
@@ -225,18 +218,11 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &ProjectData, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &ProjectData, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
-        let workspace_for_focus = self.workspace.clone();
         let project_id = project.id.clone();
-        let project_id_for_toggle = project.id.clone();
-        let project_id_for_visibility = project.id.clone();
-        let project_id_for_rename = project.id.clone();
-        let project_id_for_context_menu = project.id.clone();
-        let project_id_for_focus = project.id.clone();
         let project_name = project.name.clone();
-        let project_name_for_rename = project.name.clone();
 
         let is_focused = {
             let ws = self.workspace.read(cx);
@@ -266,7 +252,7 @@ impl Sidebar {
                     .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
                     .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                     .on_mouse_down(MouseButton::Right, cx.listener({
-                        let project_id = project_id_for_context_menu.clone();
+                        let project_id = project_id.clone();
                         move |this, event: &MouseDownEvent, _window, cx| {
                             this.request_context_menu(project_id.clone(), event.position, cx);
                             cx.stop_propagation();
@@ -278,9 +264,12 @@ impl Sidebar {
                             is_expanded,
                             &t,
                         )
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id_for_toggle);
-                            cx.notify();
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                this.toggle_expanded(&project_id);
+                                cx.notify();
+                            }
                         })),
                     )
                     .child(
@@ -321,19 +310,18 @@ impl Sidebar {
                         } else {
                             sidebar_name_label(
                                 ElementId::Name(format!("worktree-name-{}", project.id).into()),
-                                project_name,
+                                project_name.clone(),
                                 &t,
                             )
                             .on_click(cx.listener({
-                                let project_id = project_id_for_rename;
-                                let project_id_for_focus = project_id_for_focus.clone();
-                                let name = project_name_for_rename;
+                                let project_id = project_id.clone();
+                                let project_name = project_name.clone();
                                 move |this, _event: &ClickEvent, window, cx| {
                                     if this.check_project_double_click(&project_id) {
-                                        this.start_project_rename(project_id.clone(), name.clone(), window, cx);
+                                        this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                                     } else {
-                                        workspace_for_focus.update(cx, |ws, cx| {
-                                            ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
+                                        this.workspace.update(cx, |ws, cx| {
+                                            ws.set_focused_project(Some(project_id.clone()), cx);
                                         });
                                     }
                                     cx.stop_propagation();
@@ -345,7 +333,6 @@ impl Sidebar {
                     .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
                     .child(
                         {
-                            let workspace = self.workspace.clone();
                             let is_visible = project.is_visible;
                             let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
                             sidebar_visibility_toggle(
@@ -353,11 +340,14 @@ impl Sidebar {
                                 is_visible,
                                 &t,
                             )
-                            .on_click(move |_, _window, cx| {
-                                workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_visibility(&project_id_for_visibility, cx);
-                                });
-                            })
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                move |this, _, _window, cx| {
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.toggle_project_visibility(&project_id, cx);
+                                    });
+                                }
+                            }))
                             .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
                         },
                     ),
@@ -391,31 +381,22 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let workspace = self.workspace.clone();
-        let workspace_for_focus = self.workspace.clone();
-        let workspace_for_minimize = self.workspace.clone();
         let project_id = project_id.to_string();
-        let project_id_for_focus = project_id.clone();
-        let project_id_for_minimize = project_id.clone();
-        let project_id_for_rename = project_id.clone();
-        let terminal_id_owned = terminal_id.to_string();
-        let terminal_id_for_focus = terminal_id.to_string();
-        let terminal_id_for_minimize = terminal_id.to_string();
-        let terminal_id_for_rename = terminal_id.to_string();
+        let terminal_id = terminal_id.to_string();
 
         // Priority: custom name > OSC title > terminal ID prefix
         // Also check for bell notification
         let (terminal_name, has_bell) = {
             let terminals = self.terminals.lock();
-            if let Some(terminal) = terminals.get(terminal_id) {
-                let name = if let Some(custom_name) = project.terminal_names.get(terminal_id) {
+            if let Some(terminal) = terminals.get(terminal_id.as_str()) {
+                let name = if let Some(custom_name) = project.terminal_names.get(terminal_id.as_str()) {
                     custom_name.clone()
                 } else {
                     terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
                 };
                 (name, terminal.has_bell())
             } else {
-                let name = project.terminal_names.get(terminal_id)
+                let name = project.terminal_names.get(terminal_id.as_str())
                     .cloned()
                     .unwrap_or_else(|| terminal_id.chars().take(8).collect());
                 (name, false)
@@ -423,7 +404,7 @@ impl Sidebar {
         };
 
         // Check if this terminal is being renamed
-        let is_renaming = is_renaming(&self.terminal_rename, &(project_id.clone(), terminal_id.to_string()));
+        let is_renaming = is_renaming(&self.terminal_rename, &(project_id.clone(), terminal_id.clone()));
 
         // Check if this terminal is currently focused
         let is_focused = {
@@ -431,15 +412,13 @@ impl Sidebar {
             ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
                 if let Some(proj) = ws.project(&project_id) {
                     proj.layout.as_ref()
-                        .and_then(|l| l.find_terminal_path(&terminal_id_for_focus))
+                        .and_then(|l| l.find_terminal_path(&terminal_id))
                         .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
                 } else {
                     false
                 }
             })
         };
-
-        let terminal_name_for_rename = terminal_name.clone();
 
         div()
             .id(ElementId::Name(format!("{}terminal-item-{}", id_prefix, terminal_id).into()))
@@ -455,16 +434,15 @@ impl Sidebar {
             .when(is_minimized, |d| d.opacity(0.5))
             .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
             // Click to focus this terminal
-            .on_click({
-                let workspace = workspace_for_focus.clone();
-                let project_id = project_id_for_focus.clone();
-                let terminal_id = terminal_id_for_focus.clone();
-                move |_, _window, cx| {
-                    workspace.update(cx, |ws, cx| {
+            .on_click(cx.listener({
+                let project_id = project_id.clone();
+                let terminal_id = terminal_id.clone();
+                move |this, _, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
                         ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                     });
                 }
-            })
+            }))
             .child(
                 // Terminal icon - different for minimized and bell state
                 div()
@@ -519,26 +497,22 @@ impl Sidebar {
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("{}terminal-name-{}", id_prefix, terminal_id).into()),
-                        terminal_name,
+                        terminal_name.clone(),
                         &t,
                     )
                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
                             cx.stop_propagation();
                         })
                         .on_click(cx.listener({
-                            let workspace = workspace_for_focus.clone();
-                            let project_id = project_id_for_rename;
-                            let project_id_for_focus = project_id_for_focus.clone();
-                            let terminal_id = terminal_id_for_rename;
-                            let terminal_id_for_focus = terminal_id_for_focus.clone();
-                            let name = terminal_name_for_rename;
+                            let project_id = project_id.clone();
+                            let terminal_id = terminal_id.clone();
+                            let terminal_name = terminal_name.clone();
                             move |this, _event: &ClickEvent, window, cx| {
                                 if this.check_double_click(&terminal_id) {
-                                    this.start_rename(project_id.clone(), terminal_id.clone(), name.clone(), window, cx);
+                                    this.start_rename(project_id.clone(), terminal_id.clone(), terminal_name.clone(), window, cx);
                                 } else {
-                                    // Single click - focus the terminal
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.focus_terminal_by_id(&project_id_for_focus, &terminal_id_for_focus, cx);
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                                     });
                                 }
                                 cx.stop_propagation();
@@ -570,12 +544,16 @@ impl Sidebar {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                workspace_for_minimize.update(cx, |ws, cx| {
-                                    ws.toggle_terminal_minimized_by_id(&project_id_for_minimize, &terminal_id_for_minimize, cx);
-                                });
-                            })
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                let terminal_id = terminal_id.clone();
+                                move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.toggle_terminal_minimized_by_id(&project_id, &terminal_id, cx);
+                                    });
+                                }
+                            }))
                             .child(
                                 svg()
                                     .path("icons/minimize.svg")
@@ -606,16 +584,20 @@ impl Sidebar {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                workspace.update(cx, |ws, cx| {
-                                    ws.set_fullscreen_terminal(
-                                        project_id.clone(),
-                                        terminal_id_owned.clone(),
-                                        cx,
-                                    );
-                                });
-                            })
+                            .on_click(cx.listener({
+                                let project_id = project_id.clone();
+                                let terminal_id = terminal_id.clone();
+                                move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.set_fullscreen_terminal(
+                                            project_id.clone(),
+                                            terminal_id.clone(),
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }))
                             .child(
                                 svg()
                                     .path("icons/fullscreen.svg")
