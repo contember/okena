@@ -20,6 +20,9 @@ pub struct FolderData {
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
+    /// Schema version for migration support
+    #[serde(default = "default_workspace_version")]
+    pub version: u32,
     pub projects: Vec<ProjectData>,
     pub project_order: Vec<String>,
     /// Project column widths as percentages (project_id -> width %)
@@ -45,6 +48,7 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default = "default_true")]
     pub is_visible: bool,
     /// Layout tree for terminal panes. None means project is a bookmark without terminals.
     pub layout: Option<LayoutNode>,
@@ -64,6 +68,14 @@ pub struct ProjectData {
 }
 
 use crate::terminal::shell_config::ShellType;
+
+fn default_workspace_version() -> u32 {
+    0 // pre-versioning workspace files
+}
+
+fn default_true() -> bool {
+    true
+}
 
 fn default_zoom_level() -> f32 {
     1.0
