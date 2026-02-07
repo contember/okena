@@ -4,7 +4,8 @@ use crate::keybindings::Cancel;
 use crate::theme::{theme, ThemeColors};
 use crate::ui::{Selection1DExtension, Selection2DExtension};
 use crate::views::components::{
-    get_scrollbar_geometry, modal_backdrop, modal_content, segmented_toggle, HighlightedLine,
+    code_block_container, get_scrollbar_geometry, modal_backdrop, modal_content,
+    segmented_toggle, HighlightedLine,
 };
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer};
@@ -521,7 +522,6 @@ impl Render for FileViewer {
                                 }
                                 RenderedNode::CodeBlock { language, lines, .. } => {
                                     // Code block with per-line selection
-                                    let lang_label = language.as_deref().unwrap_or("");
                                     let idx = node_idx;
 
                                     // Build lines with handlers
@@ -563,28 +563,8 @@ impl Render for FileViewer {
                                     }).collect();
 
                                     // Build code block container
-                                    let code_block = div()
+                                    let code_block = code_block_container(language.as_deref(), &t)
                                         .id(ElementId::Name(format!("md-codeblock-{}", idx).into()))
-                                        .flex()
-                                        .flex_col()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(t.bg_primary))
-                                        .border_1()
-                                        .border_color(rgb(t.border))
-                                        .overflow_hidden()
-                                        .when(!lang_label.is_empty(), |d| {
-                                            d.child(
-                                                div()
-                                                    .px(px(12.0))
-                                                    .py(px(4.0))
-                                                    .bg(rgb(t.bg_header))
-                                                    .border_b_1()
-                                                    .border_color(rgb(t.border))
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child(lang_label.to_string())
-                                            )
-                                        })
                                         .child(
                                             div()
                                                 .p(px(12.0))

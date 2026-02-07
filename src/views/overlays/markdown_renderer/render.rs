@@ -1,6 +1,7 @@
 //! Rendering logic for markdown nodes and inline elements.
 
 use crate::theme::ThemeColors;
+use crate::views::components::code_block_container;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::{h_flex, v_flex};
@@ -318,7 +319,6 @@ impl MarkdownDocument {
                 Self::render_inlines_with_selection(children, t, selection)
             }
             Node::CodeBlock { language, code } => {
-                let lang_label = language.as_deref().unwrap_or("");
                 let selection_bg = rgba(0x3390ff40);
 
                 // Render code lines with selection
@@ -358,25 +358,7 @@ impl MarkdownDocument {
                     offset = line_end;
                 }
 
-                v_flex()
-                    .rounded(px(6.0))
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .overflow_hidden()
-                    .when(!lang_label.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(4.0))
-                                .bg(rgb(t.bg_header))
-                                .border_b_1()
-                                .border_color(rgb(t.border))
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.text_muted))
-                                .child(lang_label.to_string())
-                        )
-                    })
+                code_block_container(language.as_deref(), t)
                     .child(
                         div()
                             .p(px(12.0))
