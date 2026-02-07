@@ -26,17 +26,8 @@ impl Sidebar {
     ) -> impl IntoElement {
         let t = theme(cx);
         let folder_id = folder.id.clone();
-        let folder_id_for_toggle = folder.id.clone();
-        let folder_id_for_drag = folder.id.clone();
-        let folder_id_for_rename = folder.id.clone();
-        let folder_id_for_drop = folder.id.clone();
         let folder_name = folder.name.clone();
-        let folder_name_for_drag = folder.name.clone();
-        let folder_name_for_rename = folder.name.clone();
         let is_collapsed = folder.collapsed;
-        let workspace_for_drop = self.workspace.clone();
-        let workspace_for_toggle = self.workspace.clone();
-        let workspace_for_reorder = self.workspace.clone();
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
         let project_count = projects.len();
@@ -56,7 +47,7 @@ impl Sidebar {
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(t.bg_hover)))
                 // Drag source for folder reordering
-                .on_drag(FolderDrag { folder_id: folder_id_for_drag.clone(), folder_name: folder_name_for_drag.clone() }, move |drag, _position, _window, cx| {
+                .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {
                     cx.new(|_| FolderDragView { name: drag.folder_name.clone() })
                 })
                 // Drop target for folder reordering
@@ -64,12 +55,11 @@ impl Sidebar {
                     style.border_t_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener({
-                    let workspace = workspace_for_reorder.clone();
-                    let target_index = index;
-                    move |_this, drag: &FolderDrag, _window, cx| {
-                        if drag.folder_id != folder_id_for_drag {
-                            workspace.update(cx, |ws, cx| {
-                                ws.move_item_in_order(&drag.folder_id, target_index, cx);
+                    let folder_id = folder_id.clone();
+                    move |this, drag: &FolderDrag, _window, cx| {
+                        if drag.folder_id != folder_id {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.move_item_in_order(&drag.folder_id, index, cx);
                             });
                         }
                     }
@@ -79,20 +69,19 @@ impl Sidebar {
                     style.bg(rgb(t.bg_selection))
                 })
                 .on_drop(cx.listener({
-                    let workspace = workspace_for_drop.clone();
-                    let folder_id = folder_id_for_drop.clone();
-                    move |_this, drag: &ProjectDrag, _window, cx| {
-                        workspace.update(cx, |ws, cx| {
+                    let folder_id = folder_id.clone();
+                    move |this, drag: &ProjectDrag, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
                             ws.move_project_to_folder(&drag.project_id, &folder_id, None, cx);
                         });
                     }
                 }))
                 // Right-click context menu
                 .on_mouse_down(MouseButton::Right, cx.listener({
-                    let folder_id = folder.id.clone();
-                    let folder_name = folder.name.clone();
-                    move |_this, event: &MouseDownEvent, _window, cx| {
-                        _this.workspace.update(cx, |ws, cx| {
+                    let folder_id = folder_id.clone();
+                    let folder_name = folder_name.clone();
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
                             ws.push_overlay_request(crate::workspace::state::OverlayRequest::FolderContextMenu {
                                 folder_id: folder_id.clone(),
                                 folder_name: folder_name.clone(),
@@ -108,16 +97,19 @@ impl Sidebar {
                         !is_collapsed,
                         &t,
                     )
-                    .on_click(cx.listener(move |_this, _, _window, cx| {
-                        workspace_for_toggle.update(cx, |ws, cx| {
-                            ws.toggle_folder_collapsed(&folder_id_for_toggle, cx);
-                        });
+                    .on_click(cx.listener({
+                        let folder_id = folder_id.clone();
+                        move |this, _, _window, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.toggle_folder_collapsed(&folder_id, cx);
+                            });
+                        }
                     })),
                 )
                 .child({
                     // Folder color icon
                     let folder_color = t.get_folder_color(folder.folder_color);
-                    let folder_id_for_color = folder.id.clone();
+                    let folder_id = folder.id.clone();
                     sidebar_color_indicator(
                         ElementId::Name(format!("folder-color-{}", folder.id).into()),
                         svg()
@@ -126,7 +118,7 @@ impl Sidebar {
                             .text_color(rgb(folder_color)),
                     )
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.show_folder_color_picker(folder_id_for_color.clone(), cx);
+                        this.show_folder_color_picker(folder_id.clone(), cx);
                         cx.stop_propagation();
                     }))
                 })
@@ -152,16 +144,16 @@ impl Sidebar {
                     } else {
                         sidebar_name_label(
                             ElementId::Name(format!("folder-name-{}", folder.id).into()),
-                            folder_name,
+                            folder_name.clone(),
                             &t,
                         )
                         .font_weight(FontWeight::MEDIUM)
                         .on_click(cx.listener({
-                            let folder_id = folder_id_for_rename;
-                            let name = folder_name_for_rename;
+                            let folder_id = folder_id.clone();
+                            let folder_name = folder_name.clone();
                             move |this, _event: &ClickEvent, window, cx| {
                                 if this.check_folder_double_click(&folder_id) {
-                                    this.start_folder_rename(folder_id.clone(), name.clone(), window, cx);
+                                    this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
                                 }
                                 cx.stop_propagation();
                             }
@@ -184,7 +176,6 @@ impl Sidebar {
                 .child(
                     // Delete folder button (on hover)
                     {
-                        let workspace = self.workspace.clone();
                         let folder_id = folder_id.clone();
                         div()
                             .id(ElementId::Name(format!("folder-delete-{}", folder_id).into()))
@@ -201,12 +192,15 @@ impl Sidebar {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
-                            .on_click(move |_, _window, cx| {
-                                cx.stop_propagation();
-                                workspace.update(cx, |ws, cx| {
-                                    ws.delete_folder(&folder_id, cx);
-                                });
-                            })
+                            .on_click(cx.listener({
+                                let folder_id = folder_id.clone();
+                                move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.delete_folder(&folder_id, cx);
+                                    });
+                                }
+                            }))
                             .child(
                                 svg()
                                     .path("icons/close.svg")
