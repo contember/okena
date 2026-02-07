@@ -3,6 +3,7 @@
 //! This module provides reusable button definitions to ensure consistency
 //! between regular terminal mode and tab group mode.
 
+use crate::keybindings;
 use crate::theme::ThemeColors;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -46,6 +47,19 @@ impl HeaderAction {
             HeaderAction::Fullscreen => "Fullscreen",
             HeaderAction::Detach => "Detach to Window",
             HeaderAction::Close => "Close",
+        }
+    }
+
+    /// Returns the corresponding GPUI action for keybinding display in tooltips.
+    pub fn gpui_action(&self) -> Option<Box<dyn Action>> {
+        match self {
+            HeaderAction::SplitVertical => Some(Box::new(keybindings::SplitVertical)),
+            HeaderAction::SplitHorizontal => Some(Box::new(keybindings::SplitHorizontal)),
+            HeaderAction::AddTab => Some(Box::new(keybindings::AddTab)),
+            HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
+            HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
+            HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
+            HeaderAction::ExportBuffer | HeaderAction::Detach => None,
         }
     }
 
@@ -127,7 +141,13 @@ pub fn header_button_base(
                 .size(px(size.icon))
                 .text_color(rgb(t.text_secondary)),
         )
-        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx));
+        .tooltip(move |_window, cx| {
+            let mut tooltip = Tooltip::new(tooltip_text);
+            if let Some(action) = action.gpui_action() {
+                tooltip = tooltip.action(action.as_ref(), None);
+            }
+            tooltip.build(_window, cx)
+        });
 
     // Apply hover style - red for close, normal for others
     if action.is_close() {
