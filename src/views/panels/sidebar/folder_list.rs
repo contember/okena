@@ -9,8 +9,8 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::v_flex;
 
 use super::item_widgets::*;
-use super::{Sidebar, ProjectDrag, FolderDrag, FolderDragView};
-use crate::workspace::state::{FolderData, ProjectData};
+use super::{Sidebar, SidebarProjectInfo, ProjectDrag, FolderDrag, FolderDragView};
+use crate::workspace::state::FolderData;
 use std::collections::HashMap;
 
 impl Sidebar {
@@ -19,8 +19,8 @@ impl Sidebar {
         &self,
         folder: &FolderData,
         index: usize,
-        projects: &[ProjectData],
-        worktree_children: &HashMap<String, Vec<ProjectData>>,
+        projects: &[SidebarProjectInfo],
+        worktree_children: &HashMap<String, Vec<SidebarProjectInfo>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -228,9 +228,9 @@ impl Sidebar {
     /// Renders a project item inside a folder (indented)
     fn render_folder_project_item(
         &self,
-        project: &ProjectData,
+        project: &SidebarProjectInfo,
         folder_id: &str,
-        worktree_children: Option<&Vec<ProjectData>>,
+        worktree_children: Option<&Vec<SidebarProjectInfo>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -247,11 +247,9 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_ids = project.layout.as_ref()
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default();
+        let terminal_ids = &project.terminal_ids;
         let terminal_count = terminal_ids.len();
-        let has_layout = project.layout.is_some();
+        let has_layout = project.has_layout;
 
         let mut container = v_flex();
 
@@ -415,7 +413,7 @@ impl Sidebar {
 
             for (id, is_minimized) in &minimized_states {
                 container = container.child(
-                    self.render_terminal_item(&project_id, id, project, *is_minimized, 28.0, "", cx)
+                    self.render_terminal_item(&project_id, id, &project.terminal_names, *is_minimized, 28.0, "", cx)
                 );
             }
         }

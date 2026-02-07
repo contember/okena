@@ -9,16 +9,16 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::v_flex;
 
 use super::item_widgets::*;
-use super::{Sidebar, ProjectDrag, ProjectDragView, FolderDrag};
-use crate::workspace::state::ProjectData;
+use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag};
+use std::collections::HashMap;
 
 impl Sidebar {
     /// Renders a project item with its worktree children nested below it
     pub(super) fn render_project_item_with_worktrees(
         &self,
-        project: &ProjectData,
+        project: &SidebarProjectInfo,
         index: usize,
-        worktree_children: Option<&Vec<ProjectData>>,
+        worktree_children: Option<&Vec<SidebarProjectInfo>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -35,7 +35,7 @@ impl Sidebar {
         container
     }
 
-    pub(super) fn render_project_item(&self, project: &ProjectData, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
@@ -48,11 +48,9 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_ids = project.layout.as_ref()
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default();
+        let terminal_ids = &project.terminal_ids;
         let terminal_count = terminal_ids.len();
-        let has_layout = project.layout.is_some();
+        let has_layout = project.has_layout;
 
         v_flex()
             .child(
@@ -210,7 +208,7 @@ impl Sidebar {
 
                 // Show all terminals (minimized ones will be dimmed with different icon)
                 let terminal_elements: Vec<_> = minimized_states.iter().map(|(id, is_minimized)| {
-                    self.render_terminal_item(&project_id, id, project, *is_minimized, 28.0, "", cx).into_any_element()
+                    self.render_terminal_item(&project_id, id, &project.terminal_names, *is_minimized, 28.0, "", cx).into_any_element()
                 }).collect();
 
                 d.children(terminal_elements)
@@ -218,7 +216,7 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &ProjectData, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
@@ -231,11 +229,9 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_ids = project.layout.as_ref()
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default();
+        let terminal_ids = &project.terminal_ids;
         let terminal_count = terminal_ids.len();
-        let has_layout = project.layout.is_some();
+        let has_layout = project.has_layout;
 
         v_flex()
             .child(
@@ -363,7 +359,7 @@ impl Sidebar {
                 };
 
                 let terminal_elements: Vec<_> = minimized_states.iter().map(|(id, is_minimized)| {
-                    self.render_terminal_item(&project_id, id, project, *is_minimized, 48.0, "wt-", cx).into_any_element()
+                    self.render_terminal_item(&project_id, id, &project.terminal_names, *is_minimized, 48.0, "wt-", cx).into_any_element()
                 }).collect();
 
                 d.children(terminal_elements)
@@ -374,7 +370,7 @@ impl Sidebar {
         &self,
         project_id: &str,
         terminal_id: &str,
-        project: &ProjectData,
+        terminal_names: &HashMap<String, String>,
         is_minimized: bool,
         left_padding: f32,
         id_prefix: &str,
@@ -389,14 +385,14 @@ impl Sidebar {
         let (terminal_name, has_bell) = {
             let terminals = self.terminals.lock();
             if let Some(terminal) = terminals.get(terminal_id.as_str()) {
-                let name = if let Some(custom_name) = project.terminal_names.get(terminal_id.as_str()) {
+                let name = if let Some(custom_name) = terminal_names.get(terminal_id.as_str()) {
                     custom_name.clone()
                 } else {
                     terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
                 };
                 (name, terminal.has_bell())
             } else {
-                let name = project.terminal_names.get(terminal_id.as_str())
+                let name = terminal_names.get(terminal_id.as_str())
                     .cloned()
                     .unwrap_or_else(|| terminal_id.chars().take(8).collect());
                 (name, false)

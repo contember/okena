@@ -465,18 +465,47 @@ impl Sidebar {
     }
 }
 
+/// Lightweight projection of ProjectData for sidebar rendering.
+/// Avoids cloning the full LayoutNode tree, path, hidden_terminals, and hooks
+/// which are never used by the sidebar.
+pub(super) struct SidebarProjectInfo {
+    pub id: String,
+    pub name: String,
+    pub is_visible: bool,
+    pub folder_color: FolderColor,
+    pub has_layout: bool,
+    pub terminal_ids: Vec<String>,
+    pub terminal_names: HashMap<String, String>,
+}
+
+impl SidebarProjectInfo {
+    fn from_project(project: &ProjectData) -> Self {
+        Self {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            is_visible: project.is_visible,
+            folder_color: project.folder_color,
+            has_layout: project.layout.is_some(),
+            terminal_ids: project.layout.as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default(),
+            terminal_names: project.terminal_names.clone(),
+        }
+    }
+}
+
 /// An item in the sidebar's top-level ordering: either a project or a folder
 enum SidebarItem {
     Project {
-        project: ProjectData,
+        project: SidebarProjectInfo,
         index: usize,
-        worktree_children: Vec<ProjectData>,
+        worktree_children: Vec<SidebarProjectInfo>,
     },
     Folder {
         folder: FolderData,
         index: usize,
-        projects: Vec<ProjectData>,
-        worktree_children: HashMap<String, Vec<ProjectData>>,
+        projects: Vec<SidebarProjectInfo>,
+        worktree_children: HashMap<String, Vec<SidebarProjectInfo>>,
     },
 }
 
@@ -505,7 +534,7 @@ impl Render for Sidebar {
             .collect();
 
         // Build worktree children map (child project -> parent project)
-        let mut worktree_children_map: HashMap<String, Vec<ProjectData>> = HashMap::new();
+        let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
         let all_project_ids: HashSet<&str> = workspace.data.projects.iter().map(|p| p.id.as_str()).collect();
         for project in &workspace.data.projects {
             if let Some(ref wt_info) = project.worktree_info {
@@ -513,7 +542,7 @@ impl Render for Sidebar {
                     worktree_children_map
                         .entry(wt_info.parent_project_id.clone())
                         .or_default()
-                        .push(project.clone());
+                        .push(SidebarProjectInfo::from_project(project));
                 }
             }
         }
@@ -524,16 +553,17 @@ impl Render for Sidebar {
         for id in &workspace.data.project_order {
             // Check if this is a folder
             if let Some(folder) = workspace.data.folders.iter().find(|f| &f.id == id) {
-                let folder_projects: Vec<ProjectData> = folder.project_ids.iter()
-                    .filter_map(|pid| all_projects.get(pid.as_str()).map(|p| (*p).clone()))
+                let folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
+                    .filter_map(|pid| all_projects.get(pid.as_str()))
                     .filter(|p| p.worktree_info.is_none() || !all_project_ids.contains(
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
+                    .map(|p| SidebarProjectInfo::from_project(p))
                     .collect();
-                let mut folder_wt_children: HashMap<String, Vec<ProjectData>> = HashMap::new();
+                let mut folder_wt_children: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
                 for fp in &folder_projects {
-                    if let Some(children) = worktree_children_map.get(&fp.id) {
-                        folder_wt_children.insert(fp.id.clone(), children.clone());
+                    if let Some(children) = worktree_children_map.remove(&fp.id) {
+                        folder_wt_children.insert(fp.id.clone(), children);
                     }
                 }
                 items.push(SidebarItem::Folder {
@@ -554,9 +584,9 @@ impl Render for Sidebar {
                         continue;
                     }
                 }
-                let wt_children = worktree_children_map.get(&project.id).cloned().unwrap_or_default();
+                let wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
                 items.push(SidebarItem::Project {
-                    project: project.clone(),
+                    project: SidebarProjectInfo::from_project(project),
                     index: top_index,
                     worktree_children: wt_children,
                 });
