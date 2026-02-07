@@ -56,23 +56,37 @@ impl Okena {
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));
+        // Track last saved data_version to skip saves for UI-only changes
+        let last_saved_version = Arc::new(AtomicU64::new(0));
 
         // Set up debounced auto-save on workspace changes
         let save_pending_for_observer = save_pending.clone();
+        let last_saved_version_for_observer = last_saved_version.clone();
         let workspace_for_save = workspace.clone();
         cx.observe(&workspace, move |_this, _workspace, cx| {
+            // Check if persistent data actually changed
+            let current_version = _workspace.read(cx).data_version();
+            if current_version == last_saved_version_for_observer.load(Ordering::Relaxed) {
+                return; // UI-only change, skip save
+            }
+
             save_pending_for_observer.store(true, Ordering::Relaxed);
 
             let save_pending = save_pending_for_observer.clone();
+            let last_saved = last_saved_version_for_observer.clone();
             let workspace = workspace_for_save.clone();
             cx.spawn(async move |_, cx| {
                 smol::Timer::after(std::time::Duration::from_millis(500)).await;
 
                 if save_pending.swap(false, Ordering::Relaxed) {
-                    let data = cx.update(|cx| workspace.read(cx).data.clone());
+                    let (data, version) = cx.update(|cx| {
+                        let ws = workspace.read(cx);
+                        (ws.data.clone(), ws.data_version())
+                    });
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
                     }
+                    last_saved.store(version, Ordering::Relaxed);
                 }
             }).detach();
         })

@@ -37,7 +37,7 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
         self.data.project_order.push(id.clone());
-        cx.notify();
+        self.notify_data(cx);
 
         hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
     }
@@ -47,7 +47,7 @@ impl Workspace {
         if let Some(project) = self.project_mut(project_id) {
             if project.layout.is_none() {
                 project.layout = Some(LayoutNode::new_terminal());
-                cx.notify();
+                self.notify_data(cx);
             }
         }
     }
@@ -66,7 +66,7 @@ impl Workspace {
                 // Project has no layout - create one with a terminal
                 project.layout = Some(LayoutNode::new_terminal());
             }
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -113,7 +113,7 @@ impl Workspace {
                 self.fullscreen_terminal = None;
             }
         }
-        cx.notify();
+        self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
             hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
@@ -146,13 +146,13 @@ impl Workspace {
             let target = new_index.min(self.data.project_order.len());
             self.data.project_order.insert(target, project_id.to_string());
         }
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Update project column widths
     pub fn update_project_widths(&mut self, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
         self.data.project_widths = widths;
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Get project width or default equal distribution
@@ -232,7 +232,7 @@ impl Workspace {
         self.data.projects.push(project);
         self.data.project_order.insert(parent_index + 1, id.clone());
 
-        cx.notify();
+        self.notify_data(cx);
 
         hooks::fire_on_worktree_create(
             &new_project_hooks,

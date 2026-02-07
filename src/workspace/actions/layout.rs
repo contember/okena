@@ -96,7 +96,7 @@ impl Workspace {
                 if path.is_empty() {
                     // Closing root - remove layout entirely (project becomes bookmark)
                     project.layout = None;
-                    cx.notify();
+                    self.notify_data(cx);
                     return;
                 }
 
@@ -116,7 +116,7 @@ impl Workspace {
                                 // Just remove the child
                                 children.remove(child_index);
                             }
-                            cx.notify();
+                            self.notify_data(cx);
                         }
                         _ => {}
                     }
@@ -420,7 +420,7 @@ impl Workspace {
         // Remove any detached terminals from this project
         self.detached_terminals.retain(|d| d.project_id != project_id);
 
-        cx.notify();
+        self.notify_data(cx);
         terminal_ids
     }
 }

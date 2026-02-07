@@ -18,7 +18,7 @@ impl Workspace {
             folder_color: FolderColor::default(),
         });
         self.data.project_order.push(id.clone());
-        cx.notify();
+        self.notify_data(cx);
         id
     }
 
@@ -39,14 +39,14 @@ impl Workspace {
         }
 
         self.data.folders.retain(|f| f.id != folder_id);
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Rename a folder
     pub fn rename_folder(&mut self, folder_id: &str, new_name: String, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.name = new_name;
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -54,7 +54,7 @@ impl Workspace {
     pub fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.folder_color = color;
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -62,7 +62,7 @@ impl Workspace {
     pub fn toggle_folder_collapsed(&mut self, folder_id: &str, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder_mut(folder_id) {
             folder.collapsed = !folder.collapsed;
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -80,7 +80,7 @@ impl Workspace {
             let pos = position.unwrap_or(folder.project_ids.len());
             let pos = pos.min(folder.project_ids.len());
             folder.project_ids.insert(pos, project_id.to_string());
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -95,7 +95,7 @@ impl Workspace {
 
         let target = top_level_index.min(self.data.project_order.len());
         self.data.project_order.insert(target, project_id.to_string());
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Reorder a project within a folder
@@ -110,7 +110,7 @@ impl Workspace {
                 };
                 let target = target.min(folder.project_ids.len());
                 folder.project_ids.insert(target, id);
-                cx.notify();
+                self.notify_data(cx);
             }
         }
     }
@@ -126,7 +126,7 @@ impl Workspace {
             };
             let target = target.min(self.data.project_order.len());
             self.data.project_order.insert(target, id);
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 }

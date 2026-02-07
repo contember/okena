@@ -157,7 +157,7 @@ impl Workspace {
                     if let Some(node) = layout.get_at_path_mut(&path) {
                         if let LayoutNode::Terminal { minimized, .. } = node {
                             *minimized = !*minimized;
-                            cx.notify();
+                            self.notify_data(cx);
                         }
                     }
                 }
