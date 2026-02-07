@@ -154,6 +154,12 @@ pub enum SidebarRequest {
     RenameFolder { folder_id: String, folder_name: String },
 }
 
+/// Global workspace wrapper for app-wide access (used by quit handler)
+#[derive(Clone)]
+pub struct GlobalWorkspace(pub Entity<Workspace>);
+
+impl Global for GlobalWorkspace {}
+
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub(crate) data: WorkspaceData,

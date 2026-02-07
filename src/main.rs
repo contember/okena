@@ -29,12 +29,27 @@ use std::sync::Arc;
 use crate::app::Okena;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
+use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
+use crate::views::panels::status_bar::StatusMessages;
 use crate::workspace::persistence;
+use crate::workspace::state::GlobalWorkspace;
 
-/// Quit action handler
+/// Quit action handler - flushes pending saves before exiting
 fn quit(_: &Quit, cx: &mut App) {
+    // Flush pending settings save
+    if let Some(gs) = cx.try_global::<GlobalSettings>() {
+        gs.0.read(cx).flush_pending_save();
+    }
+
+    // Flush pending workspace save
+    if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
+        if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+            log::error!("Failed to flush workspace on quit: {}", e);
+        }
+    }
+
     cx.quit();
 }
 
@@ -99,6 +114,9 @@ fn main() {
 
         // Register keybindings
         keybindings::register_keybindings(cx);
+
+        // Initialize status messages for error notifications
+        cx.set_global(StatusMessages::new());
 
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);

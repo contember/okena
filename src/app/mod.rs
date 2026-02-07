@@ -8,11 +8,12 @@ use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
 use crate::settings::GlobalSettings;
+use crate::views::panels::status_bar::StatusMessages;
 use crate::updater::{GlobalUpdateInfo, UpdateInfo};
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
 use crate::workspace::persistence;
-use crate::workspace::state::{Workspace, WorkspaceData};
+use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use std::collections::HashSet;
@@ -49,6 +50,7 @@ impl Okena {
     ) -> Self {
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
+        cx.set_global(GlobalWorkspace(workspace.clone()));
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));
@@ -81,6 +83,9 @@ impl Okena {
                     });
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
+                        let _ = cx.update(|cx| {
+                            StatusMessages::post(format!("Failed to save workspace: {}", e), cx);
+                        });
                     }
                     last_saved.store(version, Ordering::Relaxed);
                 }

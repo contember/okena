@@ -5,6 +5,7 @@
 
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
+use crate::views::panels::status_bar::StatusMessages;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,6 +143,15 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Synchronously flush any pending settings save (called on quit)
+    pub fn flush_pending_save(&self) {
+        if self.save_pending.swap(false, Ordering::Relaxed) {
+            if let Err(e) = save_settings(&self.settings) {
+                log::error!("Failed to flush settings on quit: {}", e);
+            }
+        }
+    }
+
     /// Save and notify - common logic for all setters
     fn save_and_notify(&mut self, cx: &mut Context<Self>) {
         self.save_debounced(cx);
@@ -154,12 +164,15 @@ impl SettingsState {
         let save_pending = self.save_pending.clone();
         let settings = self.settings.clone();
 
-        cx.spawn(async move |_, _cx| {
+        cx.spawn(async move |_, cx| {
             smol::Timer::after(std::time::Duration::from_millis(300)).await;
 
             if save_pending.swap(false, Ordering::Relaxed) {
                 if let Err(e) = save_settings(&settings) {
                     log::error!("Failed to save settings: {}", e);
+                    let _ = cx.update(|cx| {
+                        StatusMessages::post(format!("Failed to save settings: {}", e), cx);
+                    });
                 }
             }
         })
