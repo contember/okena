@@ -516,7 +516,7 @@ impl Element for TerminalElement {
         let new_cols = ((available_width - 0.5) / cell_width_f).floor().max(1.0) as u16;
         let new_rows = ((available_height - 0.5) / line_height_f).floor().max(1.0) as u16;
 
-        let current_size = self.terminal.size.lock().clone();
+        let current_size = self.terminal.resize_state.lock().size;
         let cols_rows_changed = new_cols != current_size.cols || new_rows != current_size.rows;
         let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
             || (line_height_f - current_size.cell_height).abs() > 0.001;
@@ -534,9 +534,9 @@ impl Element for TerminalElement {
             // Only cell dimensions changed (e.g., zoom) - just update the size struct
             // This ensures hover detection uses the same cell_width as rendering
             // without triggering unnecessary grid/PTY resizes
-            let mut size = self.terminal.size.lock();
-            size.cell_width = cell_width_f;
-            size.cell_height = line_height_f;
+            let mut rs = self.terminal.resize_state.lock();
+            rs.size.cell_width = cell_width_f;
+            rs.size.cell_height = line_height_f;
         }
 
         // Paint background using theme color (different for focused vs unfocused)
