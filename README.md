@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app-icon-128.png" width="128" alt="Okena">
+  <img src=".github/assets/okena-icon.png" width="256" alt="Okena">
 </p>
 
 # Okena
