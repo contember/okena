@@ -1,3 +1,4 @@
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
 use crate::workspace::persistence::{config_dir, SessionInfo};
@@ -545,12 +546,11 @@ impl Render for SessionManager {
             .track_focus(&focus_handle)
             .key_context("SessionManager")
             .items_center()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    // Only close if not renaming (escape in rename input is handled there)
-                    if this.renaming_session.is_none() {
-                        this.close(cx);
-                    }
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                if this.renaming_session.is_some() {
+                    this.cancel_rename(cx);
+                } else {
+                    this.close(cx);
                 }
             }))
             .on_mouse_down(

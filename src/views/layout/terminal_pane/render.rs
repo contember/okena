@@ -6,8 +6,8 @@
 use crate::keybindings::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
     FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendTab,
-    SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
+    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
+    SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
 };
 use crate::settings::settings;
 use crate::theme::theme;
@@ -183,6 +183,11 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SendBacktab, _window, _cx| {
                 if let Some(ref terminal) = this.terminal {
                     terminal.send_bytes(b"\x1b[Z");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SendEscape, _window, _cx| {
+                if let Some(ref terminal) = this.terminal {
+                    terminal.send_bytes(b"\x1b");
                 }
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| {

@@ -17,6 +17,7 @@ mod sidebar;
 use categories::SettingsCategory;
 use components::opt_string;
 
+use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::terminal::shell_config::{available_shells, AvailableShell};
 use crate::theme::theme;
@@ -323,14 +324,12 @@ impl Render for SettingsPanel {
             .track_focus(&focus_handle)
             .key_context("SettingsPanel")
             .items_center()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    if this.has_open_dropdown() {
-                        this.close_all_dropdowns();
-                        cx.notify();
-                    } else {
-                        this.close(cx);
-                    }
+            .on_action(cx.listener(|this, _: &Cancel, _, cx| {
+                if this.has_open_dropdown() {
+                    this.close_all_dropdowns();
+                    cx.notify();
+                } else {
+                    this.close(cx);
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {

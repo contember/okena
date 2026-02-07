@@ -1,5 +1,5 @@
 use crate::keybindings::{
-    format_keystroke, get_action_descriptions, get_config,
+    format_keystroke, get_action_descriptions, get_config, Cancel,
     ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowSettings, OpenSettingsFile,
     ShowFileSearch, ShowDiffViewer, ToggleSidebar, ToggleSidebarAutoHide, ClearFocus,
     SplitVertical, SplitHorizontal, AddTab, CloseTerminal, MinimizeTerminal,
@@ -237,6 +237,9 @@ impl Render for CommandPalette {
         div()
             .track_focus(&focus_handle)
             .key_context("CommandPalette")
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),

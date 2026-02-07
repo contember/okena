@@ -1,5 +1,6 @@
 //! Folder list rendering for the sidebar
 
+use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use gpui::*;
@@ -168,11 +169,13 @@ impl Sidebar {
                                 .on_click(|_, _window, cx| {
                                     cx.stop_propagation();
                                 })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_folder_rename(cx);
+                                }))
                                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                                     cx.stop_propagation();
                                     match event.keystroke.key.as_str() {
                                         "enter" => this.finish_folder_rename(cx),
-                                        "escape" => this.cancel_folder_rename(cx),
                                         _ => {}
                                     }
                                 }))
@@ -435,11 +438,13 @@ impl Sidebar {
                                 .on_click(|_, _window, cx| {
                                     cx.stop_propagation();
                                 })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_project_rename(cx);
+                                }))
                                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                                     cx.stop_propagation();
                                     match event.keystroke.key.as_str() {
                                         "enter" => this.finish_project_rename(cx),
-                                        "escape" => this.cancel_project_rename(cx),
                                         _ => {}
                                     }
                                 }))

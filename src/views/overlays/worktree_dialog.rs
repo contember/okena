@@ -1,4 +1,5 @@
 use crate::git;
+use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, input_container};
 use crate::views::simple_input::{SimpleInput, SimpleInputState};
@@ -241,13 +242,13 @@ impl Render for WorktreeDialog {
             .id("worktree-dialog-backdrop")
             .track_focus(&focus_handle)
             .key_context("WorktreeDialog")
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let search_focused = this.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
 
                 match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.close(cx);
-                    }
                     "up" => {
                         if search_focused {
                             if let Some(idx) = this.selected_branch_index {

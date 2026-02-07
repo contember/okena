@@ -1,5 +1,6 @@
 //! Rendering logic for the file viewer overlay.
 
+use crate::keybindings::Cancel;
 use crate::theme::{theme, ThemeColors};
 use crate::ui::{Selection1DExtension, Selection2DExtension};
 use crate::views::components::{
@@ -289,24 +290,24 @@ impl Render for FileViewer {
             .track_focus(&focus_handle)
             .key_context("FileViewer")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                let is_preview = this.display_mode == DisplayMode::Preview;
+                if is_preview && this.markdown_selection.normalized_non_empty().is_some() {
+                    this.markdown_selection.clear();
+                    cx.notify();
+                } else if this.selection.normalized().is_some() {
+                    this.selection.clear();
+                    cx.notify();
+                } else {
+                    this.close(cx);
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
                 let is_preview = this.display_mode == DisplayMode::Preview;
 
                 match key {
-                    "escape" => {
-                        // Clear selection first, then close if no selection
-                        if is_preview && this.markdown_selection.normalized_non_empty().is_some() {
-                            this.markdown_selection.clear();
-                            cx.notify();
-                        } else if this.selection.normalized().is_some() {
-                            this.selection.clear();
-                            cx.notify();
-                        } else {
-                            this.close(cx);
-                        }
-                    }
                     "tab" if this.is_markdown => {
                         this.toggle_display_mode(cx);
                     }

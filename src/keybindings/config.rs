@@ -73,6 +73,22 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
 
     // Global actions
     map.insert(
+        "Cancel",
+        ActionDescription {
+            name: "Cancel",
+            description: "Close overlay, cancel rename, or dismiss",
+            category: "Global",
+        },
+    );
+    map.insert(
+        "SendEscape",
+        ActionDescription {
+            name: "Send Escape",
+            description: "Send escape key to terminal",
+            category: "Terminal",
+        },
+    );
+    map.insert(
         "ToggleSidebar",
         ActionDescription {
             name: "Toggle Sidebar",
