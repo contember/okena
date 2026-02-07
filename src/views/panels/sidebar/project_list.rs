@@ -1,6 +1,6 @@
 //! Project and terminal list rendering for the sidebar
 
-use crate::keybindings::Cancel;
+use crate::keybindings::{Cancel, MinimizeTerminal, ToggleFullscreen};
 use crate::theme::theme;
 use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use gpui::*;
@@ -768,7 +768,11 @@ impl Sidebar {
                             )
                             .tooltip({
                                 let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
-                                move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx)
+                                move |_window, cx| {
+                                    Tooltip::new(tooltip_text)
+                                        .action(&MinimizeTerminal as &dyn Action, None)
+                                        .build(_window, cx)
+                                }
                             }),
                     )
                     .child(
@@ -802,7 +806,11 @@ impl Sidebar {
                                     .size(px(12.0))
                                     .text_color(rgb(t.text_secondary))
                             )
-                            .tooltip(|_window, cx| Tooltip::new("Fullscreen").build(_window, cx)),
+                            .tooltip(|_window, cx| {
+                                Tooltip::new("Fullscreen")
+                                    .action(&ToggleFullscreen as &dyn Action, None)
+                                    .build(_window, cx)
+                            }),
                     ),
             )
     }
