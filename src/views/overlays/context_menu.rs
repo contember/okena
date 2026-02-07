@@ -121,19 +121,20 @@ impl Render for ContextMenu {
             .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
             }))
-            .child(
-                div()
-                    .absolute()
-                    .left(position.x)
-                    .top(position.y)
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(4.0))
-                    .shadow_xl()
-                    .min_w(px(160.0))
-                    .py(px(4.0))
-                    .id("project-context-menu")
+            .child(deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(
+                        div()
+                            .bg(rgb(t.bg_primary))
+                            .border_1()
+                            .border_color(rgb(t.border))
+                            .rounded(px(4.0))
+                            .shadow_xl()
+                            .min_w(px(160.0))
+                            .py(px(4.0))
+                            .id("project-context-menu")
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -203,7 +204,8 @@ impl Render for ContextMenu {
                                 this.delete_project(cx);
                             })),
                     ),
-            )
+                ),
+            ))
     }
 }
 
