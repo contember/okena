@@ -178,9 +178,10 @@ impl Render for RootView {
                 }
             }))
             // Global mouse up handler to end resize
-            .on_mouse_up(MouseButton::Left, cx.listener({
+            .on_mouse_up(MouseButton::Left, {
                 let active_drag = active_drag.clone();
-                move |this, _event, _window, _cx| {
+                let terminals = self.terminals.clone();
+                move |_event, _window, _cx| {
                     // Clear drag state
                     let was_dragging = active_drag.borrow().is_some();
                     *active_drag.borrow_mut() = None;
@@ -188,13 +189,13 @@ impl Render for RootView {
                     // Flush any pending terminal resizes when drag ends
                     // This ensures the final size is sent to the PTY
                     if was_dragging {
-                        let terminals_guard = this.terminals.lock();
+                        let terminals_guard = terminals.lock();
                         for terminal in terminals_guard.values() {
                             terminal.flush_pending_resize();
                         }
                     }
                 }
-            }))
+            })
             // Handle sidebar toggle action from title bar
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 this.toggle_sidebar(cx);
