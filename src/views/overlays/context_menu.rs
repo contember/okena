@@ -113,6 +113,7 @@ impl Render for ContextMenu {
             }))
             .absolute()
             .inset_0()
+            .occlude()
             .id("context-menu-backdrop")
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.close(cx);
