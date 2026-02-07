@@ -203,11 +203,13 @@ impl ResolvedBackend {
                 let socket_path = get_dtach_socket_path(session_name);
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
+                let parent = socket_path.parent().and_then(|p| p.to_str())?;
+                let socket = socket_path.to_str()?;
                 let dtach_cmd = format!(
                     "mkdir -p {} && cd {} && exec dtach -A {} -E -r winch {}",
-                    shell_escape(socket_path.parent().unwrap().to_str().unwrap()),
+                    shell_escape(parent),
                     shell_escape(cwd),
-                    shell_escape(socket_path.to_str().unwrap()),
+                    shell_escape(socket),
                     shell_escape(&shell)
                 );
                 Some(("sh".to_string(), vec!["-c".to_string(), dtach_cmd]))

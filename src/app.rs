@@ -472,7 +472,7 @@ impl Okena {
                                 fullscreen_terminal: fullscreen,
                             };
 
-                            CommandResult::Ok(Some(serde_json::to_value(resp).unwrap()))
+                            CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
                         })
                     }
                     RemoteCommand::SendText { terminal_id, text } => {

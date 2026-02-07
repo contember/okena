@@ -293,8 +293,8 @@ impl FileSearchDialog {
         // Consecutive matches bonus
         for w in positions.windows(2) {
             // Check if positions are adjacent in the original text
-            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0]).unwrap();
-            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1]).unwrap();
+            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
+            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
             if p1_text_idx == p0_text_idx + 1 {
                 score += 5;
             } else {
@@ -308,8 +308,7 @@ impl FileSearchDialog {
         for &pos in &positions {
             if pos == 0 {
                 score += 10;
-            } else {
-                let prev_char = text[..pos].chars().last().unwrap();
+            } else if let Some(prev_char) = text[..pos].chars().last() {
                 if word_separators.contains(&prev_char) {
                     score += 10;
                 }
@@ -521,7 +520,8 @@ impl Render for FileSearchDialog {
                         }
                     }
                     key if key.len() == 1 => {
-                        let ch = key.chars().next().unwrap();
+                        let Some(ch) = key.chars().next() else { return };
+
                         if SEARCH_CHARS.contains(ch) {
                             this.search_query.push(ch);
                             this.filter_files();
