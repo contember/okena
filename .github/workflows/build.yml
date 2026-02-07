@@ -141,7 +141,18 @@ jobs:
             fi
           done
 
-      - name: Update Homebrew cask
+      - name: Generate ContemberBot token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CONTEMBER_BOT_APP_ID }}
+          private-key: ${{ secrets.CONTEMBER_BOT_PRIVATE_KEY }}
+          owner: contember
+          repositories: homebrew-okena
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
 
@@ -149,20 +160,23 @@ jobs:
           ARM64_SHA=$(sha256sum okena-macos-arm64.zip | cut -d' ' -f1)
           X64_SHA=$(sha256sum okena-macos-x64.zip | cut -d' ' -f1)
 
+          # Clone the tap repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/contember/homebrew-okena.git /tmp/homebrew-okena
+
           # Update cask
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" Casks/okena.rb
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" Casks/okena.rb
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" Casks/okena.rb
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" /tmp/homebrew-okena/Casks/okena.rb
+          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" /tmp/homebrew-okena/Casks/okena.rb
+          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" /tmp/homebrew-okena/Casks/okena.rb
 
-          cat Casks/okena.rb
+          cat /tmp/homebrew-okena/Casks/okena.rb
 
-      - name: Commit cask update
-        run: |
+          # Commit and push
+          cd /tmp/homebrew-okena
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/okena.rb
-          git commit -m "chore: update homebrew cask for ${GITHUB_REF#refs/tags/}"
-          git push origin HEAD:main
+          git commit -m "chore: update cask to v${VERSION}"
+          git push origin main
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
