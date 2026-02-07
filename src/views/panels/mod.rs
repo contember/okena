@@ -8,7 +8,3 @@
 pub mod project_column;
 pub mod sidebar;
 pub mod status_bar;
-
-pub use project_column::ProjectColumn;
-pub use sidebar::Sidebar;
-pub use status_bar::StatusBar;

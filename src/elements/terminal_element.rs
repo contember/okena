@@ -1,13 +1,14 @@
 use crate::settings::settings;
 use crate::terminal::terminal::Terminal;
-use crate::theme::{theme, ThemeColors};
+use crate::theme::theme;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::grid::Dimensions;
 use gpui::*;
-use std::ops::Range;
 use std::sync::Arc;
+
+use super::terminal_input::TerminalInputHandler;
+use super::terminal_rendering::{BatchedTextRun, LayoutRect, is_default_bg};
 
 /// A search match in the terminal grid
 #[derive(Clone, Debug)]
@@ -49,130 +50,6 @@ pub struct TerminalElement {
     hovered_url_index: Option<usize>,
     cursor_visible: bool,
     zoom_level: f32,
-}
-
-/// ASCII DEL character - what terminals expect for backspace
-const DEL: u8 = 0x7f;
-
-/// macOS function key character range (U+F700-U+F8FF)
-/// GPUI sends these for arrow keys, function keys, etc.
-/// but we handle those separately via on_key_down -> key_to_bytes
-const MACOS_FUNCTION_KEY_RANGE: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
-
-/// Input handler for terminal text input
-struct TerminalInputHandler {
-    terminal: Arc<Terminal>,
-}
-
-impl TerminalInputHandler {
-    /// Send text input to terminal, filtering macOS function keys and handling control characters
-    fn send_filtered_input(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-
-        // Filter out macOS function key characters
-        let filtered: String = text
-            .chars()
-            .filter(|&c| !MACOS_FUNCTION_KEY_RANGE.contains(&c))
-            .collect();
-
-        if filtered.is_empty() {
-            return;
-        }
-
-        // Fast path: no control characters, send entire string at once
-        if !filtered.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}')) {
-            self.terminal.send_input(&filtered);
-            return;
-        }
-
-        // Slow path: handle control characters individually
-        for c in filtered.chars() {
-            match c {
-                '\u{8}' => self.terminal.send_bytes(&[DEL]),
-                '\n' | '\r' => self.terminal.send_bytes(&[b'\r']),
-                _ => {
-                    let mut buf = [0u8; 4];
-                    let s = c.encode_utf8(&mut buf);
-                    self.terminal.send_input(s);
-                }
-            }
-        }
-    }
-}
-
-impl InputHandler for TerminalInputHandler {
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<UTF16Selection> {
-        Some(UTF16Selection {
-            range: 0..0,
-            reversed: false,
-        })
-    }
-
-    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Range<usize>> {
-        None
-    }
-
-    fn text_for_range(
-        &mut self,
-        _range: Range<usize>,
-        _adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<String> {
-        None
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        _replacement_range: Option<Range<usize>>,
-        text: &str,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) {
-        self.send_filtered_input(text);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        _range_utf16: Option<Range<usize>>,
-        new_text: &str,
-        _new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) {
-        self.send_filtered_input(new_text);
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {}
-
-    fn bounds_for_range(
-        &mut self,
-        _range_utf16: Range<usize>,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<Bounds<Pixels>> {
-        None
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        _point: gpui::Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<usize> {
-        None
-    }
-
-    fn accepts_text_input(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
-        true
-    }
 }
 
 impl TerminalElement {
@@ -225,127 +102,6 @@ impl IntoElement for TerminalElement {
 
     fn into_element(self) -> Self::Element {
         self
-    }
-}
-
-/// A batched text run that combines multiple adjacent cells with the same style (like Zed)
-#[derive(Debug)]
-struct BatchedTextRun {
-    start_line: i32,
-    start_col: i32,
-    text: String,
-    cell_count: usize,
-    style: TextRun,
-}
-
-impl BatchedTextRun {
-    fn new(start_line: i32, start_col: i32, c: char, style: TextRun) -> Self {
-        let mut text = String::with_capacity(100);
-        text.push(c);
-        BatchedTextRun {
-            start_line,
-            start_col,
-            text,
-            cell_count: 1,
-            style,
-        }
-    }
-
-    fn can_append(&self, other_style: &TextRun, line: i32, col: i32) -> bool {
-        self.start_line == line
-            && self.start_col + self.cell_count as i32 == col
-            && self.style.font == other_style.font
-            && self.style.color == other_style.color
-            && self.style.background_color == other_style.background_color
-            && self.style.underline == other_style.underline
-            && self.style.strikethrough == other_style.strikethrough
-    }
-
-    fn append_char(&mut self, c: char) {
-        self.text.push(c);
-        self.cell_count += 1;
-        self.style.len += c.len_utf8();
-    }
-
-    fn paint(
-        &self,
-        origin: Point<Pixels>,
-        cell_width: Pixels,
-        line_height: Pixels,
-        font_size: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let pos = Point::new(
-            origin.x + self.start_col as f32 * cell_width,
-            origin.y + self.start_line as f32 * line_height,
-        );
-
-        // Create style for the entire text run
-        let run_style = TextRun {
-            len: self.text.len(),
-            font: self.style.font.clone(),
-            color: self.style.color,
-            background_color: self.style.background_color,
-            underline: self.style.underline.clone(),
-            strikethrough: self.style.strikethrough.clone(),
-        };
-
-        // Shape and paint entire run at once, passing cell_width for fixed-width spacing
-        // This is how Zed does it - allows proper glyph caching while maintaining grid alignment
-        let _ = window
-            .text_system()
-            .shape_line(
-                self.text.clone().into(),
-                font_size,
-                &[run_style],
-                Some(cell_width),
-            )
-            .paint(
-                pos,
-                line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-    }
-}
-
-/// A layout rectangle for background colors (like Zed)
-#[derive(Clone, Debug)]
-struct LayoutRect {
-    line: i32,
-    start_col: i32,
-    num_cells: usize,
-    color: Hsla,
-}
-
-impl LayoutRect {
-    fn new(line: i32, col: i32, color: Hsla) -> Self {
-        LayoutRect {
-            line,
-            start_col: col,
-            num_cells: 1,
-            color,
-        }
-    }
-
-    fn extend(&mut self) {
-        self.num_cells += 1;
-    }
-
-    fn paint(&self, origin: Point<Pixels>, cell_width: Pixels, line_height: Pixels, window: &mut Window) {
-        let position = point(
-            px((f32::from(origin.x) + self.start_col as f32 * f32::from(cell_width)).floor()),
-            origin.y + line_height * self.line as f32,
-        );
-        let size = size(
-            px((f32::from(cell_width) * self.num_cells as f32).ceil()),
-            line_height,
-        );
-
-        window.paint_quad(fill(Bounds::new(position, size), self.color));
     }
 }
 
@@ -846,21 +602,5 @@ impl Element for TerminalElement {
                 }
             }
         });
-    }
-}
-
-/// Check if a color is the default background (should be transparent)
-fn is_default_bg(color: &Color, t: &ThemeColors) -> bool {
-    match color {
-        Color::Named(NamedColor::Background) => true,
-        Color::Indexed(idx) if *idx == 0 => false, // Black is not default bg
-        Color::Spec(rgb_color) => {
-            // Check if it matches the theme's terminal background
-            let bg_r = ((t.term_background >> 16) & 0xFF) as u8;
-            let bg_g = ((t.term_background >> 8) & 0xFF) as u8;
-            let bg_b = (t.term_background & 0xFF) as u8;
-            rgb_color.r == bg_r && rgb_color.g == bg_g && rgb_color.b == bg_b
-        }
-        _ => false,
     }
 }

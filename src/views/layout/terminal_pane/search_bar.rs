@@ -6,7 +6,7 @@ use crate::elements::terminal_element::SearchMatch;
 use crate::keybindings::CloseSearch;
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
-use crate::views::simple_input::{SimpleInput, SimpleInputState};
+use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;

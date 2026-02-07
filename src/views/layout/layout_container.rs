@@ -9,8 +9,8 @@
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
-use crate::views::split_pane::{ActiveDrag, render_split_divider};
-use crate::views::terminal_pane::TerminalPane;
+use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
+use crate::views::layout::terminal_pane::TerminalPane;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::*;

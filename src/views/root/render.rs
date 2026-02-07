@@ -1,8 +1,8 @@
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate};
 use crate::settings::open_settings_file;
 use crate::theme::theme;
-use crate::views::navigation::clear_pane_map;
-use crate::views::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::views::layout::navigation::clear_pane_map;
+use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use gpui::*;
 use gpui::prelude::*;
 use std::cell::RefCell;
