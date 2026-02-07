@@ -177,25 +177,32 @@ impl Render for RootView {
                     }
                 }
             }))
-            // Global mouse up handler to end resize
-            .on_mouse_up(MouseButton::Left, {
-                let active_drag = active_drag.clone();
-                let terminals = self.terminals.clone();
-                move |_event, _window, _cx| {
-                    // Clear drag state
-                    let was_dragging = active_drag.borrow().is_some();
-                    *active_drag.borrow_mut() = None;
+            // Global mouse up handler to end resize (registered via window event
+            // to reliably fire regardless of which child element the cursor is over)
+            .child(canvas(
+                |_bounds, _window, _cx| {},
+                {
+                    let active_drag = active_drag.clone();
+                    let terminals = self.terminals.clone();
+                    move |_bounds, _prepaint, window, _cx| {
+                        let active_drag = active_drag.clone();
+                        let terminals = terminals.clone();
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, _window, _cx| {
+                            if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                                let was_dragging = active_drag.borrow().is_some();
+                                *active_drag.borrow_mut() = None;
 
-                    // Flush any pending terminal resizes when drag ends
-                    // This ensures the final size is sent to the PTY
-                    if was_dragging {
-                        let terminals_guard = terminals.lock();
-                        for terminal in terminals_guard.values() {
-                            terminal.flush_pending_resize();
-                        }
+                                if was_dragging {
+                                    let terminals_guard = terminals.lock();
+                                    for terminal in terminals_guard.values() {
+                                        terminal.flush_pending_resize();
+                                    }
+                                }
+                            }
+                        });
                     }
-                }
-            })
+                },
+            ).absolute().size_full())
             // Handle sidebar toggle action from title bar
             .on_action(cx.listener(|this, _: &ToggleSidebar, _window, cx| {
                 this.toggle_sidebar(cx);
