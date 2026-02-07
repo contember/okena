@@ -129,6 +129,10 @@ rm -rf "$ICONSET_DIR"
 # Create PkgInfo
 echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
+echo "==> Ad-hoc code signing..."
+codesign --force --sign - "$MACOS_DIR/okena"
+codesign --force --sign - "$APP_BUNDLE"
+
 echo "==> App bundle created at: $APP_BUNDLE"
 
 # Create DMG if requested
