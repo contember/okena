@@ -242,21 +242,9 @@ impl Sidebar {
     ) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
-        let workspace_for_focus = self.workspace.clone();
-        let workspace_for_drop = self.workspace.clone();
-        let workspace_for_drop_out = self.workspace.clone();
         let project_id = project.id.clone();
-        let project_id_for_focus = project.id.clone();
-        let project_id_for_toggle = project.id.clone();
-        let project_id_for_visibility = project.id.clone();
-        let project_id_for_rename = project.id.clone();
-        let project_id_for_context_menu = project.id.clone();
-        let project_id_for_drag = project.id.clone();
         let project_name = project.name.clone();
-        let project_name_for_rename = project.name.clone();
-        let project_name_for_drag = project.name.clone();
         let folder_id = folder_id.to_string();
-        let folder_id_for_drop = folder_id.clone();
 
         let is_focused = {
             let ws = self.workspace.read(cx);
@@ -286,7 +274,7 @@ impl Sidebar {
                 .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
                 .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
                 // Drag source
-                .on_drag(super::ProjectDrag { project_id: project_id_for_drag.clone(), project_name: project_name_for_drag.clone() }, move |drag, _position, _window, cx| {
+                .on_drag(super::ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                     cx.new(|_| super::ProjectDragView { name: drag.project_name.clone() })
                 })
                 // Drop target for reordering within folder
@@ -294,16 +282,14 @@ impl Sidebar {
                     style.border_t_2().border_color(rgb(t.border_active))
                 })
                 .on_drop(cx.listener({
-                    let folder_id = folder_id_for_drop.clone();
-                    let workspace = workspace_for_drop.clone();
-                    let project_id = project_id_for_drag.clone();
-                    move |_this, drag: &super::ProjectDrag, _window, cx| {
+                    let folder_id = folder_id.clone();
+                    let project_id = project_id.clone();
+                    move |this, drag: &super::ProjectDrag, _window, cx| {
                         if drag.project_id != project_id {
-                            // Find position of this project in the folder
-                            let pos = workspace.read(cx).folder(&folder_id)
+                            let pos = this.workspace.read(cx).folder(&folder_id)
                                 .and_then(|f| f.project_ids.iter().position(|id| id == &project_id));
                             if let Some(pos) = pos {
-                                workspace.update(cx, |ws, cx| {
+                                this.workspace.update(cx, |ws, cx| {
                                     ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
                                 });
                             }
@@ -314,17 +300,13 @@ impl Sidebar {
                 .drag_over::<super::FolderDrag>(move |style, _, _, _| {
                     style.border_t_2().border_color(rgb(t.border_active))
                 })
-                .on_drop(cx.listener({
-                    let workspace = workspace_for_drop_out;
-                    move |_this, drag: &super::FolderDrag, _window, cx| {
-                        // Reorder folder in project_order (no-op if same position)
-                        workspace.update(cx, |ws, cx| {
-                            ws.move_item_in_order(&drag.folder_id, 0, cx);
-                        });
-                    }
+                .on_drop(cx.listener(move |this, drag: &super::FolderDrag, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.move_item_in_order(&drag.folder_id, 0, cx);
+                    });
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener({
-                    let project_id = project_id_for_context_menu.clone();
+                    let project_id = project_id.clone();
                     move |this, event: &MouseDownEvent, _window, cx| {
                         this.request_context_menu(project_id.clone(), event.position, cx);
                         cx.stop_propagation();
@@ -336,15 +318,18 @@ impl Sidebar {
                         is_expanded,
                         &t,
                     )
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_expanded(&project_id_for_toggle);
-                        cx.notify();
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.toggle_expanded(&project_id);
+                            cx.notify();
+                        }
                     })),
                 )
                 .child({
                     // Project color dot
                     let folder_color = t.get_folder_color(project.folder_color);
-                    let project_id_for_color = project.id.clone();
+                    let project_id = project.id.clone();
                     sidebar_color_indicator(
                         ElementId::Name(format!("fp-folder-icon-{}", project.id).into()),
                         div()
@@ -355,7 +340,7 @@ impl Sidebar {
                             .bg(rgb(folder_color)),
                     )
                     .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                        this.show_color_picker(project_id_for_color.clone(), cx);
+                        this.show_color_picker(project_id.clone(), cx);
                         cx.stop_propagation();
                     }))
                 })
@@ -381,19 +366,18 @@ impl Sidebar {
                     } else {
                         sidebar_name_label(
                             ElementId::Name(format!("fp-project-name-{}", project.id).into()),
-                            project_name,
+                            project_name.clone(),
                             &t,
                         )
                         .on_click(cx.listener({
-                            let project_id = project_id_for_rename;
-                            let project_id_for_focus = project_id_for_focus.clone();
-                            let name = project_name_for_rename;
+                            let project_id = project_id.clone();
+                            let project_name = project_name.clone();
                             move |this, _event: &ClickEvent, window, cx| {
                                 if this.check_project_double_click(&project_id) {
-                                    this.start_project_rename(project_id.clone(), name.clone(), window, cx);
+                                    this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                                 } else {
-                                    workspace_for_focus.update(cx, |ws, cx| {
-                                        ws.set_focused_project(Some(project_id_for_focus.clone()), cx);
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.set_focused_project(Some(project_id.clone()), cx);
                                     });
                                 }
                                 cx.stop_propagation();
@@ -405,7 +389,6 @@ impl Sidebar {
                 .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
                 .child(
                     {
-                        let workspace = self.workspace.clone();
                         let is_visible = project.is_visible;
                         let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
                         sidebar_visibility_toggle(
@@ -413,11 +396,14 @@ impl Sidebar {
                             is_visible,
                             &t,
                         )
-                        .on_click(move |_, _window, cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.toggle_project_visibility(&project_id_for_visibility, cx);
-                            });
-                        })
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.toggle_project_visibility(&project_id, cx);
+                                });
+                            }
+                        }))
                         .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
                     },
                 ),
