@@ -7,6 +7,7 @@ mod assets;
 mod elements;
 mod git;
 mod keybindings;
+mod process;
 mod remote;
 mod settings;
 #[cfg(target_os = "linux")]

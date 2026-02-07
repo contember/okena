@@ -19,12 +19,12 @@ fn resolve_hook(
 fn run_hook(command: String, env_vars: HashMap<String, String>) {
     std::thread::spawn(move || {
         #[cfg(unix)]
-        let mut cmd = std::process::Command::new("sh");
+        let mut cmd = crate::process::command("sh");
         #[cfg(unix)]
         cmd.arg("-c").arg(&command);
 
         #[cfg(windows)]
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = crate::process::command("cmd");
         #[cfg(windows)]
         cmd.arg("/C").arg(&command);
 

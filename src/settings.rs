@@ -201,7 +201,7 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
+        let _ = crate::process::command("open")
             .arg("-t")
             .arg(&path)
             .spawn();
@@ -209,14 +209,14 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open")
+        let _ = crate::process::command("xdg-open")
             .arg(&path)
             .spawn();
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("notepad")
+        let _ = crate::process::command("notepad")
             .arg(&path)
             .spawn();
     }

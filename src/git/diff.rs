@@ -4,7 +4,8 @@
 //! and executing git diff commands.
 
 use std::path::Path;
-use std::process::Command;
+
+use crate::process::command;
 
 /// Type of a diff line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,7 +341,7 @@ pub fn get_diff_with_options(
         args.push("-w");
     }
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
@@ -376,7 +377,7 @@ fn get_untracked_files(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
         .output()
         .ok();
@@ -463,7 +464,7 @@ pub fn is_git_repo(path: &Path) -> bool {
         None => return false,
     };
 
-    Command::new("git")
+    command("git")
         .args(["-C", path_str, "rev-parse", "--is-inside-work-tree"])
         .output()
         .map(|o| o.status.success())
@@ -484,7 +485,7 @@ pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> O
         format!("{}:{}", revision, file_path)
     };
 
-    let output = Command::new("git")
+    let output = command("git")
         .args(["-C", repo_str, "show", &object])
         .output()
         .ok()?;
