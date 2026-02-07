@@ -76,7 +76,9 @@ impl RootView {
 
         // Observe Workspace to process overlay requests outside of render()
         cx.observe(&workspace, |this, _workspace, cx| {
-            this.process_pending_requests(cx);
+            if !this.workspace.read(cx).overlay_requests.is_empty() {
+                this.process_pending_requests(cx);
+            }
         }).detach();
 
         // Create focus handle for global keybindings
