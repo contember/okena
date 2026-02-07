@@ -189,9 +189,9 @@ impl Sidebar {
                             .rounded(px(3.0))
                             .opacity(0.0)
                             .hover(|s| s.bg(rgb(t.bg_hover)).opacity(1.0))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                                 cx.stop_propagation();
-                            })
+                            }))
                             .on_click(cx.listener({
                                 let folder_id = folder_id.clone();
                                 move |this, _, _window, cx| {

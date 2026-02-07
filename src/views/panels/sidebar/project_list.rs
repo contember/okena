@@ -500,9 +500,9 @@ impl Sidebar {
                         terminal_name.clone(),
                         &t,
                     )
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                             cx.stop_propagation();
-                        })
+                        }))
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             let terminal_id = terminal_id.clone();
@@ -541,9 +541,9 @@ impl Sidebar {
                             .justify_center()
                             .rounded(px(3.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                                 cx.stop_propagation();
-                            })
+                            }))
                             .on_click(cx.listener({
                                 let project_id = project_id.clone();
                                 let terminal_id = terminal_id.clone();
@@ -581,9 +581,9 @@ impl Sidebar {
                             .justify_center()
                             .rounded(px(3.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                                 cx.stop_propagation();
-                            })
+                            }))
                             .on_click(cx.listener({
                                 let project_id = project_id.clone();
                                 let terminal_id = terminal_id.clone();
