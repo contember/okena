@@ -1,3 +1,4 @@
+use crate::remote_client::config::RemoteConnectionConfig;
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::ThemeMode;
@@ -155,6 +156,10 @@ pub struct AppSettings {
     /// Enable automatic update checking (default: true)
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
+
+    /// Saved remote connections for the client feature
+    #[serde(default)]
+    pub remote_connections: Vec<RemoteConnectionConfig>,
 }
 
 impl Default for AppSettings {
@@ -181,6 +186,7 @@ impl Default for AppSettings {
             remote_server_enabled: false,
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            remote_connections: Vec::new(),
         }
     }
 }

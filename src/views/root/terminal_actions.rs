@@ -40,7 +40,7 @@ impl RootView {
 
         // Spawn a terminal for each empty slot
         for path in terminal_paths {
-            match self.pty_manager.create_terminal_with_shell(&project_path, Some(&shell)) {
+            match self.backend.create_terminal(&project_path, Some(&shell)) {
                 Ok(terminal_id) => {
                     log::info!("Spawned terminal {} for worktree at path {:?}", terminal_id, path);
 
@@ -54,7 +54,7 @@ impl RootView {
                     let terminal = std::sync::Arc::new(Terminal::new(
                         terminal_id.clone(),
                         size,
-                        self.pty_manager.clone(),
+                        self.backend.transport(),
                         project_path.clone(),
                     ));
                     self.terminals.lock().insert(terminal_id, terminal);
@@ -106,7 +106,7 @@ impl RootView {
         }
 
         // Kill the old terminal
-        self.pty_manager.kill(old_terminal_id);
+        self.backend.kill(old_terminal_id);
         self.terminals.lock().remove(old_terminal_id);
 
         // Update shell type in workspace state
@@ -122,7 +122,7 @@ impl RootView {
         };
 
         // Create new terminal with the new shell
-        match self.pty_manager.create_terminal_with_shell(&project_path, Some(&actual_shell)) {
+        match self.backend.create_terminal(&project_path, Some(&actual_shell)) {
             Ok(new_terminal_id) => {
                 log::info!("switch_terminal_shell: Switched to {:?}, new terminal_id: {}", actual_shell, new_terminal_id);
 
@@ -136,7 +136,7 @@ impl RootView {
                 let terminal = Arc::new(Terminal::new(
                     new_terminal_id.clone(),
                     size,
-                    self.pty_manager.clone(),
+                    self.backend.transport(),
                     project_path.clone(),
                 ));
                 self.terminals.lock().insert(new_terminal_id, terminal);

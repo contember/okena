@@ -30,6 +30,8 @@ pub mod settings_panel;
 pub mod shell_selector_overlay;
 mod terminal_overlay_utils;
 pub mod theme_selector;
+pub mod remote_connect_dialog;
+pub mod remote_context_menu;
 pub mod worktree_dialog;
 
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};

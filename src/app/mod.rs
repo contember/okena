@@ -7,6 +7,7 @@ use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::GlobalSettings;
 use crate::views::panels::status_bar::StatusMessages;
 use crate::updater::{GlobalUpdateInfo, UpdateInfo};
@@ -108,6 +109,18 @@ impl Okena {
 
         // Get terminals registry from root view
         let terminals = root_view.read(cx).terminals().clone();
+
+        // Create remote connection manager and wire to root view
+        let remote_manager = cx.new(|cx| {
+            RemoteConnectionManager::new(terminals.clone(), cx)
+        });
+        root_view.update(cx, |rv, cx| {
+            rv.set_remote_manager(remote_manager.clone(), cx);
+        });
+        // Auto-connect to saved connections with valid tokens
+        remote_manager.update(cx, |rm, cx| {
+            rm.auto_connect_all(cx);
+        });
 
         // Observe window bounds changes to force re-render
         cx.observe_window_bounds(window, |_this, _window, cx| {

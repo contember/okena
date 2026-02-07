@@ -46,6 +46,9 @@ pub async fn post_actions(
         ActionRequest::ReadContent { terminal_id } => {
             RemoteCommand::ReadContent { terminal_id }
         }
+        ActionRequest::Resize { terminal_id, cols, rows } => {
+            RemoteCommand::Resize { terminal_id, cols, rows }
+        }
     };
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

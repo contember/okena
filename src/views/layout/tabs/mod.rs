@@ -134,8 +134,8 @@ impl LayoutContainer {
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
         // Check if buffer capture is supported
-        let supports_buffer_capture = self.pty_manager.supports_buffer_capture();
-        let pty_manager_for_export = self.pty_manager.clone();
+        let supports_buffer_capture = self.backend.supports_buffer_capture();
+        let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id;
 
@@ -202,7 +202,7 @@ impl LayoutContainer {
                     header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
                         .on_click(move |_, _window, cx| {
                             if let Some(ref tid) = terminal_id_for_export {
-                                if let Some(path) = pty_manager_for_export.capture_buffer(tid) {
+                                if let Some(path) = backend_for_export.capture_buffer(tid) {
                                     cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
                                     log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
                                 }
@@ -266,7 +266,7 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
@@ -560,7 +560,7 @@ impl LayoutContainer {
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),
-                                    self.pty_manager.clone(),
+                                    self.backend.clone(),
                                     self.terminals.clone(),
                                     self.active_drag.clone(),
                                 )

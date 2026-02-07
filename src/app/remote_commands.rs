@@ -134,6 +134,26 @@ impl Okena {
                             None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
                         }
                     }
+                    RemoteCommand::Resize { terminal_id, cols, rows } => {
+                        let found = {
+                            let guard = terminals.lock();
+                            guard.get(&terminal_id).cloned()
+                        };
+                        match found {
+                            Some(term) => {
+                                use crate::terminal::terminal::TerminalSize;
+                                let size = TerminalSize {
+                                    cols,
+                                    rows,
+                                    cell_width: 8.0,
+                                    cell_height: 16.0,
+                                };
+                                term.resize(size);
+                                CommandResult::Ok(None)
+                            }
+                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                        }
+                    }
                     RemoteCommand::SplitTerminal { project_id, path, direction } => {
                         cx.update(|cx| {
                             workspace.update(cx, |ws, cx| {

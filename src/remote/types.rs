@@ -13,7 +13,7 @@ pub struct HealthResponse {
 }
 
 /// GET /v1/state response
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StateResponse {
     pub state_version: u64,
     pub projects: Vec<ApiProject>,
@@ -21,7 +21,7 @@ pub struct StateResponse {
     pub fullscreen_terminal: Option<ApiFullscreen>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
     pub name: String,
@@ -31,7 +31,7 @@ pub struct ApiProject {
     pub terminal_names: std::collections::HashMap<String, String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ApiLayoutNode {
     Terminal {
@@ -50,7 +50,7 @@ pub enum ApiLayoutNode {
     },
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ApiFullscreen {
     pub project_id: String,
     pub terminal_id: String,
@@ -87,6 +87,11 @@ pub enum ActionRequest {
     },
     ReadContent {
         terminal_id: String,
+    },
+    Resize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -134,6 +139,11 @@ pub enum WsInbound {
         terminal_id: String,
         key: SpecialKey,
     },
+    Resize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
     Ping,
 }
 
@@ -163,6 +173,33 @@ pub enum WsOutbound {
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
 impl ApiLayoutNode {
+    pub fn to_layout_node(&self) -> crate::workspace::state::LayoutNode {
+        match self {
+            ApiLayoutNode::Terminal { terminal_id, minimized, detached } => {
+                crate::workspace::state::LayoutNode::Terminal {
+                    terminal_id: terminal_id.clone(),
+                    minimized: *minimized,
+                    detached: *detached,
+                    shell_type: Default::default(),
+                    zoom_level: 1.0,
+                }
+            }
+            ApiLayoutNode::Split { direction, sizes, children } => {
+                crate::workspace::state::LayoutNode::Split {
+                    direction: *direction,
+                    sizes: sizes.clone(),
+                    children: children.iter().map(|c| c.to_layout_node()).collect(),
+                }
+            }
+            ApiLayoutNode::Tabs { children, active_tab } => {
+                crate::workspace::state::LayoutNode::Tabs {
+                    children: children.iter().map(|c| c.to_layout_node()).collect(),
+                    active_tab: *active_tab,
+                }
+            }
+        }
+    }
+
     pub fn from_layout(node: &crate::workspace::state::LayoutNode) -> Self {
         match node {
             crate::workspace::state::LayoutNode::Terminal {

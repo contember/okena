@@ -507,6 +507,20 @@ impl PtyManager {
     }
 }
 
+impl crate::terminal::terminal::TerminalTransport for PtyManager {
+    fn send_input(&self, terminal_id: &str, data: &[u8]) {
+        self.send_input(terminal_id, data)
+    }
+
+    fn resize(&self, terminal_id: &str, cols: u16, rows: u16) {
+        self.resize(terminal_id, cols, rows)
+    }
+
+    fn uses_mouse_backend(&self) -> bool {
+        self.uses_mouse_backend()
+    }
+}
+
 impl Drop for PtyManager {
     fn drop(&mut self) {
         // On drop, just detach - don't kill sessions

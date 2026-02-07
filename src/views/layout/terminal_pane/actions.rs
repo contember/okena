@@ -23,7 +23,7 @@ impl TerminalPane {
 
     pub(super) fn handle_close(&mut self, cx: &mut Context<Self>) {
         if let Some(ref id) = self.terminal_id {
-            self.pty_manager.kill(id);
+            self.backend.kill(id);
         }
 
         let layout_path = self.layout_path.clone();
@@ -57,7 +57,7 @@ impl TerminalPane {
 
     pub(super) fn handle_export_buffer(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal_id) = self.terminal_id {
-            if let Some(path) = self.pty_manager.capture_buffer(terminal_id) {
+            if let Some(path) = self.backend.capture_buffer(terminal_id) {
                 cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
             }
         }

@@ -52,6 +52,8 @@ pub struct TerminalHeader {
     click_detector: ClickDetector<()>,
     /// Whether PTY manager supports buffer capture
     supports_export: bool,
+    /// Whether this terminal is remote (hides local-only controls)
+    is_remote: bool,
     /// Unique ID suffix
     id_suffix: String,
 }
@@ -63,6 +65,7 @@ impl TerminalHeader {
         terminal_id: Option<String>,
         shell_type: ShellType,
         supports_export: bool,
+        is_remote: bool,
         id_suffix: String,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -88,6 +91,7 @@ impl TerminalHeader {
             rename_state: None,
             click_detector: ClickDetector::new(),
             supports_export,
+            is_remote,
             id_suffix,
         }
     }
@@ -171,6 +175,7 @@ impl TerminalHeader {
         let t = theme(cx);
         let id = &self.id_suffix;
         let supports_export = self.supports_export;
+        let is_remote = self.is_remote;
 
         div()
             .flex()
@@ -222,13 +227,15 @@ impl TerminalHeader {
                         cx.emit(HeaderEvent::Fullscreen);
                     })),
             )
-            .child(
-                header_button_base(HeaderAction::Detach, id, ButtonSize::REGULAR, &t, None)
-                    .on_click(cx.listener(|_this, _, _window, cx| {
-                        cx.stop_propagation();
-                        cx.emit(HeaderEvent::Detach);
-                    })),
-            )
+            .when(!is_remote, |el| {
+                el.child(
+                    header_button_base(HeaderAction::Detach, id, ButtonSize::REGULAR, &t, None)
+                        .on_click(cx.listener(|_this, _, _window, cx| {
+                            cx.stop_propagation();
+                            cx.emit(HeaderEvent::Detach);
+                        })),
+                )
+            })
             .child(
                 header_button_base(HeaderAction::Close, id, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|_this, _, _window, cx| {
@@ -326,7 +333,7 @@ impl Render for TerminalHeader {
                                 .into_any_element()
                         },
                     )
-                    .when(settings(cx).show_shell_selector, |el| {
+                    .when(settings(cx).show_shell_selector && !self.is_remote, |el| {
                         el.child(
                             div()
                                 .opacity(0.0)

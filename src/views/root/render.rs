@@ -3,6 +3,7 @@ use crate::settings::open_settings_file;
 use crate::theme::theme;
 use crate::views::layout::navigation::clear_pane_map;
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::views::panels::project_column::ProjectColumn;
 use gpui::*;
 use gpui::prelude::*;
 use std::cell::RefCell;
@@ -13,6 +14,15 @@ use super::RootView;
 
 impl RootView {
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Check if a remote project is focused — render it instead of local grid
+        if let Some(ref rm) = self.remote_manager {
+            let focused = rm.read(cx).focused_remote()
+                .map(|(c, p)| (c.to_string(), p.to_string()));
+            if let Some((conn_id, proj_id)) = focused {
+                return self.render_remote_project_column(&conn_id, &proj_id, cx).into_any_element();
+            }
+        }
+
         // Sync project columns to handle newly added projects
         self.sync_project_columns(cx);
 
@@ -104,6 +114,87 @@ impl RootView {
             ).absolute().size_full())
             // Mouse handlers are on root div - no need to duplicate here
             .children(elements)
+            .into_any_element()
+    }
+
+    /// Render a single remote project column when a remote project is focused.
+    fn render_remote_project_column(
+        &mut self,
+        conn_id: &str,
+        proj_id: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let key = format!("{}:{}", conn_id, proj_id);
+
+        // Invalidate cached column if remote state has been updated
+        // (re-create on each focus to pick up fresh layout)
+        if !self.remote_project_columns.contains_key(&key) {
+            if let Some(ref rm) = self.remote_manager {
+                let rm_read = rm.read(cx);
+                if let (Some(backend), Some(state)) =
+                    (rm_read.backend_for(conn_id), rm_read.remote_state(conn_id))
+                {
+                    if let Some(api_project) =
+                        state.projects.iter().find(|p| p.id == proj_id)
+                    {
+                        if let Some(ref api_layout) = api_project.layout {
+                            let layout = api_layout.to_layout_node();
+                            let workspace = self.workspace.clone();
+                            let request_broker = self.request_broker.clone();
+                            let terminals = self.terminals.clone();
+                            let active_drag = self.active_drag.clone();
+                            let pid = proj_id.to_string();
+                            let pname = api_project.name.clone();
+                            let ppath = api_project.path.clone();
+                            let col = cx.new(move |cx| {
+                                ProjectColumn::new_remote(
+                                    workspace,
+                                    request_broker,
+                                    pid,
+                                    pname,
+                                    ppath,
+                                    backend,
+                                    terminals,
+                                    active_drag,
+                                    layout,
+                                    cx,
+                                )
+                            });
+                            self.remote_project_columns.insert(key.clone(), col);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(col) = self.remote_project_columns.get(&key).cloned() {
+            div()
+                .id("remote-project-grid")
+                .flex_1()
+                .h_full()
+                .flex()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_basis(relative(1.0))
+                        .h_full()
+                        .min_w(px(200.0))
+                        .child(col),
+                )
+                .into_any_element()
+        } else {
+            let t = crate::theme::theme(cx);
+            div()
+                .id("remote-project-grid")
+                .flex_1()
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(t.text_muted))
+                .child("Remote project not available")
+                .into_any_element()
+        }
     }
 }
 
@@ -115,6 +206,7 @@ impl Render for RootView {
         let om = self.overlay_manager.read(cx);
         let has_context_menu = om.has_context_menu();
         let has_folder_context_menu = om.has_folder_context_menu();
+        let has_remote_context_menu = om.has_remote_context_menu();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -542,6 +634,10 @@ impl Render for RootView {
             // Folder context menu overlay (positioned popup, separate from modals)
             .when(has_folder_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_folder_context_menu())
+            })
+            // Remote connection context menu overlay (positioned popup)
+            .when(has_remote_context_menu, |d| {
+                d.children(self.overlay_manager.read(cx).render_remote_context_menu())
             })
             // Single active modal overlay (renders on top of everything)
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {

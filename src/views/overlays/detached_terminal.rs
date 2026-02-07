@@ -1,5 +1,4 @@
-use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::Terminal;
+use crate::terminal::terminal::{Terminal, TerminalTransport};
 use crate::theme::theme;
 use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
@@ -30,7 +29,7 @@ impl DetachedTerminalView {
     pub fn new(
         workspace: Entity<Workspace>,
         terminal_id: String,
-        pty_manager: Arc<PtyManager>,
+        transport: Arc<dyn TerminalTransport>,
         terminals: TerminalsRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -62,7 +61,7 @@ impl DetachedTerminalView {
         };
 
         // Get or create terminal from registry
-        let terminal = get_or_create_terminal(&terminal_id, &pty_manager, &terminals, &project_path);
+        let terminal = get_or_create_terminal(&terminal_id, &transport, &terminals, &project_path);
 
         // Create terminal content view
         let content = create_terminal_content(

@@ -49,6 +49,12 @@ pub enum RemoteCommand {
     ReadContent {
         terminal_id: String,
     },
+    /// Resize a terminal to new dimensions.
+    Resize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Named special keys the remote API supports.

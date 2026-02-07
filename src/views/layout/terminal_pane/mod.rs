@@ -27,7 +27,7 @@ use header::{TerminalHeader, HeaderEvent};
 pub use content::TerminalContent;
 
 use crate::settings::settings;
-use crate::terminal::pty_manager::PtyManager;
+use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::root::TerminalsRegistry;
@@ -48,7 +48,7 @@ pub struct TerminalPane {
     // Terminal state
     terminal: Option<Arc<Terminal>>,
     terminal_id: Option<String>,
-    pty_manager: Arc<PtyManager>,
+    backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
 
     // Child views
@@ -77,7 +77,7 @@ impl TerminalPane {
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
-        pty_manager: Arc<PtyManager>,
+        backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -108,7 +108,8 @@ impl TerminalPane {
                 project_id.clone(),
                 terminal_id.clone(),
                 shell_type.clone(),
-                pty_manager.supports_buffer_capture(),
+                backend.supports_buffer_capture(),
+                backend.is_remote(),
                 id_suffix.clone(),
                 cx,
             )
@@ -143,7 +144,7 @@ impl TerminalPane {
             layout_path,
             terminal: None,
             terminal_id,
-            pty_manager,
+            backend,
             terminals,
             header,
             content,
@@ -326,8 +327,8 @@ impl TerminalPane {
         };
 
         match self
-            .pty_manager
-            .create_or_reconnect_terminal_with_shell(Some(&terminal_id), &self.project_path, Some(&shell))
+            .backend
+            .reconnect_terminal(&terminal_id, &self.project_path, Some(&shell))
         {
             Ok(_) => {}
             Err(e) => {
@@ -336,7 +337,7 @@ impl TerminalPane {
         }
 
         let size = TerminalSize::default();
-        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone(), self.project_path.clone()));
+        let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
         self.terminals.lock().insert(terminal_id, terminal.clone());
         self.terminal = Some(terminal.clone());
         self.update_child_terminals(terminal, cx);
@@ -351,8 +352,8 @@ impl TerminalPane {
         };
 
         match self
-            .pty_manager
-            .create_terminal_with_shell(&self.project_path, Some(&shell))
+            .backend
+            .create_terminal(&self.project_path, Some(&shell))
         {
             Ok(terminal_id) => {
                 self.terminal_id = Some(terminal_id.clone());
@@ -362,7 +363,7 @@ impl TerminalPane {
 
                 let size = TerminalSize::default();
                 let terminal =
-                    Arc::new(Terminal::new(terminal_id.clone(), size, self.pty_manager.clone(), self.project_path.clone()));
+                    Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
                 self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
                 self.terminal = Some(terminal.clone());
 

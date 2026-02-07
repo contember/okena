@@ -6,7 +6,7 @@
 //! - Split panes (horizontal/vertical splits)
 //! - Tab groups (via the `tabs` submodule)
 
-use crate::terminal::pty_manager::PtyManager;
+use crate::terminal::backend::TerminalBackend;
 use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
@@ -27,7 +27,7 @@ pub struct LayoutContainer {
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
-    pub(super) pty_manager: Arc<PtyManager>,
+    pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     /// Stored terminal pane entity (for single terminal case)
     terminal_pane: Option<Entity<TerminalPane>>,
@@ -43,6 +43,8 @@ pub struct LayoutContainer {
     pub(super) drop_animation: Option<(usize, f32)>,
     /// Shared drag state for resize operations
     pub(super) active_drag: ActiveDrag,
+    /// External layout override (for remote projects not in workspace)
+    pub(super) external_layout: Option<LayoutNode>,
 }
 
 impl LayoutContainer {
@@ -52,7 +54,7 @@ impl LayoutContainer {
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
-        pty_manager: Arc<PtyManager>,
+        backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
     ) -> Self {
@@ -62,7 +64,7 @@ impl LayoutContainer {
             project_id,
             project_path,
             layout_path,
-            pty_manager,
+            backend,
             terminals,
             terminal_pane: None,
             child_containers: HashMap::new(),
@@ -73,7 +75,13 @@ impl LayoutContainer {
             tab_context_menu: None,
             drop_animation: None,
             active_drag,
+            external_layout: None,
         }
+    }
+
+    /// Set an external layout override (for remote projects).
+    pub fn set_external_layout(&mut self, layout: LayoutNode) {
+        self.external_layout = Some(layout);
     }
 
     fn ensure_terminal_pane(
@@ -99,7 +107,7 @@ impl LayoutContainer {
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
             let layout_path = self.layout_path.clone();
-            let pty_manager = self.pty_manager.clone();
+            let backend = self.backend.clone();
             let terminals = self.terminals.clone();
 
             self.terminal_pane = Some(cx.new(move |cx| {
@@ -112,7 +120,7 @@ impl LayoutContainer {
                     terminal_id,
                     minimized,
                     detached,
-                    pty_manager,
+                    backend,
                     terminals,
                     cx,
                 )
@@ -198,7 +206,7 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
@@ -268,7 +276,7 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
@@ -329,7 +337,12 @@ impl Render for LayoutContainer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
-        let layout = self.get_layout(workspace).cloned();
+        // Use external layout if set (remote projects), otherwise read from workspace
+        let layout = if let Some(ref ext) = self.external_layout {
+            Some(ext.clone())
+        } else {
+            self.get_layout(workspace).cloned()
+        };
 
         // Clean up stale entities when layout type changes
         match &layout {

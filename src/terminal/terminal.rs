@@ -1,4 +1,3 @@
-use crate::terminal::pty_manager::PtyManager;
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
@@ -10,6 +9,14 @@ use alacritty_terminal::grid::{Scroll, Dimensions};
 use parking_lot::Mutex;
 use regex::Regex;
 use std::sync::{Arc, OnceLock};
+
+/// Transport trait for terminal I/O operations.
+/// Implemented by PtyManager (local) and RemoteTransport (remote).
+pub trait TerminalTransport: Send + Sync {
+    fn send_input(&self, terminal_id: &str, data: &[u8]);
+    fn resize(&self, terminal_id: &str, cols: u16, rows: u16);
+    fn uses_mouse_backend(&self) -> bool;
+}
 
 /// Terminal size in cells and pixels
 #[derive(Clone, Copy, Debug)]
@@ -38,8 +45,8 @@ pub struct ZedEventListener {
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag
     has_bell: Arc<Mutex<bool>>,
-    /// PTY manager for writing responses back to the terminal
-    pty_manager: Arc<PtyManager>,
+    /// Transport for writing responses back to the terminal
+    transport: Arc<dyn TerminalTransport>,
     /// Terminal ID for PTY write operations
     terminal_id: String,
 }
@@ -48,10 +55,10 @@ impl ZedEventListener {
     pub fn new(
         title: Arc<Mutex<Option<String>>>,
         has_bell: Arc<Mutex<bool>>,
-        pty_manager: Arc<PtyManager>,
+        transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
-        Self { title, has_bell, pty_manager, terminal_id }
+        Self { title, has_bell, transport, terminal_id }
     }
 }
 
@@ -67,7 +74,7 @@ impl EventListener for ZedEventListener {
             TermEvent::PtyWrite(data) => {
                 // Write response back to PTY (e.g., cursor position report)
                 log::debug!("PtyWrite event: {:?}", data);
-                self.pty_manager.send_input(&self.terminal_id, data.as_bytes());
+                self.transport.send_input(&self.terminal_id, data.as_bytes());
             }
             _ => {
                 // Ignore other events
@@ -176,7 +183,7 @@ pub struct Terminal {
     processor: Mutex<Processor>,
     pub terminal_id: String,
     pub resize_state: Mutex<ResizeState>,
-    pty_manager: Arc<PtyManager>,
+    transport: Arc<dyn TerminalTransport>,
     selection_state: Mutex<SelectionState>,
     scroll_offset: Mutex<i32>,
     /// Terminal title from OSC sequences
@@ -194,7 +201,7 @@ impl Terminal {
     pub fn new(
         terminal_id: String,
         size: TerminalSize,
-        pty_manager: Arc<PtyManager>,
+        transport: Arc<dyn TerminalTransport>,
         initial_cwd: String,
     ) -> Self {
         let config = TermConfig::default();
@@ -206,7 +213,7 @@ impl Terminal {
         let event_listener = ZedEventListener::new(
             title.clone(),
             has_bell.clone(),
-            pty_manager.clone(),
+            transport.clone(),
             terminal_id.clone(),
         );
         let term = Term::new(config, &term_size, event_listener);
@@ -220,7 +227,7 @@ impl Terminal {
                 last_pty_resize: std::time::Instant::now(),
                 pending_pty_resize: None,
             }),
-            pty_manager,
+            transport,
             selection_state: Mutex::new(SelectionState::default()),
             scroll_offset: Mutex::new(0),
             title,
@@ -250,14 +257,14 @@ impl Terminal {
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
         self.scroll_to_bottom();
-        self.pty_manager.send_input(&self.terminal_id, input.as_bytes());
+        self.transport.send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send raw bytes to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
         self.scroll_to_bottom();
-        self.pty_manager.send_input(&self.terminal_id, data);
+        self.transport.send_input(&self.terminal_id, data);
     }
 
     /// Clear the terminal screen by sending the clear sequence
@@ -265,7 +272,7 @@ impl Terminal {
         // Send ANSI escape sequence to clear screen and move cursor to home
         // \x1b[2J = clear entire screen
         // \x1b[H = move cursor to home position (0,0)
-        self.pty_manager.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.transport.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
         self.scroll_to_bottom();
     }
 
@@ -335,7 +342,7 @@ impl Terminal {
             rs.pending_pty_resize = None;
             rs.last_pty_resize = now;
             drop(rs);
-            self.pty_manager.resize(&self.terminal_id, new_size.cols, new_size.rows);
+            self.transport.resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
             // Store pending resize - will be applied on next resize that passes debounce
             rs.pending_pty_resize = Some((new_size.cols, new_size.rows));
@@ -348,7 +355,7 @@ impl Terminal {
         if let Some((cols, rows)) = rs.pending_pty_resize.take() {
             rs.last_pty_resize = std::time::Instant::now();
             drop(rs);
-            self.pty_manager.resize(&self.terminal_id, cols, rows);
+            self.transport.resize(&self.terminal_id, cols, rows);
         }
     }
 
@@ -762,7 +769,7 @@ impl Terminal {
     /// Also returns true if using tmux backend (which handles mouse with `set mouse on`)
     pub fn is_mouse_mode(&self) -> bool {
         // If using tmux backend, tmux handles mouse events directly
-        if self.pty_manager.uses_mouse_backend() {
+        if self.transport.uses_mouse_backend() {
             return true;
         }
         // Otherwise check if the terminal itself requested mouse mode
@@ -784,7 +791,7 @@ impl Terminal {
     /// button: 64 for scroll up, 65 for scroll down
     pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize) {
         // Check if using tmux backend - always use SGR format (tmux supports it)
-        let use_sgr = if self.pty_manager.uses_mouse_backend() {
+        let use_sgr = if self.transport.uses_mouse_backend() {
             true
         } else {
             let term = self.term.lock();

@@ -117,6 +117,15 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     let _ = reply_rx.await;
                                 }
                             }
+                            Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if state.bridge_tx.send(BridgeMessage {
+                                    command: RemoteCommand::Resize { terminal_id, cols, rows },
+                                    reply: reply_tx,
+                                }).await.is_ok() {
+                                    let _ = reply_rx.await;
+                                }
+                            }
                             Ok(WsInbound::Ping) => {
                                 let resp = serde_json::to_string(&WsOutbound::Pong).expect("BUG: WsOutbound must serialize");
                                 if socket.send(Message::Text(resp.into())).await.is_err() {

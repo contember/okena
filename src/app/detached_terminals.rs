@@ -37,7 +37,7 @@ impl Okena {
 
     fn open_detached_window(&self, terminal_id: &str, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
-        let pty_manager = self.pty_manager.clone();
+        let transport: std::sync::Arc<dyn crate::terminal::terminal::TerminalTransport> = self.pty_manager.clone();
         let terminals = self.terminals.clone();
         let terminal_id_owned = terminal_id.to_string();
 
@@ -77,7 +77,7 @@ impl Okena {
                     DetachedTerminalView::new(
                         workspace.clone(),
                         terminal_id_owned.clone(),
-                        pty_manager.clone(),
+                        transport.clone(),
                         terminals.clone(),
                         cx,
                     )
