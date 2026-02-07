@@ -21,6 +21,7 @@ use gpui::*;
 pub fn modal_backdrop(id: impl Into<SharedString>, _t: &ThemeColors) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
+        .occlude()
         .absolute()
         .inset_0()
         .bg(hsla(0.0, 0.0, 0.0, 0.5))
