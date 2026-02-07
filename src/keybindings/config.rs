@@ -28,11 +28,6 @@ impl KeybindingEntry {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
-        self.enabled = enabled;
-        self
-    }
 }
 
 /// Represents a conflict between two keybindings
@@ -715,22 +710,6 @@ impl KeybindingConfig {
         conflicts
     }
 
-    /// Reset a specific action to its default bindings
-    #[allow(dead_code)]
-    pub fn reset_action(&mut self, action: &str) {
-        let defaults = Self::defaults();
-        if let Some(default_bindings) = defaults.bindings.get(action) {
-            self.bindings
-                .insert(action.to_string(), default_bindings.clone());
-        }
-    }
-
-    /// Reset all bindings to defaults
-    #[allow(dead_code)]
-    pub fn reset_all(&mut self) {
-        *self = Self::defaults();
-    }
-
     /// Get all actions that have custom (non-default) bindings
     pub fn get_customized_actions(&self) -> HashSet<String> {
         let defaults = Self::defaults();
@@ -757,79 +736,6 @@ impl KeybindingConfig {
         customized
     }
 
-    /// Add a new keybinding for an action
-    #[allow(dead_code)]
-    pub fn add_binding(&mut self, action: &str, keystroke: &str, context: Option<&str>) {
-        let entry = KeybindingEntry::new(keystroke, context);
-        self.bindings
-            .entry(action.to_string())
-            .or_insert_with(Vec::new)
-            .push(entry);
-    }
-
-    /// Remove a specific keybinding
-    #[allow(dead_code)]
-    pub fn remove_binding(&mut self, action: &str, keystroke: &str, context: Option<&str>) {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            entries.retain(|e| !(e.keystroke == keystroke && e.context.as_deref() == context));
-        }
-    }
-
-    /// Disable a specific keybinding without removing it
-    #[allow(dead_code)]
-    pub fn disable_binding(&mut self, action: &str, keystroke: &str, context: Option<&str>) {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            for entry in entries {
-                if entry.keystroke == keystroke && entry.context.as_deref() == context {
-                    entry.enabled = false;
-                }
-            }
-        }
-    }
-
-    /// Enable a specific keybinding
-    #[allow(dead_code)]
-    pub fn enable_binding(&mut self, action: &str, keystroke: &str, context: Option<&str>) {
-        if let Some(entries) = self.bindings.get_mut(action) {
-            for entry in entries {
-                if entry.keystroke == keystroke && entry.context.as_deref() == context {
-                    entry.enabled = true;
-                }
-            }
-        }
-    }
-
-    /// Get enabled bindings for an action
-    #[allow(dead_code)]
-    pub fn get_enabled_bindings(&self, action: &str) -> Vec<&KeybindingEntry> {
-        self.bindings
-            .get(action)
-            .map(|entries| entries.iter().filter(|e| e.enabled).collect())
-            .unwrap_or_default()
-    }
-
-    /// Get all bindings grouped by category
-    #[allow(dead_code)]
-    pub fn get_bindings_by_category(&self) -> HashMap<&'static str, Vec<(&str, &KeybindingEntry)>> {
-        let descriptions = get_action_descriptions();
-        let mut categories: HashMap<&'static str, Vec<(&str, &KeybindingEntry)>> = HashMap::new();
-
-        for (action, entries) in &self.bindings {
-            let category = descriptions
-                .get(action.as_str())
-                .map(|d| d.category)
-                .unwrap_or("Other");
-
-            for entry in entries {
-                categories
-                    .entry(category)
-                    .or_insert_with(Vec::new)
-                    .push((action.as_str(), entry));
-            }
-        }
-
-        categories
-    }
 }
 
 /// Get the keybindings configuration file path
@@ -885,37 +791,4 @@ mod tests {
         assert!(conflicts.is_empty(), "Default config should have no conflicts");
     }
 
-    #[test]
-    fn test_conflict_detection() {
-        let mut config = KeybindingConfig::defaults();
-        // Add a conflicting binding
-        config.add_binding("Copy", "cmd-b", None); // cmd-b is already used for ToggleSidebar
-
-        let conflicts = config.detect_conflicts();
-        assert!(!conflicts.is_empty(), "Should detect conflict");
-        assert!(conflicts.iter().any(|c| c.keystroke == "cmd-b"));
-    }
-
-    #[test]
-    fn test_reset_action() {
-        let mut config = KeybindingConfig::defaults();
-        config.bindings.remove("Copy");
-        assert!(config.bindings.get("Copy").is_none());
-
-        config.reset_action("Copy");
-        assert!(config.bindings.get("Copy").is_some());
-    }
-
-    #[test]
-    fn test_disable_enable_binding() {
-        let mut config = KeybindingConfig::defaults();
-        config.disable_binding("Copy", "cmd-c", Some("TerminalPane"));
-
-        let enabled = config.get_enabled_bindings("Copy");
-        assert!(!enabled.iter().any(|e| e.keystroke == "cmd-c"));
-
-        config.enable_binding("Copy", "cmd-c", Some("TerminalPane"));
-        let enabled = config.get_enabled_bindings("Copy");
-        assert!(enabled.iter().any(|e| e.keystroke == "cmd-c"));
-    }
 }

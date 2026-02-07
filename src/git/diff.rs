@@ -74,12 +74,6 @@ impl FileDiff {
             .unwrap_or("unknown")
     }
 
-    /// Get just the filename without path.
-    #[allow(dead_code)]
-    pub fn filename(&self) -> &str {
-        let path = self.display_name();
-        path.rsplit('/').next().unwrap_or(path)
-    }
 }
 
 /// Mode for git diff.

@@ -94,12 +94,6 @@ impl FocusManager {
         }
     }
 
-    /// Get the currently focused terminal target
-    #[allow(dead_code)]
-    pub fn current(&self) -> Option<&FocusTarget> {
-        self.current_focus.as_ref()
-    }
-
     /// Get the current focus as FocusedTerminalState for backward compatibility.
     ///
     /// This is the primary method for checking which terminal is focused.
@@ -166,12 +160,6 @@ impl FocusManager {
     /// Get the project ID of the fullscreened terminal (if any)
     pub fn fullscreen_project_id(&self) -> Option<&str> {
         self.fullscreen_state().map(|(pid, _)| pid)
-    }
-
-    /// Get the terminal ID of the fullscreened terminal (if any)
-    #[allow(dead_code)]
-    pub fn fullscreen_terminal_id(&self) -> Option<&str> {
-        self.fullscreen_state().map(|(_, tid)| tid)
     }
 
     // --- Focus actions ---
@@ -284,15 +272,6 @@ impl FocusManager {
         self.context = FocusContext::Terminal;
     }
 
-    /// Clear the entire focus stack.
-    ///
-    /// Used when the application state changes significantly
-    /// (e.g., workspace reload).
-    #[allow(dead_code)]
-    pub fn clear_stack(&mut self) {
-        self.focus_stack.clear();
-    }
-
     /// Clear all focus state: current focus, focused_project_id, and stack.
     ///
     /// Used when switching workspaces to reset everything.
@@ -318,20 +297,9 @@ impl FocusManager {
         self.focus_stack.pop()
     }
 
-    /// Check if we're in fullscreen context
-    #[allow(dead_code)]
-    pub fn is_fullscreen(&self) -> bool {
-        self.context == FocusContext::Fullscreen
-    }
-
     /// Check if we're in modal context
     pub fn is_modal(&self) -> bool {
         self.context == FocusContext::Modal
     }
 
-    /// Get the stack depth (for debugging)
-    #[allow(dead_code)]
-    pub fn stack_depth(&self) -> usize {
-        self.focus_stack.len()
-    }
 }

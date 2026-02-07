@@ -85,6 +85,7 @@ impl Workspace {
     }
 
     /// Move a project out of its folder into the top-level project_order
+    #[allow(dead_code)]
     pub fn move_project_out_of_folder(&mut self, project_id: &str, top_level_index: usize, cx: &mut Context<Self>) {
         // Remove from any folder
         for folder in &mut self.data.folders {
@@ -99,6 +100,7 @@ impl Workspace {
     }
 
     /// Reorder a project within a folder
+    #[allow(dead_code)]
     pub fn reorder_project_in_folder(&mut self, folder_id: &str, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
         if let Some(folder) = self.folder_mut(folder_id) {
             if let Some(current) = folder.project_ids.iter().position(|id| id == project_id) {

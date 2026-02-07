@@ -75,27 +75,12 @@ pub fn get_config() -> impl std::ops::Deref<Target = KeybindingConfig> {
     })
 }
 
-/// Get a write guard to the current keybinding configuration
-#[allow(dead_code)]
-pub fn get_config_mut() -> impl std::ops::DerefMut<Target = KeybindingConfig> {
-    parking_lot::RwLockWriteGuard::map(KEYBINDING_CONFIG.write(), |opt| {
-        opt.as_mut().expect("Keybinding config not initialized")
-    })
-}
-
 /// Reset keybindings to defaults and save
 pub fn reset_to_defaults() -> anyhow::Result<()> {
     let config = KeybindingConfig::defaults();
     save_keybindings(&config)?;
     *KEYBINDING_CONFIG.write() = Some(config);
     Ok(())
-}
-
-/// Reload keybindings from disk
-#[allow(dead_code)]
-pub fn reload_keybindings() {
-    let config = load_keybindings();
-    *KEYBINDING_CONFIG.write() = Some(config);
 }
 
 /// Register keybindings for the application from configuration
@@ -231,12 +216,4 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("down", "↓")
 }
 
-/// Get the primary (first enabled) keybinding for an action
-#[allow(dead_code)]
-pub fn get_primary_binding(action: &str) -> Option<String> {
-    let config = get_config();
-    config
-        .get_enabled_bindings(action)
-        .first()
-        .map(|e| format_keystroke(&e.keystroke))
-}
+

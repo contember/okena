@@ -58,6 +58,7 @@ impl PathAutoCompleteState {
         self.input.read(cx).value().to_string()
     }
 
+    #[allow(dead_code)]
     pub fn set_value(&mut self, value: impl Into<String>, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| {
             input.set_value(value, cx);

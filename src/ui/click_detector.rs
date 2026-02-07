@@ -70,11 +70,7 @@ impl<K: Eq + Clone> ClickDetector<K> {
         }
     }
 
-    /// Reset the click state, forgetting any previous click.
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        self.last_click = None;
-    }
+
 }
 
 #[cfg(test)]

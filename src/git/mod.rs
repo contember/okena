@@ -114,14 +114,6 @@ pub fn invalidate_cache(path: &Path) {
     });
 }
 
-/// Clear entire cache
-#[allow(dead_code)]
-pub fn clear_cache() {
-    with_cache(|cache| {
-        cache.clear();
-    });
-}
-
 /// Get per-file diff summary for a repository.
 /// Returns a list of files with their add/remove counts.
 pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {

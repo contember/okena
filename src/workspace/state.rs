@@ -257,11 +257,13 @@ impl Workspace {
     }
 
     /// Check if an ID in project_order refers to a folder
+    #[allow(dead_code)]
     pub fn is_folder(&self, id: &str) -> bool {
         self.data.folders.iter().any(|f| f.id == id)
     }
 
     /// Find which folder (if any) contains a given project
+    #[allow(dead_code)]
     pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
         self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
     }
