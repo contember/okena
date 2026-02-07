@@ -2,6 +2,7 @@
 
 use crate::theme::ThemeColors;
 use crate::ui::tokens::*;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 
@@ -117,6 +118,40 @@ pub fn menu_item_conditional(
     } else {
         base
     }
+}
+
+/// Context menu panel with standard styling (bg, border, shadow, min_w, py).
+///
+/// Comes with stop-propagation handlers on left-click, right-click, and scroll.
+/// Caller adds `.child(menu_item(...))` for content.
+pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful<Div> {
+    div()
+        .id(id)
+        .bg(rgb(t.bg_primary))
+        .border_1()
+        .border_color(rgb(t.border))
+        .rounded(px(4.0))
+        .shadow_xl()
+        .min_w(px(160.0))
+        .py(px(4.0))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Right, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
+}
+
+/// Menu separator - 1px horizontal line.
+pub fn menu_separator(t: &ThemeColors) -> Div {
+    div()
+        .h(px(1.0))
+        .mx(SPACE_MD)
+        .my(SPACE_XS)
+        .bg(rgb(t.border))
 }
 
 /// Small pill label for categories like "Custom", "worktree", etc.
@@ -323,6 +358,32 @@ pub fn labeled_input(label: impl Into<SharedString>, t: &ThemeColors) -> Div {
                 .text_color(rgb(t.text_muted))
                 .child(label.into()),
         )
+}
+
+/// Code block container with rounded corners, bg, border, overflow_hidden, and optional language label.
+///
+/// Caller adds `.child(...)` for the code content area.
+pub fn code_block_container(language: Option<&str>, t: &ThemeColors) -> Div {
+    let lang_label = language.unwrap_or("");
+    v_flex()
+        .rounded(px(6.0))
+        .bg(rgb(t.bg_primary))
+        .border_1()
+        .border_color(rgb(t.border))
+        .overflow_hidden()
+        .when(!lang_label.is_empty(), |d| {
+            d.child(
+                div()
+                    .px(SPACE_LG)
+                    .py(SPACE_XS)
+                    .bg(rgb(t.bg_header))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.text_muted))
+                    .child(lang_label.to_string()),
+            )
+        })
 }
 
 /// Search input area with ">" prefix prompt and query/placeholder display.

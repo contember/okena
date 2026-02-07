@@ -6,7 +6,7 @@
 //! - Close tabs to the right
 
 use crate::theme::theme;
-use crate::views::components::{menu_item, menu_item_disabled};
+use crate::views::components::{context_menu_panel, menu_item, menu_item_disabled};
 use crate::views::layout::layout_container::LayoutContainer;
 use gpui::*;
 
@@ -45,24 +45,7 @@ impl LayoutContainer {
                     .position(position)
                     .snap_to_window()
                     .child(
-                        div()
-                            .id("tab-context-menu")
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border))
-                            .rounded(px(4.0))
-                            .shadow_lg()
-                            .py(px(4.0))
-                            .min_w(px(140.0))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_mouse_down(MouseButton::Right, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_scroll_wheel(|_, _, cx| {
-                                cx.stop_propagation();
-                            })
+                        context_menu_panel("tab-context-menu", &t)
                             // Close tab
                             .child(
                                 menu_item("tab-menu-close", "icons/close.svg", "Close", &t)
