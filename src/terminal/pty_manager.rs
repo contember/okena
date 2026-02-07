@@ -8,8 +8,11 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 /// Events from PTY processes
 #[derive(Debug)]
@@ -24,12 +27,49 @@ pub enum PtyEvent {
     },
 }
 
+/// Shared shutdown coordination between reader/writer threads
+struct PtyShutdownState {
+    broken: AtomicBool,
+    terminal_id: String,
+}
+
+impl PtyShutdownState {
+    fn new(terminal_id: String) -> Self {
+        Self {
+            broken: AtomicBool::new(false),
+            terminal_id,
+        }
+    }
+
+    fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::Relaxed)
+    }
+
+    fn mark_broken(&self) {
+        self.broken.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Extract a human-readable message from a panic payload
+fn format_panic(payload: &dyn std::any::Any) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Handle to a single PTY process
 struct PtyHandle {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     /// Channel to send input to the writer thread
     input_tx: mpsc::Sender<Vec<u8>>,
+    reader_handle: Option<JoinHandle<()>>,
+    writer_handle: Option<JoinHandle<()>>,
+    shutdown: Arc<PtyShutdownState>,
 }
 
 /// Manages all PTY processes
@@ -43,7 +83,7 @@ pub struct PtyManager {
 impl PtyManager {
     /// Create a new PTY manager with the specified session backend
     pub fn new(backend: SessionBackend) -> (Self, Receiver<PtyEvent>) {
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(4096);
         let session_backend = backend.resolve();
 
         if session_backend.supports_persistence() {
@@ -126,18 +166,52 @@ impl PtyManager {
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
-        // Spawn reader thread
+        let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string()));
+
+        // Spawn reader thread with panic guard
         let tx = self.event_tx.clone();
         let id = terminal_id.to_string();
-        std::thread::spawn(move || {
-            Self::read_loop(id, reader, tx);
-        });
+        let reader_shutdown = Arc::clone(&shutdown);
+        let reader_handle = std::thread::Builder::new()
+            .name(format!("pty-reader-{}", &terminal_id[..8.min(terminal_id.len())]))
+            .spawn(move || {
+                let tx_panic = tx.clone();
+                let shutdown_panic = Arc::clone(&reader_shutdown);
+                let id_panic = id.clone();
+                if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Self::read_loop(id, reader, tx, reader_shutdown);
+                })) {
+                    log::error!("PTY reader thread panicked: {}", format_panic(&*panic));
+                    shutdown_panic.mark_broken();
+                    let _ = tx_panic.send_blocking(PtyEvent::Exit {
+                        terminal_id: id_panic,
+                        exit_code: None,
+                    });
+                }
+            })?;
 
-        // Create input channel and spawn writer thread
+        // Create input channel and spawn writer thread with panic guard
         let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
-            Self::write_loop(writer, input_rx);
-        });
+        let writer_shutdown = Arc::clone(&shutdown);
+        let writer_event_tx = self.event_tx.clone();
+        let writer_id = terminal_id.to_string();
+        let writer_handle = std::thread::Builder::new()
+            .name(format!("pty-writer-{}", &terminal_id[..8.min(terminal_id.len())]))
+            .spawn(move || {
+                let tx_panic = writer_event_tx.clone();
+                let shutdown_panic = Arc::clone(&writer_shutdown);
+                let id_panic = writer_id.clone();
+                if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Self::write_loop(writer, input_rx, writer_shutdown, writer_event_tx, writer_id);
+                })) {
+                    log::error!("PTY writer thread panicked: {}", format_panic(&*panic));
+                    shutdown_panic.mark_broken();
+                    let _ = tx_panic.send_blocking(PtyEvent::Exit {
+                        terminal_id: id_panic,
+                        exit_code: None,
+                    });
+                }
+            })?;
 
         // Store the handle
         self.terminals.lock().insert(
@@ -146,6 +220,9 @@ impl PtyManager {
                 master: pair.master,
                 child,
                 input_tx,
+                reader_handle: Some(reader_handle),
+                writer_handle: Some(writer_handle),
+                shutdown,
             },
         );
 
@@ -213,10 +290,15 @@ impl PtyManager {
         terminal_id: String,
         mut reader: Box<dyn Read + Send>,
         tx: Sender<PtyEvent>,
+        shutdown: Arc<PtyShutdownState>,
     ) {
         // Use larger buffer like alacritty (they use 1MB, we use 64KB)
         let mut buf = [0u8; 65536];
         loop {
+            if shutdown.is_broken() {
+                log::debug!("PTY reader {} stopping: shutdown signaled", terminal_id);
+                break;
+            }
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // EOF - process exited
@@ -227,14 +309,23 @@ impl PtyManager {
                     break;
                 }
                 Ok(n) => {
+                    if shutdown.is_broken() {
+                        break;
+                    }
                     log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&buf[..n.min(100)]));
-                    let _ = tx.send_blocking(PtyEvent::Data {
+                    // send_blocking will block when channel is full (backpressure)
+                    if tx.send_blocking(PtyEvent::Data {
                         terminal_id: terminal_id.clone(),
                         data: buf[..n].to_vec(),
-                    });
+                    }).is_err() {
+                        // Receiver dropped - app is shutting down
+                        break;
+                    }
                 }
                 Err(e) => {
-                    log::error!("PTY read error: {}", e);
+                    if !shutdown.is_broken() {
+                        log::error!("PTY read error: {}", e);
+                    }
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
                         exit_code: None,
@@ -249,6 +340,9 @@ impl PtyManager {
     fn write_loop(
         mut writer: Box<dyn Write + Send>,
         rx: mpsc::Receiver<Vec<u8>>,
+        shutdown: Arc<PtyShutdownState>,
+        event_tx: Sender<PtyEvent>,
+        terminal_id: String,
     ) {
         loop {
             // Wait for first message
@@ -265,7 +359,12 @@ impl PtyManager {
 
             // Write the batched data
             if let Err(e) = writer.write_all(&batch) {
-                log::error!("Failed to write to PTY: {}", e);
+                log::error!("Failed to write to PTY {}: {}", terminal_id, e);
+                shutdown.mark_broken();
+                let _ = event_tx.send_blocking(PtyEvent::Exit {
+                    terminal_id,
+                    exit_code: None,
+                });
                 break;
             }
         }
@@ -297,22 +396,58 @@ impl PtyManager {
     /// Kill a terminal
     /// Also kills the underlying tmux/screen session if applicable
     pub fn kill(&self, terminal_id: &str) {
-        if let Some(mut handle) = self.terminals.lock().remove(terminal_id) {
-            if let Err(e) = handle.child.kill() {
-                log::warn!("Failed to kill PTY process: {}", e);
-            }
+        // Remove handle from map (releases the mutex before joining threads)
+        let handle = self.terminals.lock().remove(terminal_id);
+
+        if let Some(handle) = handle {
+            Self::shutdown_handle(handle);
         }
+
         // Also kill the session backend session
         self.session_backend
             .kill_session(&self.session_backend.session_name(terminal_id));
     }
 
+    /// Perform coordinated shutdown of a single PTY handle
+    fn shutdown_handle(mut handle: PtyHandle) {
+        let id = &handle.shutdown.terminal_id;
+
+        // 1. Signal shutdown to threads
+        handle.shutdown.mark_broken();
+
+        // 2. Kill child process - closes PTY slave, reader gets EOF
+        if let Err(e) = handle.child.kill() {
+            log::warn!("Failed to kill PTY process {}: {}", id, e);
+        }
+
+        // 3. Drop input_tx - writer gets Err from rx.recv()
+        drop(handle.input_tx);
+
+        // 4. Drop master - safety net to unblock reader if still stuck
+        drop(handle.master);
+
+        // 5. Join writer thread (should exit quickly after input_tx drop)
+        if let Some(h) = handle.writer_handle.take() {
+            if let Err(e) = h.join() {
+                log::warn!("PTY writer thread panicked on join: {}", format_panic(&*e));
+            }
+        }
+
+        // 6. Join reader thread (should exit after child kill + master drop)
+        if let Some(h) = handle.reader_handle.take() {
+            if let Err(e) = h.join() {
+                log::warn!("PTY reader thread panicked on join: {}", format_panic(&*e));
+            }
+        }
+    }
+
     /// Detach from all terminals without killing sessions
     /// Sessions will persist and can be reconnected on next app start
     pub fn detach_all(&self) {
-        let mut terminals = self.terminals.lock();
-        for (_, mut handle) in terminals.drain() {
-            let _ = handle.child.kill();
+        // Drain all handles while holding the lock, then release lock before joining
+        let handles: Vec<PtyHandle> = self.terminals.lock().drain().map(|(_, h)| h).collect();
+        for handle in handles {
+            Self::shutdown_handle(handle);
         }
     }
 
