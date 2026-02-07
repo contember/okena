@@ -24,7 +24,8 @@ use crate::views::components::{
     RenameState,
 };
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{FolderData, ProjectData, SidebarRequest, Workspace};
+use crate::workspace::requests::SidebarRequest;
+use crate::workspace::state::{FolderData, ProjectData, Workspace};
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -219,7 +220,7 @@ impl Sidebar {
 
     fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
-            ws.push_overlay_request(crate::workspace::state::OverlayRequest::ContextMenu {
+            ws.push_overlay_request(crate::workspace::requests::OverlayRequest::ContextMenu {
                 project_id,
                 position,
             }, cx);
@@ -587,7 +588,7 @@ impl Sidebar {
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.workspace.update(cx, |ws, cx| {
                                     ws.push_overlay_request(
-                                        crate::workspace::state::OverlayRequest::AddProjectDialog,
+                                        crate::workspace::requests::OverlayRequest::AddProjectDialog,
                                         cx,
                                     );
                                 });

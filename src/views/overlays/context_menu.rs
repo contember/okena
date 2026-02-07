@@ -4,7 +4,8 @@ use crate::git;
 use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
-use crate::workspace::state::{ContextMenuRequest, Workspace};
+use crate::workspace::requests::ContextMenuRequest;
+use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 

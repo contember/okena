@@ -1,5 +1,6 @@
 use crate::theme::FolderColor;
 use crate::workspace::focus::FocusManager;
+use crate::workspace::requests::{OverlayRequest, SidebarRequest};
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -120,38 +121,6 @@ pub enum SplitDirection {
 pub struct FocusedTerminalState {
     pub project_id: String,
     pub layout_path: Vec<usize>,
-}
-
-/// Request to show context menu at a position
-#[derive(Clone, Debug)]
-pub struct ContextMenuRequest {
-    pub project_id: String,
-    pub position: gpui::Point<gpui::Pixels>,
-}
-
-/// Request to show folder context menu at a position
-#[derive(Clone, Debug)]
-pub struct FolderContextMenuRequest {
-    pub folder_id: String,
-    pub folder_name: String,
-    pub position: gpui::Point<gpui::Pixels>,
-}
-
-/// Requests consumed by RootView::process_pending_requests()
-#[derive(Clone, Debug)]
-pub enum OverlayRequest {
-    ContextMenu { project_id: String, position: gpui::Point<gpui::Pixels> },
-    FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
-    ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
-    AddProjectDialog,
-    DiffViewer { path: String, file: Option<String> },
-}
-
-/// Requests consumed by Sidebar::render()
-#[derive(Clone, Debug)]
-pub enum SidebarRequest {
-    RenameProject { project_id: String, project_name: String },
-    RenameFolder { folder_id: String, folder_name: String },
 }
 
 /// Global workspace wrapper for app-wide access (used by quit handler)

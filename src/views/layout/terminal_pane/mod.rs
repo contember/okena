@@ -188,7 +188,7 @@ impl TerminalPane {
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.workspace.update(cx, |ws, cx| {
-                        ws.push_overlay_request(crate::workspace::state::OverlayRequest::ShellSelector {
+                        ws.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
                             project_id: self.project_id.clone(),
                             terminal_id: terminal_id.clone(),
                             current_shell: current_shell.clone(),

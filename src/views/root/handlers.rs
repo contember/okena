@@ -1,5 +1,5 @@
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
-use crate::workspace::state::OverlayRequest;
+use crate::workspace::requests::OverlayRequest;
 use gpui::*;
 
 use super::RootView;
@@ -34,7 +34,7 @@ impl RootView {
             }
             OverlayManagerEvent::RenameProject { project_id, project_name } => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.push_sidebar_request(crate::workspace::state::SidebarRequest::RenameProject {
+                    ws.push_sidebar_request(crate::workspace::requests::SidebarRequest::RenameProject {
                         project_id: project_id.clone(),
                         project_name: project_name.clone(),
                     }, cx);
@@ -112,7 +112,7 @@ impl RootView {
                     if !self.overlay_manager.read(cx).has_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_context_menu(
-                                crate::workspace::state::ContextMenuRequest { project_id, position },
+                                crate::workspace::requests::ContextMenuRequest { project_id, position },
                                 cx,
                             );
                         });
@@ -122,7 +122,7 @@ impl RootView {
                     if !self.overlay_manager.read(cx).has_folder_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_folder_context_menu(
-                                crate::workspace::state::FolderContextMenuRequest { folder_id, folder_name, position },
+                                crate::workspace::requests::FolderContextMenuRequest { folder_id, folder_name, position },
                                 cx,
                             );
                         });
