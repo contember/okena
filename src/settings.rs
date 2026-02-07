@@ -131,7 +131,7 @@ impl SettingsState {
     }
 
     /// Set diff view mode (unified or side-by-side)
-    pub fn set_diff_view_mode(&mut self, value: crate::views::overlays::DiffViewMode, cx: &mut Context<Self>) {
+    pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
         self.settings.diff_view_mode = value;
         self.save_and_notify(cx);
     }

@@ -4,23 +4,7 @@ use crate::git::{DiffLineType, FileDiff};
 pub use crate::views::components::syntax::HighlightedSpan;
 use std::collections::BTreeMap;
 
-/// Display mode for the diff viewer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DiffViewMode {
-    #[default]
-    Unified,
-    SideBySide,
-}
-
-impl DiffViewMode {
-    /// Toggle between view modes.
-    pub fn toggle(self) -> Self {
-        match self {
-            DiffViewMode::Unified => DiffViewMode::SideBySide,
-            DiffViewMode::SideBySide => DiffViewMode::Unified,
-        }
-    }
-}
+pub use crate::workspace::persistence::DiffViewMode;
 
 /// Lightweight file stats for sidebar display (no syntax highlighting).
 pub struct FileStats {

@@ -1,8 +1,25 @@
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::{FolderColor, ThemeMode};
-use crate::views::overlays::DiffViewMode;
 use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
+
+/// Display mode for the diff viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DiffViewMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+impl DiffViewMode {
+    /// Toggle between view modes.
+    pub fn toggle(self) -> Self {
+        match self {
+            DiffViewMode::Unified => DiffViewMode::SideBySide,
+            DiffViewMode::SideBySide => DiffViewMode::Unified,
+        }
+    }
+}
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
