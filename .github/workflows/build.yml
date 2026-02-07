@@ -146,7 +146,7 @@ jobs:
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.CONTEMBER_BOT_APP_ID }}
-          private-key: ${{ secrets.CONTEMBER_BOT_PRIVATE_KEY }}
+          private-key: ${{ secrets.CONTEMBER_BOT_APP_PRIVATE_KEY }}
           owner: contember
           repositories: homebrew-okena
 
