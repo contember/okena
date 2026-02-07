@@ -8,8 +8,8 @@ use crate::keybindings::{
 };
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
-    badge, handle_list_overlay_key, keyboard_hints_footer, search_input_area, substring_filter,
-    ListOverlayAction, ListOverlayConfig, ListOverlayState,
+    badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
+    search_input_area, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
 use gpui::*;
 use gpui_component::h_flex;
@@ -255,60 +255,47 @@ impl Render for CommandPalette {
                     _ => {}
                 }
             }))
-            .absolute()
-            .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
-            .flex()
-            .items_start()
-            .justify_center()
-            .pt(px(80.0))
-            .id("command-palette-backdrop")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.close(cx);
-                }),
-            )
             .child(
-                // Modal content
-                div()
-                    .id("command-palette-modal")
-                    .w(px(config_width))
-                    .max_h(px(config_max_height))
-                    .bg(rgb(t.bg_primary))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .shadow_xl()
-                    .flex()
-                    .flex_col()
-                    .on_mouse_down(MouseButton::Left, |_, _window, _cx| {})
-                    .child(search_input_area(&search_query, &search_placeholder, &t))
-                    .child(
-                        // Command list
-                        div()
-                            .id("command-list")
-                            .flex_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.state.scroll_handle)
-                            .children(
-                                self.state.filtered
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
-                            )
-                            .when(self.state.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px(px(12.0))
-                                        .py(px(20.0))
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(empty_message.clone()),
-                                )
-                            }),
+                modal_backdrop("command-palette-backdrop", &t)
+                    .items_start()
+                    .pt(px(80.0))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            this.close(cx);
+                        }),
                     )
-                    .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
+                    .child(
+                        modal_content("command-palette-modal", &t)
+                            .w(px(config_width))
+                            .max_h(px(config_max_height))
+                            .child(search_input_area(&search_query, &search_placeholder, &t))
+                            .child(
+                                // Command list
+                                div()
+                                    .id("command-list")
+                                    .flex_1()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.state.scroll_handle)
+                                    .children(
+                                        self.state.filtered
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
+                                    )
+                                    .when(self.state.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .px(px(12.0))
+                                                .py(px(20.0))
+                                                .text_size(px(13.0))
+                                                .text_color(rgb(t.text_muted))
+                                                .child(empty_message.clone()),
+                                        )
+                                    }),
+                            )
+                            .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
+                    ),
             )
     }
 }
