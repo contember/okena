@@ -125,7 +125,7 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     let mut summaries = Vec::new();
 
     // Get tracked file changes with numstat
-    let output = std::process::Command::new("git")
+    let output = crate::process::command("git")
         .args(["-C", path_str, "diff", "--numstat", "HEAD"])
         .output()
         .ok();
@@ -151,7 +151,7 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     }
 
     // Get untracked files
-    let output = std::process::Command::new("git")
+    let output = crate::process::command("git")
         .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
         .output()
         .ok();

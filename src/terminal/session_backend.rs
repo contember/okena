@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::process::Command;
 
 /// Backend for persistent terminal sessions
