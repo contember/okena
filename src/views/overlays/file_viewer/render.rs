@@ -1,247 +1,19 @@
-//! File viewer overlay for displaying file contents with syntax highlighting.
-//!
-//! Provides a read-only view of files with syntax highlighting via syntect.
-//! Markdown files can be viewed in rendered preview mode.
+//! Rendering logic for the file viewer overlay.
 
-use crate::settings::settings_entity;
 use crate::theme::{theme, ThemeColors};
-use crate::ui::{copy_to_clipboard, Selection1DExtension, Selection2DExtension, SelectionState};
+use crate::ui::{Selection1DExtension, Selection2DExtension};
 use crate::views::components::{
-    get_scrollbar_geometry, get_selected_text, highlight_content, load_syntax_set, modal_backdrop,
-    modal_content, segmented_toggle, start_scrollbar_drag, update_scrollbar_drag, HighlightedLine,
-    ScrollbarDrag,
+    get_scrollbar_geometry, modal_backdrop, modal_content, segmented_toggle, HighlightedLine,
 };
-use super::markdown_renderer::{MarkdownDocument, MarkdownSelection, RenderedNode};
+use super::markdown_renderer::RenderedNode;
+use super::{DisplayMode, FileViewer};
 use gpui::*;
 use gpui::prelude::*;
-use std::path::PathBuf;
 use std::sync::Arc;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
-
-/// Maximum file size to load (5MB)
-const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
-
-/// Maximum number of lines to display
-const MAX_LINES: usize = 10000;
-
-/// Display mode for file viewer.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum DisplayMode {
-    #[default]
-    Source,
-    Preview,
-}
-
-/// Type alias for source view selection (line, column).
-type Selection = SelectionState<(usize, usize)>;
-
-/// File viewer overlay for displaying file contents.
-pub struct FileViewer {
-    focus_handle: FocusHandle,
-    file_path: PathBuf,
-    content: String,
-    highlighted_lines: Vec<HighlightedLine>,
-    line_count: usize,
-    line_num_width: usize,
-    error_message: Option<String>,
-    selection: Selection,
-    /// Current display mode (source or preview)
-    display_mode: DisplayMode,
-    /// Whether the file is a markdown file
-    is_markdown: bool,
-    /// Parsed markdown document for preview mode
-    markdown_doc: Option<MarkdownDocument>,
-    /// Selection state for markdown preview mode
-    markdown_selection: MarkdownSelection,
-    /// Scroll handle for markdown preview (to track scroll offset)
-    markdown_scroll_handle: ScrollHandle,
-    /// Scroll handle for virtualized source view
-    source_scroll_handle: UniformListScrollHandle,
-    /// Scrollbar drag state
-    scrollbar_drag: Option<ScrollbarDrag>,
-    /// Syntax set for highlighting
-    syntax_set: SyntaxSet,
-    /// Theme set for highlighting
-    theme_set: ThemeSet,
-    /// File font size from settings
-    file_font_size: f32,
-}
 
 impl FileViewer {
-    /// Create a new file viewer for the given file path.
-    pub fn new(file_path: PathBuf, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        let is_markdown = Self::is_markdown_file(&file_path);
-        let file_font_size = settings_entity(cx).read(cx).settings.file_font_size;
-
-        let mut viewer = Self {
-            focus_handle,
-            file_path: file_path.clone(),
-            content: String::new(),
-            highlighted_lines: Vec::new(),
-            line_count: 0,
-            line_num_width: 3,
-            error_message: None,
-            selection: Selection::default(),
-            display_mode: if is_markdown { DisplayMode::Preview } else { DisplayMode::Source },
-            is_markdown,
-            markdown_doc: None,
-            markdown_selection: MarkdownSelection::default(),
-            markdown_scroll_handle: ScrollHandle::new(),
-            source_scroll_handle: UniformListScrollHandle::new(),
-            scrollbar_drag: None,
-            syntax_set: load_syntax_set(),
-            theme_set: ThemeSet::load_defaults(),
-            file_font_size,
-        };
-
-        // Load and highlight the file
-        viewer.load_file(&file_path);
-
-        viewer
-    }
-
-    /// Check if a file is a markdown file based on extension.
-    fn is_markdown_file(path: &PathBuf) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| {
-                let ext_lower = ext.to_lowercase();
-                ext_lower == "md" || ext_lower == "markdown"
-            })
-            .unwrap_or(false)
-    }
-
-    /// Toggle between source and preview display modes.
-    fn toggle_display_mode(&mut self, cx: &mut Context<Self>) {
-        if !self.is_markdown {
-            return;
-        }
-        self.display_mode = match self.display_mode {
-            DisplayMode::Source => DisplayMode::Preview,
-            DisplayMode::Preview => DisplayMode::Source,
-        };
-        cx.notify();
-    }
-
-    /// Load file content and apply syntax highlighting.
-    fn load_file(&mut self, path: &PathBuf) {
-        // Check file size first
-        match std::fs::metadata(path) {
-            Ok(metadata) => {
-                if metadata.len() > MAX_FILE_SIZE {
-                    self.error_message = Some(format!(
-                        "File too large ({:.1} MB). Maximum size is 5 MB.",
-                        metadata.len() as f64 / 1024.0 / 1024.0
-                    ));
-                    return;
-                }
-            }
-            Err(e) => {
-                self.error_message = Some(format!("Cannot read file: {}", e));
-                return;
-            }
-        }
-
-        // Read file content
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                self.content = content.clone();
-                self.do_highlight_content(path);
-                // Parse markdown if this is a markdown file
-                if self.is_markdown {
-                    self.markdown_doc = Some(MarkdownDocument::parse(&content));
-                }
-            }
-            Err(e) => {
-                // Try reading as binary and check if it's a binary file
-                match std::fs::read(path) {
-                    Ok(bytes) => {
-                        if bytes.iter().take(1024).any(|&b| b == 0) {
-                            self.error_message = Some("Cannot display binary file".to_string());
-                        } else {
-                            self.error_message = Some(format!("Cannot read file: {}", e));
-                        }
-                    }
-                    Err(_) => {
-                        self.error_message = Some(format!("Cannot read file: {}", e));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Apply syntax highlighting to the content using shared utilities.
-    fn do_highlight_content(&mut self, path: &PathBuf) {
-        self.highlighted_lines = highlight_content(
-            &self.content,
-            path,
-            &self.syntax_set,
-            &self.theme_set,
-            MAX_LINES,
-        );
-        self.line_count = self.highlighted_lines.len();
-        self.line_num_width = self.line_count.to_string().len().max(3);
-    }
-
-    /// Close the viewer.
-    fn close(&self, cx: &mut Context<Self>) {
-        cx.emit(FileViewerEvent::Close);
-    }
-
-    /// Get selected text using the shared utility.
-    fn get_selected_text(&self) -> Option<String> {
-        get_selected_text(&self.highlighted_lines, &self.selection)
-    }
-
-    /// Copy selected text to clipboard.
-    fn copy_selection(&self, cx: &mut Context<Self>) {
-        copy_to_clipboard(cx, self.get_selected_text());
-    }
-
-    /// Select all text.
-    fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.highlighted_lines.is_empty() {
-            return;
-        }
-        let last_line = self.highlighted_lines.len() - 1;
-        let last_col = self.highlighted_lines[last_line].plain_text.len();
-        self.selection.start = Some((0, 0));
-        self.selection.end = Some((last_line, last_col));
-        cx.notify();
-    }
-
-
-    /// Get selected text from markdown preview (using character indices).
-    fn get_selected_markdown_text(&self) -> Option<String> {
-        let doc = self.markdown_doc.as_ref()?;
-        let (start, end) = self.markdown_selection.normalized_non_empty()?;
-
-        let chars: Vec<char> = doc.plain_text.chars().collect();
-        let char_count = chars.len();
-        let start = start.min(char_count);
-        let end = end.min(char_count);
-
-        Some(chars[start..end].iter().collect())
-    }
-
-    /// Copy selected markdown text to clipboard.
-    fn copy_markdown_selection(&self, cx: &mut Context<Self>) {
-        copy_to_clipboard(cx, self.get_selected_markdown_text());
-    }
-
-    /// Select all markdown text (using character count).
-    fn select_all_markdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(doc) = &self.markdown_doc {
-            self.markdown_selection.start = Some(0);
-            self.markdown_selection.end = Some(doc.plain_text.chars().count());
-            cx.notify();
-        }
-    }
-
     /// Render a single highlighted line with selection support.
-    fn render_line(&self, line_number: usize, line: &HighlightedLine, t: &crate::theme::ThemeColors, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn render_line(&self, line_number: usize, line: &HighlightedLine, t: &ThemeColors, cx: &mut Context<Self>) -> Stateful<Div> {
         // Format line number with right padding
         let line_num_str = format!("{:>width$}", line_number + 1, width = self.line_num_width);
         let has_selection = self.selection.line_has_selection(line_number);
@@ -320,7 +92,7 @@ impl FileViewer {
         &self,
         line_number: usize,
         line: &HighlightedLine,
-        _t: &crate::theme::ThemeColors,
+        _t: &ThemeColors,
         selection_bg: Rgba,
     ) -> Div {
         let ((start_line, start_col), (end_line, end_col)) = match self.selection.normalized() {
@@ -406,38 +178,8 @@ impl FileViewer {
             .children(elements)
     }
 
-    /// Calculate column position from x coordinate.
-    fn x_to_column(&self, x: f32, line_num_width: usize) -> usize {
-        // Approximate char width based on font size (monospace fonts are ~0.6 of font size)
-        let char_width = self.file_font_size * 0.6;
-        let gutter_width = (line_num_width * 8 + 16) as f32;
-        let text_x = (x - gutter_width).max(0.0);
-        (text_x / char_width) as usize
-    }
-
-    // Scrollbar methods using shared utilities
-
-    fn start_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
-        let mut drag = start_scrollbar_drag(&self.source_scroll_handle);
-        drag.start_y = y;
-        self.scrollbar_drag = Some(drag);
-        cx.notify();
-    }
-
-    fn update_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
-        if let Some(drag) = self.scrollbar_drag {
-            update_scrollbar_drag(&self.source_scroll_handle, drag, y);
-            cx.notify();
-        }
-    }
-
-    fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar_drag = None;
-        cx.notify();
-    }
-
     /// Render visible lines for the virtualized list.
-    fn render_visible_lines(
+    pub(super) fn render_visible_lines(
         &self,
         range: std::ops::Range<usize>,
         t: &ThemeColors,
@@ -453,7 +195,7 @@ impl FileViewer {
     }
 
     /// Render scrollbar thumb.
-    fn render_scrollbar(
+    pub(super) fn render_scrollbar(
         &self,
         t: &ThemeColors,
         thumb_y: f32,
@@ -503,15 +245,6 @@ impl FileViewer {
             )
     }
 }
-
-/// Events emitted by the file viewer.
-#[derive(Clone, Debug)]
-pub enum FileViewerEvent {
-    /// Viewer was closed.
-    Close,
-}
-
-impl EventEmitter<FileViewerEvent> for FileViewer {}
 
 impl Render for FileViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -690,7 +423,7 @@ impl Render for FileViewer {
                                                 div()
                                                     .text_size(px(18.0))
                                                     .text_color(rgb(t.text_muted))
-                                                    .child("×"),
+                                                    .child("\u{00d7}"),
                                             ),
                                     ),
                             ),
@@ -1126,5 +859,3 @@ impl Render for FileViewer {
             )
     }
 }
-
-impl_focusable!(FileViewer);
