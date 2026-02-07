@@ -19,8 +19,8 @@ impl RootView {
         let visible_projects: Vec<_> = {
             let workspace = self.workspace.read(cx);
             // When zoomed, show only the zoomed project's column
-            if let Some(ref fs) = workspace.fullscreen_terminal {
-                vec![fs.project_id.clone()]
+            if let Some(pid) = workspace.focus_manager.fullscreen_project_id() {
+                vec![pid.to_string()]
             } else {
                 workspace.visible_projects().iter().map(|p| p.id.clone()).collect()
             }

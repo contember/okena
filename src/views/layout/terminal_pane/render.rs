@@ -43,9 +43,8 @@ impl Render for TerminalPane {
                 }
 
                 // Fullscreen focus: if this terminal is in fullscreen and doesn't have focus, restore it
-                if let Some(ref fs) = ws.fullscreen_terminal {
-                    if fs.project_id == self.project_id
-                        && Some(&fs.terminal_id) == self.terminal_id.as_ref()
+                if let Some(ref tid) = self.terminal_id {
+                    if ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
                         && !focus_handle.is_focused(window)
                     {
                         self.pending_focus = true;
@@ -216,7 +215,7 @@ impl Render for TerminalPane {
                 });
             }))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
-                let is_fullscreen = this.workspace.read(cx).fullscreen_terminal.is_some();
+                let is_fullscreen = this.workspace.read(cx).focus_manager.has_fullscreen();
                 if is_fullscreen {
                     this.workspace.update(cx, |ws, cx| {
                         ws.exit_fullscreen(cx);

@@ -411,10 +411,8 @@ impl Workspace {
         }
 
         // Exit fullscreen if a terminal from this project was in fullscreen
-        if let Some(ref fs) = self.fullscreen_terminal {
-            if fs.project_id == project_id {
-                self.fullscreen_terminal = None;
-            }
+        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
+            self.focus_manager.exit_fullscreen();
         }
 
         // Remove any detached terminals from this project

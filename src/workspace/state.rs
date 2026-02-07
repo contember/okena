@@ -103,15 +103,6 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// State for fullscreen terminal mode
-#[derive(Clone, Debug)]
-pub struct FullscreenState {
-    pub project_id: String,
-    pub terminal_id: String,
-    /// Previous focused project ID to restore when exiting fullscreen
-    pub previous_focused_project_id: Option<String>,
-}
-
 /// State for a detached terminal (opened in separate window)
 #[derive(Clone, Debug)]
 pub struct DetachedTerminalState {
@@ -162,8 +153,6 @@ pub enum SidebarRequest {
 /// GPUI Entity for workspace state
 pub struct Workspace {
     pub data: WorkspaceData,
-    pub focused_project_id: Option<String>,
-    pub fullscreen_terminal: Option<FullscreenState>,
     /// Currently detached terminals (opened in separate windows)
     pub detached_terminals: Vec<DetachedTerminalState>,
     /// Unified focus manager for the workspace
@@ -183,8 +172,6 @@ impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
             data,
-            focused_project_id: None,
-            fullscreen_terminal: None,
             detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
             overlay_requests: VecDeque::new(),
@@ -231,21 +218,28 @@ impl Workspace {
         &self.data.projects
     }
 
+    /// Get the currently focused/zoomed project ID.
+    /// Delegates to FocusManager (single source of truth).
+    pub fn focused_project_id(&self) -> Option<&String> {
+        self.focus_manager.focused_project_id()
+    }
+
     /// Get visible projects in order, expanding folders into their contained projects
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
+        let focused = self.focused_project_id();
         let mut result = Vec::new();
         for id in &self.data.project_order {
             if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
                 // Folder: include its projects
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if self.focused_project_id.as_ref().map_or(p.is_visible, |fid| &p.id == fid) {
+                        if focused.map_or(p.is_visible, |fid| &p.id == fid) {
                             result.push(p);
                         }
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
-                if self.focused_project_id.as_ref().map_or(p.is_visible, |fid| &p.id == fid) {
+                if focused.map_or(p.is_visible, |fid| &p.id == fid) {
                     result.push(p);
                 }
             }
