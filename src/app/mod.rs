@@ -13,6 +13,7 @@ use crate::updater::{GlobalUpdateInfo, UpdateInfo};
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
 use crate::workspace::persistence;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
@@ -24,6 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub struct Okena {
     root_view: Entity<RootView>,
     pub(crate) workspace: Entity<Workspace>,
+    #[allow(dead_code)]
+    request_broker: Entity<RequestBroker>,
     pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
@@ -51,6 +54,9 @@ impl Okena {
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
+
+        // Create request broker entity (decoupled UI request routing)
+        let request_broker = cx.new(|_| RequestBroker::new());
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));
@@ -95,8 +101,9 @@ impl Okena {
 
         // Create root view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
+        let request_broker_clone = request_broker.clone();
         let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), pty_manager_clone, cx)
+            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, cx)
         });
 
         // Get terminals registry from root view
@@ -128,6 +135,7 @@ impl Okena {
         let mut manager = Self {
             root_view,
             workspace: workspace.clone(),
+            request_broker,
             pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),

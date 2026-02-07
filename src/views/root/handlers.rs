@@ -1,5 +1,6 @@
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::workspace::requests::OverlayRequest;
+use crate::workspace::requests::SidebarRequest;
 use gpui::*;
 
 use super::RootView;
@@ -33,8 +34,8 @@ impl RootView {
                 });
             }
             OverlayManagerEvent::RenameProject { project_id, project_name } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.push_sidebar_request(crate::workspace::requests::SidebarRequest::RenameProject {
+                self.request_broker.update(cx, |broker, cx| {
+                    broker.push_sidebar_request(SidebarRequest::RenameProject {
                         project_id: project_id.clone(),
                         project_name: project_name.clone(),
                     }, cx);
@@ -102,8 +103,8 @@ impl RootView {
     /// Drains the overlay request queue and dispatches each request to the
     /// OverlayManager. Requests for already-open overlays are silently dropped.
     pub(super) fn process_pending_requests(&mut self, cx: &mut Context<Self>) {
-        let requests: Vec<_> = self.workspace.update(cx, |ws, _cx| {
-            ws.overlay_requests.drain(..).collect()
+        let requests: Vec<_> = self.request_broker.update(cx, |broker, _cx| {
+            broker.drain_overlay_requests()
         });
 
         for request in requests {

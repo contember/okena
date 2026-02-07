@@ -11,6 +11,7 @@ use crate::theme::theme;
 use crate::views::root::TerminalsRegistry;
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::views::layout::terminal_pane::TerminalPane;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::*;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 /// Recursive layout container that renders terminal/split/tabs nodes
 pub struct LayoutContainer {
     pub(super) workspace: Entity<Workspace>,
+    pub(super) request_broker: Entity<RequestBroker>,
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
@@ -46,6 +48,7 @@ pub struct LayoutContainer {
 impl LayoutContainer {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
@@ -55,6 +58,7 @@ impl LayoutContainer {
     ) -> Self {
         Self {
             workspace,
+            request_broker,
             project_id,
             project_path,
             layout_path,
@@ -91,6 +95,7 @@ impl LayoutContainer {
 
         if needs_new_pane {
             let workspace = self.workspace.clone();
+            let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
             let layout_path = self.layout_path.clone();
@@ -100,6 +105,7 @@ impl LayoutContainer {
             self.terminal_pane = Some(cx.new(move |cx| {
                 TerminalPane::new(
                     workspace,
+                    request_broker,
                     project_id,
                     project_path,
                     layout_path,
@@ -188,6 +194,7 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -257,6 +264,7 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),

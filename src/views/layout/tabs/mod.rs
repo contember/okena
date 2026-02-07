@@ -262,6 +262,7 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
@@ -555,6 +556,7 @@ impl LayoutContainer {
                             cx.new(|_cx| {
                                 LayoutContainer::new(
                                     self.workspace.clone(),
+                                    self.request_broker.clone(),
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),

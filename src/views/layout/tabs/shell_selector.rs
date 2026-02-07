@@ -48,11 +48,11 @@ impl LayoutContainer {
         shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
             .when_some(terminal_id, |el, tid| {
                 el.on_mouse_down(MouseButton::Left, {
-                    let workspace = self.workspace.clone();
+                    let request_broker = self.request_broker.clone();
                     move |_, _window, cx| {
                         cx.stop_propagation();
-                        workspace.update(cx, |ws, cx| {
-                            ws.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                        request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
                                 project_id: project_id.clone(),
                                 terminal_id: tid.clone(),
                                 current_shell: shell_type.clone(),

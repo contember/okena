@@ -13,6 +13,7 @@ use crate::views::layout::split_pane::{new_active_drag, ActiveDrag};
 use crate::views::panels::status_bar::StatusBar;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::workspace::persistence::{load_settings, AppSettings};
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use parking_lot::Mutex;
@@ -25,6 +26,7 @@ pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<Terminal>>>>;
 /// Root view of the application
 pub struct RootView {
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     pty_manager: Arc<PtyManager>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
@@ -49,6 +51,7 @@ pub struct RootView {
 impl RootView {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         pty_manager: Arc<PtyManager>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -59,7 +62,7 @@ impl RootView {
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), terminals.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), request_broker.clone(), terminals.clone(), cx));
 
         // Create title bar entity
         let workspace_for_title = workspace.clone();
@@ -69,14 +72,14 @@ impl RootView {
         let status_bar = cx.new(StatusBar::new);
 
         // Create overlay manager
-        let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone()));
+        let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));
 
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
-        // Observe Workspace to process overlay requests outside of render()
-        cx.observe(&workspace, |this, _workspace, cx| {
-            if !this.workspace.read(cx).overlay_requests.is_empty() {
+        // Observe RequestBroker to process overlay requests outside of render()
+        cx.observe(&request_broker, |this, _broker, cx| {
+            if this.request_broker.read(cx).has_overlay_requests() {
                 this.process_pending_requests(cx);
             }
         }).detach();
@@ -86,6 +89,7 @@ impl RootView {
 
         let mut view = Self {
             workspace,
+            request_broker,
             pty_manager,
             terminals,
             sidebar,
@@ -121,6 +125,7 @@ impl RootView {
         for project_id in &visible_project_ids {
             if !self.project_columns.contains_key(project_id) {
                 let workspace_clone = self.workspace.clone();
+                let request_broker_clone = self.request_broker.clone();
                 let pty_manager_clone = self.pty_manager.clone();
                 let terminals_clone = self.terminals.clone();
                 let active_drag_clone = self.active_drag.clone();
@@ -128,6 +133,7 @@ impl RootView {
                 let entity = cx.new(move |cx| {
                     ProjectColumn::new(
                         workspace_clone,
+                        request_broker_clone,
                         id,
                         pty_manager_clone,
                         terminals_clone,

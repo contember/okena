@@ -31,6 +31,7 @@ use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::root::TerminalsRegistry;
+use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ use std::sync::Arc;
 pub struct TerminalPane {
     // Identity
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     project_id: String,
     project_path: String,
     layout_path: Vec<usize>,
@@ -68,6 +70,7 @@ pub struct TerminalPane {
 impl TerminalPane {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
@@ -134,6 +137,7 @@ impl TerminalPane {
 
         let mut pane = Self {
             workspace,
+            request_broker,
             project_id,
             project_path,
             layout_path,
@@ -187,8 +191,8 @@ impl TerminalPane {
             HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                    self.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
                             project_id: self.project_id.clone(),
                             terminal_id: terminal_id.clone(),
                             current_shell: current_shell.clone(),
