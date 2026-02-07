@@ -81,7 +81,7 @@ impl Okena {
                 if save_pending.swap(false, Ordering::Relaxed) {
                     let (data, version) = cx.update(|cx| {
                         let ws = workspace.read(cx);
-                        (ws.data.clone(), ws.data_version())
+                        (ws.data().clone(), ws.data_version())
                     });
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
@@ -447,7 +447,7 @@ impl Okena {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
                             let sv = state_version.load(Ordering::Relaxed);
-                            let projects: Vec<ApiProject> = ws.data.projects.iter().map(|p| {
+                            let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
@@ -554,22 +554,21 @@ impl Okena {
                     RemoteCommand::SplitTerminal { project_id, path, direction } => {
                         cx.update(|cx| {
                             workspace.update(cx, |ws, cx| {
-                                if let Some(project) = ws.project_mut(&project_id) {
-                                    if let Some(ref mut layout) = project.layout {
-                                        if let Some(node) = layout.get_at_path_mut(&path) {
-                                            let existing = node.clone();
-                                            let new_terminal = crate::workspace::state::LayoutNode::new_terminal();
-                                            *node = crate::workspace::state::LayoutNode::Split {
-                                                direction,
-                                                sizes: vec![0.5, 0.5],
-                                                children: vec![existing, new_terminal],
-                                            };
-                                            cx.notify();
-                                            return CommandResult::Ok(None);
-                                        }
-                                    }
+                                let ok = ws.with_layout_node(&project_id, &path, cx, |node| {
+                                    let existing = node.clone();
+                                    let new_terminal = crate::workspace::state::LayoutNode::new_terminal();
+                                    *node = crate::workspace::state::LayoutNode::Split {
+                                        direction,
+                                        sizes: vec![0.5, 0.5],
+                                        children: vec![existing, new_terminal],
+                                    };
+                                    true
+                                });
+                                if ok {
+                                    CommandResult::Ok(None)
+                                } else {
+                                    CommandResult::Err(format!("project or path not found: {}:{:?}", project_id, path))
                                 }
-                                CommandResult::Err(format!("project or path not found: {}:{:?}", project_id, path))
                             })
                         })
                     }

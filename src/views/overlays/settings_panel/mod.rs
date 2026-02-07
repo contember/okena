@@ -154,7 +154,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        if let Some(p) = ws.project_mut(&pid) { p.hooks.on_project_open = val; cx.notify(); }
+                        ws.with_project(&pid, cx, |p| { p.hooks.on_project_open = val; true });
                     });
                 }
             }
@@ -166,7 +166,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        if let Some(p) = ws.project_mut(&pid) { p.hooks.on_project_close = val; cx.notify(); }
+                        ws.with_project(&pid, cx, |p| { p.hooks.on_project_close = val; true });
                     });
                 }
             }
@@ -178,7 +178,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        if let Some(p) = ws.project_mut(&pid) { p.hooks.on_worktree_create = val; cx.notify(); }
+                        ws.with_project(&pid, cx, |p| { p.hooks.on_worktree_create = val; true });
                     });
                 }
             }
@@ -190,7 +190,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        if let Some(p) = ws.project_mut(&pid) { p.hooks.on_worktree_close = val; cx.notify(); }
+                        ws.with_project(&pid, cx, |p| { p.hooks.on_worktree_close = val; true });
                     });
                 }
             }

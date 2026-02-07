@@ -88,10 +88,7 @@ impl RootView {
 
         // Update workspace with new data
         self.workspace.update(cx, |ws, cx| {
-            ws.data = data;
-            // Clear all focus state via FocusManager (focus, focused_project_id, stack)
-            ws.focus_manager.clear_all();
-            cx.notify();
+            ws.replace_data(data, cx);
         });
 
         // Sync project columns for new data
