@@ -1,6 +1,17 @@
+use gpui::Action;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+use super::{
+    AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
+    CreateWorktree, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
+    FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, MinimizeTerminal,
+    NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp, Search, SearchNext,
+    SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer, ShowFileSearch, ShowKeybindings,
+    ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
+    SplitVertical, ToggleFullscreen, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+};
 
 /// Represents a single keybinding configuration
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,11 +66,13 @@ impl std::fmt::Display for KeybindingConflict {
 }
 
 /// Human-readable description of an action
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActionDescription {
     pub name: &'static str,
     pub description: &'static str,
     pub category: &'static str,
+    /// Factory to create a boxed Action for dispatch
+    pub factory: fn() -> Box<dyn Action>,
 }
 
 /// Get human-readable descriptions for all actions
@@ -73,6 +86,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Cancel",
             description: "Close overlay, cancel rename, or dismiss",
             category: "Global",
+            factory: || Box::new(Cancel),
         },
     );
     map.insert(
@@ -81,6 +95,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Send Escape",
             description: "Send escape key to terminal",
             category: "Terminal",
+            factory: || Box::new(SendEscape),
         },
     );
     map.insert(
@@ -89,6 +104,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Toggle Sidebar",
             description: "Show or hide the sidebar",
             category: "Global",
+            factory: || Box::new(ToggleSidebar),
         },
     );
     map.insert(
@@ -97,6 +113,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Toggle Auto-Hide",
             description: "Enable or disable sidebar auto-hide mode",
             category: "Global",
+            factory: || Box::new(ToggleSidebarAutoHide),
         },
     );
     map.insert(
@@ -105,6 +122,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Clear Focus",
             description: "Clear focus and show all projects",
             category: "Global",
+            factory: || Box::new(ClearFocus),
         },
     );
 
@@ -115,6 +133,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Toggle Fullscreen",
             description: "Toggle fullscreen mode for focused terminal",
             category: "Fullscreen",
+            factory: || Box::new(ToggleFullscreen),
         },
     );
     map.insert(
@@ -123,6 +142,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Next Terminal",
             description: "Switch to next terminal in fullscreen",
             category: "Fullscreen",
+            factory: || Box::new(FullscreenNextTerminal),
         },
     );
     map.insert(
@@ -131,6 +151,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Previous Terminal",
             description: "Switch to previous terminal in fullscreen",
             category: "Fullscreen",
+            factory: || Box::new(FullscreenPrevTerminal),
         },
     );
 
@@ -141,6 +162,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Split Vertical",
             description: "Split the terminal vertically",
             category: "Terminal",
+            factory: || Box::new(SplitVertical),
         },
     );
     map.insert(
@@ -149,6 +171,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Split Horizontal",
             description: "Split the terminal horizontally",
             category: "Terminal",
+            factory: || Box::new(SplitHorizontal),
         },
     );
     map.insert(
@@ -157,6 +180,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Add Tab",
             description: "Add a new tab (creates tab group if needed)",
             category: "Terminal",
+            factory: || Box::new(AddTab),
         },
     );
     map.insert(
@@ -165,6 +189,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Close Terminal",
             description: "Close the current terminal",
             category: "Terminal",
+            factory: || Box::new(CloseTerminal),
         },
     );
     map.insert(
@@ -173,6 +198,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Minimize Terminal",
             description: "Minimize/detach the terminal",
             category: "Terminal",
+            factory: || Box::new(MinimizeTerminal),
         },
     );
     map.insert(
@@ -181,6 +207,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Copy",
             description: "Copy selected text",
             category: "Terminal",
+            factory: || Box::new(Copy),
         },
     );
     map.insert(
@@ -189,6 +216,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Paste",
             description: "Paste from clipboard",
             category: "Terminal",
+            factory: || Box::new(Paste),
         },
     );
     map.insert(
@@ -197,6 +225,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Scroll Up",
             description: "Scroll terminal output up",
             category: "Terminal",
+            factory: || Box::new(ScrollUp),
         },
     );
     map.insert(
@@ -205,6 +234,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Scroll Down",
             description: "Scroll terminal output down",
             category: "Terminal",
+            factory: || Box::new(ScrollDown),
         },
     );
     map.insert(
@@ -213,6 +243,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Search",
             description: "Open search in terminal",
             category: "Terminal",
+            factory: || Box::new(Search),
         },
     );
     map.insert(
@@ -221,6 +252,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Search Next",
             description: "Find next search match",
             category: "Search",
+            factory: || Box::new(SearchNext),
         },
     );
     map.insert(
@@ -229,6 +261,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Search Previous",
             description: "Find previous search match",
             category: "Search",
+            factory: || Box::new(SearchPrev),
         },
     );
     map.insert(
@@ -237,6 +270,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Close Search",
             description: "Close search panel",
             category: "Search",
+            factory: || Box::new(CloseSearch),
         },
     );
 
@@ -247,6 +281,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Zoom In",
             description: "Increase terminal font size",
             category: "Terminal",
+            factory: || Box::new(ZoomIn),
         },
     );
     map.insert(
@@ -255,6 +290,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Zoom Out",
             description: "Decrease terminal font size",
             category: "Terminal",
+            factory: || Box::new(ZoomOut),
         },
     );
     map.insert(
@@ -263,6 +299,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Reset Zoom",
             description: "Reset terminal font size to default",
             category: "Terminal",
+            factory: || Box::new(ResetZoom),
         },
     );
 
@@ -273,6 +310,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Left",
             description: "Move focus to the left terminal",
             category: "Navigation",
+            factory: || Box::new(FocusLeft),
         },
     );
     map.insert(
@@ -281,6 +319,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Right",
             description: "Move focus to the right terminal",
             category: "Navigation",
+            factory: || Box::new(FocusRight),
         },
     );
     map.insert(
@@ -289,6 +328,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Up",
             description: "Move focus to the terminal above",
             category: "Navigation",
+            factory: || Box::new(FocusUp),
         },
     );
     map.insert(
@@ -297,6 +337,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Down",
             description: "Move focus to the terminal below",
             category: "Navigation",
+            factory: || Box::new(FocusDown),
         },
     );
     map.insert(
@@ -305,6 +346,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Next",
             description: "Move focus to the next terminal",
             category: "Navigation",
+            factory: || Box::new(FocusNextTerminal),
         },
     );
     map.insert(
@@ -313,6 +355,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Focus Previous",
             description: "Move focus to the previous terminal",
             category: "Navigation",
+            factory: || Box::new(FocusPrevTerminal),
         },
     );
 
@@ -323,6 +366,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "New Project",
             description: "Create a new project",
             category: "Project",
+            factory: || Box::new(NewProject),
         },
     );
     map.insert(
@@ -331,6 +375,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Create Worktree",
             description: "Create a git worktree from the focused project",
             category: "Project",
+            factory: || Box::new(CreateWorktree),
         },
     );
     map.insert(
@@ -339,6 +384,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Show Keybindings",
             description: "Display keybinding help",
             category: "Global",
+            factory: || Box::new(ShowKeybindings),
         },
     );
     map.insert(
@@ -347,6 +393,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Session Manager",
             description: "Open session manager to save/load workspaces",
             category: "Global",
+            factory: || Box::new(ShowSessionManager),
         },
     );
     map.insert(
@@ -355,6 +402,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Theme Selector",
             description: "Open theme selector to change appearance",
             category: "Global",
+            factory: || Box::new(ShowThemeSelector),
         },
     );
     map.insert(
@@ -363,6 +411,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Command Palette",
             description: "Open command palette for quick access to all commands",
             category: "Global",
+            factory: || Box::new(ShowCommandPalette),
         },
     );
     map.insert(
@@ -371,6 +420,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Settings",
             description: "Open settings panel",
             category: "Global",
+            factory: || Box::new(ShowSettings),
         },
     );
     map.insert(
@@ -379,6 +429,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Open Settings File",
             description: "Open settings JSON file in default editor",
             category: "Global",
+            factory: || Box::new(OpenSettingsFile),
         },
     );
     map.insert(
@@ -387,6 +438,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Go to File",
             description: "Quick file search in the active project",
             category: "Global",
+            factory: || Box::new(ShowFileSearch),
         },
     );
     map.insert(
@@ -395,6 +447,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Switch Project",
             description: "Quick project navigation (Enter=focus, Space=toggle visibility)",
             category: "Global",
+            factory: || Box::new(ShowProjectSwitcher),
         },
     );
     map.insert(
@@ -403,6 +456,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Show Git Diff",
             description: "View git diff for the current project",
             category: "Git",
+            factory: || Box::new(ShowDiffViewer),
         },
     );
     map.insert(
@@ -411,6 +465,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Check for Updates",
             description: "Check for a new version of Okena",
             category: "Global",
+            factory: || Box::new(CheckForUpdates),
         },
     );
     map.insert(
@@ -419,6 +474,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             name: "Install Update",
             description: "Install a downloaded update",
             category: "Global",
+            factory: || Box::new(InstallUpdate),
         },
     );
 
