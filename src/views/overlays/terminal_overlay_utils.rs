@@ -70,7 +70,6 @@ pub fn create_terminal_content<V: 'static>(
             cx,
         );
         content.set_terminal(Some(terminal), cx);
-        content.set_focused(true);
         content
     })
 }
