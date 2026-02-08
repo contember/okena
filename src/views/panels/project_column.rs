@@ -45,6 +45,8 @@ pub struct ProjectColumn {
     active_drag: ActiveDrag,
     /// For remote projects: layout provided externally (from remote state)
     external_layout: Option<crate::workspace::state::LayoutNode>,
+    /// Whether this is a remote project column
+    is_remote: bool,
 }
 
 impl ProjectColumn {
@@ -78,6 +80,7 @@ impl ProjectColumn {
             cached_git_status: None,
             active_drag,
             external_layout: None,
+            is_remote: false,
         }
     }
 
@@ -90,7 +93,7 @@ impl ProjectColumn {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
-        external_layout: crate::workspace::state::LayoutNode,
+        external_layout: Option<crate::workspace::state::LayoutNode>,
         _cx: &mut Context<Self>,
     ) -> Self {
         // No git status for remote projects
@@ -108,7 +111,8 @@ impl ProjectColumn {
             hover_token: Arc::new(AtomicU64::new(0)),
             cached_git_status: None,
             active_drag,
-            external_layout: Some(external_layout),
+            external_layout,
+            is_remote: true,
         }
     }
 
@@ -846,6 +850,46 @@ impl Render for ProjectColumn {
                     .bg(rgb(t.bg_primary))
                     .child(header)
                     .child(content)
+                    .into_any_element()
+            }
+
+            None if self.is_remote => {
+                // Remote bookmark project (no terminals)
+                let header = div()
+                    .id("remote-project-header")
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .bg(rgb(t.bg_header))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("{} (remote)", self.project_id)),
+                    );
+
+                div()
+                    .id("project-column-main")
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_h_0()
+                    .bg(rgb(t.bg_primary))
+                    .child(header)
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(t.text_muted))
+                            .child("No terminals on remote"),
+                    )
                     .into_any_element()
             }
 

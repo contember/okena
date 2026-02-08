@@ -214,6 +214,13 @@ impl LayoutContainer {
                 })
                 .clone();
 
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[zoomed_idx].clone());
+                });
+            }
+
             return div()
                 .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
                 .size_full()
@@ -283,6 +290,13 @@ impl LayoutContainer {
                     })
                 })
                 .clone();
+
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[*original_idx].clone());
+                });
+            }
 
             // Add divider before this child (if not first visible child)
             if visible_idx > 0 {

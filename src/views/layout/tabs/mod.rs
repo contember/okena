@@ -274,6 +274,13 @@ impl LayoutContainer {
                 })
                 .clone();
 
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[zoomed_idx].clone());
+                });
+            }
+
             return v_flex()
                 .size_full()
                 .child(container);
@@ -550,7 +557,7 @@ impl LayoutContainer {
                     let mut child_path = self.layout_path.clone();
                     child_path.push(active_tab);
 
-                    self.child_containers
+                    let container = self.child_containers
                         .entry(child_path.clone())
                         .or_insert_with(|| {
                             cx.new(|_cx| {
@@ -566,7 +573,16 @@ impl LayoutContainer {
                                 )
                             })
                         })
-                        .clone()
+                        .clone();
+
+                    // Propagate external layout to child
+                    if self.external_layout.is_some() {
+                        container.update(cx, |c, _| {
+                            c.external_layout = Some(children[active_tab].clone());
+                        });
+                    }
+
+                    container
                 }),
             )
     }
