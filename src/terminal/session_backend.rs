@@ -253,7 +253,7 @@ impl ResolvedBackend {
                     {
                         let my_pid = std::process::id() as i32;
                         if let Ok(output) = Command::new("lsof")
-                            .args(["-t", "-U"])
+                            .arg("-t")
                             .arg(&socket_path)
                             .output()
                         {
