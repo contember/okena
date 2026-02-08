@@ -28,6 +28,8 @@ use gpui_component::Root;
 use crate::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
+use std::net::IpAddr;
+
 use crate::app::Okena;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
@@ -89,6 +91,73 @@ fn set_app_menus(cx: &mut App) {
     ]);
 }
 
+/// `okena pair` — retrieve the pairing code from a running Okena instance.
+fn cli_pair() -> i32 {
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("okena");
+    let remote_json_path = config_dir.join("remote.json");
+
+    let data = match std::fs::read_to_string(&remote_json_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("Okena remote server is not running (no remote.json found).");
+            eprintln!("Start Okena with --remote or enable the remote server in settings.");
+            return 1;
+        }
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Failed to parse remote.json.");
+            return 1;
+        }
+    };
+
+    let port = match json.get("port").and_then(|v| v.as_u64()) {
+        Some(p) => p as u16,
+        None => {
+            eprintln!("Invalid remote.json: missing port.");
+            return 1;
+        }
+    };
+
+    let url = format!("http://127.0.0.1:{port}/v1/local/pair-code");
+    let resp = match reqwest::blocking::get(&url) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!("Could not connect to Okena on port {port}.");
+            eprintln!("The remote server may not be running.");
+            return 1;
+        }
+    };
+
+    if !resp.status().is_success() {
+        eprintln!("Server returned status {}.", resp.status());
+        return 1;
+    }
+
+    let body: serde_json::Value = match resp.json() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Invalid response from server.");
+            return 1;
+        }
+    };
+
+    let code = body
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("???");
+    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(60);
+
+    println!("Pairing code: {code}");
+    println!("Expires in {expires_in}s — run `okena pair` again for a fresh code.");
+    println!("Server port: {port}");
+    0
+}
+
 fn main() {
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
@@ -96,9 +165,40 @@ fn main() {
         return;
     }
 
+    // Handle `okena pair` subcommand before GPUI init
+    if std::env::args().nth(1).as_deref() == Some("pair") {
+        std::process::exit(cli_pair());
+    }
+
     env_logger::init();
 
-    Application::new().with_assets(Assets).run(|cx: &mut App| {
+    // Parse --remote and --listen flags
+    let listen_addr: Option<IpAddr> = {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(pos) = args.iter().position(|a| a == "--listen") {
+            match args.get(pos + 1) {
+                Some(addr_str) => match addr_str.parse::<IpAddr>() {
+                    Ok(addr) => Some(addr),
+                    Err(_) => {
+                        eprintln!("Invalid address for --listen: {addr_str}");
+                        eprintln!("Expected an IP address, e.g. --listen 0.0.0.0");
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("--listen requires an address argument, e.g. --listen 0.0.0.0");
+                    std::process::exit(1);
+                }
+            }
+        } else if args.iter().any(|a| a == "--remote") {
+            // --remote without --listen: force-enable server on localhost
+            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        } else {
+            None
+        }
+    };
+
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Quit the app when the last window is closed (default on macOS is to keep running)
         cx.set_quit_mode(QuitMode::LastWindowClosed);
 
@@ -205,7 +305,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
+                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },

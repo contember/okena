@@ -19,6 +19,7 @@ use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -42,6 +43,7 @@ pub struct Okena {
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
     pub(crate) state_version: Arc<AtomicU64>,
     remote_info: RemoteInfo,
+    listen_addr: IpAddr,
 }
 
 impl Okena {
@@ -49,9 +51,12 @@ impl Okena {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
+        listen_addr: Option<IpAddr>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let force_remote = listen_addr.is_some();
+        let listen_addr = listen_addr.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -158,6 +163,7 @@ impl Okena {
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
+            listen_addr,
         };
 
         // Start PTY event loop (centralized for all windows)
@@ -172,9 +178,9 @@ impl Okena {
         })
         .detach();
 
-        // Auto-start remote server if enabled in settings
+        // Auto-start remote server if enabled in settings or forced via --remote
         let settings = cx.global::<GlobalSettings>().0.clone();
-        if settings.read(cx).get().remote_server_enabled {
+        if settings.read(cx).get().remote_server_enabled || force_remote {
             manager.start_remote_server(bridge_tx.clone());
         }
 
@@ -231,11 +237,18 @@ impl Okena {
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
+            self.listen_addr,
         ) {
             Ok(server) => {
                 let port = server.port();
                 self.remote_info.set_active(port, self.auth_store.clone());
                 log::info!("Remote server started on port {}", port);
+
+                let code = self.auth_store.get_or_create_code();
+                println!("Remote server listening on port {port}");
+                println!("Pairing code: {code} (expires in 60s)");
+                println!("Run `okena pair` anytime for a fresh code.");
+
                 self.remote_server = Some(server);
             }
             Err(e) => {

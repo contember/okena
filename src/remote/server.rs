@@ -2,7 +2,7 @@ use crate::remote::auth::AuthStore;
 use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::routes;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -25,6 +25,7 @@ impl RemoteServer {
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
         state_version: Arc<AtomicU64>,
+        bind_addr: IpAddr,
     ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -41,18 +42,18 @@ impl RemoteServer {
         let listener = runtime.block_on(async {
             // Try preferred range first
             for port in 19100..=19200 {
-                let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                let addr = SocketAddr::new(bind_addr, port);
                 if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
                     return Ok(listener);
                 }
             }
             // Fall back to OS-assigned port
-            let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+            let addr = SocketAddr::new(bind_addr, 0);
             tokio::net::TcpListener::bind(addr).await
         })?;
 
         let port = listener.local_addr()?.port();
-        log::info!("Remote control server listening on 127.0.0.1:{}", port);
+        log::info!("Remote control server listening on {}:{}", bind_addr, port);
 
         // Write remote.json
         if let Err(e) = write_remote_json(port) {
