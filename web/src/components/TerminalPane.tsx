@@ -10,11 +10,13 @@ export function TerminalPane({
   name,
   projectId,
   path,
+  hideSplitActions,
 }: {
   terminalId: string | null;
   name?: string;
   projectId: string;
   path: number[];
+  hideSplitActions?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -165,20 +167,24 @@ export function TerminalPane({
           {name ?? "Terminal"}
         </span>
         <div className="flex items-center gap-0.5 ml-2">
-          <button
-            onClick={(e) => { e.stopPropagation(); handleSplit("horizontal"); }}
-            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
-            title="Split horizontal"
-          >
-            &#x2502;
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); handleSplit("vertical"); }}
-            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
-            title="Split vertical"
-          >
-            &#x2500;
-          </button>
+          {!hideSplitActions && (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleSplit("horizontal"); }}
+                className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+                title="Split horizontal"
+              >
+                &#x2502;
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleSplit("vertical"); }}
+                className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+                title="Split vertical"
+              >
+                &#x2500;
+              </button>
+            </>
+          )}
           <button
             onClick={(e) => { e.stopPropagation(); handleClose(); }}
             className="p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-700 rounded text-xs"

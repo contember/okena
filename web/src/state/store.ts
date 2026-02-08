@@ -50,6 +50,8 @@ export class TerminalRegistry {
 export interface AppState {
   workspace: StateResponse | null;
   selectedProjectId: string | null;
+  selectedTerminalId: string | null;
+  sidebarOpen: boolean;
   wsStatus: WsStatus;
   /** terminalId → streamId mapping from WS subscribe */
   streamMappings: Record<string, number>;
@@ -58,6 +60,8 @@ export interface AppState {
 export type AppAction =
   | { type: "set_workspace"; workspace: StateResponse }
   | { type: "select_project"; projectId: string }
+  | { type: "select_terminal"; terminalId: string | null }
+  | { type: "set_sidebar_open"; open: boolean }
   | { type: "set_ws_status"; status: WsStatus }
   | { type: "set_stream_mappings"; mappings: Record<string, number> }
   | { type: "clear_stream_mappings" };
@@ -68,6 +72,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, workspace: action.workspace };
     case "select_project":
       return { ...state, selectedProjectId: action.projectId };
+    case "select_terminal":
+      return { ...state, selectedTerminalId: action.terminalId };
+    case "set_sidebar_open":
+      return { ...state, sidebarOpen: action.open };
     case "set_ws_status":
       return { ...state, wsStatus: action.status };
     case "set_stream_mappings":
@@ -80,6 +88,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 export const initialState: AppState = {
   workspace: null,
   selectedProjectId: null,
+  selectedTerminalId: null,
+  sidebarOpen: false,
   wsStatus: "disconnected",
   streamMappings: {},
 };
