@@ -26,5 +26,9 @@ mobile/.flutter-plugins-dependencies
 mobile/pubspec.lock
 mobile/native/target/
 
+# Web client
+web/node_modules/
+web/dist/
+
 # claude
 .claude/settings.local.json
