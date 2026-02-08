@@ -170,6 +170,7 @@ impl RemoteConnectDialog {
             host: host.clone(),
             port,
             saved_token: None,
+            token_obtained_at: None,
         };
 
         let runtime = self.runtime(cx);

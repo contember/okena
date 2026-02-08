@@ -125,6 +125,7 @@ impl Okena {
         // Auto-connect to saved connections with valid tokens
         remote_manager.update(cx, |rm, cx| {
             rm.auto_connect_all(cx);
+            rm.start_token_refresh_task(cx);
         });
 
         // Observe window bounds changes to force re-render

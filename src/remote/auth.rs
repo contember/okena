@@ -101,6 +101,20 @@ impl AuthStore {
         }
     }
 
+    /// Create an AuthStore with a given secret (for testing).
+    #[cfg(test)]
+    fn with_secret(secret: Vec<u8>) -> Self {
+        Self {
+            inner: Mutex::new(AuthStoreInner {
+                app_secret: secret,
+                current_code: None,
+                code_created_at: Instant::now(),
+                tokens: Vec::new(),
+                rate_limiter: RateLimiter::new(),
+            }),
+        }
+    }
+
     /// Generate a new pairing code (or return the current one if still valid).
     /// Code format: "XXXX-XXXX" using base32 chars, 60s TTL.
     pub fn get_or_create_code(&self) -> String {
@@ -195,6 +209,49 @@ impl AuthStore {
         false
     }
 
+    /// Refresh a valid token: validate the current token, generate a new one,
+    /// and keep both valid until their respective expiry times.
+    pub fn refresh_token(&self, current_token: &str) -> Result<String, &'static str> {
+        let mut inner = self.inner.lock();
+        let candidate_hmac = compute_hmac(&inner.app_secret, current_token.as_bytes());
+        let now = Instant::now();
+
+        // Validate the current token
+        let valid = inner.tokens.iter().any(|record| {
+            constant_time_eq(&record.token_hmac, &candidate_hmac)
+                && now.duration_since(record.created_at) < Duration::from_secs(TOKEN_TTL_SECS)
+        });
+        if !valid {
+            return Err("invalid or expired token");
+        }
+
+        // Generate a new token
+        let mut token_bytes = [0u8; 32];
+        rand::thread_rng().fill(&mut token_bytes);
+        let new_token = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            &token_bytes,
+        );
+
+        // Store HMAC of the new token (old token remains valid until its own expiry)
+        let new_hmac = compute_hmac(&inner.app_secret, new_token.as_bytes());
+        inner.tokens.push(TokenRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            token_hmac: new_hmac,
+            created_at: Instant::now(),
+            last_used_at: Mutex::new(Instant::now()),
+            name: None,
+        });
+
+        // Evict oldest tokens if we exceed the limit
+        const MAX_TOKENS: usize = 64;
+        let count = inner.tokens.len();
+        if count > MAX_TOKENS {
+            inner.tokens.drain(0..count - MAX_TOKENS);
+        }
+
+        Ok(new_token)
+    }
 }
 
 /// Pairing errors.
@@ -276,4 +333,51 @@ fn load_or_create_secret() -> Vec<u8> {
     }
 
     secret
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn test_store() -> AuthStore {
+        AuthStore::with_secret(vec![42u8; 32])
+    }
+
+    fn test_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    }
+
+    /// Helper: pair and return a valid token.
+    fn pair_token(store: &AuthStore) -> String {
+        let code = store.get_or_create_code();
+        store.try_pair(&code, test_ip()).expect("pairing should succeed")
+    }
+
+    #[test]
+    fn refresh_valid_token_returns_new_different_token() {
+        let store = test_store();
+        let original = pair_token(&store);
+
+        let refreshed = store.refresh_token(&original).expect("refresh should succeed");
+        assert_ne!(original, refreshed, "refreshed token should differ from original");
+    }
+
+    #[test]
+    fn refresh_invalid_token_returns_err() {
+        let store = test_store();
+        let result = store.refresh_token("totally-bogus-token");
+        assert!(result.is_err(), "refreshing invalid token should fail");
+    }
+
+    #[test]
+    fn both_tokens_valid_after_refresh() {
+        let store = test_store();
+        let original = pair_token(&store);
+
+        let refreshed = store.refresh_token(&original).expect("refresh should succeed");
+
+        assert!(store.validate_token(&original), "original token should still be valid");
+        assert!(store.validate_token(&refreshed), "refreshed token should be valid");
+    }
 }

@@ -5,6 +5,7 @@ use crate::theme::ThemeMode;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 
 /// Display mode for the diff viewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,5 +421,74 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     }
     let content = serde_json::to_string_pretty(settings)?;
     std::fs::write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
+}
+
+/// Process-level mutex for settings file access.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Atomically load, update, and save the `remote_connections` field in settings.
+///
+/// Uses a process-level mutex to prevent concurrent read-modify-write races.
+/// On Unix, also uses file locking (flock) for cross-process safety.
+pub fn update_remote_connections<F>(updater: F) -> Result<()>
+where
+    F: FnOnce(&mut Vec<RemoteConnectionConfig>),
+{
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let path = get_settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write, Seek};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // Acquire exclusive file lock
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+
+        let mut settings: AppSettings = if content.is_empty() {
+            AppSettings::default()
+        } else {
+            serde_json::from_str(&content).unwrap_or_default()
+        };
+
+        updater(&mut settings.remote_connections);
+
+        let new_content = serde_json::to_string_pretty(&settings)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(new_content.as_bytes())?;
+
+        // Set restrictive permissions
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+
+        // Lock is released automatically when `file` is dropped
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut settings = load_settings();
+        updater(&mut settings.remote_connections);
+        save_settings(&settings)?;
+        Ok(())
+    }
 }

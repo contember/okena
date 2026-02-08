@@ -1,10 +1,12 @@
 use crate::remote::types::StateResponse;
 use crate::remote_client::config::RemoteConnectionConfig;
-use crate::remote_client::connection::{ConnectionEvent, ConnectionStatus, RemoteConnection};
+use crate::remote_client::connection::{
+    try_refresh_token, ConnectionEvent, ConnectionStatus, RemoteConnection,
+};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::settings::{load_settings, save_settings};
+use crate::workspace::settings::{load_settings, update_remote_connections};
 
 use gpui::*;
 use std::collections::HashMap;
@@ -66,8 +68,27 @@ impl RemoteConnectionManager {
         }
     }
 
+    /// Check if a connection to the given host:port already exists.
+    pub fn find_by_host_port(&self, host: &str, port: u16) -> Option<&str> {
+        self.connections
+            .values()
+            .find(|c| c.config.host == host && c.config.port == port)
+            .map(|c| c.config.name.as_str())
+    }
+
     /// Add a new connection and start connecting.
-    pub fn add_connection(&mut self, config: RemoteConnectionConfig, cx: &mut Context<Self>) {
+    /// Returns Err if a connection to the same host:port already exists.
+    pub fn add_connection(
+        &mut self,
+        config: RemoteConnectionConfig,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(name) = self.find_by_host_port(&config.host, config.port) {
+            return Err(format!(
+                "Already connected to {}:{} as '{}'",
+                config.host, config.port, name
+            ));
+        }
         let id = config.id.clone();
         let mut conn = RemoteConnection::new(
             config,
@@ -78,6 +99,7 @@ impl RemoteConnectionManager {
         conn.connect();
         self.connections.insert(id, conn);
         cx.notify();
+        Ok(())
     }
 
     /// Reconnect an existing connection (disconnect then connect again).
@@ -101,11 +123,8 @@ impl RemoteConnectionManager {
             }
         }
         // Remove from saved settings
-        let mut settings = load_settings();
-        settings
-            .remote_connections
-            .retain(|c| c.id != connection_id);
-        let _ = save_settings(&settings);
+        let id = connection_id.to_string();
+        let _ = update_remote_connections(|conns| conns.retain(|c| c.id != id));
         cx.notify();
     }
 
@@ -226,19 +245,20 @@ impl RemoteConnectionManager {
                 connection_id,
                 token,
             } => {
+                let now = now_unix_timestamp();
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.config.saved_token = Some(token.clone());
+                    conn.config.token_obtained_at = Some(now);
                 }
-                // Persist token to settings
-                let mut settings = load_settings();
-                if let Some(saved) = settings
-                    .remote_connections
-                    .iter_mut()
-                    .find(|c| c.id == connection_id)
-                {
-                    saved.saved_token = Some(token);
-                }
-                let _ = save_settings(&settings);
+                // Persist token to settings (atomic update)
+                let cid = connection_id.clone();
+                let tok = token.clone();
+                let _ = update_remote_connections(|conns| {
+                    if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
+                        saved.saved_token = Some(tok);
+                        saved.token_obtained_at = Some(now);
+                    }
+                });
                 cx.notify();
             }
             ConnectionEvent::StateReceived {
@@ -269,6 +289,129 @@ impl RemoteConnectionManager {
                     .unwrap_or("Remote");
                 ToastManager::warning(format!("{}: {}", name, message), cx);
             }
+            ConnectionEvent::TokenRefreshed {
+                connection_id,
+                token,
+            } => {
+                let now = now_unix_timestamp();
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    conn.config.saved_token = Some(token.clone());
+                    conn.config.token_obtained_at = Some(now);
+                }
+                let cid = connection_id.clone();
+                let tok = token.clone();
+                let _ = update_remote_connections(|conns| {
+                    if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
+                        saved.saved_token = Some(tok);
+                        saved.token_obtained_at = Some(now);
+                    }
+                });
+            }
         }
+    }
+
+    /// Start a periodic token refresh task.
+    /// Checks every 10 minutes and refreshes tokens older than 20 hours.
+    pub fn start_token_refresh_task(&self, cx: &mut Context<Self>) {
+        let event_tx = self.event_tx.clone();
+        let runtime = self.runtime.clone();
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                // Sleep 10 minutes between checks
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(600))
+                    .await;
+
+                // Collect configs of Connected connections
+                let configs: Vec<RemoteConnectionConfig> = match this.update(cx, |this, _cx| {
+                    this.connections
+                        .values()
+                        .filter(|c| matches!(c.status, ConnectionStatus::Connected))
+                        .map(|c| c.config.clone())
+                        .collect()
+                }) {
+                    Ok(configs) => configs,
+                    Err(_) => break, // Entity dropped
+                };
+
+                // Try refresh for each (runs on tokio runtime)
+                for config in configs {
+                    let event_tx = event_tx.clone();
+                    runtime.spawn(async move {
+                        try_refresh_token(&config, &event_tx).await;
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+}
+
+fn now_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::remote_client::config::RemoteConnectionConfig;
+    use crate::remote_client::manager::RemoteConnectionManager;
+    use crate::views::root::TerminalsRegistry;
+    use gpui::AppContext as _;
+    use parking_lot::Mutex as PMutex;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn make_config(host: &str, port: u16) -> RemoteConnectionConfig {
+        RemoteConnectionConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: format!("{}:{}", host, port),
+            host: host.to_string(),
+            port,
+            saved_token: None,
+            token_obtained_at: None,
+        }
+    }
+
+    fn make_terminals() -> TerminalsRegistry {
+        Arc::new(PMutex::new(HashMap::new()))
+    }
+
+    #[gpui::test]
+    fn test_add_duplicate_connection_returns_err(cx: &mut gpui::TestAppContext) {
+        let terminals = make_terminals();
+        let manager = cx.new(|cx| RemoteConnectionManager::new(terminals, cx));
+
+        let config1 = make_config("192.168.1.10", 19100);
+        let config2 = make_config("192.168.1.10", 19100); // same host:port, different ID
+
+        manager.update(cx, |rm, cx| {
+            assert!(rm.add_connection(config1, cx).is_ok());
+        });
+
+        manager.update(cx, |rm, cx| {
+            let result = rm.add_connection(config2, cx);
+            assert!(result.is_err(), "duplicate host:port should be rejected");
+            assert!(result.unwrap_err().contains("Already connected"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_different_host_port_returns_ok(cx: &mut gpui::TestAppContext) {
+        let terminals = make_terminals();
+        let manager = cx.new(|cx| RemoteConnectionManager::new(terminals, cx));
+
+        let config1 = make_config("192.168.1.10", 19100);
+        let config2 = make_config("192.168.1.11", 19100); // different host
+        let config3 = make_config("192.168.1.10", 19101); // different port
+
+        manager.update(cx, |rm, cx| {
+            assert!(rm.add_connection(config1, cx).is_ok());
+            assert!(rm.add_connection(config2, cx).is_ok());
+            assert!(rm.add_connection(config3, cx).is_ok());
+        });
     }
 }

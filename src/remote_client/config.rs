@@ -15,4 +15,7 @@ pub struct RemoteConnectionConfig {
     /// Persisted bearer token (24h TTL on server side)
     #[serde(default)]
     pub saved_token: Option<String>,
+    /// Unix timestamp when the token was obtained (for refresh scheduling)
+    #[serde(default)]
+    pub token_obtained_at: Option<i64>,
 }

@@ -29,6 +29,14 @@ pub enum ConnectionStatus {
     Error(String),
 }
 
+/// Error type distinguishing auth failures from transient network errors.
+enum SessionError {
+    /// Token expired or invalid — do not retry, go to Pairing state.
+    Auth(String),
+    /// Network/transient error — retry with backoff.
+    Transient(String),
+}
+
 /// Event sent from tokio tasks back to the GPUI thread via async_channel.
 /// The manager reads these from a cx.spawn() loop and applies state changes.
 pub(crate) enum ConnectionEvent {
@@ -56,6 +64,11 @@ pub(crate) enum ConnectionEvent {
     ServerWarning {
         connection_id: String,
         message: String,
+    },
+    /// Token was refreshed — save new token and update timestamp
+    TokenRefreshed {
+        connection_id: String,
+        token: String,
     },
 }
 
@@ -394,7 +407,22 @@ impl RemoteConnection {
                     );
                     break;
                 }
-                Err(e) => {
+                Err(SessionError::Auth(msg)) => {
+                    log::warn!(
+                        "Auth error for {}:{}: {}. Switching to Pairing state.",
+                        config.host,
+                        config.port,
+                        msg
+                    );
+                    let _ = event_tx
+                        .send(ConnectionEvent::StatusChanged {
+                            connection_id: config.id.clone(),
+                            status: ConnectionStatus::Pairing,
+                        })
+                        .await;
+                    break;
+                }
+                Err(SessionError::Transient(e)) => {
                     reconnect_attempt += 1;
 
                     if reconnect_attempt > max_reconnect_attempts {
@@ -451,7 +479,7 @@ impl RemoteConnection {
         ws_rx: &async_channel::Receiver<WsClientMessage>,
         terminals: &TerminalsRegistry,
         transport: &Arc<RemoteTransport>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         // Local reverse stream map: stream_id -> remote terminal_id
         // Built from "subscribed" responses, used for binary frame routing.
         let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
@@ -460,7 +488,7 @@ impl RemoteConnection {
         // Connect WebSocket (pass string directly as IntoClientRequest)
         let (ws_stream, _response) = tokio_tungstenite::connect_async(&ws_url)
             .await
-            .map_err(|e| format!("WebSocket connect failed: {}", e))?;
+            .map_err(|e| SessionError::Transient(format!("WebSocket connect failed: {}", e)))?;
 
         let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
 
@@ -474,7 +502,7 @@ impl RemoteConnection {
             tungstenite::Message::Text(auth_msg.to_string().into()),
         )
         .await
-        .map_err(|e| format!("Failed to send auth: {}", e))?;
+        .map_err(|e| SessionError::Transient(format!("Failed to send auth: {}", e)))?;
 
         // Step 2: Wait for AuthOk
         let auth_response = tokio::time::timeout(
@@ -482,14 +510,14 @@ impl RemoteConnection {
             futures::StreamExt::next(&mut ws_read),
         )
         .await
-        .map_err(|_| "Auth response timeout".to_string())?
-        .ok_or_else(|| "WebSocket closed before auth response".to_string())?
-        .map_err(|e| format!("WebSocket read error: {}", e))?;
+        .map_err(|_| SessionError::Transient("Auth response timeout".to_string()))?
+        .ok_or_else(|| SessionError::Transient("WebSocket closed before auth response".to_string()))?
+        .map_err(|e| SessionError::Transient(format!("WebSocket read error: {}", e)))?;
 
         match &auth_response {
             tungstenite::Message::Text(text) => {
                 let parsed: serde_json::Value =
-                    serde_json::from_str(text).map_err(|e| format!("Invalid JSON: {}", e))?;
+                    serde_json::from_str(text).map_err(|e| SessionError::Transient(format!("Invalid JSON: {}", e)))?;
                 let msg_type = parsed
                     .get("type")
                     .and_then(|v| v.as_str())
@@ -501,19 +529,13 @@ impl RemoteConnection {
                         .get("error")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    let _ = event_tx
-                        .send(ConnectionEvent::StatusChanged {
-                            connection_id: config.id.clone(),
-                            status: ConnectionStatus::Error(format!("Auth failed: {}", error)),
-                        })
-                        .await;
-                    return Err(format!("Auth failed: {}", error));
+                    return Err(SessionError::Auth(format!("Auth failed: {}", error)));
                 } else {
-                    return Err(format!("Unexpected auth response type: {}", msg_type));
+                    return Err(SessionError::Transient(format!("Unexpected auth response type: {}", msg_type)));
                 }
             }
             _ => {
-                return Err("Expected text message for auth response".to_string());
+                return Err(SessionError::Transient("Expected text message for auth response".to_string()));
             }
         }
 
@@ -526,19 +548,25 @@ impl RemoteConnection {
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch state: {}", e))?;
+            .map_err(|e| SessionError::Transient(format!("Failed to fetch state: {}", e)))?;
 
-        if !state_resp.status().is_success() {
-            return Err(format!(
+        if state_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(SessionError::Auth(format!(
                 "State fetch failed: HTTP {}",
                 state_resp.status()
-            ));
+            )));
+        }
+        if !state_resp.status().is_success() {
+            return Err(SessionError::Transient(format!(
+                "State fetch failed: HTTP {}",
+                state_resp.status()
+            )));
         }
 
         let state: StateResponse = state_resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse state: {}", e))?;
+            .map_err(|e| SessionError::Transient(format!("Failed to parse state: {}", e)))?;
 
         // Step 4: Create Terminal objects for all remote terminals
         let terminal_ids = collect_state_terminal_ids(&state);
@@ -573,7 +601,7 @@ impl RemoteConnection {
                 tungstenite::Message::Text(subscribe_msg.to_string().into()),
             )
             .await
-            .map_err(|e| format!("Failed to send subscribe: {}", e))?;
+            .map_err(|e| SessionError::Transient(format!("Failed to send subscribe: {}", e)))?;
         }
 
         // Notify connected
@@ -847,19 +875,19 @@ impl RemoteConnection {
                 Some(Ok(tungstenite::Message::Close(_))) => {
                     log::info!("Server closed WebSocket connection");
                     writer_handle.abort();
-                    return Err("Server closed connection".to_string());
+                    return Err(SessionError::Transient("Server closed connection".to_string()));
                 }
                 Some(Ok(tungstenite::Message::Frame(_))) => {
                     // Raw frame, ignore
                 }
                 Some(Err(e)) => {
                     writer_handle.abort();
-                    return Err(format!("WebSocket error: {}", e));
+                    return Err(SessionError::Transient(format!("WebSocket error: {}", e)));
                 }
                 None => {
                     // Stream ended
                     writer_handle.abort();
-                    return Err("WebSocket stream ended".to_string());
+                    return Err(SessionError::Transient("WebSocket stream ended".to_string()));
                 }
             }
         }
@@ -902,6 +930,78 @@ impl RemoteConnection {
         self.reverse_stream_map.clear();
         self.remote_state = None;
         self.status = ConnectionStatus::Disconnected;
+    }
+}
+
+/// Token age threshold for refresh (20 hours = 72000 seconds).
+const TOKEN_REFRESH_AGE_SECS: i64 = 72000;
+
+/// Attempt to refresh a token if it's older than 20 hours.
+/// On success, sends a `TokenRefreshed` event. On failure, logs a warning.
+pub(crate) async fn try_refresh_token(
+    config: &RemoteConnectionConfig,
+    event_tx: &async_channel::Sender<ConnectionEvent>,
+) {
+    let token = match &config.saved_token {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Check token age
+    if let Some(obtained_at) = config.token_obtained_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if now - obtained_at < TOKEN_REFRESH_AGE_SECS {
+            return; // Token is still fresh
+        }
+    }
+    // If token_obtained_at is None, attempt refresh (legacy token without timestamp)
+
+    let base_url = format!("http://{}:{}", config.host, config.port);
+    let client = reqwest::Client::new();
+
+    match client
+        .post(format!("{}/v1/refresh", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            #[derive(serde::Deserialize)]
+            struct RefreshResp {
+                token: String,
+                #[allow(dead_code)]
+                expires_in: u64,
+            }
+            match resp.json::<RefreshResp>().await {
+                Ok(refresh_resp) => {
+                    log::info!("Token refreshed for {}:{}", config.host, config.port);
+                    let _ = event_tx
+                        .send(ConnectionEvent::TokenRefreshed {
+                            connection_id: config.id.clone(),
+                            token: refresh_resp.token,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse refresh response for {}:{}: {}", config.host, config.port, e);
+                }
+            }
+        }
+        Ok(resp) => {
+            log::warn!(
+                "Token refresh failed for {}:{}: HTTP {} (server may not support refresh)",
+                config.host,
+                config.port,
+                resp.status()
+            );
+        }
+        Err(e) => {
+            log::warn!("Token refresh request failed for {}:{}: {}", config.host, config.port, e);
+        }
     }
 }
 

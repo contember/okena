@@ -86,16 +86,20 @@ impl RootView {
             }
             OverlayManagerEvent::RemoteConnected { config } => {
                 if let Some(ref rm) = self.remote_manager {
-                    let connection_id = config.id.clone();
-                    rm.update(cx, |rm, cx| {
-                        rm.add_connection(config.clone(), cx);
+                    let config_clone = config.clone();
+                    let result = rm.update(cx, |rm, cx| {
+                        rm.add_connection(config.clone(), cx)
                     });
-                    // Save connection config (with token) to settings
-                    let mut settings = crate::workspace::settings::load_settings();
-                    if !settings.remote_connections.iter().any(|c| c.id == connection_id) {
-                        settings.remote_connections.push(config.clone());
-                        let _ = crate::workspace::settings::save_settings(&settings);
+                    if let Err(msg) = result {
+                        crate::views::panels::toast::ToastManager::warning(msg, cx);
+                        return;
                     }
+                    // Save connection config (with token) to settings (atomic update)
+                    let _ = crate::workspace::settings::update_remote_connections(|conns| {
+                        if !conns.iter().any(|c| c.id == config_clone.id) {
+                            conns.push(config_clone);
+                        }
+                    });
                 }
             }
         }
