@@ -4061,6 +4061,7 @@ dependencies = [
  "portable-pty",
  "pulldown-cmark",
  "rand 0.8.5",
+ "raw-window-handle",
  "regex",
  "reqwest",
  "rust-embed",

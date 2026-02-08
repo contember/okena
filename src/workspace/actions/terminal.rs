@@ -3,7 +3,7 @@
 //! Actions for managing individual terminals within projects.
 
 use crate::terminal::shell_config::ShellType;
-use crate::workspace::state::{DetachedTerminalState, LayoutNode, Workspace};
+use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -157,7 +157,7 @@ impl Workspace {
                     if let Some(node) = layout.get_at_path_mut(&path) {
                         if let LayoutNode::Terminal { minimized, .. } = node {
                             *minimized = !*minimized;
-                            cx.notify();
+                            self.notify_data(cx);
                         }
                     }
                 }
@@ -179,82 +179,56 @@ impl Workspace {
         false
     }
 
-    /// Detach a terminal to a separate window
-    /// Returns the detached state for window creation
+    /// Detach a terminal to a separate window.
+    /// Sets the detached flag on the layout node (single source of truth).
+    /// Returns true if the terminal was successfully detached.
     pub fn detach_terminal(
         &mut self,
         project_id: &str,
         path: &[usize],
         cx: &mut Context<Self>,
-    ) -> Option<DetachedTerminalState> {
-        // Get terminal ID from the layout node
-        let terminal_id = if let Some(project) = self.project(project_id) {
-            if let Some(ref layout) = project.layout {
-                if let Some(LayoutNode::Terminal { terminal_id: Some(id), .. }) = layout.get_at_path(path) {
-                    id.clone()
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        };
-
-        // Check if already detached
-        if self.detached_terminals.iter().any(|d| d.terminal_id == terminal_id) {
-            return None;
-        }
-
-        // Mark terminal as detached in layout
+    ) -> bool {
         self.with_layout_node(project_id, path, cx, |node| {
-            if let LayoutNode::Terminal { detached, .. } = node {
-                *detached = true;
-                true
-            } else {
-                false
-            }
-        });
-
-        // Create detached state
-        let state = DetachedTerminalState {
-            terminal_id: terminal_id.clone(),
-            project_id: project_id.to_string(),
-            layout_path: path.to_vec(),
-        };
-
-        self.detached_terminals.push(state.clone());
-        cx.notify();
-
-        Some(state)
-    }
-
-    /// Re-attach a detached terminal back to its original location
-    pub fn attach_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
-        // Find and remove from detached list
-        let detached = self.detached_terminals.iter()
-            .position(|d| d.terminal_id == terminal_id)
-            .map(|i| self.detached_terminals.remove(i));
-
-        if let Some(state) = detached {
-            // Mark terminal as not detached in layout
-            self.with_layout_node(&state.project_id, &state.layout_path, cx, |node| {
-                if let LayoutNode::Terminal { detached, .. } = node {
-                    *detached = false;
-                    true
-                } else {
-                    false
+            if let LayoutNode::Terminal { terminal_id: Some(_), detached, .. } = node {
+                if !*detached {
+                    *detached = true;
+                    return true;
                 }
-            });
-        }
-
-        cx.notify();
+            }
+            false
+        })
     }
 
-    /// Check if a terminal is detached
+    /// Re-attach a detached terminal back to its original location.
+    /// Scans all project layouts to find the terminal and clear the detached flag.
+    pub fn attach_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
+        for project in &mut self.data.projects {
+            if let Some(ref mut layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    if let Some(node) = layout.get_at_path_mut(&path) {
+                        if let LayoutNode::Terminal { detached, .. } = node {
+                            *detached = false;
+                        }
+                    }
+                    self.notify_data(cx);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Check if a terminal is detached by scanning layout trees.
     pub fn is_terminal_detached(&self, terminal_id: &str) -> bool {
-        self.detached_terminals.iter().any(|d| d.terminal_id == terminal_id)
+        for project in &self.data.projects {
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    if let Some(LayoutNode::Terminal { detached, .. }) = layout.get_at_path(&path) {
+                        return *detached;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Get the zoom level for a terminal at the given path
@@ -291,9 +265,4 @@ impl Workspace {
         });
     }
 
-    /// Get detached terminal state by terminal ID
-    #[allow(dead_code)] // API for detached terminal access
-    pub fn get_detached_terminal(&self, terminal_id: &str) -> Option<&DetachedTerminalState> {
-        self.detached_terminals.iter().find(|d| d.terminal_id == terminal_id)
-    }
 }

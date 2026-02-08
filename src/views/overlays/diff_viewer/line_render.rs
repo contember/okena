@@ -7,6 +7,7 @@ use crate::theme::ThemeColors;
 use crate::ui::Selection2DExtension;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::h_flex;
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -101,9 +102,7 @@ impl DiffViewer {
             )
             // Gutter with line numbers
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .flex_shrink_0()
                     .h_full()
                     .child(

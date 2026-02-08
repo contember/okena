@@ -1,3 +1,4 @@
+use crate::keybindings::Cancel;
 use crate::theme::{
     get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
@@ -8,6 +9,7 @@ use crate::views::components::{
 };
 use crate::workspace::persistence::{load_settings, save_settings};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Theme selection entry with preview and info
@@ -228,9 +230,7 @@ impl ThemeSelector {
                     .flex_col()
                     .gap(px(1.0))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(2.0))
                             .child(
                                 div()
@@ -301,9 +301,7 @@ impl ThemeSelector {
                     .flex_col()
                     .gap(px(2.0))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -350,12 +348,17 @@ impl Render for ThemeSelector {
         let config_title = self.state.config.title.clone();
         let config_subtitle = self.state.config.subtitle.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("theme-selector-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("ThemeSelector")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),

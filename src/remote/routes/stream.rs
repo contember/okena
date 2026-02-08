@@ -46,13 +46,13 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
         let msg = serde_json::to_string(&WsOutbound::AuthFailed {
             error: "authentication required".into(),
         })
-        .unwrap();
+        .expect("BUG: WsOutbound must serialize");
         let _ = socket.send(Message::Text(msg.into())).await;
         return;
     }
 
     // Send auth success
-    let msg = serde_json::to_string(&WsOutbound::AuthOk).unwrap();
+    let msg = serde_json::to_string(&WsOutbound::AuthOk).expect("BUG: WsOutbound must serialize");
     if socket.send(Message::Text(msg.into())).await.is_err() {
         return;
     }
@@ -88,7 +88,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         stream_id_map.get(id).map(|sid| (id.clone(), *sid))
                                     })
                                     .collect();
-                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings }).unwrap();
+                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings }).expect("BUG: WsOutbound must serialize");
                                 if socket.send(Message::Text(resp.into())).await.is_err() {
                                     break;
                                 }
@@ -118,7 +118,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 }
                             }
                             Ok(WsInbound::Ping) => {
-                                let resp = serde_json::to_string(&WsOutbound::Pong).unwrap();
+                                let resp = serde_json::to_string(&WsOutbound::Pong).expect("BUG: WsOutbound must serialize");
                                 if socket.send(Message::Text(resp.into())).await.is_err() {
                                     break;
                                 }
@@ -129,7 +129,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Err(_) => {
                                 let resp = serde_json::to_string(&WsOutbound::Error {
                                     error: "invalid message".into(),
-                                }).unwrap();
+                                }).expect("BUG: WsOutbound must serialize");
                                 let _ = socket.send(Message::Text(resp.into())).await;
                             }
                         }
@@ -158,7 +158,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        let resp = serde_json::to_string(&WsOutbound::Dropped { count: n }).unwrap();
+                        let resp = serde_json::to_string(&WsOutbound::Dropped { count: n }).expect("BUG: WsOutbound must serialize");
                         if socket.send(Message::Text(resp.into())).await.is_err() {
                             break;
                         }
@@ -174,7 +174,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     last_version = current;
                     let resp = serde_json::to_string(&WsOutbound::StateChanged {
                         state_version: current,
-                    }).unwrap();
+                    }).expect("BUG: WsOutbound must serialize");
                     if socket.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }

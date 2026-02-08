@@ -4,14 +4,33 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A folder that groups projects in the sidebar
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FolderData {
+    pub id: String,
+    pub name: String,
+    /// Ordered project IDs inside this folder
+    pub project_ids: Vec<String>,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default)]
+    pub folder_color: FolderColor,
+}
+
 /// The main workspace data structure (serializable)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceData {
+    /// Schema version for migration support
+    #[serde(default = "default_workspace_version")]
+    pub version: u32,
     pub projects: Vec<ProjectData>,
     pub project_order: Vec<String>,
     /// Project column widths as percentages (project_id -> width %)
     #[serde(default)]
     pub project_widths: HashMap<String, f32>,
+    /// Folders for grouping projects
+    #[serde(default)]
+    pub folders: Vec<FolderData>,
 }
 
 /// Metadata for worktree projects
@@ -29,6 +48,7 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default = "default_true")]
     pub is_visible: bool,
     /// Layout tree for terminal panes. None means project is a bookmark without terminals.
     pub layout: Option<LayoutNode>,
@@ -48,6 +68,14 @@ pub struct ProjectData {
 }
 
 use crate::terminal::shell_config::ShellType;
+
+fn default_workspace_version() -> u32 {
+    0 // pre-versioning workspace files
+}
+
+fn default_true() -> bool {
+    true
+}
 
 fn default_zoom_level() -> f32 {
     1.0
@@ -87,23 +115,6 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// State for fullscreen terminal mode
-#[derive(Clone, Debug)]
-pub struct FullscreenState {
-    pub project_id: String,
-    pub terminal_id: String,
-    /// Previous focused project ID to restore when exiting fullscreen
-    pub previous_focused_project_id: Option<String>,
-}
-
-/// State for a detached terminal (opened in separate window)
-#[derive(Clone, Debug)]
-pub struct DetachedTerminalState {
-    pub terminal_id: String,
-    pub project_id: String,
-    pub layout_path: Vec<usize>,
-}
-
 /// State for focused terminal (for visual indicator)
 #[derive(Clone, Debug, PartialEq)]
 pub struct FocusedTerminalState {
@@ -111,77 +122,57 @@ pub struct FocusedTerminalState {
     pub layout_path: Vec<usize>,
 }
 
-/// Request to show worktree dialog
-#[derive(Clone, Debug)]
-pub struct WorktreeDialogRequest {
-    pub project_id: String,
-    pub project_path: String,
-}
+/// Global workspace wrapper for app-wide access (used by quit handler)
+#[derive(Clone)]
+pub struct GlobalWorkspace(pub Entity<Workspace>);
 
-/// Request to show context menu at a position
-#[derive(Clone, Debug)]
-pub struct ContextMenuRequest {
-    pub project_id: String,
-    pub position: gpui::Point<gpui::Pixels>,
-}
-
-/// Request to show shell selector overlay
-#[derive(Clone, Debug)]
-pub struct ShellSelectorRequest {
-    pub project_id: String,
-    pub terminal_id: String,
-    pub current_shell: crate::terminal::shell_config::ShellType,
-}
-
-/// Request to rename a project (triggered from context menu)
-#[derive(Clone, Debug)]
-pub struct ProjectRenameRequest {
-    pub project_id: String,
-    pub project_name: String,
-}
+impl Global for GlobalWorkspace {}
 
 /// GPUI Entity for workspace state
 pub struct Workspace {
-    pub data: WorkspaceData,
-    pub focused_project_id: Option<String>,
-    pub fullscreen_terminal: Option<FullscreenState>,
-    /// Currently focused terminal (for visual indicator).
-    ///
-    /// **DEPRECATED**: Use `focus_manager.focused_terminal_state()` instead.
-    /// This field is kept in sync with FocusManager for backward compatibility
-    /// but should not be accessed directly in new code.
-    pub focused_terminal: Option<FocusedTerminalState>,
-    /// Currently detached terminals (opened in separate windows)
-    pub detached_terminals: Vec<DetachedTerminalState>,
+    pub(crate) data: WorkspaceData,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
-    /// Pending request to show worktree dialog
-    pub worktree_dialog_request: Option<WorktreeDialogRequest>,
-    /// Pending request to show context menu
-    pub context_menu_request: Option<ContextMenuRequest>,
-    /// Pending request to show shell selector
-    pub shell_selector_request: Option<ShellSelectorRequest>,
-    /// Pending request to rename a project
-    pub pending_project_rename: Option<ProjectRenameRequest>,
     /// Last access time for each project (for sorting in project switcher)
     pub project_access_times: HashMap<String, std::time::Instant>,
+    /// Monotonic counter incremented only on persistent data mutations.
+    /// The auto-save observer compares this to skip saves for UI-only changes.
+    data_version: u64,
 }
 
 impl Workspace {
     pub fn new(data: WorkspaceData) -> Self {
         Self {
             data,
-            focused_project_id: None,
-            fullscreen_terminal: None,
-            focused_terminal: None,
-            detached_terminals: Vec::new(),
             focus_manager: FocusManager::new(),
-            worktree_dialog_request: None,
-            context_menu_request: None,
-            shell_selector_request: None,
-            pending_project_rename: None,
             project_access_times: HashMap::new(),
+            data_version: 0,
         }
+    }
+
+    /// Current data version (incremented on persistent data mutations)
+    pub fn data_version(&self) -> u64 {
+        self.data_version
+    }
+
+    /// Read-only access to persistent workspace data.
+    pub fn data(&self) -> &WorkspaceData {
+        &self.data
+    }
+
+    /// Notify that persistent data changed. Bumps version and calls cx.notify().
+    /// Use this instead of cx.notify() when mutating `self.data`.
+    pub fn notify_data(&mut self, cx: &mut Context<Self>) {
+        self.data_version += 1;
+        cx.notify();
+    }
+
+    /// Replace workspace data wholesale (e.g. from disk reload).
+    /// Does NOT bump data_version — the data came from disk, not a user edit.
+    pub fn replace_data(&mut self, data: WorkspaceData, cx: &mut Context<Self>) {
+        self.data = data;
+        self.focus_manager.clear_all();
+        cx.notify();
     }
 
     /// Record that a project was accessed (for sorting by recency)
@@ -209,21 +200,33 @@ impl Workspace {
         &self.data.projects
     }
 
-    /// Get visible projects in order
+    /// Get the currently focused/zoomed project ID.
+    /// Delegates to FocusManager (single source of truth).
+    pub fn focused_project_id(&self) -> Option<&String> {
+        self.focus_manager.focused_project_id()
+    }
+
+    /// Get visible projects in order, expanding folders into their contained projects
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
-        self.data
-            .project_order
-            .iter()
-            .filter_map(|id| self.data.projects.iter().find(|p| &p.id == id))
-            .filter(|p| {
-                // If focused, only show focused project
-                if let Some(focused_id) = &self.focused_project_id {
-                    &p.id == focused_id
-                } else {
-                    p.is_visible
+        let focused = self.focused_project_id();
+        let mut result = Vec::new();
+        for id in &self.data.project_order {
+            if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
+                // Folder: include its projects
+                for pid in &folder.project_ids {
+                    if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
+                        if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                            result.push(p);
+                        }
+                    }
                 }
-            })
-            .collect()
+            } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
+                if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                    result.push(p);
+                }
+            }
+        }
+        result
     }
 
     /// Get a project by ID
@@ -232,8 +235,44 @@ impl Workspace {
     }
 
     /// Get a mutable project by ID
-    pub fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
+    pub(crate) fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
         self.data.projects.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Get a folder by ID
+    pub fn folder(&self, id: &str) -> Option<&FolderData> {
+        self.data.folders.iter().find(|f| f.id == id)
+    }
+
+    /// Get a mutable folder by ID
+    pub(crate) fn folder_mut(&mut self, id: &str) -> Option<&mut FolderData> {
+        self.data.folders.iter_mut().find(|f| f.id == id)
+    }
+
+    /// Check if an ID in project_order refers to a folder
+    #[allow(dead_code)]
+    pub fn is_folder(&self, id: &str) -> bool {
+        self.data.folders.iter().any(|f| f.id == id)
+    }
+
+    /// Find which folder (if any) contains a given project
+    #[allow(dead_code)]
+    pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
+        self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
+    }
+
+    /// Collect all detached terminals across all projects by traversing layout trees.
+    /// Returns (terminal_id, project_id, layout_path) tuples.
+    pub fn collect_all_detached_terminals(&self) -> Vec<(String, String, Vec<usize>)> {
+        let mut result = Vec::new();
+        for project in &self.data.projects {
+            if let Some(ref layout) = project.layout {
+                for (terminal_id, layout_path) in layout.collect_detached_terminals() {
+                    result.push((terminal_id, project.id.clone(), layout_path));
+                }
+            }
+        }
+        result
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
@@ -246,7 +285,29 @@ impl Workspace {
             if let Some(ref mut layout) = project.layout {
                 if let Some(node) = layout.get_at_path_mut(path) {
                     if f(node) {
-                        cx.notify();
+                        self.notify_data(cx);
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Helper to mutate a layout node at a path, normalize the root layout, then notify.
+    /// Use this instead of `with_layout_node` when the mutation may create nested splits
+    /// that should be flattened (e.g. splitting a terminal).
+    /// Returns true if the mutation was applied.
+    pub fn with_layout_node_normalized<F>(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>, f: F) -> bool
+    where
+        F: FnOnce(&mut LayoutNode) -> bool,
+    {
+        if let Some(project) = self.project_mut(project_id) {
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    if f(node) {
+                        layout.normalize();
+                        self.notify_data(cx);
                         return true;
                     }
                 }
@@ -263,7 +324,7 @@ impl Workspace {
     {
         if let Some(project) = self.project_mut(project_id) {
             if f(project) {
-                cx.notify();
+                self.notify_data(cx);
                 return true;
             }
         }

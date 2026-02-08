@@ -15,7 +15,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
-        self.with_layout_node(project_id, path, cx, |node| {
+        self.with_layout_node_normalized(project_id, path, cx, |node| {
             log::info!("Found node at path, splitting...");
             let old_node = node.clone();
             *node = LayoutNode::Split {
@@ -26,13 +26,6 @@ impl Workspace {
             log::info!("Split complete");
             true
         });
-
-        // Normalize to flatten if parent was already a same-direction split
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
-                layout.normalize();
-            }
-        }
     }
 
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group
@@ -96,7 +89,7 @@ impl Workspace {
                 if path.is_empty() {
                     // Closing root - remove layout entirely (project becomes bookmark)
                     project.layout = None;
-                    cx.notify();
+                    self.notify_data(cx);
                     return;
                 }
 
@@ -116,7 +109,7 @@ impl Workspace {
                                 // Just remove the child
                                 children.remove(child_index);
                             }
-                            cx.notify();
+                            self.notify_data(cx);
                         }
                         _ => {}
                     }
@@ -132,7 +125,7 @@ impl Workspace {
             // Closing root - remove layout (project becomes bookmark)
             self.close_terminal(project_id, path, cx);
             // Clear focused terminal since there's nothing to focus
-            self.focused_terminal = None;
+            self.focus_manager.clear_focus();
             return;
         }
 
@@ -380,47 +373,4 @@ impl Workspace {
         });
     }
 
-    /// Close all terminals in a project
-    /// Returns the list of terminal IDs that were closed (for PTY cleanup)
-    /// The project becomes a bookmark (no terminals) after this operation
-    #[allow(dead_code)]
-    pub fn close_all_terminals(&mut self, project_id: &str, cx: &mut Context<Self>) -> Vec<String> {
-        let terminal_ids = if let Some(project) = self.project(project_id) {
-            project.layout.as_ref()
-                .map(|l| l.collect_terminal_ids())
-                .unwrap_or_default()
-        } else {
-            return vec![];
-        };
-
-        // Clear the layout entirely (project becomes a bookmark)
-        if let Some(project) = self.project_mut(project_id) {
-            project.layout = None;
-            // Clear terminal names for removed terminals
-            for tid in &terminal_ids {
-                project.terminal_names.remove(tid);
-                project.hidden_terminals.remove(tid);
-            }
-        }
-
-        // Clear focused terminal if it was in this project
-        if let Some(ref focused) = self.focused_terminal {
-            if focused.project_id == project_id {
-                self.focused_terminal = None;
-            }
-        }
-
-        // Exit fullscreen if a terminal from this project was in fullscreen
-        if let Some(ref fs) = self.fullscreen_terminal {
-            if fs.project_id == project_id {
-                self.fullscreen_terminal = None;
-            }
-        }
-
-        // Remove any detached terminals from this project
-        self.detached_terminals.retain(|d| d.project_id != project_id);
-
-        cx.notify();
-        terminal_ids
-    }
 }

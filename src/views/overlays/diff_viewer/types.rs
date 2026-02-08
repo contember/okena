@@ -1,26 +1,10 @@
 //! Data types for the diff viewer.
 
 use crate::git::{DiffLineType, FileDiff};
-use gpui::Rgba;
+pub use crate::views::components::syntax::HighlightedSpan;
 use std::collections::BTreeMap;
 
-/// Display mode for the diff viewer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum DiffViewMode {
-    #[default]
-    Unified,
-    SideBySide,
-}
-
-impl DiffViewMode {
-    /// Toggle between view modes.
-    pub fn toggle(self) -> Self {
-        match self {
-            DiffViewMode::Unified => DiffViewMode::SideBySide,
-            DiffViewMode::SideBySide => DiffViewMode::Unified,
-        }
-    }
-}
+pub use crate::workspace::persistence::DiffViewMode;
 
 /// Lightweight file stats for sidebar display (no syntax highlighting).
 pub struct FileStats {
@@ -77,13 +61,6 @@ pub struct SideBySideLine {
     #[allow(dead_code)]
     pub header_text: String,
     pub header_spans: Vec<HighlightedSpan>,
-}
-
-/// A highlighted span with color.
-#[derive(Clone)]
-pub struct HighlightedSpan {
-    pub color: Rgba,
-    pub text: String,
 }
 
 /// A processed line ready for display with syntax highlighting.

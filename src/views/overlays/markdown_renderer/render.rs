@@ -1,387 +1,15 @@
-//! Markdown renderer for GPUI.
-//!
-//! Parses markdown content and renders it as GPUI elements.
+//! Rendering logic for markdown nodes and inline elements.
 
 use crate::theme::ThemeColors;
-use crate::ui::SelectionState;
+use crate::views::components::code_block_container;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use gpui_component::{h_flex, v_flex};
 
-/// Type alias for markdown selection (1D character offset).
-pub type MarkdownSelection = SelectionState<usize>;
-
-/// A rendered node that can be either a simple block or a code block with selectable lines.
-pub enum RenderedNode {
-    /// A simple block (heading, paragraph, list, etc.) - single selectable unit
-    Simple {
-        div: Div,
-        start_offset: usize,
-        end_offset: usize,
-    },
-    /// A code block with individually selectable lines
-    CodeBlock {
-        language: Option<String>,
-        /// Each line as (div, start_offset, end_offset)
-        lines: Vec<(Div, usize, usize)>,
-    },
-    /// A table with individually selectable rows
-    Table {
-        /// Header row (div, start_offset, end_offset)
-        header: Option<(Div, usize, usize)>,
-        /// Data rows as (div, start_offset, end_offset)
-        rows: Vec<(Div, usize, usize)>,
-    },
-}
-
-
-/// Slice a string by character indices (not byte indices).
-/// Returns (before, selected, after) parts.
-fn slice_by_chars(s: &str, start: usize, end: usize) -> (String, String, String) {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
-    let start = start.min(len);
-    let end = end.min(len);
-
-    let before: String = chars[..start].iter().collect();
-    let selected: String = chars[start..end].iter().collect();
-    let after: String = chars[end..].iter().collect();
-
-    (before, selected, after)
-}
-
-/// Get character count of a string (not byte count).
-fn char_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-/// Parsed markdown document ready for rendering.
-pub struct MarkdownDocument {
-    nodes: Vec<Node>,
-    /// Flat text representation of all visible content
-    pub plain_text: String,
-}
-
-/// A node in the markdown AST.
-#[derive(Clone)]
-enum Node {
-    Heading { level: u8, children: Vec<Inline> },
-    Paragraph { children: Vec<Inline> },
-    CodeBlock { language: Option<String>, code: String },
-    List { ordered: bool, items: Vec<Vec<Inline>> },
-    Table { headers: Vec<Vec<Inline>>, rows: Vec<Vec<Vec<Inline>>> },
-    Blockquote { children: Vec<Inline> },
-    HorizontalRule,
-}
-
-/// Inline content within a block.
-#[derive(Clone)]
-enum Inline {
-    Text(String),
-    Code(String),
-    Bold(Vec<Inline>),
-    Italic(Vec<Inline>),
-    Link { #[allow(dead_code)] url: String, children: Vec<Inline> },
-}
+use super::types::{char_len, slice_by_chars, Inline, Node};
+use super::{MarkdownDocument, RenderedNode};
 
 impl MarkdownDocument {
-    /// Parse markdown content into a document.
-    pub fn parse(content: &str) -> Self {
-        let mut options = Options::empty();
-        options.insert(Options::ENABLE_TABLES);
-        let parser = Parser::new_ext(content, options);
-
-        let mut nodes = Vec::new();
-        let mut inline_stack: Vec<Vec<Inline>> = vec![Vec::new()];
-
-        // State
-        let mut in_heading: Option<u8> = None;
-        let mut in_paragraph = false;
-        let mut in_code_block = false;
-        let mut code_block_lang: Option<String> = None;
-        let mut code_block_content = String::new();
-        let mut in_list = false;
-        let mut list_ordered = false;
-        let mut list_items: Vec<Vec<Inline>> = Vec::new();
-        let mut in_blockquote = false;
-        let mut in_table = false;
-        let mut in_table_head = false;
-        let mut table_headers: Vec<Vec<Inline>> = Vec::new();
-        let mut table_rows: Vec<Vec<Vec<Inline>>> = Vec::new();
-        let mut current_row: Vec<Vec<Inline>> = Vec::new();
-
-        for event in parser {
-            match event {
-                // Block elements
-                Event::Start(Tag::Heading { level, .. }) => {
-                    in_heading = Some(match level {
-                        HeadingLevel::H1 => 1,
-                        HeadingLevel::H2 => 2,
-                        HeadingLevel::H3 => 3,
-                        HeadingLevel::H4 => 4,
-                        HeadingLevel::H5 => 5,
-                        HeadingLevel::H6 => 6,
-                    });
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::Heading(_)) => {
-                    if let Some(level) = in_heading.take() {
-                        let children = inline_stack.pop().unwrap_or_default();
-                        nodes.push(Node::Heading { level, children });
-                    }
-                }
-                Event::Start(Tag::Paragraph) => {
-                    in_paragraph = true;
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::Paragraph) => {
-                    if in_paragraph {
-                        let children = inline_stack.pop().unwrap_or_default();
-                        if in_blockquote {
-                            // Add to blockquote
-                            if let Some(last) = inline_stack.last_mut() {
-                                last.extend(children);
-                            }
-                        } else if in_list {
-                            // Will be collected by Item end
-                            if let Some(last) = inline_stack.last_mut() {
-                                last.extend(children);
-                            }
-                        } else if in_table {
-                            // Table cell content
-                            if let Some(last) = inline_stack.last_mut() {
-                                last.extend(children);
-                            }
-                        } else {
-                            nodes.push(Node::Paragraph { children });
-                        }
-                        in_paragraph = false;
-                    }
-                }
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    in_code_block = true;
-                    code_block_lang = match kind {
-                        CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
-                        _ => None,
-                    };
-                    code_block_content.clear();
-                }
-                Event::End(TagEnd::CodeBlock) => {
-                    nodes.push(Node::CodeBlock {
-                        language: code_block_lang.take(),
-                        code: std::mem::take(&mut code_block_content),
-                    });
-                    in_code_block = false;
-                }
-                Event::Start(Tag::List(first_item)) => {
-                    in_list = true;
-                    list_ordered = first_item.is_some();
-                    list_items.clear();
-                }
-                Event::End(TagEnd::List(_)) => {
-                    nodes.push(Node::List {
-                        ordered: list_ordered,
-                        items: std::mem::take(&mut list_items),
-                    });
-                    in_list = false;
-                }
-                Event::Start(Tag::Item) => {
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::Item) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    list_items.push(children);
-                }
-                Event::Start(Tag::BlockQuote(_)) => {
-                    in_blockquote = true;
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::BlockQuote(_)) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    nodes.push(Node::Blockquote { children });
-                    in_blockquote = false;
-                }
-                Event::Rule => {
-                    nodes.push(Node::HorizontalRule);
-                }
-
-                // Table elements
-                Event::Start(Tag::Table(_)) => {
-                    in_table = true;
-                    table_headers.clear();
-                    table_rows.clear();
-                }
-                Event::End(TagEnd::Table) => {
-                    nodes.push(Node::Table {
-                        headers: std::mem::take(&mut table_headers),
-                        rows: std::mem::take(&mut table_rows),
-                    });
-                    in_table = false;
-                }
-                Event::Start(Tag::TableHead) => {
-                    in_table_head = true;
-                    current_row.clear();
-                }
-                Event::End(TagEnd::TableHead) => {
-                    table_headers = std::mem::take(&mut current_row);
-                    in_table_head = false;
-                }
-                Event::Start(Tag::TableRow) => {
-                    current_row.clear();
-                }
-                Event::End(TagEnd::TableRow) => {
-                    if !in_table_head {
-                        table_rows.push(std::mem::take(&mut current_row));
-                    }
-                }
-                Event::Start(Tag::TableCell) => {
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::TableCell) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    current_row.push(children);
-                }
-
-                // Inline elements
-                Event::Start(Tag::Strong) => {
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::Strong) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Bold(children));
-                    }
-                }
-                Event::Start(Tag::Emphasis) => {
-                    inline_stack.push(Vec::new());
-                }
-                Event::End(TagEnd::Emphasis) => {
-                    let children = inline_stack.pop().unwrap_or_default();
-                    if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Italic(children));
-                    }
-                }
-                Event::Start(Tag::Link { dest_url, .. }) => {
-                    inline_stack.push(Vec::new());
-                    // Store URL temporarily - we'll use it on End
-                    if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(format!("\x00LINK:{}\x00", dest_url)));
-                    }
-                }
-                Event::End(TagEnd::Link) => {
-                    let mut children = inline_stack.pop().unwrap_or_default();
-                    // Extract URL from marker
-                    let url = children.iter().find_map(|c| {
-                        if let Inline::Text(t) = c {
-                            if t.starts_with("\x00LINK:") && t.ends_with("\x00") {
-                                return Some(t[6..t.len()-1].to_string());
-                            }
-                        }
-                        None
-                    }).unwrap_or_default();
-                    children.retain(|c| {
-                        if let Inline::Text(t) = c {
-                            !t.starts_with("\x00LINK:")
-                        } else {
-                            true
-                        }
-                    });
-                    if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Link { url, children });
-                    }
-                }
-                Event::Code(text) => {
-                    if in_code_block {
-                        code_block_content.push_str(&text);
-                    } else if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Code(text.to_string()));
-                    }
-                }
-                Event::Text(text) => {
-                    if in_code_block {
-                        code_block_content.push_str(&text);
-                    } else if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(text.to_string()));
-                    }
-                }
-                Event::SoftBreak | Event::HardBreak => {
-                    if in_code_block {
-                        code_block_content.push('\n');
-                    } else if let Some(last) = inline_stack.last_mut() {
-                        last.push(Inline::Text(" ".to_string()));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Build flat text representation
-        let mut plain_text = String::new();
-
-        for node in &nodes {
-            Self::node_to_flat_text(node, &mut plain_text);
-        }
-
-        Self { nodes, plain_text }
-    }
-
-    /// Convert a node to flat text (in characters, not bytes).
-    fn node_to_flat_text(node: &Node, text: &mut String) {
-        match node {
-            Node::Heading { children, .. } |
-            Node::Paragraph { children } |
-            Node::Blockquote { children } => {
-                Self::inlines_to_flat_text(children, text);
-                text.push('\n');
-            }
-            Node::CodeBlock { code, .. } => {
-                for line in code.lines() {
-                    text.push_str(line);
-                    text.push('\n');
-                }
-            }
-            Node::List { items, .. } => {
-                for item in items {
-                    Self::inlines_to_flat_text(item, text);
-                    text.push('\n');
-                }
-            }
-            Node::Table { headers, rows } => {
-                for (i, header) in headers.iter().enumerate() {
-                    if i > 0 { text.push('\t'); }
-                    Self::inlines_to_flat_text(header, text);
-                }
-                text.push('\n');
-                for row in rows {
-                    for (i, cell) in row.iter().enumerate() {
-                        if i > 0 { text.push('\t'); }
-                        Self::inlines_to_flat_text(cell, text);
-                    }
-                    text.push('\n');
-                }
-            }
-            Node::HorizontalRule => {
-                text.push('\n');
-            }
-        }
-    }
-
-    /// Convert inline elements to flat text.
-    fn inlines_to_flat_text(inlines: &[Inline], text: &mut String) {
-        for inline in inlines {
-            match inline {
-                Inline::Text(t) => text.push_str(t),
-                Inline::Code(c) => text.push_str(c),
-                Inline::Bold(children) | Inline::Italic(children) => {
-                    Self::inlines_to_flat_text(children, text);
-                }
-                Inline::Link { children, .. } => {
-                    Self::inlines_to_flat_text(children, text);
-                }
-            }
-        }
-    }
-
     /// Render the document as a list of RenderedNode items.
     /// This allows the caller to wrap each node/line with mouse handlers.
     /// Code blocks are returned with individual lines for per-line selection.
@@ -490,7 +118,7 @@ impl MarkdownDocument {
                             }
                         });
 
-                        let mut header_row = div().flex();
+                        let mut header_row = h_flex();
                         let mut cell_offset = 0usize;
                         for (i, header) in headers.iter().enumerate() {
                             let cell_len = Self::inlines_text_length(header) + if i > 0 { 1 } else { 0 };
@@ -542,7 +170,7 @@ impl MarkdownDocument {
                             }
                         });
 
-                        let mut row_div = div().flex();
+                        let mut row_div = h_flex();
                         if row_idx % 2 == 1 {
                             row_div = row_div.bg(rgb(t.bg_secondary));
                         }
@@ -607,7 +235,7 @@ impl MarkdownDocument {
 
 
     /// Calculate the text length of a node (for selection offset tracking, in characters).
-    fn node_text_length(node: &Node) -> usize {
+    pub(super) fn node_text_length(node: &Node) -> usize {
         match node {
             Node::Heading { children, .. } |
             Node::Paragraph { children } |
@@ -637,7 +265,7 @@ impl MarkdownDocument {
     }
 
     /// Calculate the text length of inline elements (in characters, not bytes).
-    fn inlines_text_length(inlines: &[Inline]) -> usize {
+    pub(super) fn inlines_text_length(inlines: &[Inline]) -> usize {
         inlines.iter().map(|inline| {
             match inline {
                 Inline::Text(t) => char_len(t),
@@ -691,7 +319,6 @@ impl MarkdownDocument {
                 Self::render_inlines_with_selection(children, t, selection)
             }
             Node::CodeBlock { language, code } => {
-                let lang_label = language.as_deref().unwrap_or("");
                 let selection_bg = rgba(0x3390ff40);
 
                 // Render code lines with selection
@@ -731,27 +358,7 @@ impl MarkdownDocument {
                     offset = line_end;
                 }
 
-                div()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(6.0))
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .overflow_hidden()
-                    .when(!lang_label.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .px(px(12.0))
-                                .py(px(4.0))
-                                .bg(rgb(t.bg_header))
-                                .border_b_1()
-                                .border_color(rgb(t.border))
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.text_muted))
-                                .child(lang_label.to_string())
-                        )
-                    })
+                code_block_container(language.as_deref(), t)
                     .child(
                         div()
                             .p(px(12.0))
@@ -764,7 +371,7 @@ impl MarkdownDocument {
                     )
             }
             Node::List { ordered, items } => {
-                let mut list = div().flex().flex_col().gap(px(4.0)).pl(px(16.0));
+                let mut list = v_flex().gap(px(4.0)).pl(px(16.0));
                 let mut offset = 0usize;
 
                 for (i, item_inlines) in items.iter().enumerate() {
@@ -828,7 +435,7 @@ impl MarkdownDocument {
     }
 
     /// Render inline elements with selection highlighting.
-    fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
+    pub(super) fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         let mut offset = 0usize;
 
@@ -1002,9 +609,7 @@ impl MarkdownDocument {
             }
         }
 
-        let mut table = div()
-            .flex()
-            .flex_col()
+        let mut table = v_flex()
             .rounded(px(4.0))
             .border_1()
             .border_color(rgb(t.border))
@@ -1103,7 +708,7 @@ impl MarkdownDocument {
     }
 
     /// Render inlines as plain text (for measuring, headings, etc.).
-    fn render_inlines_as_text(inlines: &[Inline]) -> String {
+    pub(super) fn render_inlines_as_text(inlines: &[Inline]) -> String {
         let mut result = String::new();
         for inline in inlines {
             Self::inline_to_text(inline, &mut result);

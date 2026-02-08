@@ -8,18 +8,22 @@ use gpui::*;
 use std::path::PathBuf;
 
 use crate::terminal::shell_config::ShellType;
-use crate::views::command_palette::{CommandPalette, CommandPaletteEvent};
-use crate::views::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
+use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
+use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
+use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
 use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
-use crate::views::session_manager::{SessionManager, SessionManagerEvent};
-use crate::views::settings_panel::{SettingsPanel, SettingsPanelEvent};
-use crate::views::theme_selector::{ThemeSelector, ThemeSelectorEvent};
-use crate::views::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::workspace::state::{ContextMenuRequest, Workspace, WorkspaceData};
+use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
+use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
+use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
+use crate::workspace::state::{Workspace, WorkspaceData};
 
 /// Trait for overlay events that support closing.
 ///
@@ -77,33 +81,38 @@ impl<T: 'static + Render> OverlaySlot<T> {
     }
 }
 
-/// Helper macro for toggling simple overlays.
+/// Helper macro for toggling modal overlays via the single active_modal slot.
 ///
 /// Usage:
 /// ```ignore
-/// toggle_overlay!(self, cx, keybindings_help, KeybindingsHelpEvent, || KeybindingsHelp::new(cx));
+/// toggle_overlay!(self, cx, KeybindingsHelp, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
 /// ```
 #[macro_export]
 macro_rules! toggle_overlay {
-    ($self:ident, $cx:ident, $field:ident, $event_type:ty, $factory:expr) => {
-        if $self.$field.is_open() {
-            $self.$field.close();
+    ($self:ident, $cx:ident, $type:ty, $event_type:ty, $factory:expr) => {
+        if $self.is_modal::<$type>() {
+            $self.close_modal($cx);
         } else {
             let entity = $cx.new($factory);
             $cx.subscribe(&entity, |this, _, event: &$event_type, cx| {
                 if event.is_close() {
-                    this.$field.close();
-                    cx.notify();
+                    this.close_modal(cx);
                 }
             })
             .detach();
-            $self.$field.set(entity);
+            $self.open_modal(entity, $cx);
         }
         $cx.notify();
     };
 }
 
 // Implement CloseEvent for existing overlay events
+
+impl CloseEvent for AddProjectDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, AddProjectDialogEvent::Close)
+    }
+}
 
 impl CloseEvent for KeybindingsHelpEvent {
     fn is_close(&self) -> bool {
@@ -203,190 +212,167 @@ pub enum OverlayManagerEvent {
 
 /// Centralized overlay manager that handles all modal overlays.
 ///
-/// This entity owns all overlay state and provides methods for showing/hiding
-/// overlays. Complex events that require RootView interaction are forwarded
-/// via OverlayManagerEvent.
+/// Uses a single `active_modal` slot to enforce mutual exclusion -
+/// only one modal can be open at a time. Context menus remain as
+/// separate slots since they are positioned popups, not full-screen modals.
 pub struct OverlayManager {
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
 
-    // Simple toggle overlays
-    keybindings_help: OverlaySlot<KeybindingsHelp>,
-    theme_selector: OverlaySlot<ThemeSelector>,
-    command_palette: OverlaySlot<CommandPalette>,
-    settings_panel: OverlaySlot<SettingsPanel>,
-    project_switcher: OverlaySlot<ProjectSwitcher>,
+    /// The single active modal overlay (only one can be open at a time).
+    active_modal: Option<AnyView>,
 
-    // Parametric overlays
-    shell_selector: OverlaySlot<ShellSelectorOverlay>,
-    worktree_dialog: Option<Entity<WorktreeDialog>>,
-    context_menu: Option<Entity<ContextMenu>>,
-    session_manager: Option<Entity<SessionManager>>,
+    /// TypeId of the active modal for toggle detection.
+    modal_type_id: Option<std::any::TypeId>,
 
-    // File search and viewer
-    file_search: Option<Entity<FileSearchDialog>>,
-    file_viewer: Option<Entity<FileViewer>>,
-    diff_viewer: Option<Entity<DiffViewer>>,
+    // Context menus remain separate (positioned popups, not full-screen modals)
+    context_menu: OverlaySlot<ContextMenu>,
+    folder_context_menu: OverlaySlot<FolderContextMenu>,
 }
 
 impl OverlayManager {
     /// Create a new OverlayManager.
-    pub fn new(workspace: Entity<Workspace>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>) -> Self {
         Self {
             workspace,
-            keybindings_help: OverlaySlot::new(),
-            theme_selector: OverlaySlot::new(),
-            command_palette: OverlaySlot::new(),
-            settings_panel: OverlaySlot::new(),
-            project_switcher: OverlaySlot::new(),
-            shell_selector: OverlaySlot::new(),
-            worktree_dialog: None,
-            context_menu: None,
-            session_manager: None,
-            file_search: None,
-            file_viewer: None,
-            diff_viewer: None,
+            request_broker,
+            active_modal: None,
+            modal_type_id: None,
+            context_menu: OverlaySlot::new(),
+            folder_context_menu: OverlaySlot::new(),
         }
     }
 
     // ========================================================================
-    // Visibility checks
+    // Modal management helpers
     // ========================================================================
 
-    /// Check if keybindings help is open.
-    pub fn has_keybindings_help(&self) -> bool {
-        self.keybindings_help.is_open()
+    /// Close the active modal, restoring terminal focus if needed.
+    fn close_modal(&mut self, cx: &mut Context<Self>) {
+        if self.active_modal.is_some() {
+            self.active_modal = None;
+            self.modal_type_id = None;
+            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+            cx.notify();
+        }
     }
 
-    /// Check if session manager is open.
-    pub fn has_session_manager(&self) -> bool {
-        self.session_manager.is_some()
+    /// Check if the active modal is of a specific type.
+    fn is_modal<T: 'static>(&self) -> bool {
+        self.modal_type_id == Some(std::any::TypeId::of::<T>())
     }
 
-    /// Check if theme selector is open.
-    pub fn has_theme_selector(&self) -> bool {
-        self.theme_selector.is_open()
+    /// Open a modal, closing any existing one first.
+    ///
+    /// Automatically clears terminal focus so keyboard input goes to the modal.
+    fn open_modal<T: Render + 'static>(&mut self, entity: Entity<T>, cx: &mut Context<Self>) {
+        self.close_modal(cx);
+        self.active_modal = Some(entity.into());
+        self.modal_type_id = Some(std::any::TypeId::of::<T>());
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
     }
 
-    /// Check if command palette is open.
-    pub fn has_command_palette(&self) -> bool {
-        self.command_palette.is_open()
+    /// Get the active modal for rendering.
+    pub fn render_modal(&self) -> Option<AnyView> {
+        self.active_modal.clone()
     }
 
-    /// Check if settings panel is open.
-    pub fn has_settings_panel(&self) -> bool {
-        self.settings_panel.is_open()
-    }
-
-    /// Check if project switcher is open.
-    pub fn has_project_switcher(&self) -> bool {
-        self.project_switcher.is_open()
-    }
-
-    /// Check if shell selector is open.
-    pub fn has_shell_selector(&self) -> bool {
-        self.shell_selector.is_open()
-    }
-
-    /// Check if worktree dialog is open.
-    pub fn has_worktree_dialog(&self) -> bool {
-        self.worktree_dialog.is_some()
-    }
+    // ========================================================================
+    // Context menu visibility checks (kept separate)
+    // ========================================================================
 
     /// Check if context menu is open.
     pub fn has_context_menu(&self) -> bool {
-        self.context_menu.is_some()
+        self.context_menu.is_open()
     }
 
-    /// Check if file search is open.
-    pub fn has_file_search(&self) -> bool {
-        self.file_search.is_some()
-    }
-
-    /// Check if file viewer is open.
-    pub fn has_file_viewer(&self) -> bool {
-        self.file_viewer.is_some()
-    }
-
-    /// Check if diff viewer is open.
-    pub fn has_diff_viewer(&self) -> bool {
-        self.diff_viewer.is_some()
+    /// Check if folder context menu is open.
+    pub fn has_folder_context_menu(&self) -> bool {
+        self.folder_context_menu.is_open()
     }
 
     // ========================================================================
     // Simple toggle overlays
     // ========================================================================
 
+    /// Toggle add project dialog overlay.
+    pub fn toggle_add_project_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<AddProjectDialog>() {
+            self.close_modal(cx);
+        } else {
+            let workspace = self.workspace.clone();
+            let entity = cx.new(|cx| AddProjectDialog::new(workspace, cx));
+            cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
+                if event.is_close() {
+                    this.close_modal(cx);
+                }
+            }).detach();
+            self.open_modal(entity, cx);
+        }
+        cx.notify();
+    }
+
     /// Toggle keybindings help overlay.
     pub fn toggle_keybindings_help(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, keybindings_help, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
+        toggle_overlay!(self, cx, KeybindingsHelp, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
     }
 
     /// Toggle theme selector overlay.
     pub fn toggle_theme_selector(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, theme_selector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
+        toggle_overlay!(self, cx, ThemeSelector, ThemeSelectorEvent, |cx| ThemeSelector::new(cx));
     }
 
     /// Toggle command palette overlay.
     pub fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, command_palette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
+        toggle_overlay!(self, cx, CommandPalette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
     }
 
     /// Toggle settings panel overlay.
     pub fn toggle_settings_panel(&mut self, cx: &mut Context<Self>) {
-        if self.settings_panel.is_open() {
-            self.settings_panel.close();
+        if self.is_modal::<SettingsPanel>() {
+            self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
             let entity = cx.new(|cx| SettingsPanel::new(workspace, cx));
             cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
                 if event.is_close() {
-                    this.settings_panel.close();
-                    cx.notify();
+                    this.close_modal(cx);
                 }
             }).detach();
-            self.settings_panel.set(entity);
+            self.open_modal(entity, cx);
         }
         cx.notify();
     }
 
     /// Show settings panel opened to Hooks category for a specific project.
     pub fn show_settings_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        // Close existing settings panel if open
-        self.settings_panel.close();
-
         let workspace = self.workspace.clone();
         let entity = cx.new(|cx| SettingsPanel::new_for_project(workspace, project_id, cx));
         cx.subscribe(&entity, |this, _, event: &SettingsPanelEvent, cx| {
             if event.is_close() {
-                this.settings_panel.close();
-                cx.notify();
+                this.close_modal(cx);
             }
         }).detach();
-        self.settings_panel.set(entity);
+        self.open_modal(entity, cx);
         cx.notify();
     }
 
     /// Toggle project switcher overlay.
     pub fn toggle_project_switcher(&mut self, cx: &mut Context<Self>) {
-        if self.project_switcher.is_open() {
-            self.project_switcher.close();
-            // Restore focus after closing
-            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        if self.is_modal::<ProjectSwitcher>() {
+            self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
             let entity = cx.new(|cx| ProjectSwitcher::new(workspace, cx));
             cx.subscribe(&entity, |this, _, event: &ProjectSwitcherEvent, cx| {
                 match event {
                     ProjectSwitcherEvent::Close => {
-                        this.project_switcher.close();
-                        this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                        cx.notify();
+                        this.close_modal(cx);
                     }
                     ProjectSwitcherEvent::FocusProject(project_id) => {
-                        this.project_switcher.close();
                         cx.emit(OverlayManagerEvent::FocusProject(project_id.clone()));
-                        this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                        cx.notify();
+                        this.close_modal(cx);
                     }
                     ProjectSwitcherEvent::ToggleVisibility(project_id) => {
                         cx.emit(OverlayManagerEvent::ToggleProjectVisibility(project_id.clone()));
@@ -395,9 +381,7 @@ impl OverlayManager {
                 }
             })
             .detach();
-            self.project_switcher.set(entity);
-            // Clear focus during modal
-            self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+            self.open_modal(entity, cx);
         }
         cx.notify();
     }
@@ -408,26 +392,24 @@ impl OverlayManager {
 
     /// Toggle session manager overlay.
     pub fn toggle_session_manager(&mut self, cx: &mut Context<Self>) {
-        if self.session_manager.is_some() {
-            self.session_manager = None;
+        if self.is_modal::<SessionManager>() {
+            self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
             let manager = cx.new(|cx| SessionManager::new(workspace, cx));
             cx.subscribe(&manager, |this, _, event: &SessionManagerEvent, cx| {
                 match event {
                     SessionManagerEvent::Close => {
-                        this.session_manager = None;
-                        cx.notify();
+                        this.close_modal(cx);
                     }
                     SessionManagerEvent::SwitchWorkspace(data) => {
-                        this.session_manager = None;
                         cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
-                        cx.notify();
+                        this.close_modal(cx);
                     }
                 }
             })
             .detach();
-            self.session_manager = Some(manager);
+            self.open_modal(manager, cx);
         }
         cx.notify();
     }
@@ -449,12 +431,9 @@ impl OverlayManager {
         cx.subscribe(&entity, move |this, _, event: &ShellSelectorOverlayEvent, cx| {
             match event {
                 ShellSelectorOverlayEvent::Close => {
-                    this.shell_selector.close();
-                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                    cx.notify();
+                    this.close_modal(cx);
                 }
                 ShellSelectorOverlayEvent::ShellSelected { shell_type, context } => {
-                    this.shell_selector.close();
                     if let Some((project_id, terminal_id)) = context {
                         cx.emit(OverlayManagerEvent::ShellSelected {
                             shell_type: shell_type.clone(),
@@ -462,13 +441,11 @@ impl OverlayManager {
                             terminal_id: terminal_id.clone(),
                         });
                     }
-                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
-                    cx.notify();
+                    this.close_modal(cx);
                 }
             }
         }).detach();
-        self.shell_selector.set(entity);
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        self.open_modal(entity, cx);
         cx.notify();
     }
 
@@ -490,39 +467,28 @@ impl OverlayManager {
         cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
             match event {
                 WorktreeDialogEvent::Close => {
-                    this.hide_worktree_dialog(cx);
+                    this.close_modal(cx);
                 }
                 WorktreeDialogEvent::Created(new_project_id) => {
                     cx.emit(OverlayManagerEvent::WorktreeCreated(new_project_id.clone()));
-                    this.hide_worktree_dialog(cx);
+                    this.close_modal(cx);
                 }
             }
         })
         .detach();
-        self.worktree_dialog = Some(dialog);
-        // Clear focused terminal during modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
-    /// Close worktree dialog.
-    pub fn hide_worktree_dialog(&mut self, cx: &mut Context<Self>) {
-        self.worktree_dialog = None;
-        // Restore focus after modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.open_modal(dialog, cx);
         cx.notify();
     }
 
     // ========================================================================
-    // Context menu (parametric)
+    // Context menu (parametric - remains as separate OverlaySlot)
     // ========================================================================
 
     /// Show context menu for a project.
     pub fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
+        self.close_modal(cx);
+        self.folder_context_menu.close();
+
         let workspace = self.workspace.clone();
         let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
 
@@ -573,16 +539,55 @@ impl OverlayManager {
         })
         .detach();
 
-        self.context_menu = Some(menu);
+        self.context_menu.set(menu);
         cx.notify();
     }
 
     /// Hide context menu.
     pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_context_menu_request(cx);
-        });
+        self.context_menu.close();
+        cx.notify();
+    }
+
+    /// Show folder context menu.
+    pub fn show_folder_context_menu(&mut self, request: FolderContextMenuRequest, cx: &mut Context<Self>) {
+        self.close_modal(cx);
+        self.context_menu.close();
+
+        let workspace = self.workspace.clone();
+        let menu = cx.new(|cx| FolderContextMenu::new(workspace.clone(), request, cx));
+
+        cx.subscribe(&menu, |this, _, event: &FolderContextMenuEvent, cx| {
+            match event {
+                FolderContextMenuEvent::Close => {
+                    this.hide_folder_context_menu(cx);
+                }
+                FolderContextMenuEvent::RenameFolder { folder_id, folder_name } => {
+                    this.hide_folder_context_menu(cx);
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_sidebar_request(SidebarRequest::RenameFolder {
+                            folder_id: folder_id.clone(),
+                            folder_name: folder_name.clone(),
+                        }, cx);
+                    });
+                }
+                FolderContextMenuEvent::DeleteFolder { folder_id } => {
+                    this.hide_folder_context_menu(cx);
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.delete_folder(folder_id, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.folder_context_menu.set(menu);
+        cx.notify();
+    }
+
+    /// Hide folder context menu.
+    pub fn hide_folder_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.folder_context_menu.close();
         cx.notify();
     }
 
@@ -592,8 +597,8 @@ impl OverlayManager {
 
     /// Toggle file search dialog for a project.
     pub fn toggle_file_search(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
-        if self.file_search.is_some() {
-            self.hide_file_search(cx);
+        if self.is_modal::<FileSearchDialog>() {
+            self.close_modal(cx);
         } else {
             self.show_file_search(project_path, cx);
         }
@@ -606,11 +611,11 @@ impl OverlayManager {
         cx.subscribe(&dialog, |this, _, event: &FileSearchDialogEvent, cx| {
             match event {
                 FileSearchDialogEvent::Close => {
-                    this.hide_file_search(cx);
+                    this.close_modal(cx);
                 }
                 FileSearchDialogEvent::FileSelected(path) => {
                     let path = path.clone();
-                    this.hide_file_search(cx);
+                    this.close_modal(cx);
                     // Open the file viewer
                     this.show_file_viewer(path, cx);
                 }
@@ -618,21 +623,7 @@ impl OverlayManager {
         })
         .detach();
 
-        self.file_search = Some(dialog);
-        // Clear focused terminal during modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
-    /// Hide file search dialog.
-    pub fn hide_file_search(&mut self, cx: &mut Context<Self>) {
-        self.file_search = None;
-        // Restore focus after modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.open_modal(dialog, cx);
         cx.notify();
     }
 
@@ -647,27 +638,13 @@ impl OverlayManager {
         cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {
                 FileViewerEvent::Close => {
-                    this.hide_file_viewer(cx);
+                    this.close_modal(cx);
                 }
             }
         })
         .detach();
 
-        self.file_viewer = Some(viewer);
-        // Clear focused terminal during modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
-    /// Hide file viewer.
-    pub fn hide_file_viewer(&mut self, cx: &mut Context<Self>) {
-        self.file_viewer = None;
-        // Restore focus after modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.open_modal(viewer, cx);
         cx.notify();
     }
 
@@ -682,92 +659,28 @@ impl OverlayManager {
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {
                 DiffViewerEvent::Close => {
-                    this.hide_diff_viewer(cx);
+                    this.close_modal(cx);
                 }
             }
         })
         .detach();
 
-        self.diff_viewer = Some(viewer);
-        // Clear focused terminal during modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.clear_focused_terminal(cx);
-        });
-        cx.notify();
-    }
-
-    /// Hide diff viewer.
-    pub fn hide_diff_viewer(&mut self, cx: &mut Context<Self>) {
-        self.diff_viewer = None;
-        // Restore focus after modal
-        self.workspace.update(cx, |ws, cx| {
-            ws.restore_focused_terminal(cx);
-        });
+        self.open_modal(viewer, cx);
         cx.notify();
     }
 
     // ========================================================================
-    // Render helpers
+    // Render helpers (context menus only - modal uses render_modal())
     // ========================================================================
-
-    /// Get keybindings help entity for rendering.
-    pub fn render_keybindings_help(&self) -> Option<Entity<KeybindingsHelp>> {
-        self.keybindings_help.render()
-    }
-
-    /// Get session manager entity for rendering.
-    pub fn render_session_manager(&self) -> Option<Entity<SessionManager>> {
-        self.session_manager.clone()
-    }
-
-    /// Get theme selector entity for rendering.
-    pub fn render_theme_selector(&self) -> Option<Entity<ThemeSelector>> {
-        self.theme_selector.render()
-    }
-
-    /// Get command palette entity for rendering.
-    pub fn render_command_palette(&self) -> Option<Entity<CommandPalette>> {
-        self.command_palette.render()
-    }
-
-    /// Get settings panel entity for rendering.
-    pub fn render_settings_panel(&self) -> Option<Entity<SettingsPanel>> {
-        self.settings_panel.render()
-    }
-
-    /// Get project switcher entity for rendering.
-    pub fn render_project_switcher(&self) -> Option<Entity<ProjectSwitcher>> {
-        self.project_switcher.render()
-    }
-
-    /// Get shell selector entity for rendering.
-    pub fn render_shell_selector(&self) -> Option<Entity<ShellSelectorOverlay>> {
-        self.shell_selector.render()
-    }
-
-    /// Get worktree dialog entity for rendering.
-    pub fn render_worktree_dialog(&self) -> Option<Entity<WorktreeDialog>> {
-        self.worktree_dialog.clone()
-    }
 
     /// Get context menu entity for rendering.
     pub fn render_context_menu(&self) -> Option<Entity<ContextMenu>> {
-        self.context_menu.clone()
+        self.context_menu.render()
     }
 
-    /// Get file search dialog entity for rendering.
-    pub fn render_file_search(&self) -> Option<Entity<FileSearchDialog>> {
-        self.file_search.clone()
-    }
-
-    /// Get file viewer entity for rendering.
-    pub fn render_file_viewer(&self) -> Option<Entity<FileViewer>> {
-        self.file_viewer.clone()
-    }
-
-    /// Get diff viewer entity for rendering.
-    pub fn render_diff_viewer(&self) -> Option<Entity<DiffViewer>> {
-        self.diff_viewer.clone()
+    /// Get folder context menu entity for rendering.
+    pub fn render_folder_context_menu(&self) -> Option<Entity<FolderContextMenu>> {
+        self.folder_context_menu.render()
     }
 }
 

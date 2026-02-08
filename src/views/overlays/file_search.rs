@@ -3,12 +3,14 @@
 //! Provides a searchable list of files in the active project,
 //! similar to VS Code's Cmd+P file picker.
 
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
     keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area,
     ListOverlayConfig,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 use std::path::PathBuf;
 
@@ -291,8 +293,8 @@ impl FileSearchDialog {
         // Consecutive matches bonus
         for w in positions.windows(2) {
             // Check if positions are adjacent in the original text
-            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0]).unwrap();
-            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1]).unwrap();
+            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
+            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
             if p1_text_idx == p0_text_idx + 1 {
                 score += 5;
             } else {
@@ -306,8 +308,7 @@ impl FileSearchDialog {
         for &pos in &positions {
             if pos == 0 {
                 score += 10;
-            } else {
-                let prev_char = text[..pos].chars().last().unwrap();
+            } else if let Some(prev_char) = text[..pos].chars().last() {
                 if word_separators.contains(&prev_char) {
                     score += 10;
                 }
@@ -486,16 +487,20 @@ impl Render for FileSearchDialog {
             .unwrap_or_else(|| "Project".to_string());
 
         // Focus on first render
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("file-search-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context(self.config.key_context.as_str())
             .items_start()
             .pt(px(80.0))
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    "escape" => this.close(cx),
                     "up" => {
                         if this.select_prev() {
                             cx.notify();
@@ -515,7 +520,8 @@ impl Render for FileSearchDialog {
                         }
                     }
                     key if key.len() == 1 => {
-                        let ch = key.chars().next().unwrap();
+                        let Some(ch) = key.chars().next() else { return };
+
                         if SEARCH_CHARS.contains(ch) {
                             this.search_query.push(ch);
                             this.filter_files();
@@ -590,9 +596,7 @@ impl Render for FileSearchDialog {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(16.0))
                                     .child(keyboard_hint("Enter", "to open", &t))
                                     .child(keyboard_hint("Esc", "to close", &t)),

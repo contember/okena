@@ -31,9 +31,9 @@ Where should this state live?
 
 ## Centralized State
 
-### App State Pattern
+### Global State Pattern
 
-Single source of truth for global state:
+GPUI has built-in support for global state via `impl Global`:
 
 ```rust
 pub struct AppState {
@@ -43,30 +43,40 @@ pub struct AppState {
     pub active_session: Option<usize>,
 }
 
+impl Global for AppState {}
+
 impl AppState {
-    pub fn global(cx: &mut App) -> Entity<Self> {
-        static INSTANCE: OnceLock<Entity<AppState>> = OnceLock::new();
-        
-        *INSTANCE.get_or_init(|| {
-            cx.new(|_| Self {
-                settings: Settings::load().unwrap_or_default(),
-                theme: Theme::default(),
-                sessions: Vec::new(),
-                active_session: None,
-            })
-        })
-    }
-    
     pub fn active(&self) -> Option<&Entity<Session>> {
         self.active_session.and_then(|i| self.sessions.get(i))
     }
 }
 
-// Access from anywhere
-fn some_function(cx: &mut Context<MyView>) {
-    let state = AppState::global(cx);
-    let settings = state.read(cx).settings.clone();
+// Initialize during app startup
+app.run(|cx: &mut App| {
+    cx.set_global(AppState {
+        settings: Settings::load().unwrap_or_default(),
+        theme: Theme::default(),
+        sessions: Vec::new(),
+        active_session: None,
+    });
+});
+
+// Read from anywhere (immutable)
+fn some_function(cx: &App) {
+    let state = cx.global::<AppState>();
+    let settings = &state.settings;
 }
+
+// Update (mutable)
+fn update_theme(cx: &mut App) {
+    cx.global_mut::<AppState>().theme = Theme::dark();
+}
+
+// Observe changes from a view
+cx.observe_global::<AppState>(|this, cx| {
+    this.refresh_theme(cx);
+    cx.notify();
+}).detach();
 ```
 
 ### State Events
@@ -95,11 +105,11 @@ impl AppState {
     }
 }
 
-// Subscribe to specific events
-cx.subscribe(&app_state, |this, _state, event, cx| {
+// Subscribe to specific events (in window context)
+cx.subscribe_in(&app_state, window, |this, _state, event, window, cx| {
     match event {
-        AppEvent::ThemeChanged => this.update_colors(cx),
-        AppEvent::SettingsChanged => this.reload_config(cx),
+        AppEvent::ThemeChanged => this.update_colors(window, cx),
+        AppEvent::SettingsChanged => this.reload_config(window, cx),
         _ => {}
     }
 }).detach();
@@ -142,7 +152,7 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    fn handle_keypress(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn handle_keypress(&mut self, key: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.document.update(cx, |doc, cx| {
             doc.insert(key, cx);
         });

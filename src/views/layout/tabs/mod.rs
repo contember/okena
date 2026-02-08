@@ -9,10 +9,11 @@ mod context_menu;
 mod shell_selector;
 
 use crate::theme::{theme, with_alpha};
-use crate::views::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
+use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::collections::HashSet;
 
@@ -54,9 +55,7 @@ impl Render for TabDragView {
             .font_weight(FontWeight::MEDIUM)
             // Add a subtle glow effect using the active border color
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(6.0))
                     // Shell icon
                     .child(
@@ -263,19 +262,19 @@ impl LayoutContainer {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
                             self.pty_manager.clone(),
                             self.terminals.clone(),
+                            self.active_drag.clone(),
                         )
                     })
                 })
                 .clone();
 
-            return div()
-                .flex()
-                .flex_col()
+            return v_flex()
                 .size_full()
                 .child(container);
         }
@@ -377,9 +376,7 @@ impl LayoutContainer {
                 })
                 // Tab content with icon and label
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
+                    h_flex()
                         .gap(px(6.0))
                         // Shell icon
                         .child(
@@ -507,9 +504,7 @@ impl LayoutContainer {
         // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .size_full()
             .relative()
             // Use a canvas to capture the container bounds during prepaint
@@ -541,9 +536,7 @@ impl LayoutContainer {
                     .children(tab_elements)
                     .child(end_drop_zone)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .opacity(0.0)
                             .group_hover("tab-bar-row", |s| s.opacity(1.0))
                             .child(shell_indicator)
@@ -563,11 +556,13 @@ impl LayoutContainer {
                             cx.new(|_cx| {
                                 LayoutContainer::new(
                                     self.workspace.clone(),
+                                    self.request_broker.clone(),
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),
                                     self.pty_manager.clone(),
                                     self.terminals.clone(),
+                                    self.active_drag.clone(),
                                 )
                             })
                         })

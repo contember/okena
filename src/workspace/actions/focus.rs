@@ -2,7 +2,7 @@
 //!
 //! Actions for managing terminal and project focus, including fullscreen mode.
 
-use crate::workspace::state::{FocusedTerminalState, Workspace};
+use crate::workspace::state::Workspace;
 use gpui::*;
 
 impl Workspace {
@@ -10,9 +10,11 @@ impl Workspace {
     ///
     /// This also focuses the first terminal in the project if one exists.
     pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
-        self.focused_project_id = project_id.clone();
-        // Exit fullscreen when changing focus
-        self.fullscreen_terminal = None;
+        // Clear fullscreen without restoring old project_id (we're overriding it)
+        self.focus_manager.clear_fullscreen_without_restore();
+
+        // Set the focused project via FocusManager
+        self.focus_manager.set_focused_project_id(project_id.clone());
 
         // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
@@ -20,11 +22,7 @@ impl Workspace {
                 if let Some(ref layout) = project.layout {
                     // Find the first terminal's path
                     if let Some(first_path) = Self::find_first_terminal_path(layout) {
-                        self.focus_manager.focus_terminal(pid.clone(), first_path.clone());
-                        self.focused_terminal = Some(FocusedTerminalState {
-                            project_id: pid.clone(),
-                            layout_path: first_path,
-                        });
+                        self.focus_manager.focus_terminal(pid.clone(), first_path);
                     }
                 }
             }
@@ -67,71 +65,26 @@ impl Workspace {
 
         log::info!("layout_path for terminal: {:?}", layout_path);
 
-        // Use FocusManager for fullscreen entry
-        self.focus_manager.enter_fullscreen(project_id.clone(), layout_path.clone());
+        // Use FocusManager for fullscreen entry (saves current state + sets focused_project_id)
+        self.focus_manager.enter_fullscreen(project_id, layout_path, terminal_id.clone());
 
-        // Save previous focused_project_id before changing it
-        let previous_focused_project_id = self.focused_project_id.clone();
-
-        // Update legacy state for compatibility
-        self.fullscreen_terminal = Some(crate::workspace::state::FullscreenState {
-            project_id: project_id.clone(),
-            terminal_id: terminal_id.clone(),
-            previous_focused_project_id,
-        });
-        log::info!("fullscreen_terminal set to Some with terminal_id={}", terminal_id);
-
-        // Also focus the project
-        self.focused_project_id = Some(project_id.clone());
-
-        // Sync focused_terminal for visual indicator
-        self.focused_terminal = Some(FocusedTerminalState {
-            project_id,
-            layout_path,
-        });
+        log::info!("fullscreen_terminal set via FocusManager with terminal_id={}", terminal_id);
 
         cx.notify();
-    }
-
-    /// Enter fullscreen mode for the first terminal in a project
-    #[allow(dead_code)]
-    pub fn fullscreen_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        if let Some(project) = self.project(&project_id) {
-            let terminal_ids = project.layout.as_ref()
-                .map(|l| l.collect_terminal_ids())
-                .unwrap_or_default();
-            if let Some(first_id) = terminal_ids.first().cloned() {
-                self.set_fullscreen_terminal(project_id, first_id, cx);
-            }
-        }
     }
 
     /// Exit fullscreen mode
     ///
     /// Restores focus to the previously focused terminal and project view mode.
     pub fn exit_fullscreen(&mut self, cx: &mut Context<Self>) {
-        // Restore previous focused_project_id before clearing fullscreen state
-        if let Some(ref fs) = self.fullscreen_terminal {
-            self.focused_project_id = fs.previous_focused_project_id.clone();
-        }
-
-        self.fullscreen_terminal = None;
-
-        // Use FocusManager for focus restoration
-        if let Some(restored) = self.focus_manager.exit_fullscreen() {
-            // Restore the focused terminal state for visual indicator
-            self.focused_terminal = Some(FocusedTerminalState {
-                project_id: restored.project_id,
-                layout_path: restored.layout_path,
-            });
-        }
+        // Use FocusManager for focus + project_id restoration
+        self.focus_manager.exit_fullscreen();
 
         cx.notify();
     }
 
     /// Set focused terminal (for visual indicator)
     ///
-    /// This updates both the FocusManager and the legacy focused_terminal state.
     /// Focus events propagate: terminal focus -> pane focus -> project awareness
     pub fn set_focused_terminal(
         &mut self,
@@ -145,11 +98,6 @@ impl Workspace {
         // Record project access time for recency sorting
         self.touch_project(&project_id);
 
-        // Update legacy state for compatibility
-        self.focused_terminal = Some(FocusedTerminalState {
-            project_id,
-            layout_path,
-        });
         cx.notify();
     }
 
@@ -160,7 +108,7 @@ impl Workspace {
     pub fn clear_focused_terminal(&mut self, cx: &mut Context<Self>) {
         // Use FocusManager to save focus for restoration
         self.focus_manager.enter_modal();
-        // Don't clear focused_terminal - visual indicator remains during modal
+        // Visual indicator remains during modal (FocusManager keeps current_focus)
         cx.notify();
     }
 
@@ -169,12 +117,7 @@ impl Workspace {
     /// Called when exiting a modal context to restore the previous focus.
     pub fn restore_focused_terminal(&mut self, cx: &mut Context<Self>) {
         // Use FocusManager to restore focus
-        if let Some(restored) = self.focus_manager.exit_modal() {
-            self.focused_terminal = Some(FocusedTerminalState {
-                project_id: restored.project_id,
-                layout_path: restored.layout_path,
-            });
-        }
+        self.focus_manager.exit_modal();
         cx.notify();
     }
 

@@ -1,13 +1,17 @@
 use crate::git::{self, FileDiffSummary};
-use crate::keybindings::{set_pending_diff_path, set_pending_diff_file, ShowDiffViewer};
+use crate::git::GitStatus;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{theme, ThemeColors};
-use crate::views::layout_container::LayoutContainer;
+use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::root::TerminalsRegistry;
+use crate::views::layout::split_pane::ActiveDrag;
+use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::requests::OverlayRequest;
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
+use gpui_component::{h_flex, v_flex};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,6 +23,7 @@ const HOVER_DELAY_MS: u64 = 400;
 /// A single project column with header and layout
 pub struct ProjectColumn {
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     project_id: String,
     #[allow(dead_code)]
     pty_manager: Arc<PtyManager>,
@@ -34,17 +39,32 @@ pub struct ProjectColumn {
     diff_popover_project_path: String,
     /// Hover token to cancel pending popover show
     hover_token: Arc<AtomicU64>,
+    /// Cached git status (fetched asynchronously)
+    cached_git_status: Option<GitStatus>,
+    /// Shared drag state for resize operations
+    active_drag: ActiveDrag,
 }
 
 impl ProjectColumn {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         pty_manager: Arc<PtyManager>,
         terminals: TerminalsRegistry,
+        active_drag: ActiveDrag,
+        cx: &mut Context<Self>,
     ) -> Self {
+        // Spawn initial async git status fetch
+        let project_path = workspace.read(cx).project(&project_id)
+            .map(|p| p.path.clone());
+        if let Some(path) = project_path {
+            Self::spawn_git_status_refresh(path, cx);
+        }
+
         Self {
             workspace,
+            request_broker,
             project_id,
             pty_manager,
             terminals,
@@ -53,7 +73,33 @@ impl ProjectColumn {
             diff_file_summaries: Vec::new(),
             diff_popover_project_path: String::new(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            cached_git_status: None,
+            active_drag,
         }
+    }
+
+    /// Spawn an async task to fetch git status and schedule the next refresh.
+    fn spawn_git_status_refresh(project_path: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let path = project_path.clone();
+            let status = smol::unblock(move || {
+                git::get_git_status(Path::new(&path))
+            }).await;
+
+            let should_continue = this.update(cx, |this, cx| {
+                this.cached_git_status = status;
+                cx.notify();
+                true
+            }).unwrap_or(false);
+
+            if should_continue {
+                // Schedule next refresh after cache TTL
+                smol::Timer::after(Duration::from_secs(5)).await;
+                let _ = this.update(cx, |_this, cx| {
+                    Self::spawn_git_status_refresh(project_path, cx);
+                });
+            }
+        }).detach();
     }
 
     fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -182,21 +228,20 @@ impl ProjectColumn {
                             .items_center()
                             .justify_between()
                             .gap(px(12.0))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.hide_diff_popover(cx);
-                                set_pending_diff_path(project_path_for_click.clone());
-                                set_pending_diff_file(file_path.clone());
-                                window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                                this.request_broker.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                        path: project_path_for_click.clone(),
+                                        file: Some(file_path.clone()),
+                                    }, cx);
+                                });
                             }))
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
+                                v_flex()
                                     .overflow_hidden()
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .gap(px(4.0))
                                             .child(
                                                 div()
@@ -229,9 +274,7 @@ impl ProjectColumn {
                                     }),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(6.0))
                                     .flex_shrink_0()
                                     .text_size(px(10.0))
@@ -268,18 +311,22 @@ impl ProjectColumn {
     fn ensure_layout_container(&mut self, project_path: String, cx: &mut Context<Self>) {
         if self.layout_container.is_none() {
             let workspace = self.workspace.clone();
+            let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let pty_manager = self.pty_manager.clone();
             let terminals = self.terminals.clone();
+            let active_drag = self.active_drag.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
                     workspace,
+                    request_broker,
                     project_id,
                     project_path,
                     vec![],
                     pty_manager,
                     terminals,
+                    active_drag,
                 )
             }));
         }
@@ -301,9 +348,7 @@ impl ProjectColumn {
             return div().into_any_element();
         }
 
-        div()
-            .flex()
-            .items_center()
+        h_flex()
             // Minimized terminals
             .children(
                 minimized_terminals.into_iter().map(|(terminal_id, layout_path)| {
@@ -384,7 +429,7 @@ impl ProjectColumn {
     }
 
     fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = git::get_git_status(Path::new(&project.path));
+        let status = self.cached_git_status.clone();
         let is_worktree = project.worktree_info.is_some();
         let main_repo_path = project.worktree_info.as_ref()
             .map(|w| w.main_repo_path.clone())
@@ -399,9 +444,7 @@ impl ProjectColumn {
                 let project_path = project.path.clone();
                 let project_path_for_hover = project.path.clone();
 
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .flex_shrink_0()
                     .gap(px(6.0))
                     .text_size(px(10.0))
@@ -424,9 +467,7 @@ impl ProjectColumn {
                     })
                     // Branch name
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(3.0))
                             .child(
                                 svg()
@@ -467,12 +508,15 @@ impl ProjectColumn {
                                         this.hide_diff_popover(cx);
                                     }
                                 }))
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
-                                    // Set the path and dispatch ShowDiffViewer
-                                    set_pending_diff_path(project_path.clone());
-                                    window.dispatch_action(Box::new(ShowDiffViewer), cx);
+                                    this.request_broker.update(cx, |broker, cx| {
+                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                            path: project_path.clone(),
+                                            file: None,
+                                        }, cx);
+                                    });
                                 }))
                                 .child(
                                     div()
@@ -516,9 +560,7 @@ impl ProjectColumn {
             .border_b_1()
             .border_color(rgb(t.border))
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(6.0))
                     .overflow_hidden()
                     .child(
@@ -544,9 +586,7 @@ impl ProjectColumn {
             )
             .child(
                 // Right side: minimized taskbar + controls
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     // Hidden terminals taskbar (minimized and detached)
                     .child(self.render_hidden_taskbar(project, t))
@@ -625,9 +665,7 @@ impl ProjectColumn {
         let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
 
-        div()
-            .flex()
-            .flex_col()
+        v_flex()
             .items_center()
             .justify_center()
             .size_full()

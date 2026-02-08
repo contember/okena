@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub enum UpdateStatus {
     Idle,
     Checking,
+    #[allow(dead_code)]
     Available {
         version: String,
         asset_url: String,

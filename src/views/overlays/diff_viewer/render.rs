@@ -6,6 +6,7 @@ use crate::theme::ThemeColors;
 use crate::views::components::segmented_toggle;
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::h_flex;
 use std::sync::Arc;
 
 impl DiffViewer {
@@ -31,9 +32,7 @@ impl DiffViewer {
             .items_center()
             .justify_between()
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(16.0))
                     .child(
                         div()
@@ -44,9 +43,7 @@ impl DiffViewer {
                     )
                     .when(has_files, |d| {
                         d.child(
-                            div()
-                                .flex()
-                                .items_center()
+                            h_flex()
                                 .gap(px(6.0))
                                 .pl(px(8.0))
                                 .border_l_1()
@@ -83,9 +80,7 @@ impl DiffViewer {
                     }),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     // Whitespace toggle
                     .child(
@@ -428,9 +423,7 @@ impl DiffViewer {
             .items_center()
             .justify_between()
             .child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t))
                     .child(self.render_hint("Tab", "staged/unstaged", t))
@@ -466,9 +459,7 @@ impl DiffViewer {
         action: &str,
         t: &ThemeColors,
     ) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
+        h_flex()
             .gap(px(5.0))
             .child(
                 div()
@@ -506,9 +497,7 @@ impl DiffViewer {
 
             if has_content {
                 elements.push(
-                    div()
-                        .flex()
-                        .items_center()
+                    h_flex()
                         .h(px(26.0))
                         .pl(px(indent as f32 + 12.0))
                         .child(
@@ -581,9 +570,7 @@ impl DiffViewer {
                         // Line counts - more subtle
                         .when(added > 0 || removed > 0, |d| {
                             d.child(
-                                div()
-                                    .flex()
-                                    .items_center()
+                                h_flex()
                                     .gap(px(4.0))
                                     .text_size(px(11.0))
                                     .when(added > 0, |d| {

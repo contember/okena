@@ -1,12 +1,17 @@
 mod config;
+mod descriptions;
+mod types;
 
 use gpui::*;
 use parking_lot::RwLock;
 
 pub use config::{
-    get_action_descriptions, get_keybindings_path, load_keybindings, save_keybindings,
+    get_keybindings_path, load_keybindings, save_keybindings,
     KeybindingConfig,
 };
+pub use descriptions::get_action_descriptions;
+#[allow(unused_imports)]
+pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
 // Define actions
 actions!(
@@ -14,6 +19,8 @@ actions!(
     [
         Quit,
         About,
+        Cancel,
+        SendEscape,
         ToggleSidebar,
         ToggleSidebarAutoHide,
         ToggleFullscreen,
@@ -57,34 +64,14 @@ actions!(
         ResetZoom,
         CheckForUpdates,
         InstallUpdate,
+        FocusSidebar,
+        SidebarUp,
+        SidebarDown,
+        SidebarConfirm,
+        SidebarToggleExpand,
+        SidebarEscape,
     ]
 );
-
-/// Pending diff viewer path (set before dispatching ShowDiffViewer from project header).
-static PENDING_DIFF_PATH: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
-
-/// Pending diff file to select (set before dispatching ShowDiffViewer).
-static PENDING_DIFF_FILE: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
-
-/// Set a pending diff path to be used by the next ShowDiffViewer action.
-pub fn set_pending_diff_path(path: String) {
-    *PENDING_DIFF_PATH.lock() = Some(path);
-}
-
-/// Set a pending diff file to select in the diff viewer.
-pub fn set_pending_diff_file(file: String) {
-    *PENDING_DIFF_FILE.lock() = Some(file);
-}
-
-/// Take the pending diff path (returns and clears it).
-pub fn take_pending_diff_path() -> Option<String> {
-    PENDING_DIFF_PATH.lock().take()
-}
-
-/// Take the pending diff file (returns and clears it).
-pub fn take_pending_diff_file() -> Option<String> {
-    PENDING_DIFF_FILE.lock().take()
-}
 
 /// Global keybinding configuration (thread-safe)
 static KEYBINDING_CONFIG: RwLock<Option<KeybindingConfig>> = RwLock::new(None);
@@ -99,27 +86,12 @@ pub fn get_config() -> impl std::ops::Deref<Target = KeybindingConfig> {
     })
 }
 
-/// Get a write guard to the current keybinding configuration
-#[allow(dead_code)]
-pub fn get_config_mut() -> impl std::ops::DerefMut<Target = KeybindingConfig> {
-    parking_lot::RwLockWriteGuard::map(KEYBINDING_CONFIG.write(), |opt| {
-        opt.as_mut().expect("Keybinding config not initialized")
-    })
-}
-
 /// Reset keybindings to defaults and save
 pub fn reset_to_defaults() -> anyhow::Result<()> {
     let config = KeybindingConfig::defaults();
     save_keybindings(&config)?;
     *KEYBINDING_CONFIG.write() = Some(config);
     Ok(())
-}
-
-/// Reload keybindings from disk
-#[allow(dead_code)]
-pub fn reload_keybindings() {
-    let config = load_keybindings();
-    *KEYBINDING_CONFIG.write() = Some(config);
 }
 
 /// Register keybindings for the application from configuration
@@ -144,6 +116,29 @@ pub fn register_keybindings(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("tab", SendTab, Some("TerminalPane")),
         KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
+    ]);
+
+    // Register sidebar navigation keybindings (not user-configurable)
+    cx.bind_keys([
+        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+        KeyBinding::new("enter", SidebarConfirm, Some("Sidebar")),
+        KeyBinding::new("space", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("left", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("right", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("escape", SidebarEscape, Some("Sidebar")),
+    ]);
+
+    // Register escape keybindings with context-based precedence:
+    //   Global:             escape → Cancel        (overlays, sidebar rename)
+    //   TerminalPane:       escape → SendEscape    (send 0x1b to PTY)
+    //   SearchBar:          escape → CloseSearch   (close search, deeper than TerminalPane)
+    //   TerminalRename:     escape → Cancel        (cancel rename, deeper than TerminalPane)
+    cx.bind_keys([
+        KeyBinding::new("escape", Cancel, None),
+        KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
+        KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
+        KeyBinding::new("escape", Cancel, Some("TerminalRename")),
     ]);
 }
 
@@ -175,6 +170,8 @@ fn register_bindings_from_config(cx: &mut App, config: &KeybindingConfig) {
 fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Option<KeyBinding> {
     // Map action names to actual actions
     match action {
+        "Cancel" => Some(KeyBinding::new(keystroke, Cancel, context)),
+        "SendEscape" => Some(KeyBinding::new(keystroke, SendEscape, context)),
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),
         "ToggleSidebarAutoHide" => Some(KeyBinding::new(keystroke, ToggleSidebarAutoHide, context)),
         "ToggleFullscreen" => Some(KeyBinding::new(keystroke, ToggleFullscreen, context)),
@@ -217,6 +214,12 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ResetZoom" => Some(KeyBinding::new(keystroke, ResetZoom, context)),
         "CheckForUpdates" => Some(KeyBinding::new(keystroke, CheckForUpdates, context)),
         "InstallUpdate" => Some(KeyBinding::new(keystroke, InstallUpdate, context)),
+        "FocusSidebar" => Some(KeyBinding::new(keystroke, FocusSidebar, context)),
+        "SidebarUp" => Some(KeyBinding::new(keystroke, SidebarUp, context)),
+        "SidebarDown" => Some(KeyBinding::new(keystroke, SidebarDown, context)),
+        "SidebarConfirm" => Some(KeyBinding::new(keystroke, SidebarConfirm, context)),
+        "SidebarToggleExpand" => Some(KeyBinding::new(keystroke, SidebarToggleExpand, context)),
+        "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None
@@ -239,14 +242,4 @@ pub fn format_keystroke(keystroke: &str) -> String {
         .replace("right", "→")
         .replace("up", "↑")
         .replace("down", "↓")
-}
-
-/// Get the primary (first enabled) keybinding for an action
-#[allow(dead_code)]
-pub fn get_primary_binding(action: &str) -> Option<String> {
-    let config = get_config();
-    config
-        .get_enabled_bindings(action)
-        .first()
-        .map(|e| format_keystroke(&e.keystroke))
 }

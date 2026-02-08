@@ -132,7 +132,6 @@ pub fn get_syntax_for_path<'a>(
 }
 
 /// Highlight a single line of code.
-#[allow(dead_code)]
 pub fn highlight_line(
     content: &str,
     highlighter: &mut HighlightLines,
@@ -150,7 +149,9 @@ pub fn highlight_line(
                     b: style.foreground.b as f32 / 255.0,
                     a: style.foreground.a as f32 / 255.0,
                 };
-                let processed = text.replace('\t', "    ");
+                let processed = text
+                    .trim_end_matches(&['\n', '\r'][..])
+                    .replace('\t', "    ");
                 if !processed.is_empty() {
                     result.push(HighlightedSpan {
                         color,
@@ -162,7 +163,9 @@ pub fn highlight_line(
         }
         Err(_) => vec![HighlightedSpan {
             color: default_color,
-            text: content.replace('\t', "    "),
+            text: content
+                .trim_end_matches(&['\n', '\r'][..])
+                .replace('\t', "    "),
         }],
     }
 }

@@ -5,6 +5,7 @@
 //! - Space: Toggle project visibility
 //! - Type to filter projects
 
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
@@ -13,6 +14,7 @@ use crate::views::components::{
 };
 use crate::workspace::state::{ProjectData, Workspace};
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Events emitted by the ProjectSwitcher overlay.
@@ -134,9 +136,7 @@ impl ProjectSwitcher {
                     .gap(px(2.0))
                     .overflow_hidden()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
+                        h_flex()
                             .gap(px(8.0))
                             .child(
                                 div()
@@ -196,13 +196,18 @@ impl Render for ProjectSwitcher {
         let search_placeholder = self.state.config.search_placeholder.clone().unwrap_or_default();
         let empty_message = self.state.config.empty_message.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("project-switcher-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("ProjectSwitcher")
             .items_start()
             .pt(px(80.0))
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[("space", "toggle")]) {
                     ListOverlayAction::Close => this.close(cx),

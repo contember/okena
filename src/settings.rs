@@ -5,6 +5,7 @@
 
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
+use crate::views::panels::status_bar::StatusMessages;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -131,7 +132,7 @@ impl SettingsState {
     }
 
     /// Set diff view mode (unified or side-by-side)
-    pub fn set_diff_view_mode(&mut self, value: crate::views::overlays::DiffViewMode, cx: &mut Context<Self>) {
+    pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
         self.settings.diff_view_mode = value;
         self.save_and_notify(cx);
     }
@@ -140,6 +141,15 @@ impl SettingsState {
     pub fn set_diff_ignore_whitespace(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.diff_ignore_whitespace = value;
         self.save_and_notify(cx);
+    }
+
+    /// Synchronously flush any pending settings save (called on quit)
+    pub fn flush_pending_save(&self) {
+        if self.save_pending.swap(false, Ordering::Relaxed) {
+            if let Err(e) = save_settings(&self.settings) {
+                log::error!("Failed to flush settings on quit: {}", e);
+            }
+        }
     }
 
     /// Save and notify - common logic for all setters
@@ -154,12 +164,15 @@ impl SettingsState {
         let save_pending = self.save_pending.clone();
         let settings = self.settings.clone();
 
-        cx.spawn(async move |_, _cx| {
+        cx.spawn(async move |_, cx| {
             smol::Timer::after(std::time::Duration::from_millis(300)).await;
 
             if save_pending.swap(false, Ordering::Relaxed) {
                 if let Err(e) = save_settings(&settings) {
                     log::error!("Failed to save settings: {}", e);
+                    let _ = cx.update(|cx| {
+                        StatusMessages::post(format!("Failed to save settings: {}", e), cx);
+                    });
                 }
             }
         })
@@ -188,7 +201,7 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
+        let _ = crate::process::command("open")
             .arg("-t")
             .arg(&path)
             .spawn();
@@ -196,14 +209,14 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open")
+        let _ = crate::process::command("xdg-open")
             .arg(&path)
             .spawn();
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("notepad")
+        let _ = crate::process::command("notepad")
             .arg(&path)
             .spawn();
     }

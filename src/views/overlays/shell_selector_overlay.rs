@@ -2,6 +2,7 @@
 //!
 //! Displays available shells in a modal dialog for selection.
 
+use crate::keybindings::Cancel;
 use crate::terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use crate::theme::theme;
 use crate::views::components::{
@@ -9,6 +10,7 @@ use crate::views::components::{
     ListOverlayConfig, ListOverlayState,
 };
 use gpui::*;
+use gpui_component::h_flex;
 use gpui::prelude::*;
 
 /// Shell selector overlay for choosing a shell.
@@ -84,12 +86,17 @@ impl Render for ShellSelectorOverlay {
         let config_title = self.state.config.title.clone();
         let config_subtitle = self.state.config.subtitle.clone();
 
-        window.focus(&focus_handle, cx);
+        if !focus_handle.is_focused(window) {
+            window.focus(&focus_handle, cx);
+        }
 
         modal_backdrop("shell-selector-overlay-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("ShellSelectorOverlay")
             .items_center()
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),
@@ -139,9 +146,7 @@ impl Render for ShellSelectorOverlay {
                                         }),
                                     )
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
+                                        h_flex()
                                             .justify_between()
                                             .child(
                                                 div()

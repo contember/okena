@@ -2,6 +2,7 @@
 
 use super::types::{DiffDisplayFile, DisplayLine, HighlightedSpan};
 use crate::git::{get_file_contents_for_diff, DiffLineType, DiffMode, FileDiff};
+use crate::views::components::syntax::{default_text_color, get_syntax_for_path, highlight_line};
 use gpui::Rgba;
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,106 +10,6 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-
-/// Map file extension to syntax name.
-pub fn map_extension_to_syntax(ext: &str) -> Option<&'static str> {
-    match ext.to_lowercase().as_str() {
-        "ts" | "mts" | "cts" => Some("ts"),
-        "tsx" => Some("tsx"),
-        "jsx" => Some("tsx"), // JSX uses TypeScriptReact syntax (best JSX support)
-        "mjs" | "cjs" => Some("js"),
-        "vue" | "svelte" => Some("html"),
-        "yml" | "yaml" => Some("yaml"),
-        "json" | "jsonc" | "json5" => Some("json"),
-        "toml" => Some("toml"),
-        "ini" | "cfg" | "conf" => Some("ini"),
-        "sh" | "bash" | "zsh" | "fish" => Some("sh"),
-        "ps1" | "psm1" | "psd1" => Some("ps1"),
-        "html" | "htm" | "xhtml" => Some("html"),
-        "css" | "scss" | "sass" | "less" => Some("css"),
-        "xml" | "svg" | "xsl" | "xslt" => Some("xml"),
-        "py" | "pyw" | "pyi" => Some("py"),
-        "rb" | "erb" | "rake" => Some("rb"),
-        "rs" => Some("rs"),
-        "go" => Some("go"),
-        "c" | "h" => Some("c"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => Some("cpp"),
-        "java" => Some("java"),
-        "kt" | "kts" => Some("kt"),
-        "swift" => Some("swift"),
-        "cs" => Some("cs"),
-        "php" => Some("php"),
-        "pl" | "pm" => Some("pl"),
-        "lua" => Some("lua"),
-        "sql" => Some("sql"),
-        "md" | "markdown" => Some("md"),
-        "tex" | "latex" => Some("tex"),
-        _ => None,
-    }
-}
-
-/// Get syntax for a file path.
-pub fn get_syntax_for_path<'a>(
-    path: &str,
-    syntax_set: &'a SyntaxSet,
-) -> &'a syntect::parsing::SyntaxReference {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str());
-
-    ext.and_then(|e| map_extension_to_syntax(e))
-        .and_then(|mapped| syntax_set.find_syntax_by_extension(mapped))
-        .or_else(|| ext.and_then(|e| syntax_set.find_syntax_by_extension(e)))
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text())
-}
-
-/// Default text color for unhighlighted content.
-fn default_color() -> Rgba {
-    Rgba {
-        r: 0.8,
-        g: 0.8,
-        b: 0.8,
-        a: 1.0,
-    }
-}
-
-/// Highlight a line of code and return spans.
-fn highlight_line_to_spans(
-    content: &str,
-    highlighter: &mut HighlightLines,
-    syntax_set: &SyntaxSet,
-) -> Vec<HighlightedSpan> {
-    match highlighter.highlight_line(content, syntax_set) {
-        Ok(spans) => {
-            let mut result = Vec::new();
-            for (style, text) in spans {
-                let color = Rgba {
-                    r: style.foreground.r as f32 / 255.0,
-                    g: style.foreground.g as f32 / 255.0,
-                    b: style.foreground.b as f32 / 255.0,
-                    a: style.foreground.a as f32 / 255.0,
-                };
-                // Strip newlines and expand tabs
-                let processed = text
-                    .trim_end_matches(&['\n', '\r'][..])
-                    .replace('\t', "    ");
-                if !processed.is_empty() {
-                    result.push(HighlightedSpan {
-                        color,
-                        text: processed,
-                    });
-                }
-            }
-            result
-        }
-        Err(_) => vec![HighlightedSpan {
-            color: default_color(),
-            text: content
-                .trim_end_matches(&['\n', '\r'][..])
-                .replace('\t', "    "),
-        }],
-    }
-}
 
 /// Pre-highlight an entire file and return a map of line number -> spans.
 /// Line numbers are 1-based to match git diff line numbers.
@@ -124,7 +25,7 @@ fn highlight_full_file(
     // Use LinesWithEndings to preserve newlines - syntect needs them for proper state tracking
     for (idx, line) in LinesWithEndings::from(content).enumerate() {
         let line_num = idx + 1; // 1-based line numbers
-        let spans = highlight_line_to_spans(line, &mut highlighter, syntax_set);
+        let spans = highlight_line(line, &mut highlighter, syntax_set);
         result.insert(line_num, spans);
     }
 
@@ -134,7 +35,7 @@ fn highlight_full_file(
 /// Create a fallback span for content without highlighting.
 fn fallback_spans(content: &str) -> Vec<HighlightedSpan> {
     vec![HighlightedSpan {
-        color: default_color(),
+        color: default_text_color(),
         text: content.replace('\t', "    "),
     }]
 }
@@ -156,7 +57,7 @@ pub fn process_file(
     let path = file.display_name();
 
     // Get syntax highlighter for this file
-    let syntax = get_syntax_for_path(path, syntax_set);
+    let syntax = get_syntax_for_path(Path::new(path), syntax_set);
     let theme = &theme_set.themes["base16-ocean.dark"];
 
     // Fetch and pre-highlight the full file content for both old and new versions.

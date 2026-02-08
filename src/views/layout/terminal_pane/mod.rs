@@ -13,6 +13,10 @@ mod shell_selector;
 mod search_bar;
 mod header;
 mod content;
+mod actions;
+mod zoom;
+mod navigation;
+mod render;
 
 // Internal imports
 use content::ContextMenuEvent;
@@ -22,22 +26,13 @@ use header::{TerminalHeader, HeaderEvent};
 // Re-export TerminalContent (used by tests/internal consumers)
 pub use content::TerminalContent;
 
-use crate::keybindings::{
-    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
-    FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
-    MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendTab,
-    SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
-};
 use crate::settings::settings;
-use crate::terminal::input::key_to_bytes;
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::theme::theme;
-use crate::views::layout::navigation::{get_pane_map, NavigationDirection};
 use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{SplitDirection, Workspace};
-use gpui::prelude::FluentBuilder;
+use crate::workspace::request_broker::RequestBroker;
+use crate::workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
 
@@ -45,6 +40,7 @@ use std::sync::Arc;
 pub struct TerminalPane {
     // Identity
     workspace: Entity<Workspace>,
+    request_broker: Entity<RequestBroker>,
     project_id: String,
     project_path: String,
     layout_path: Vec<usize>,
@@ -74,6 +70,7 @@ pub struct TerminalPane {
 impl TerminalPane {
     pub fn new(
         workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
@@ -140,6 +137,7 @@ impl TerminalPane {
 
         let mut pane = Self {
             workspace,
+            request_broker,
             project_id,
             project_path,
             layout_path,
@@ -158,9 +156,12 @@ impl TerminalPane {
             shell_type,
         };
 
-        // Create terminal if we have an ID
+        // Create terminal: either reconnect to existing PTY or create new one
         if let Some(ref id) = pane.terminal_id {
             pane.create_terminal_for_existing_pty(id.clone(), cx);
+        } else {
+            // No terminal ID - create a new terminal immediately
+            pane.create_new_terminal(cx);
         }
 
         // Start background loops
@@ -169,6 +170,8 @@ impl TerminalPane {
 
         pane
     }
+
+    // === Event handlers ===
 
     /// Handle events from header.
     fn handle_header_event(
@@ -188,13 +191,12 @@ impl TerminalPane {
             HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.request_shell_selector(
-                            &self.project_id,
-                            terminal_id,
-                            current_shell.clone(),
-                            cx,
-                        );
+                    self.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                            project_id: self.project_id.clone(),
+                            terminal_id: terminal_id.clone(),
+                            current_shell: current_shell.clone(),
+                        }, cx);
                     });
                 }
             }
@@ -239,6 +241,8 @@ impl TerminalPane {
             ContextMenuEvent::Close => self.handle_close(cx),
         }
     }
+
+    // === Background loops ===
 
     /// Start dirty check loop.
     fn start_dirty_check_loop(&self, cx: &mut Context<Self>) {
@@ -303,6 +307,8 @@ impl TerminalPane {
         })
         .detach();
     }
+
+    // === Terminal creation ===
 
     /// Create terminal for existing PTY.
     fn create_terminal_for_existing_pty(&mut self, terminal_id: String, cx: &mut Context<Self>) {
@@ -388,6 +394,8 @@ impl TerminalPane {
         });
     }
 
+    // === Public accessors ===
+
     /// Get terminal ID.
     pub fn terminal_id(&self) -> Option<String> {
         self.terminal_id.clone()
@@ -408,6 +416,8 @@ impl TerminalPane {
             cx.notify();
         }
     }
+
+    // === Helpers ===
 
     /// Get ID suffix for element IDs.
     fn id_suffix(&self) -> String {
@@ -439,741 +449,6 @@ impl TerminalPane {
             }
         }
         false
-    }
-
-    // === Zoom ===
-
-    /// Check if this pane is currently zoomed (fullscreen).
-    fn is_zoomed(&self, cx: &Context<Self>) -> bool {
-        let ws = self.workspace.read(cx);
-        if let Some(ref fs) = ws.fullscreen_terminal {
-            fs.project_id == self.project_id
-                && Some(&fs.terminal_id) == self.terminal_id.as_ref()
-        } else {
-            false
-        }
-    }
-
-    /// Get all terminal IDs in the current project (for zoom navigation).
-    fn get_project_terminals(&self, cx: &Context<Self>) -> Vec<String> {
-        let ws = self.workspace.read(cx);
-        ws.project(&self.project_id)
-            .and_then(|p| p.layout.as_ref())
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default()
-    }
-
-    /// Switch to the next terminal while zoomed.
-    fn handle_zoom_next_terminal(&mut self, cx: &mut Context<Self>) {
-        if !self.is_zoomed(cx) {
-            return;
-        }
-        let terminals = self.get_project_terminals(cx);
-        if terminals.len() <= 1 {
-            return;
-        }
-        if let Some(ref current_id) = self.terminal_id {
-            if let Some(idx) = terminals.iter().position(|id| id == current_id) {
-                let next_idx = (idx + 1) % terminals.len();
-                let next_id = terminals[next_idx].clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_fullscreen_terminal(self.project_id.clone(), next_id, cx);
-                });
-            }
-        }
-    }
-
-    /// Switch to the previous terminal while zoomed.
-    fn handle_zoom_prev_terminal(&mut self, cx: &mut Context<Self>) {
-        if !self.is_zoomed(cx) {
-            return;
-        }
-        let terminals = self.get_project_terminals(cx);
-        if terminals.len() <= 1 {
-            return;
-        }
-        if let Some(ref current_id) = self.terminal_id {
-            if let Some(idx) = terminals.iter().position(|id| id == current_id) {
-                let prev_idx = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
-                let prev_id = terminals[prev_idx].clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_fullscreen_terminal(self.project_id.clone(), prev_id, cx);
-                });
-            }
-        }
-    }
-
-    /// Render the zoom header bar (shown when this pane is zoomed).
-    fn render_zoom_header(&self, cx: &Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let workspace = self.workspace.clone();
-
-        // Get terminal info
-        let ws = self.workspace.read(cx);
-        let project_name = ws
-            .project(&self.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Unknown".to_string());
-
-        let terminal_name = if let Some(ref tid) = self.terminal_id {
-            ws.project(&self.project_id)
-                .and_then(|p| p.terminal_names.get(tid).cloned())
-                .unwrap_or_else(|| format!("Terminal {}", tid.chars().take(8).collect::<String>()))
-        } else {
-            "Terminal".to_string()
-        };
-
-        let all_terminals = ws
-            .project(&self.project_id)
-            .and_then(|p| p.layout.as_ref())
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default();
-        let terminal_count = all_terminals.len();
-        let current_index = self
-            .terminal_id
-            .as_ref()
-            .and_then(|tid| all_terminals.iter().position(|id| id == tid))
-            .unwrap_or(0);
-        let has_multiple = terminal_count > 1;
-
-        div()
-            .h(px(40.0))
-            .px(px(16.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .bg(rgb(t.bg_header))
-            .border_b_1()
-            .border_color(rgb(t.border))
-            .child(
-                // Left side: Terminal info
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .child(
-                        div()
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .text_size(px(11.0))
-                            .text_color(rgb(t.text_muted))
-                            .child(project_name),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.text_primary))
-                            .child(terminal_name),
-                    )
-                    .when(has_multiple, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(t.text_muted))
-                                .child(format!("{}/{}", current_index + 1, terminal_count)),
-                        )
-                    }),
-            )
-            .child(
-                // Right side: Controls
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .when(has_multiple, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .id("zoom-prev-btn")
-                                        .cursor_pointer()
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("◀ Prev")
-                                        .on_click({
-                                            let workspace = workspace.clone();
-                                            let project_id = self.project_id.clone();
-                                            let terminal_id = self.terminal_id.clone();
-                                            move |_, _window, cx| {
-                                                let terminals = {
-                                                    let ws = workspace.read(cx);
-                                                    ws.project(&project_id)
-                                                        .and_then(|p| p.layout.as_ref())
-                                                        .map(|l| l.collect_terminal_ids())
-                                                        .unwrap_or_default()
-                                                };
-                                                if let Some(ref tid) = terminal_id {
-                                                    if let Some(idx) = terminals.iter().position(|id| id == tid) {
-                                                        let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
-                                                        workspace.update(cx, |ws, cx| {
-                                                            ws.set_fullscreen_terminal(project_id.clone(), terminals[prev].clone(), cx);
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id("zoom-next-btn")
-                                        .cursor_pointer()
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Next ▶")
-                                        .on_click({
-                                            let workspace = workspace.clone();
-                                            let project_id = self.project_id.clone();
-                                            let terminal_id = self.terminal_id.clone();
-                                            move |_, _window, cx| {
-                                                let terminals = {
-                                                    let ws = workspace.read(cx);
-                                                    ws.project(&project_id)
-                                                        .and_then(|p| p.layout.as_ref())
-                                                        .map(|l| l.collect_terminal_ids())
-                                                        .unwrap_or_default()
-                                                };
-                                                if let Some(ref tid) = terminal_id {
-                                                    if let Some(idx) = terminals.iter().position(|id| id == tid) {
-                                                        let next = (idx + 1) % terminals.len();
-                                                        workspace.update(cx, |ws, cx| {
-                                                            ws.set_fullscreen_terminal(project_id.clone(), terminals[next].clone(), cx);
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border)),
-                    )
-                    .child(
-                        div()
-                            .id("zoom-close-btn")
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .child("✕ Exit Zoom")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click({
-                                let workspace = workspace.clone();
-                                move |_, _window, cx| {
-                                    cx.stop_propagation();
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.exit_fullscreen(cx);
-                                    });
-                                }
-                            }),
-                    ),
-            )
-    }
-
-    // === Actions ===
-
-    fn handle_split(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.split_terminal(&self.project_id, &self.layout_path, direction, cx);
-        });
-    }
-
-    fn handle_add_tab(&mut self, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.add_tab(&self.project_id, &self.layout_path, cx);
-        });
-    }
-
-    fn handle_close(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref id) = self.terminal_id {
-            self.pty_manager.kill(id);
-        }
-
-        let layout_path = self.layout_path.clone();
-        let project_id = self.project_id.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.close_terminal_and_focus_sibling(&project_id, &layout_path, cx);
-        });
-    }
-
-    fn handle_minimize(&mut self, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.toggle_terminal_minimized(&self.project_id, &self.layout_path, cx);
-        });
-    }
-
-    fn handle_fullscreen(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref id) = self.terminal_id {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_fullscreen_terminal(self.project_id.clone(), id.clone(), cx);
-            });
-        }
-    }
-
-    fn handle_detach(&mut self, cx: &mut Context<Self>) {
-        if self.terminal_id.is_some() {
-            self.workspace.update(cx, |ws, cx| {
-                ws.detach_terminal(&self.project_id, &self.layout_path, cx);
-            });
-        }
-    }
-
-    fn handle_export_buffer(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal_id) = self.terminal_id {
-            if let Some(path) = self.pty_manager.capture_buffer(terminal_id) {
-                cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-            }
-        }
-    }
-
-    fn handle_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
-        if let Some(ref terminal_id) = self.terminal_id {
-            let project_id = self.project_id.clone();
-            let terminal_id = terminal_id.clone();
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
-            });
-        }
-    }
-
-    fn handle_copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            if let Some(text) = terminal.get_selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
-        }
-    }
-
-    fn handle_paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            if let Some(clipboard_item) = cx.read_from_clipboard() {
-                if let Some(text) = clipboard_item.text() {
-                    terminal.send_input(&text);
-                }
-            }
-        }
-    }
-
-    fn handle_clear(&mut self, _cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            terminal.clear();
-        }
-    }
-
-    fn handle_select_all(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            terminal.select_all();
-            cx.notify();
-        }
-    }
-
-    fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
-        let Some(ref terminal) = self.terminal else {
-            return;
-        };
-
-        for path in paths.paths() {
-            let escaped_path = Self::shell_escape_path(path);
-            terminal.send_input(&format!("{} ", escaped_path));
-        }
-    }
-
-    fn shell_escape_path(path: &std::path::Path) -> String {
-        let path_str = path.to_string_lossy();
-        let mut escaped = String::with_capacity(path_str.len() * 2);
-
-        for c in path_str.chars() {
-            match c {
-                ' ' | '(' | ')' | '[' | ']' | '{' | '}' | '\'' | '"' | '`' | '$' | '&' | '|'
-                | ';' | '<' | '>' | '*' | '?' | '!' | '#' | '~' | '\\' => {
-                    escaped.push('\\');
-                    escaped.push(c);
-                }
-                _ => escaped.push(c),
-            }
-        }
-
-        escaped
-    }
-
-    // === Navigation ===
-
-    fn handle_navigation(
-        &mut self,
-        direction: NavigationDirection,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane_map = get_pane_map();
-
-        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
-            Some(pane) => pane.clone(),
-            None => return,
-        };
-
-        if let Some(target) = pane_map.find_nearest_in_direction(&source, direction) {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
-            });
-        }
-    }
-
-    fn handle_sequential_navigation(
-        &mut self,
-        next: bool,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let pane_map = get_pane_map();
-
-        let source = match pane_map.find_pane(&self.project_id, &self.layout_path) {
-            Some(pane) => pane.clone(),
-            None => return,
-        };
-
-        let target = if next {
-            pane_map.find_next_pane(&source)
-        } else {
-            pane_map.find_prev_pane(&source)
-        };
-
-        if let Some(target) = target {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
-            });
-        }
-    }
-
-    // === Search ===
-
-    fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_bar.update(cx, |search_bar, cx| {
-            search_bar.open(window, cx);
-        });
-        cx.notify();
-    }
-
-    fn close_search(&mut self, cx: &mut Context<Self>) {
-        self.search_bar.update(cx, |search_bar, cx| {
-            search_bar.close(cx);
-        });
-        cx.notify();
-    }
-
-    fn next_match(&mut self, cx: &mut Context<Self>) {
-        self.search_bar.update(cx, |search_bar, cx| {
-            search_bar.next_match(cx);
-        });
-    }
-
-    fn prev_match(&mut self, cx: &mut Context<Self>) {
-        self.search_bar.update(cx, |search_bar, cx| {
-            search_bar.prev_match(cx);
-        });
-    }
-
-    // === Key handling ===
-
-    fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            let app_cursor_mode = terminal.is_app_cursor_mode();
-            if let Some(input) = key_to_bytes(event, app_cursor_mode) {
-                terminal.send_bytes(&input);
-            }
-        }
-    }
-}
-
-impl Render for TerminalPane {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-
-        // Create terminal if needed
-        if self.terminal.is_none() && self.terminal_id.is_none() {
-            self.create_new_terminal(cx);
-        }
-
-        let focus_handle = self.focus_handle.clone();
-        let id_suffix = self.id_suffix();
-
-        // Check focus state
-        let is_modal = {
-            let ws = self.workspace.read(cx);
-            let is_modal = ws.focus_manager.is_modal();
-            let header_renaming = self.header.read(cx).is_renaming();
-            let search_active = self.search_bar.read(cx).is_active();
-
-            if !header_renaming && !search_active && !is_modal {
-                if let Some(focused) = ws.focus_manager.focused_terminal_state() {
-                    if focused.project_id == self.project_id
-                        && focused.layout_path == self.layout_path
-                        && !focus_handle.is_focused(window)
-                    {
-                        self.pending_focus = true;
-                    }
-                }
-
-                // Fullscreen focus: if this terminal is in fullscreen and doesn't have focus, restore it
-                if let Some(ref fs) = ws.fullscreen_terminal {
-                    if fs.project_id == self.project_id
-                        && Some(&fs.terminal_id) == self.terminal_id.as_ref()
-                        && !focus_handle.is_focused(window)
-                    {
-                        self.pending_focus = true;
-                    }
-                }
-            }
-            is_modal
-        };
-
-        // Handle pending focus
-        let header_renaming = self.header.read(cx).is_renaming();
-        let search_active = self.search_bar.read(cx).is_active();
-        if self.pending_focus
-            && self.terminal.is_some()
-            && !header_renaming
-            && !search_active
-            && !is_modal
-        {
-            self.pending_focus = false;
-            window.focus(&self.focus_handle, cx);
-        }
-
-        let is_focused = focus_handle.is_focused(window);
-
-        // Update content focus state
-        self.content.update(cx, |content, _| {
-            content.set_focused(is_focused);
-        });
-
-        // Bell handling
-        let has_bell = self.terminal.as_ref().map_or(false, |t| t.has_bell());
-        if is_focused && has_bell {
-            if let Some(ref terminal) = self.terminal {
-                terminal.clear_bell();
-            }
-        }
-
-        let show_focused_border = settings(cx).show_focused_border;
-        let show_border = (is_focused && show_focused_border) || has_bell;
-        let border_color = if is_focused && show_focused_border {
-            rgb(t.border_focused)
-        } else {
-            rgb(t.border_bell)
-        };
-
-        let in_tab_group = self.is_in_tab_group(cx);
-        let is_zoomed = self.is_zoomed(cx);
-        let zoom_header = if is_zoomed {
-            Some(self.render_zoom_header(cx))
-        } else {
-            None
-        };
-
-        div()
-            .id(format!("terminal-pane-main-{}", id_suffix))
-            .track_focus(&focus_handle)
-            .key_context("TerminalPane")
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    this.header.update(cx, |header, cx| {
-                        header.close_shell_dropdown(cx);
-                    });
-                    window.focus(&this.focus_handle, cx);
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_terminal(
-                            this.project_id.clone(),
-                            this.layout_path.clone(),
-                            cx,
-                        );
-                    });
-                }),
-            )
-            // Actions
-            .on_action(cx.listener(|this, _: &SplitVertical, _window, cx| {
-                this.handle_split(SplitDirection::Vertical, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SplitHorizontal, _window, cx| {
-                this.handle_split(SplitDirection::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &AddTab, _window, cx| {
-                this.handle_add_tab(cx);
-            }))
-            .on_action(cx.listener(|this, _: &CloseTerminal, _window, cx| {
-                this.handle_close(cx);
-            }))
-            .on_action(cx.listener(|this, _: &MinimizeTerminal, _window, cx| {
-                this.handle_minimize(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Copy, _window, cx| {
-                this.handle_copy(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Paste, _window, cx| {
-                this.handle_paste(cx);
-            }))
-            .on_action(cx.listener(|this, _: &Search, window, cx| {
-                if !this.search_bar.read(cx).is_active() {
-                    this.start_search(window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| {
-                if this.search_bar.read(cx).is_active() {
-                    this.close_search(cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SearchNext, _window, cx| {
-                this.next_match(cx);
-            }))
-            .on_action(cx.listener(|this, _: &SearchPrev, _window, cx| {
-                this.prev_match(cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| {
-                this.handle_navigation(NavigationDirection::Left, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusRight, window, cx| {
-                this.handle_navigation(NavigationDirection::Right, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusUp, window, cx| {
-                this.handle_navigation(NavigationDirection::Up, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusDown, window, cx| {
-                this.handle_navigation(NavigationDirection::Down, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
-                this.handle_sequential_navigation(true, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPrevTerminal, window, cx| {
-                this.handle_sequential_navigation(false, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
-                if let Some(ref terminal) = this.terminal {
-                    terminal.send_bytes(b"\t");
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SendBacktab, _window, _cx| {
-                if let Some(ref terminal) = this.terminal {
-                    terminal.send_bytes(b"\x1b[Z");
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ZoomIn, _window, cx| {
-                let current = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
-                let new_zoom = (current + 0.1).clamp(0.5, 3.0);
-                let project_id = this.project_id.clone();
-                let layout_path = this.layout_path.clone();
-                this.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ZoomOut, _window, cx| {
-                let current = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
-                let new_zoom = (current - 0.1).clamp(0.5, 3.0);
-                let project_id = this.project_id.clone();
-                let layout_path = this.layout_path.clone();
-                this.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ResetZoom, _window, cx| {
-                let project_id = this.project_id.clone();
-                let layout_path = this.layout_path.clone();
-                this.workspace.update(cx, |ws, cx| {
-                    ws.set_terminal_zoom(&project_id, &layout_path, 1.0, cx);
-                });
-            }))
-            .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
-                let is_fullscreen = this.workspace.read(cx).fullscreen_terminal.is_some();
-                if is_fullscreen {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.exit_fullscreen(cx);
-                    });
-                } else {
-                    this.handle_fullscreen(cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &FullscreenNextTerminal, _window, cx| {
-                this.handle_zoom_next_terminal(cx);
-            }))
-            .on_action(cx.listener(|this, _: &FullscreenPrevTerminal, _window, cx| {
-                this.handle_zoom_prev_terminal(cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.handle_key(event, cx);
-            }))
-            .on_click(cx.listener(|this, _, window, cx| {
-                window.focus(&this.focus_handle, cx);
-                this.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_terminal(this.project_id.clone(), this.layout_path.clone(), cx);
-                });
-            }))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
-                this.handle_file_drop(paths, cx);
-            }))
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .bg(rgb(t.bg_primary))
-            .group("terminal-pane")
-            .relative()
-            // Zoom header (shown when zoomed)
-            .children(zoom_header)
-            // Regular header (hidden in tab groups and when zoomed)
-            .when(!in_tab_group && !self.minimized && !is_zoomed, |el| {
-                el.child(self.header.clone())
-            })
-            // Content (hidden when minimized or detached)
-            .when(!self.minimized && !self.detached, |el| {
-                el.child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .relative()
-                        .child(self.content.clone())
-                        // Focus/bell border overlay
-                        .when(show_border, |el| {
-                            el.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .border_1()
-                                    .border_color(border_color),
-                            )
-                        }),
-                )
-            })
-            // Search bar (when active)
-            .when(search_active, |el: Stateful<Div>| {
-                el.child(self.search_bar.clone())
-            })
     }
 }
 

@@ -2,9 +2,9 @@
 
 Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 
-## Quick Reference
+Detailed module documentation lives in `src/*/CLAUDE.md` files.
 
-### Build Commands
+## Build Commands
 
 **Linux:**
 ```bash
@@ -18,97 +18,87 @@ cargo build
 cargo run
 ```
 
-### Project Structure
+## Project Structure
 
 ```
 src/
 ├── main.rs               # Entry point, GPUI setup, window creation
-├── app.rs                # Okena - main app state, PTY event routing
-├── settings.rs           # Global settings (theme, font, shell, session backend)
-├── theme.rs              # ThemeMode, FolderColor, color utilities
+├── settings.rs           # Global settings entity (SettingsState, auto-save)
 ├── assets.rs             # Embedded fonts and icons
-├── simple_root.rs        # Linux Wayland maximize fix
+├── process.rs            # Cross-platform subprocess spawning
+├── macros.rs             # Shared macros (impl_focusable!)
+├── simple_root.rs        # Linux Wayland maximize workaround
+├── app/                  # Main app entity, PTY event routing
 ├── terminal/             # Terminal emulation & PTY management
-├── views/                # UI components
 ├── workspace/            # State management & persistence
-├── keybindings/          # Keyboard actions & config
+├── views/                # UI views (root, layout, panels, overlays, components)
 ├── elements/             # Custom GPUI rendering (terminal grid)
-├── git/                  # Git worktree integration
-└── ui/                   # Shared UI utilities
+├── keybindings/          # Keyboard actions & config
+├── git/                  # Git status, diff, worktree
+├── theme/                # Theming system (built-in + custom)
+├── ui/                   # Shared UI utilities
+├── remote/               # Remote control server (HTTP/WS API)
+└── updater/              # Self-update system
 ```
 
 ## Architecture
 
-### Core Modules
-
-| Module | Key File | Purpose |
-|--------|----------|---------|
-| App | `app.rs` | Okena entity - owns RootView, Workspace, routes PTY events |
-| Terminal | `terminal/terminal.rs` | Wraps alacritty_terminal, ANSI processing, selection, search |
-| PTY | `terminal/pty_manager.rs` | PTY lifecycle, async I/O via smol + async_channel |
-| Shell | `terminal/shell_config.rs` | Shell detection (bash/zsh/fish/cmd/PowerShell/WSL) |
-| Session | `terminal/session_backend.rs` | tmux/screen persistence (Unix only) |
-| Workspace | `workspace/state.rs` | Projects, layouts (LayoutNode tree), focus management |
-| Persistence | `workspace/persistence.rs` | Load/save workspace.json, settings.json |
-| Settings | `settings.rs` | Font, theme, shell prefs with debounced save |
-| Keybindings | `keybindings/config.rs` | Custom keybindings from keybindings.json |
-
 ### View Hierarchy
 
 ```
-RootView (views/root.rs)
-├── TitleBar (chrome/title_bar.rs)
-├── Sidebar (panels/sidebar.rs) - project list
-├── ProjectColumns (panels/project_column.rs)
-│   └── LayoutContainer (layout/layout_container.rs)
-│       ├── TerminalPane (layout/terminal_pane/)
-│       ├── SplitPane (layout/split_pane.rs)
-│       └── Tabs
-├── StatusBar (panels/status_bar.rs)
-└── Overlays (overlays/)
-    ├── FullscreenTerminal
-    ├── CommandPalette
-    ├── SettingsPanel
-    ├── SessionManager
-    ├── KeybindingsHelp
-    └── ...
+RootView (views/root/)
+├── TitleBar (views/chrome/)
+├── Sidebar (views/panels/sidebar/)
+├── ProjectColumn (views/panels/project_column.rs)
+│   └── LayoutContainer → TerminalPane / SplitPane / Tabs
+├── StatusBar (views/panels/status_bar.rs)
+└── Overlays (views/overlays/) — managed by OverlayManager
 ```
+
+See `src/views/CLAUDE.md` for full hierarchy and file inventory.
 
 ### Layout System
 
 Terminals are organized in a recursive tree structure (`LayoutNode`):
-- **Terminal** - single terminal pane
-- **Split** - horizontal/vertical split with children
-- **Tabs** - tabbed container with multiple children
+- **Terminal** — single terminal pane
+- **Split** — horizontal/vertical split with children and ratios
+- **Tabs** — tabbed container with multiple children
 
 Path-based navigation: `Vec<usize>` indexes into the tree.
 
-### State Management
+### GPUI Entities
 
-**GPUI Entities** (observable state with auto-notify):
-- `Workspace` - projects, layouts, focus state, fullscreen
-- `SettingsState` - user preferences
-- `AppTheme` - current theme mode
-- `RootView` - overlay states, sidebar animation
+Observable state with auto-notify:
+- `Workspace` — projects, layouts, focus (via FocusManager)
+- `RequestBroker` — decoupled transient UI request routing (overlay/sidebar requests)
+- `SettingsState` — user preferences with debounced auto-save
+- `AppTheme` — current theme mode and colors
+- `RootView` — main view, owns SidebarController + OverlayManager
+- `OverlayManager` — centralized modal overlay lifecycle
+- `Sidebar` — sidebar project list with drag-and-drop
 
-**Event Flow:**
-1. PTY events: `PtyManager` → async_channel → `Okena` → `Terminal`
-2. State mutations: trigger notify → observers update UI
-3. Workspace changes: debounced 500ms save to disk
+### Event Flow
+
+1. **PTY events**: `PtyManager` → `async_channel` → `Okena` → `Terminal` (+ `PtyBroadcaster` for remote clients)
+2. **UI requests**: `RequestBroker` → `cx.notify()` → observers in RootView/Sidebar
+3. **State mutations**: `Workspace` notify → observers update UI
+4. **Persistence**: debounced 500ms save to disk
 
 ### Configuration Files
 
 Located in `~/.config/okena/`:
-- `workspace.json` - projects, layouts, terminal state
-- `settings.json` - font, theme, shell, session backend
-- `keybindings.json` - custom keyboard shortcuts
+- `workspace.json` — projects, layouts, terminal state
+- `settings.json` — font, theme, shell, session backend
+- `keybindings.json` — custom keyboard shortcuts
+- `themes/*.json` — custom theme files
+- `remote.json` — remote server discovery (auto-generated)
 
 ## Platform Support
 
 ### Linux
 - Standard shells: bash, zsh, fish, sh (auto-detected)
 - Session backends: tmux, screen (optional)
-- `simple_root.rs` - Wayland maximize workaround
+- `simple_root.rs` — Wayland maximize workaround
 
 ### Windows
 - Shells: cmd, PowerShell (classic/core), WSL with distro detection
@@ -153,8 +143,11 @@ cargo build
 
 ## Key Dependencies
 
-- **gpui** - UI framework (from Zed)
-- **alacritty_terminal** - Terminal emulation
-- **portable-pty** - Cross-platform PTY
-- **smol** - Async runtime
-- **serde/serde_json** - Serialization
+- **gpui** + **gpui-component** — UI framework (from Zed)
+- **alacritty_terminal** — Terminal emulation
+- **portable-pty** — Cross-platform PTY
+- **smol** + **async-channel** — Async runtime for PTY threads
+- **tokio** + **axum** — Remote control server
+- **serde** / **serde_json** — Serialization
+- **syntect** — Syntax highlighting
+- **reqwest** + **semver** — Update checker
