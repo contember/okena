@@ -13,6 +13,7 @@ use crate::views::sidebar_controller::SidebarController;
 use crate::views::panels::sidebar::Sidebar;
 use crate::views::layout::split_pane::{new_active_drag, ActiveDrag};
 use crate::views::panels::status_bar::StatusBar;
+use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::workspace::persistence::{load_settings, AppSettings};
 use crate::workspace::request_broker::RequestBroker;
@@ -44,6 +45,8 @@ pub struct RootView {
     status_bar: Entity<StatusBar>,
     /// Centralized overlay manager
     overlay_manager: Entity<OverlayManager>,
+    /// Toast notification overlay
+    toast_overlay: Entity<ToastOverlay>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
     /// Focus handle for capturing global keybindings
@@ -80,6 +83,9 @@ impl RootView {
         // Create overlay manager
         let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));
 
+        // Create toast overlay
+        let toast_overlay = cx.new(ToastOverlay::new);
+
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
@@ -108,6 +114,7 @@ impl RootView {
             title_bar,
             status_bar,
             overlay_manager,
+            toast_overlay,
             active_drag: new_active_drag(),
             focus_handle,
             remote_manager: None,
@@ -128,7 +135,8 @@ impl RootView {
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
         // Observe remote manager for re-renders
-        cx.observe(&manager, |_this, _rm, cx| {
+        cx.observe(&manager, |this, _rm, cx| {
+            this.remote_project_columns.clear();
             cx.notify();
         }).detach();
 

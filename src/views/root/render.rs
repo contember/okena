@@ -137,31 +137,31 @@ impl RootView {
                     if let Some(api_project) =
                         state.projects.iter().find(|p| p.id == proj_id)
                     {
-                        if let Some(ref api_layout) = api_project.layout {
-                            let layout = api_layout.to_layout_node();
-                            let workspace = self.workspace.clone();
-                            let request_broker = self.request_broker.clone();
-                            let terminals = self.terminals.clone();
-                            let active_drag = self.active_drag.clone();
-                            let pid = proj_id.to_string();
-                            let pname = api_project.name.clone();
-                            let ppath = api_project.path.clone();
-                            let col = cx.new(move |cx| {
-                                ProjectColumn::new_remote(
-                                    workspace,
-                                    request_broker,
-                                    pid,
-                                    pname,
-                                    ppath,
-                                    backend,
-                                    terminals,
-                                    active_drag,
-                                    layout,
-                                    cx,
-                                )
-                            });
-                            self.remote_project_columns.insert(key.clone(), col);
-                        }
+                        let layout = api_project.layout.as_ref().map(|l| {
+                            l.to_layout_node_prefixed(&format!("remote:{}", conn_id))
+                        });
+                        let workspace = self.workspace.clone();
+                        let request_broker = self.request_broker.clone();
+                        let terminals = self.terminals.clone();
+                        let active_drag = self.active_drag.clone();
+                        let pid = proj_id.to_string();
+                        let pname = api_project.name.clone();
+                        let ppath = api_project.path.clone();
+                        let col = cx.new(move |cx| {
+                            ProjectColumn::new_remote(
+                                workspace,
+                                request_broker,
+                                pid,
+                                pname,
+                                ppath,
+                                backend,
+                                terminals,
+                                active_drag,
+                                layout,
+                                cx,
+                            )
+                        });
+                        self.remote_project_columns.insert(key.clone(), col);
                     }
                 }
             }
@@ -643,5 +643,7 @@ impl Render for RootView {
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {
                 d.child(modal)
             })
+            // Toast notifications (bottom-right, on top of everything)
+            .child(self.toast_overlay.clone())
     }
 }

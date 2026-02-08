@@ -3,54 +3,12 @@ use gpui::*;
 use gpui_component::h_flex;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
 
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How long a status message stays visible
-const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
-
-/// A transient status message displayed in the status bar
-pub struct StatusMessage {
-    pub text: String,
-    pub created: Instant,
-}
-
-/// Global queue for status messages (e.g. save errors)
-#[derive(Clone)]
-pub struct StatusMessages(pub Arc<Mutex<Option<StatusMessage>>>);
-
-impl Global for StatusMessages {}
-
-impl StatusMessages {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(None)))
-    }
-
-    /// Post a status message visible in the status bar for STATUS_MESSAGE_TTL
-    pub fn post(text: String, cx: &App) {
-        if let Some(sm) = cx.try_global::<StatusMessages>() {
-            *sm.0.lock() = Some(StatusMessage {
-                text,
-                created: Instant::now(),
-            });
-        }
-    }
-
-    /// Get the current active message (if not expired)
-    fn current(&self) -> Option<String> {
-        let guard = self.0.lock();
-        if let Some(ref msg) = *guard {
-            if msg.created.elapsed() < STATUS_MESSAGE_TTL {
-                return Some(msg.text.clone());
-            }
-        }
-        None
-    }
-}
 
 /// Cached system stats
 #[derive(Clone, Default)]
@@ -194,22 +152,9 @@ impl Render for StatusBar {
             .border_t_1()
             .border_color(rgb(t.border))
             .text_size(px(11.0))
-            // Left side - status message + system stats
+            // Left side - system stats
             .child({
-                let mut left = h_flex().gap(px(16.0));
-
-                // Show status message if active
-                if let Some(sm) = cx.try_global::<StatusMessages>() {
-                    if let Some(msg) = sm.current() {
-                        left = left.child(
-                            div()
-                                .text_color(rgb(t.term_red))
-                                .child(msg)
-                        );
-                    }
-                }
-
-                left
+                h_flex().gap(px(16.0))
                     // CPU
                     .child(
                         h_flex()

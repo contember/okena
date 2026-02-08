@@ -36,7 +36,7 @@ use crate::keybindings::{About, Quit};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::workspace::persistence;
 use crate::workspace::state::GlobalWorkspace;
 
@@ -217,8 +217,8 @@ fn main() {
         // Register keybindings
         keybindings::register_keybindings(cx);
 
-        // Initialize status messages for error notifications
-        cx.set_global(StatusMessages::new());
+        // Initialize toast notification system
+        cx.set_global(ToastManager::new());
 
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);

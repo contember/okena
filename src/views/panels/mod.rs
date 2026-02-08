@@ -8,3 +8,4 @@
 pub mod project_column;
 pub mod sidebar;
 pub mod status_bar;
+pub mod toast;

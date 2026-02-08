@@ -9,7 +9,7 @@ use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::GlobalSettings;
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::updater::{GlobalUpdateInfo, UpdateInfo};
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
@@ -96,7 +96,7 @@ impl Okena {
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
                         let _ = cx.update(|cx| {
-                            StatusMessages::post(format!("Failed to save workspace: {}", e), cx);
+                            ToastManager::error(format!("Failed to save workspace: {}", e), cx);
                         });
                     }
                     last_saved.store(version, Ordering::Relaxed);

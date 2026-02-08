@@ -5,7 +5,7 @@
 
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,7 +171,7 @@ impl SettingsState {
                 if let Err(e) = save_settings(&settings) {
                     log::error!("Failed to save settings: {}", e);
                     let _ = cx.update(|cx| {
-                        StatusMessages::post(format!("Failed to save settings: {}", e), cx);
+                        ToastManager::error(format!("Failed to save settings: {}", e), cx);
                     });
                 }
             }
