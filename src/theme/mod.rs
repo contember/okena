@@ -8,7 +8,7 @@ mod types;
 
 // Re-export public API
 pub use colors::{
-    ThemeColors, DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
+    ThemeColors, DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME, ansi_to_hsla,
 };
 #[allow(unused_imports)]
 pub use custom::{

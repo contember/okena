@@ -108,12 +108,7 @@ pub enum LayoutNode {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SplitDirection {
-    Horizontal,
-    Vertical,
-}
+pub use okena_core::types::SplitDirection;
 
 /// State for focused terminal (for visual indicator)
 #[derive(Clone, Debug, PartialEq)]

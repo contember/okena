@@ -1,6 +1,6 @@
 use alacritty_terminal::grid::Dimensions;
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFullscreen, ApiLayoutNode, ApiProject, StateResponse};
+use crate::remote::types::{ApiFullscreen, ApiProject, StateResponse};
 use gpui::*;
 use std::sync::atomic::Ordering;
 
@@ -36,7 +36,7 @@ impl Okena {
                                     name: p.name.clone(),
                                     path: p.path.clone(),
                                     is_visible: p.is_visible,
-                                    layout: p.layout.as_ref().map(ApiLayoutNode::from_layout),
+                                    layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
                                 }
                             }).collect();

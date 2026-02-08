@@ -7,6 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+okena-core = { path = "../../crates/okena-core" }
 flutter_rust_bridge = "=2.11.1"
 alacritty_terminal = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }

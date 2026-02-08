@@ -1,6 +1,6 @@
 use crate::settings::settings;
 use crate::terminal::terminal::Terminal;
-use crate::theme::theme;
+use crate::theme::{theme, ansi_to_hsla};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::grid::Dimensions;
@@ -386,7 +386,7 @@ impl Element for TerminalElement {
                     let bg_color = if is_selected {
                         Some(rgb(t.selection_bg).into())
                     } else if !is_default_bg(&bg, &t) {
-                        Some(t.ansi_to_hsla(&bg))
+                        Some(ansi_to_hsla(&t,&bg))
                     } else {
                         None
                     };
@@ -418,7 +418,7 @@ impl Element for TerminalElement {
                     let fg_color = if is_selected {
                         rgb(t.selection_fg).into()
                     } else {
-                        t.ansi_to_hsla(&fg)
+                        ansi_to_hsla(&t,&fg)
                     };
 
                     // Use pre-computed font variants to avoid repeated cloning

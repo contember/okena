@@ -1,6 +1,7 @@
 use crate::workspace::state::SplitDirection;
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+
+pub use okena_core::keys::SpecialKey;
 
 /// Commands sent from the axum server to the GPUI main thread.
 /// Each command carries a oneshot sender for the reply.
@@ -55,47 +56,6 @@ pub enum RemoteCommand {
         cols: u16,
         rows: u16,
     },
-}
-
-/// Named special keys the remote API supports.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SpecialKey {
-    Enter,
-    Escape,
-    CtrlC,
-    CtrlD,
-    CtrlZ,
-    Tab,
-    ArrowUp,
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    Home,
-    End,
-    PageUp,
-    PageDown,
-}
-
-impl SpecialKey {
-    /// Convert to the byte sequence sent to the PTY.
-    pub fn to_bytes(&self) -> &[u8] {
-        match self {
-            SpecialKey::Enter => b"\r",
-            SpecialKey::Escape => b"\x1b",
-            SpecialKey::CtrlC => b"\x03",
-            SpecialKey::CtrlD => b"\x04",
-            SpecialKey::CtrlZ => b"\x1a",
-            SpecialKey::Tab => b"\t",
-            SpecialKey::ArrowUp => b"\x1b[A",
-            SpecialKey::ArrowDown => b"\x1b[B",
-            SpecialKey::ArrowRight => b"\x1b[C",
-            SpecialKey::ArrowLeft => b"\x1b[D",
-            SpecialKey::Home => b"\x1b[H",
-            SpecialKey::End => b"\x1b[F",
-            SpecialKey::PageUp => b"\x1b[5~",
-            SpecialKey::PageDown => b"\x1b[6~",
-        }
-    }
 }
 
 /// Result of processing a RemoteCommand.

@@ -138,7 +138,7 @@ impl RootView {
                         state.projects.iter().find(|p| p.id == proj_id)
                     {
                         let layout = api_project.layout.as_ref().map(|l| {
-                            l.to_layout_node_prefixed(&format!("remote:{}", conn_id))
+                            crate::workspace::state::LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
                         });
                         let workspace = self.workspace.clone();
                         let request_broker = self.request_broker.clone();

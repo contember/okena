@@ -4246,6 +4246,7 @@ dependencies = [
  "hmac",
  "libc",
  "log",
+ "okena-core",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
@@ -4273,6 +4274,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "okena_mobile_native"
 version = "0.1.0"
 dependencies = [
@@ -4280,6 +4290,7 @@ dependencies = [
  "anyhow",
  "flutter_rust_bridge",
  "log",
+ "okena-core",
  "parking_lot",
  "reqwest",
  "serde",

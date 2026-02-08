@@ -6,8 +6,8 @@ use axum::extract::State;
 pub async fn get_health(State(state): State<AppState>) -> Json<HealthResponse> {
     let uptime = state.start_time.elapsed().as_secs();
     Json(HealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        status: "ok".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
         uptime_secs: uptime,
     })
 }

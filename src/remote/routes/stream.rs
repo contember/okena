@@ -1,6 +1,6 @@
 use crate::remote::bridge::{BridgeMessage, RemoteCommand};
 use crate::remote::routes::AppState;
-use crate::remote::types::{WsInbound, WsOutbound};
+use crate::remote::types::{WsInbound, WsOutbound, build_pty_frame};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -154,12 +154,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     Ok(event) => {
                         if subscribed_ids.contains(&event.terminal_id) {
                             if let Some(&stream_id) = stream_id_map.get(&event.terminal_id) {
-                                // Binary frame: [proto_version=1] [frame_type=1 (pty)] [u32 stream_id] [data...]
-                                let mut frame = Vec::with_capacity(6 + event.data.len());
-                                frame.push(1u8); // proto_version
-                                frame.push(1u8); // frame_type: pty
-                                frame.extend_from_slice(&stream_id.to_be_bytes());
-                                frame.extend_from_slice(&event.data);
+                                let frame = build_pty_frame(stream_id, &event.data);
                                 if socket.send(Message::Binary(frame.into())).await.is_err() {
                                     break;
                                 }
