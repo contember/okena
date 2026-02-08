@@ -129,6 +129,14 @@ pub fn execute_action(
             }
             None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
         },
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path,
+            sizes,
+        } => {
+            ws.update_split_sizes(&project_id, &path, sizes, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {

@@ -48,7 +48,8 @@ export type ActionRequest =
   | { action: "focus_terminal"; project_id: string; terminal_id: string }
   | { action: "read_content"; terminal_id: string }
   | { action: "resize"; terminal_id: string; cols: number; rows: number }
-  | { action: "create_terminal"; project_id: string };
+  | { action: "create_terminal"; project_id: string }
+  | { action: "update_split_sizes"; project_id: string; path: number[]; sizes: number[] };
 
 export interface PairRequest {
   code: string;

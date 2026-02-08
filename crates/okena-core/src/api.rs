@@ -96,6 +96,11 @@ pub enum ActionRequest {
     CreateTerminal {
         project_id: String,
     },
+    UpdateSplitSizes {
+        project_id: String,
+        path: Vec<usize>,
+        sizes: Vec<f32>,
+    },
 }
 
 /// POST /v1/pair request
@@ -227,6 +232,11 @@ mod tests {
             },
             ActionRequest::CreateTerminal {
                 project_id: "p1".into(),
+            },
+            ActionRequest::UpdateSplitSizes {
+                project_id: "p1".into(),
+                path: vec![0],
+                sizes: vec![60.0, 40.0],
             },
         ];
         for action in actions {
