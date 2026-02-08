@@ -173,7 +173,9 @@ impl Okena {
         manager.start_pty_event_loop(pty_events, cx);
 
         // Start remote command bridge loop
-        manager.start_remote_command_loop(bridge_rx, cx);
+        let local_backend: Arc<dyn crate::terminal::backend::TerminalBackend> =
+            Arc::new(crate::terminal::backend::LocalBackend::new(manager.pty_manager.clone()));
+        manager.start_remote_command_loop(bridge_rx, local_backend, cx);
 
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {

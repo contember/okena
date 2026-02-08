@@ -1,7 +1,7 @@
 use crate::settings::settings;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::panels::toast::ToastManager;
-use crate::workspace::state::LayoutNode;
+use crate::workspace::actions::execute::spawn_uninitialized_terminals;
 use gpui::*;
 use std::sync::Arc;
 
@@ -11,63 +11,11 @@ impl RootView {
     /// Spawn terminals for all layout slots in a project that have terminal_id: None
     /// Used after creating a worktree project to immediately populate terminals
     pub(super) fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
-        // Get the project path and collect all terminal slots to spawn
-        let project_info = {
-            let ws = self.workspace.read(cx);
-            ws.project(&project_id).map(|p| (p.path.clone(), p.layout.clone()))
-        };
-
-        let (project_path, layout) = match project_info {
-            Some((path, Some(layout))) => (path, layout),
-            Some((_, None)) => {
-                log::info!("spawn_terminals_for_project: Project {} has no layout (bookmark)", project_id);
-                return;
-            }
-            None => {
-                log::error!("spawn_terminals_for_project: Project {} not found", project_id);
-                return;
-            }
-        };
-
-        // Get the default shell from settings
-        let shell = settings(cx).default_shell;
-
-        // Collect all paths to terminal nodes that need spawning
-        let mut terminal_paths: Vec<Vec<usize>> = Vec::new();
-        Self::collect_empty_terminal_paths(&layout, vec![], &mut terminal_paths);
-
-        log::info!("spawn_terminals_for_project: Found {} empty terminal slots for project {}",
-            terminal_paths.len(), project_id);
-
-        // Spawn a terminal for each empty slot
-        for path in terminal_paths {
-            match self.backend.create_terminal(&project_path, Some(&shell)) {
-                Ok(terminal_id) => {
-                    log::info!("Spawned terminal {} for worktree at path {:?}", terminal_id, path);
-
-                    // Store terminal ID in workspace
-                    self.workspace.update(cx, |ws, cx| {
-                        ws.set_terminal_id(&project_id, &path, terminal_id.clone(), cx);
-                    });
-
-                    // Create terminal wrapper and register it
-                    let size = TerminalSize::default();
-                    let terminal = std::sync::Arc::new(Terminal::new(
-                        terminal_id.clone(),
-                        size,
-                        self.backend.transport(),
-                        project_path.clone(),
-                    ));
-                    self.terminals.lock().insert(terminal_id, terminal);
-                }
-                Err(e) => {
-                    log::error!("Failed to spawn terminal for worktree at path {:?}: {}", path, e);
-                    ToastManager::error(format!("Failed to create terminal: {}", e), cx);
-                }
-            }
-        }
-
-        // Sync project columns to pick up the new project
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        self.workspace.update(cx, |ws, cx| {
+            spawn_uninitialized_terminals(ws, &project_id, &*backend, &terminals, cx);
+        });
         self.sync_project_columns(cx);
     }
 
@@ -146,29 +94,6 @@ impl RootView {
             Err(e) => {
                 log::error!("switch_terminal_shell: Failed to create terminal with new shell: {}", e);
                 ToastManager::error(format!("Failed to create terminal: {}", e), cx);
-            }
-        }
-    }
-
-    /// Recursively collect paths to all Terminal nodes with terminal_id: None
-    pub(super) fn collect_empty_terminal_paths(
-        node: &LayoutNode,
-        current_path: Vec<usize>,
-        result: &mut Vec<Vec<usize>>,
-    ) {
-        match node {
-            LayoutNode::Terminal { terminal_id, .. } => {
-                if terminal_id.is_none() {
-                    result.push(current_path);
-                }
-            }
-            LayoutNode::Split { children, .. }
-            | LayoutNode::Tabs { children, .. } => {
-                for (i, child) in children.iter().enumerate() {
-                    let mut child_path = current_path.clone();
-                    child_path.push(i);
-                    Self::collect_empty_terminal_paths(child, child_path, result);
-                }
             }
         }
     }

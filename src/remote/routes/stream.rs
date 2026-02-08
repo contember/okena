@@ -1,7 +1,7 @@
 use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::remote::routes::AppState;
 use crate::remote::types::{
-    WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
+    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
     FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
 };
 use axum::extract::ws::{Message, WebSocket};
@@ -114,7 +114,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::SendText { terminal_id, text }) => {
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                 if state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::SendText { terminal_id, text },
+                                    command: RemoteCommand::Action(ActionRequest::SendText { terminal_id, text }),
                                     reply: reply_tx,
                                 }).await.is_ok() {
                                     let _ = reply_rx.await;
@@ -123,7 +123,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::SendSpecialKey { terminal_id, key }) => {
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                 if state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::SendSpecialKey { terminal_id, key },
+                                    command: RemoteCommand::Action(ActionRequest::SendSpecialKey { terminal_id, key }),
                                     reply: reply_tx,
                                 }).await.is_ok() {
                                     let _ = reply_rx.await;
@@ -132,7 +132,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                 if state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Resize { terminal_id, cols, rows },
+                                    command: RemoteCommand::Action(ActionRequest::Resize { terminal_id, cols, rows }),
                                     reply: reply_tx,
                                 }).await.is_ok() {
                                     let _ = reply_rx.await;
@@ -162,10 +162,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 let text = String::from_utf8_lossy(payload).to_string();
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                 if state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::SendText {
+                                    command: RemoteCommand::Action(ActionRequest::SendText {
                                         terminal_id: terminal_id.clone(),
                                         text,
-                                    },
+                                    }),
                                     reply: reply_tx,
                                 }).await.is_ok() {
                                     let _ = reply_rx.await;

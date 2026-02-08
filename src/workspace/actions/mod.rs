@@ -6,6 +6,7 @@
 //! - `project`: Project CRUD and properties
 //! - `terminal`: Terminal-specific actions
 
+pub mod execute;
 mod focus;
 mod folder;
 mod layout;

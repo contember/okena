@@ -57,7 +57,7 @@ pub struct ApiFullscreen {
 }
 
 /// POST /v1/actions request body (tagged enum)
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionRequest {
     SendText {

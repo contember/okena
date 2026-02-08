@@ -1,124 +1,11 @@
-use alacritty_terminal::grid::Dimensions;
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
 use crate::remote::types::{ApiFullscreen, ApiProject, StateResponse};
-use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::terminal::pty_manager::PtyManager;
-use crate::views::root::TerminalsRegistry;
-use crate::workspace::state::{LayoutNode, Workspace};
+use crate::terminal::backend::TerminalBackend;
+use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 use gpui::*;
 use std::sync::Arc;
 
 use super::Okena;
-
-/// Look up a terminal in the registry. If not found, attempt to spawn it by
-/// finding the terminal_id in the workspace layout and creating a PTY for it.
-fn ensure_terminal(
-    terminal_id: &str,
-    terminals: &TerminalsRegistry,
-    pty_manager: &Arc<PtyManager>,
-    workspace: &Entity<Workspace>,
-    cx: &mut App,
-) -> Option<Arc<Terminal>> {
-    // Fast path: already in registry
-    if let Some(term) = terminals.lock().get(terminal_id).cloned() {
-        return Some(term);
-    }
-
-    // Find which project owns this terminal_id and get its path
-    let ws = workspace.read(cx);
-    let mut cwd = None;
-    for project in &ws.data().projects {
-        if let Some(layout) = &project.layout {
-            if layout.find_terminal_path(terminal_id).is_some() {
-                cwd = Some(project.path.clone());
-                break;
-            }
-        }
-    }
-    let cwd = cwd?;
-
-    // Spawn PTY via PtyManager
-    match pty_manager.create_or_reconnect_terminal_with_shell(Some(terminal_id), &cwd, None) {
-        Ok(_id) => {
-            let terminal = Arc::new(Terminal::new(
-                terminal_id.to_string(),
-                TerminalSize::default(),
-                pty_manager.clone(),
-                cwd,
-            ));
-            terminals.lock().insert(terminal_id.to_string(), terminal.clone());
-            log::info!("Auto-spawned terminal {} for remote client", terminal_id);
-            Some(terminal)
-        }
-        Err(e) => {
-            log::error!("Failed to auto-spawn terminal {}: {}", terminal_id, e);
-            None
-        }
-    }
-}
-
-/// Spawn PTYs for any uninitialized terminals (terminal_id: None) in a project's layout.
-/// Used by CreateTerminal and SplitTerminal to eagerly create PTYs for remote clients
-/// that don't have a rendering layer to trigger lazy spawning.
-fn spawn_new_terminals_in_project(
-    ws: &mut Workspace,
-    project_id: &str,
-    pty_manager: &Arc<PtyManager>,
-    terminals: &TerminalsRegistry,
-    cx: &mut Context<Workspace>,
-) -> CommandResult {
-    let project = match ws.project(project_id) {
-        Some(p) => p,
-        None => return CommandResult::Err(format!("project not found: {}", project_id)),
-    };
-
-    let project_path = project.path.clone();
-    let mut uninitialized = Vec::new();
-    if let Some(layout) = &project.layout {
-        collect_uninitialized_terminals(layout, vec![], &mut uninitialized);
-    }
-
-    for path in uninitialized {
-        match pty_manager.create_or_reconnect_terminal_with_shell(None, &project_path, None) {
-            Ok(terminal_id) => {
-                ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
-                let terminal = Arc::new(Terminal::new(
-                    terminal_id.clone(),
-                    TerminalSize::default(),
-                    pty_manager.clone(),
-                    project_path.clone(),
-                ));
-                terminals.lock().insert(terminal_id, terminal);
-            }
-            Err(e) => {
-                log::error!("Failed to spawn terminal for project {}: {}", project_id, e);
-                return CommandResult::Err(format!("failed to spawn terminal: {}", e));
-            }
-        }
-    }
-
-    CommandResult::Ok(None)
-}
-
-fn collect_uninitialized_terminals(
-    node: &LayoutNode,
-    current_path: Vec<usize>,
-    result: &mut Vec<Vec<usize>>,
-) {
-    match node {
-        LayoutNode::Terminal { terminal_id: None, .. } => {
-            result.push(current_path);
-        }
-        LayoutNode::Terminal { .. } => {}
-        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-            for (i, child) in children.iter().enumerate() {
-                let mut child_path = current_path.clone();
-                child_path.push(i);
-                collect_uninitialized_terminals(child, child_path, result);
-            }
-        }
-    }
-}
 
 impl Okena {
     /// Process commands from the remote API bridge.
@@ -126,12 +13,12 @@ impl Okena {
     pub(super) fn start_remote_command_loop(
         &mut self,
         bridge_rx: BridgeReceiver,
+        backend: Arc<dyn TerminalBackend>,
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
-        let pty_manager = self.pty_manager.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx| {
             loop {
@@ -141,6 +28,14 @@ impl Okena {
                 };
 
                 let result = match msg.command {
+                    RemoteCommand::Action(action) => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                execute_action(action, ws, &*backend, &terminals, cx)
+                                    .into_command_result()
+                            })
+                        })
+                    }
                     RemoteCommand::GetState => {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
@@ -173,155 +68,10 @@ impl Okena {
                             CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
                         })
                     }
-                    RemoteCommand::SendText { terminal_id, text } => {
-                        cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
-                                Some(term) => {
-                                    term.send_input(&text);
-                                    CommandResult::Ok(None)
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                    RemoteCommand::RunCommand { terminal_id, command } => {
-                        cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
-                                Some(term) => {
-                                    term.send_input(&format!("{}\r", command));
-                                    CommandResult::Ok(None)
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                    RemoteCommand::SendSpecialKey { terminal_id, key } => {
-                        cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
-                                Some(term) => {
-                                    term.send_bytes(key.to_bytes());
-                                    CommandResult::Ok(None)
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                    RemoteCommand::ReadContent { terminal_id } => {
-                        cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
-                                Some(term) => {
-                                    let content = term.with_content(|term| {
-                                        let grid = term.grid();
-                                        let screen_lines = grid.screen_lines();
-                                        let cols = grid.columns();
-                                        let mut lines = Vec::with_capacity(screen_lines);
-
-                                        for row in 0..screen_lines as i32 {
-                                            let mut line = String::with_capacity(cols);
-                                            for col in 0..cols {
-                                                use alacritty_terminal::index::{Point, Line, Column};
-                                                let cell = &grid[Point::new(Line(row), Column(col))];
-                                                line.push(cell.c);
-                                            }
-                                            let trimmed = line.trim_end().to_string();
-                                            lines.push(trimmed);
-                                        }
-
-                                        while lines.last().map_or(false, |l| l.is_empty()) {
-                                            lines.pop();
-                                        }
-
-                                        lines.join("\n")
-                                    });
-                                    CommandResult::Ok(Some(serde_json::json!({"content": content})))
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                    RemoteCommand::Resize { terminal_id, cols, rows } => {
-                        cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
-                                Some(term) => {
-                                    let size = TerminalSize {
-                                        cols,
-                                        rows,
-                                        cell_width: 8.0,
-                                        cell_height: 16.0,
-                                    };
-                                    term.resize(size);
-                                    CommandResult::Ok(None)
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                    RemoteCommand::SplitTerminal { project_id, path, direction } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let ok = ws.with_layout_node(&project_id, &path, cx, |node| {
-                                    let existing = node.clone();
-                                    let new_terminal = crate::workspace::state::LayoutNode::new_terminal();
-                                    *node = crate::workspace::state::LayoutNode::Split {
-                                        direction,
-                                        sizes: vec![0.5, 0.5],
-                                        children: vec![existing, new_terminal],
-                                    };
-                                    true
-                                });
-                                if ok {
-                                    spawn_new_terminals_in_project(ws, &project_id, &pty_manager, &terminals, cx)
-                                } else {
-                                    CommandResult::Err(format!("project or path not found: {}:{:?}", project_id, path))
-                                }
-                            })
-                        })
-                    }
-                    RemoteCommand::CloseTerminal { project_id, terminal_id } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let path = ws.project(&project_id)
-                                    .and_then(|p| p.layout.as_ref())
-                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
-
-                                match path {
-                                    Some(path) => {
-                                        ws.close_terminal(&project_id, &path, cx);
-                                        CommandResult::Ok(None)
-                                    }
-                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                                }
-                            })
-                        })
-                    }
-                    RemoteCommand::FocusTerminal { project_id, terminal_id } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let path = ws.project(&project_id)
-                                    .and_then(|p| p.layout.as_ref())
-                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
-
-                                match path {
-                                    Some(path) => {
-                                        ws.set_focused_terminal(project_id, path, cx);
-                                        CommandResult::Ok(None)
-                                    }
-                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                                }
-                            })
-                        })
-                    }
-                    RemoteCommand::CreateTerminal { project_id } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                ws.start_terminal(&project_id, cx);
-                                spawn_new_terminals_in_project(ws, &project_id, &pty_manager, &terminals, cx)
-                            })
-                        })
-                    }
                     RemoteCommand::RenderSnapshot { terminal_id } => {
                         cx.update(|cx| {
-                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
+                            let ws = workspace.read(cx);
+                            match ensure_terminal(&terminal_id, &terminals, &*backend, ws) {
                                 Some(term) => {
                                     let snapshot = term.render_snapshot();
                                     CommandResult::OkBytes(snapshot)
