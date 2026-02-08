@@ -102,6 +102,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 if send_snapshots(&mut socket, &state, &terminal_ids, &stream_id_map).await.is_err() {
                                     break;
                                 }
+                                // Drain PTY events that accumulated before/during snapshot generation.
+                                // The snapshot already contains their effects — replaying would garble the display.
+                                while pty_rx.try_recv().is_ok() {}
                             }
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
@@ -199,6 +202,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         if send_snapshots(&mut socket, &state, &ids, &stream_id_map).await.is_err() {
                             break;
                         }
+                        // Drain stale PTY events — snapshot already includes their effects.
+                        while pty_rx.try_recv().is_ok() {}
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

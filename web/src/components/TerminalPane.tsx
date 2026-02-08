@@ -116,6 +116,7 @@ export function TerminalPane({
     }
 
     fit.fit();
+    sendResize(); // Send resize immediately so server knows our dimensions
 
     termRef.current = term;
     fitRef.current = fit;
