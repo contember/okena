@@ -1,3 +1,7 @@
+use crate::client::manager::ConnectionManager;
+use okena_core::client::WsClientMessage;
+use okena_core::theme::DARK_THEME;
+
 /// Cell data for FFI transfer (flat, no pointers).
 #[derive(Debug, Clone)]
 pub struct CellData {
@@ -30,31 +34,36 @@ pub struct CursorState {
 
 /// Get the visible terminal cells for rendering.
 #[flutter_rust_bridge::frb(sync)]
-pub fn get_visible_cells(_conn_id: String, _terminal_id: String) -> Vec<CellData> {
-    // TODO: read from alacritty_terminal::Term grid
-    Vec::new()
+pub fn get_visible_cells(conn_id: String, terminal_id: String) -> Vec<CellData> {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| {
+        holder.get_visible_cells(&DARK_THEME)
+    })
+    .unwrap_or_default()
 }
 
 /// Get the current cursor state.
 #[flutter_rust_bridge::frb(sync)]
-pub fn get_cursor(_conn_id: String, _terminal_id: String) -> CursorState {
-    // TODO: read from alacritty_terminal::Term
-    CursorState {
-        col: 0,
-        row: 0,
-        shape: CursorShape::Block,
-        visible: true,
-    }
+pub fn get_cursor(conn_id: String, terminal_id: String) -> CursorState {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.get_cursor())
+        .unwrap_or(CursorState {
+            col: 0,
+            row: 0,
+            shape: CursorShape::Block,
+            visible: true,
+        })
 }
 
 /// Send text input to a terminal.
 pub async fn send_text(conn_id: String, terminal_id: String, text: String) -> anyhow::Result<()> {
-    // TODO: send via WebSocket to server
-    log::info!(
-        "send_text stub: conn={}, terminal={}, text={}",
-        conn_id,
-        terminal_id,
-        text
+    let mgr = ConnectionManager::get();
+    mgr.send_ws_message(
+        &conn_id,
+        WsClientMessage::SendText {
+            terminal_id,
+            text,
+        },
     );
     Ok(())
 }
@@ -66,13 +75,7 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> anyhow::Result<()> {
-    // TODO: send resize action via WebSocket/REST
-    log::info!(
-        "resize_terminal stub: conn={}, terminal={}, {}x{}",
-        conn_id,
-        terminal_id,
-        cols,
-        rows
-    );
+    let mgr = ConnectionManager::get();
+    mgr.resize_terminal(&conn_id, &terminal_id, cols, rows);
     Ok(())
 }

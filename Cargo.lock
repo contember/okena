@@ -4310,7 +4310,9 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "async-channel 2.5.0",
  "flutter_rust_bridge",
+ "futures",
  "log",
  "okena-core",
  "parking_lot",

@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-okena-core = { path = "../../crates/okena-core" }
+okena-core = { path = "../../crates/okena-core", features = ["client"] }
 flutter_rust_bridge = "=2.11.1"
 alacritty_terminal = "0.25"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
@@ -17,6 +17,8 @@ serde_json = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 log = "0.4"
 anyhow = "1.0"
+async-channel = "2.3"
+futures = "0.3"
 parking_lot = "0.12"
 uuid = { version = "1.10", features = ["v4"] }
 
