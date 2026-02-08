@@ -132,3 +132,208 @@ impl Workspace {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::workspace::state::*;
+    use crate::workspace::settings::HooksConfig;
+    use crate::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            is_visible: true,
+            layout: Some(LayoutNode::new_terminal()),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+        }
+    }
+
+    fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects,
+            project_order: order.into_iter().map(String::from).collect(),
+            project_widths: HashMap::new(),
+            folders: vec![],
+        }
+    }
+
+    /// Simulate delete_folder: splice projects back into project_order
+    fn simulate_delete_folder(data: &mut WorkspaceData, folder_id: &str) {
+        let project_ids = data.folders.iter()
+            .find(|f| f.id == folder_id)
+            .map(|f| f.project_ids.clone())
+            .unwrap_or_default();
+
+        if let Some(pos) = data.project_order.iter().position(|id| id == folder_id) {
+            data.project_order.remove(pos);
+            for (i, pid) in project_ids.into_iter().enumerate() {
+                data.project_order.insert(pos + i, pid);
+            }
+        }
+        data.folders.retain(|f| f.id != folder_id);
+    }
+
+    /// Simulate move_project_to_folder
+    fn simulate_move_to_folder(data: &mut WorkspaceData, project_id: &str, folder_id: &str, position: Option<usize>) {
+        for folder in &mut data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+        data.project_order.retain(|id| id != project_id);
+
+        if let Some(folder) = data.folders.iter_mut().find(|f| f.id == folder_id) {
+            let pos = position.unwrap_or(folder.project_ids.len());
+            let pos = pos.min(folder.project_ids.len());
+            folder.project_ids.insert(pos, project_id.to_string());
+        }
+    }
+
+    #[test]
+    fn test_delete_folder_preserves_project_order_around_folder() {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
+            vec!["p1", "f1", "p3"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        simulate_delete_folder(&mut data, "f1");
+        // p2 should be inserted where f1 was (between p1 and p3)
+        assert_eq!(data.project_order, vec!["p1", "p2", "p3"]);
+    }
+
+    #[test]
+    fn test_move_project_to_folder_at_position() {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
+            vec!["f1", "p2", "p3"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        // Move p2 to folder at position 0 (before p1)
+        simulate_move_to_folder(&mut data, "p2", "f1", Some(0));
+
+        assert_eq!(data.folders[0].project_ids, vec!["p2", "p1"]);
+        assert!(!data.project_order.contains(&"p2".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod gpui_tests {
+    use gpui::AppContext as _;
+    use crate::workspace::state::{FolderData, LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::workspace::settings::HooksConfig;
+    use crate::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            is_visible: true,
+            layout: Some(LayoutNode::new_terminal()),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+        }
+    }
+
+    fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects,
+            project_order: order.into_iter().map(String::from).collect(),
+            project_widths: HashMap::new(),
+            folders: vec![],
+        }
+    }
+
+    #[gpui::test]
+    fn test_create_folder_gpui(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![], vec![]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let folder_id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_folder("My Folder".to_string(), cx)
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().folders.len(), 1);
+            assert_eq!(ws.data().folders[0].name, "My Folder");
+            assert_eq!(ws.data().folders[0].id, folder_id);
+            assert!(ws.data().project_order.contains(&folder_id));
+        });
+    }
+
+    #[gpui::test]
+    fn test_delete_folder_gpui(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["f1"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_folder("f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().folders.is_empty());
+            assert_eq!(ws.data().project_order, vec!["p1", "p2"]);
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_project_to_folder_gpui(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["f1", "p1", "p2"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_project_to_folder("p1", "f1", None, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().project_order.contains(&"p1".to_string()));
+            assert_eq!(ws.data().folders[0].project_ids, vec!["p1".to_string()]);
+        });
+    }
+
+}
