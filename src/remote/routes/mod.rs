@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod health;
+pub mod local_pair;
 pub mod pair;
 pub mod state;
 pub mod stream;
@@ -57,7 +58,11 @@ pub fn build_router(
     // Public routes (no auth required)
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
-        .route("/v1/pair", axum::routing::post(pair::post_pair));
+        .route("/v1/pair", axum::routing::post(pair::post_pair))
+        .route(
+            "/v1/local/pair-code",
+            axum::routing::get(local_pair::get_local_pair_code),
+        );
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
