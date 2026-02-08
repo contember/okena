@@ -1,10 +1,13 @@
+use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -16,8 +19,8 @@ pub const TOKEN_TTL_SECS: u64 = 86400;
 pub struct TokenRecord {
     pub id: String,
     pub token_hmac: Vec<u8>,
-    pub created_at: Instant,
-    pub last_used_at: Mutex<Instant>,
+    pub created_at: SystemTime,
+    pub last_used_at: Mutex<SystemTime>,
     pub name: Option<String>,
 }
 
@@ -87,15 +90,17 @@ struct AuthStoreInner {
 
 impl AuthStore {
     /// Create a new AuthStore, loading or generating the app secret.
+    /// Previously issued tokens are loaded from disk so clients survive restarts.
     pub fn new() -> Self {
         let app_secret = load_or_create_secret();
+        let tokens = load_tokens();
 
         Self {
             inner: Mutex::new(AuthStoreInner {
                 app_secret,
                 current_code: None,
                 code_created_at: Instant::now(),
-                tokens: Vec::new(),
+                tokens,
                 rate_limiter: RateLimiter::new(),
             }),
         }
@@ -174,11 +179,12 @@ impl AuthStore {
 
         // Store HMAC of the token
         let token_hmac = compute_hmac(&inner.app_secret, token.as_bytes());
+        let now = SystemTime::now();
         let record = TokenRecord {
             id: uuid::Uuid::new_v4().to_string(),
             token_hmac,
-            created_at: Instant::now(),
-            last_used_at: Mutex::new(Instant::now()),
+            created_at: now,
+            last_used_at: Mutex::new(now),
             name: None,
         };
         inner.tokens.push(record);
@@ -198,6 +204,8 @@ impl AuthStore {
             let _ = std::fs::remove_file(pair_code_path());
         }
 
+        save_tokens(&inner.tokens);
+
         Ok(token)
     }
 
@@ -205,12 +213,15 @@ impl AuthStore {
     pub fn validate_token(&self, token: &str) -> bool {
         let inner = self.inner.lock();
         let candidate_hmac = compute_hmac(&inner.app_secret, token.as_bytes());
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         for record in &inner.tokens {
             if constant_time_eq(&record.token_hmac, &candidate_hmac) {
                 // Check token expiration (24 hours)
-                if now.duration_since(record.created_at) >= Duration::from_secs(TOKEN_TTL_SECS) {
+                let age = now
+                    .duration_since(record.created_at)
+                    .unwrap_or(Duration::MAX);
+                if age >= Duration::from_secs(TOKEN_TTL_SECS) {
                     return false;
                 }
                 *record.last_used_at.lock() = now;
@@ -225,12 +236,15 @@ impl AuthStore {
     pub fn refresh_token(&self, current_token: &str) -> Result<String, &'static str> {
         let mut inner = self.inner.lock();
         let candidate_hmac = compute_hmac(&inner.app_secret, current_token.as_bytes());
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         // Validate the current token
         let valid = inner.tokens.iter().any(|record| {
             constant_time_eq(&record.token_hmac, &candidate_hmac)
-                && now.duration_since(record.created_at) < Duration::from_secs(TOKEN_TTL_SECS)
+                && now
+                    .duration_since(record.created_at)
+                    .unwrap_or(Duration::MAX)
+                    < Duration::from_secs(TOKEN_TTL_SECS)
         });
         if !valid {
             return Err("invalid or expired token");
@@ -249,8 +263,8 @@ impl AuthStore {
         inner.tokens.push(TokenRecord {
             id: uuid::Uuid::new_v4().to_string(),
             token_hmac: new_hmac,
-            created_at: Instant::now(),
-            last_used_at: Mutex::new(Instant::now()),
+            created_at: now,
+            last_used_at: Mutex::new(now),
             name: None,
         });
 
@@ -260,6 +274,8 @@ impl AuthStore {
         if count > MAX_TOKENS {
             inner.tokens.drain(0..count - MAX_TOKENS);
         }
+
+        save_tokens(&inner.tokens);
 
         Ok(new_token)
     }
@@ -380,10 +396,117 @@ fn load_or_create_secret() -> Vec<u8> {
     secret
 }
 
+/// Serializable representation of a token record for disk persistence.
+#[derive(Serialize, Deserialize)]
+struct PersistedToken {
+    id: String,
+    /// Base64-encoded HMAC digest.
+    token_hmac: String,
+    /// Unix timestamp (seconds since epoch).
+    created_at: u64,
+}
+
+/// Path to the persisted tokens file.
+fn tokens_path() -> PathBuf {
+    crate::workspace::persistence::config_dir().join("remote_tokens.json")
+}
+
+/// Save token records to disk, filtering out expired tokens.
+fn save_tokens(tokens: &[TokenRecord]) {
+    let now = SystemTime::now();
+    let persisted: Vec<PersistedToken> = tokens
+        .iter()
+        .filter(|t| {
+            now.duration_since(t.created_at).unwrap_or(Duration::MAX)
+                < Duration::from_secs(TOKEN_TTL_SECS)
+        })
+        .map(|t| {
+            let unix = t
+                .created_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            PersistedToken {
+                id: t.id.clone(),
+                token_hmac: base64::engine::general_purpose::STANDARD.encode(&t.token_hmac),
+                created_at: unix,
+            }
+        })
+        .collect();
+
+    let json = match serde_json::to_string_pretty(&persisted) {
+        Ok(j) => j,
+        Err(e) => {
+            log::error!("Failed to serialize tokens: {}", e);
+            return;
+        }
+    };
+
+    let path = tokens_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, json.as_bytes()) {
+        log::error!("Failed to write remote_tokens.json: {}", e);
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
+    }
+}
+
+/// Load token records from disk, filtering out expired tokens.
+fn load_tokens() -> Vec<TokenRecord> {
+    let path = tokens_path();
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let persisted: Vec<PersistedToken> = match serde_json::from_str(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Failed to parse remote_tokens.json: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let now = SystemTime::now();
+    persisted
+        .into_iter()
+        .filter_map(|p| {
+            let hmac_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&p.token_hmac)
+                .ok()?;
+            let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(p.created_at);
+            // Filter out expired tokens
+            let age = now.duration_since(created_at).unwrap_or(Duration::MAX);
+            if age >= Duration::from_secs(TOKEN_TTL_SECS) {
+                return None;
+            }
+            Some(TokenRecord {
+                id: p.id,
+                token_hmac: hmac_bytes,
+                created_at,
+                last_used_at: Mutex::new(now),
+                name: None,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::LazyLock;
+
+    /// Serialize tests that read/write the shared remote_tokens.json file.
+    static TOKEN_FILE_LOCK: LazyLock<std::sync::Mutex<()>> =
+        LazyLock::new(|| std::sync::Mutex::new(()));
 
     fn test_store() -> AuthStore {
         AuthStore::with_secret(vec![42u8; 32])
@@ -428,6 +551,7 @@ mod tests {
 
     #[test]
     fn file_based_pair_succeeds_and_deletes_file() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
         let store = test_store();
         let code = generate_pairing_code();
 
@@ -451,5 +575,68 @@ mod tests {
 
         let result = store.try_pair("ABCD-EFGH", test_ip());
         assert!(matches!(result, Err(PairError::InvalidCode)));
+    }
+
+    #[test]
+    fn persisted_tokens_survive_reload() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
+        let secret = vec![99u8; 32];
+
+        // Create a store, pair a token (which saves to disk)
+        let store = AuthStore::with_secret(secret.clone());
+        let token = pair_token(&store);
+        assert!(store.validate_token(&token));
+
+        // The try_pair call saved tokens to disk. Now load them back
+        // into a fresh store with the same secret.
+        let loaded_tokens = load_tokens();
+        assert!(!loaded_tokens.is_empty(), "tokens should load from disk");
+
+        let store2 = AuthStore {
+            inner: Mutex::new(AuthStoreInner {
+                app_secret: secret,
+                current_code: None,
+                code_created_at: Instant::now(),
+                tokens: loaded_tokens,
+                rate_limiter: RateLimiter::new(),
+            }),
+        };
+
+        assert!(
+            store2.validate_token(&token),
+            "token should validate against reloaded store"
+        );
+    }
+
+    #[test]
+    fn save_load_round_trip_filters_expired() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
+        let now = SystemTime::now();
+        let expired_time = now - Duration::from_secs(TOKEN_TTL_SECS + 1);
+        let valid_time = now - Duration::from_secs(100);
+
+        let tokens = vec![
+            TokenRecord {
+                id: "expired".to_string(),
+                token_hmac: vec![1, 2, 3],
+                created_at: expired_time,
+                last_used_at: Mutex::new(now),
+                name: None,
+            },
+            TokenRecord {
+                id: "valid".to_string(),
+                token_hmac: vec![4, 5, 6],
+                created_at: valid_time,
+                last_used_at: Mutex::new(now),
+                name: None,
+            },
+        ];
+
+        save_tokens(&tokens);
+        let loaded = load_tokens();
+
+        assert_eq!(loaded.len(), 1, "only non-expired token should survive");
+        assert_eq!(loaded[0].id, "valid");
+        assert_eq!(loaded[0].token_hmac, vec![4, 5, 6]);
     }
 }
