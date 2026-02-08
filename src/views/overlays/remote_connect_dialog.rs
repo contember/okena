@@ -6,7 +6,7 @@
 //! so the caller only receives fully-validated connections.
 
 use crate::keybindings::Cancel;
-use crate::remote_client::config::RemoteConnectionConfig;
+use okena_core::client::RemoteConnectionConfig;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::theme::theme;
 use crate::views::components::{

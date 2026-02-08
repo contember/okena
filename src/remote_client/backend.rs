@@ -2,27 +2,9 @@ use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::TerminalTransport;
 use anyhow::Result;
+use okena_core::client::{make_prefixed_id, strip_prefix, WsClientMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Messages sent from the GPUI/UI thread to the WebSocket writer task.
-#[derive(Debug)]
-pub(crate) enum WsClientMessage {
-    /// Send text input to a remote terminal
-    SendText { terminal_id: String, text: String },
-    /// Resize a remote terminal
-    Resize {
-        terminal_id: String,
-        cols: u16,
-        rows: u16,
-    },
-    /// Close a remote terminal
-    CloseTerminal { terminal_id: String },
-    /// Subscribe to terminal output streams
-    Subscribe { terminal_ids: Vec<String> },
-    /// Unsubscribe from terminal output streams
-    Unsubscribe { terminal_ids: Vec<String> },
-}
 
 /// Transport implementation for remote terminals.
 ///
@@ -53,7 +35,6 @@ impl TerminalTransport for RemoteTransport {
     }
 
     fn uses_mouse_backend(&self) -> bool {
-        // Remote doesn't use tmux backend locally
         false
     }
 }
@@ -82,7 +63,6 @@ impl TerminalBackend for RemoteBackend {
     }
 
     fn create_terminal(&self, _cwd: &str, _shell: Option<&ShellType>) -> Result<String> {
-        // MVP: not supported. Remote terminals are pre-existing on the server.
         anyhow::bail!("Creating terminals on remote server is not supported")
     }
 
@@ -92,8 +72,6 @@ impl TerminalBackend for RemoteBackend {
         _cwd: &str,
         _shell: Option<&ShellType>,
     ) -> Result<String> {
-        // Remote terminal already exists on server.
-        // Return prefixed ID for local registry.
         Ok(make_prefixed_id(&self.connection_id, id))
     }
 
@@ -118,28 +96,4 @@ impl TerminalBackend for RemoteBackend {
     fn is_remote(&self) -> bool {
         true
     }
-}
-
-// ── ID namespacing helpers ──────────────────────────────────────────────────
-
-/// Prefix format: "remote:{connection_id}:{terminal_id}"
-pub(crate) fn make_prefixed_id(connection_id: &str, terminal_id: &str) -> String {
-    format!("remote:{}:{}", connection_id, terminal_id)
-}
-
-/// Strip the "remote:{connection_id}:" prefix from a terminal ID.
-/// If the ID doesn't have the expected prefix, returns it unchanged.
-pub(crate) fn strip_prefix(terminal_id: &str, connection_id: &str) -> String {
-    let prefix = format!("remote:{}:", connection_id);
-    if let Some(stripped) = terminal_id.strip_prefix(&prefix) {
-        stripped.to_string()
-    } else {
-        terminal_id.to_string()
-    }
-}
-
-/// Check if a terminal ID belongs to a specific remote connection.
-pub(crate) fn is_remote_terminal(terminal_id: &str, connection_id: &str) -> bool {
-    let prefix = format!("remote:{}:", connection_id);
-    terminal_id.starts_with(&prefix)
 }

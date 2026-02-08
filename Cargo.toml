@@ -9,7 +9,7 @@ edition = "2021"
 
 [dependencies]
 # Shared core types
-okena-core = { path = "crates/okena-core" }
+okena-core = { path = "crates/okena-core", features = ["client"] }
 
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

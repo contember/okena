@@ -1,12 +1,14 @@
-use crate::remote::types::StateResponse;
-use crate::remote_client::config::RemoteConnectionConfig;
-use crate::remote_client::connection::{
-    try_refresh_token, ConnectionEvent, ConnectionStatus, RemoteConnection,
-};
+use crate::remote_client::connection::RemoteConnection;
 use crate::terminal::backend::TerminalBackend;
 use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::settings::{load_settings, update_remote_connections};
+
+use okena_core::api::StateResponse;
+use okena_core::client::{
+    ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
+};
+use okena_core::client::connection::try_refresh_token;
 
 use gpui::*;
 use std::collections::HashMap;
@@ -72,8 +74,8 @@ impl RemoteConnectionManager {
     pub fn find_by_host_port(&self, host: &str, port: u16) -> Option<&str> {
         self.connections
             .values()
-            .find(|c| c.config.host == host && c.config.port == port)
-            .map(|c| c.config.name.as_str())
+            .find(|c| c.config().host == host && c.config().port == port)
+            .map(|c| c.config().name.as_str())
     }
 
     /// Add a new connection and start connecting.
@@ -151,13 +153,7 @@ impl RemoteConnectionManager {
     )> {
         self.connections
             .values()
-            .map(|conn| {
-                (
-                    &conn.config,
-                    &conn.status,
-                    conn.remote_state.as_ref(),
-                )
-            })
+            .map(|conn| (conn.config(), conn.status(), conn.remote_state()))
             .collect()
     }
 
@@ -172,7 +168,7 @@ impl RemoteConnectionManager {
     pub fn remote_state(&self, connection_id: &str) -> Option<&StateResponse> {
         self.connections
             .get(connection_id)
-            .and_then(|conn| conn.remote_state.as_ref())
+            .and_then(|conn| conn.remote_state())
     }
 
     /// Auto-connect to all saved connections with valid tokens.
@@ -219,8 +215,8 @@ impl RemoteConnectionManager {
                 status,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    let prev = std::mem::replace(&mut conn.status, status.clone());
-                    let name = &conn.config.name;
+                    let prev = std::mem::replace(conn.status_mut(), status.clone());
+                    let name = &conn.config().name;
                     match &status {
                         ConnectionStatus::Error(msg) => {
                             ToastManager::error(format!("{}: {}", name, msg), cx);
@@ -247,8 +243,8 @@ impl RemoteConnectionManager {
             } => {
                 let now = now_unix_timestamp();
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    conn.config.saved_token = Some(token.clone());
-                    conn.config.token_obtained_at = Some(now);
+                    conn.config_mut().saved_token = Some(token.clone());
+                    conn.config_mut().token_obtained_at = Some(now);
                 }
                 // Persist token to settings (atomic update)
                 let cid = connection_id.clone();
@@ -266,7 +262,7 @@ impl RemoteConnectionManager {
                 state,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    conn.remote_state = Some(state);
+                    conn.set_remote_state(Some(state));
                 }
                 cx.notify();
             }
@@ -285,7 +281,7 @@ impl RemoteConnectionManager {
                 let name = self
                     .connections
                     .get(&connection_id)
-                    .map(|c| c.config.name.as_str())
+                    .map(|c| c.config().name.as_str())
                     .unwrap_or("Remote");
                 ToastManager::warning(format!("{}: {}", name, message), cx);
             }
@@ -295,8 +291,8 @@ impl RemoteConnectionManager {
             } => {
                 let now = now_unix_timestamp();
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    conn.config.saved_token = Some(token.clone());
-                    conn.config.token_obtained_at = Some(now);
+                    conn.config_mut().saved_token = Some(token.clone());
+                    conn.config_mut().token_obtained_at = Some(now);
                 }
                 let cid = connection_id.clone();
                 let tok = token.clone();
@@ -327,8 +323,8 @@ impl RemoteConnectionManager {
                 let configs: Vec<RemoteConnectionConfig> = match this.update(cx, |this, _cx| {
                     this.connections
                         .values()
-                        .filter(|c| matches!(c.status, ConnectionStatus::Connected))
-                        .map(|c| c.config.clone())
+                        .filter(|c| matches!(c.status(), ConnectionStatus::Connected))
+                        .map(|c| c.config().clone())
                         .collect()
                 }) {
                     Ok(configs) => configs,
@@ -357,10 +353,10 @@ fn now_unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::remote_client::config::RemoteConnectionConfig;
     use crate::remote_client::manager::RemoteConnectionManager;
     use crate::views::root::TerminalsRegistry;
     use gpui::AppContext as _;
+    use okena_core::client::RemoteConnectionConfig;
     use parking_lot::Mutex as PMutex;
     use std::collections::HashMap;
     use std::sync::Arc;

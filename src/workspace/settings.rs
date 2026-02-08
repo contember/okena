@@ -1,4 +1,4 @@
-use crate::remote_client::config::RemoteConnectionConfig;
+use okena_core::client::RemoteConnectionConfig;
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::ThemeMode;

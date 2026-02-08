@@ -1,5 +1,4 @@
-use crate::remote_client::config::RemoteConnectionConfig;
-use crate::remote_client::connection::ConnectionStatus;
+use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
 use crate::remote::types::ApiProject;
 use crate::theme::theme;
 use crate::workspace::requests::OverlayRequest;

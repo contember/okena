@@ -23,7 +23,7 @@ use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
-use crate::remote_client::config::RemoteConnectionConfig;
+use okena_core::client::RemoteConnectionConfig;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
