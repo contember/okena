@@ -3,7 +3,6 @@ use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::routes;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -24,7 +23,7 @@ impl RemoteServer {
         bridge_tx: BridgeSender,
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
-        state_version: Arc<AtomicU64>,
+        state_version: Arc<watch::Sender<u64>>,
         bind_addr: IpAddr,
     ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()

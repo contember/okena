@@ -6,7 +6,6 @@ use crate::terminal::pty_manager::PtyManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
 use gpui::*;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::Okena;
@@ -82,7 +81,7 @@ impl Okena {
                     RemoteCommand::GetState => {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
-                            let sv = state_version.load(Ordering::Relaxed);
+                            let sv = *state_version.borrow();
                             let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
                                 ApiProject {
                                     id: p.id.clone(),
@@ -255,6 +254,17 @@ impl Okena {
                                 ws.start_terminal(&project_id, cx);
                                 CommandResult::Ok(None)
                             })
+                        })
+                    }
+                    RemoteCommand::RenderSnapshot { terminal_id } => {
+                        cx.update(|cx| {
+                            match ensure_terminal(&terminal_id, &terminals, &pty_manager, &workspace, cx) {
+                                Some(term) => {
+                                    let snapshot = term.render_snapshot();
+                                    CommandResult::OkBytes(snapshot)
+                                }
+                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                            }
                         })
                     }
                 };

@@ -14,7 +14,6 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
 use tower_http::services::{ServeDir, ServeFile};
@@ -25,7 +24,7 @@ pub struct AppState {
     pub bridge_tx: BridgeSender,
     pub auth_store: Arc<AuthStore>,
     pub broadcaster: Arc<PtyBroadcaster>,
-    pub state_version: Arc<AtomicU64>,
+    pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
 }
 
@@ -34,7 +33,7 @@ pub fn build_router(
     bridge_tx: BridgeSender,
     auth_store: Arc<AuthStore>,
     broadcaster: Arc<PtyBroadcaster>,
-    state_version: Arc<AtomicU64>,
+    state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
 ) -> Router {
     let state = AppState {

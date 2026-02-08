@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::watch as tokio_watch;
 
 /// Main application state and view
 pub struct Okena {
@@ -41,7 +42,7 @@ pub struct Okena {
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
-    pub(crate) state_version: Arc<AtomicU64>,
+    pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
 }
@@ -137,14 +138,15 @@ impl Okena {
         // ── Remote control setup ────────────────────────────────────────
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
-        let state_version = Arc::new(AtomicU64::new(0));
+        let (state_version_tx, _) = tokio_watch::channel(0u64);
+        let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();
         cx.set_global(GlobalRemoteInfo(remote_info.clone()));
 
         // Bump state_version on workspace changes
         let sv = state_version.clone();
         cx.observe(&workspace, move |_this, _workspace, _cx| {
-            sv.fetch_add(1, Ordering::Relaxed);
+            sv.send_modify(|v| *v += 1);
         })
         .detach();
 
