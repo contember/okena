@@ -251,6 +251,7 @@ impl ResolvedBackend {
                 if socket_path.exists() {
                     #[cfg(unix)]
                     {
+                        let my_pid = std::process::id() as i32;
                         if let Ok(output) = Command::new("lsof")
                             .args(["-t", "-U"])
                             .arg(&socket_path)
@@ -259,6 +260,10 @@ impl ResolvedBackend {
                             if let Ok(pid_str) = String::from_utf8(output.stdout) {
                                 for line in pid_str.lines() {
                                     if let Ok(pid) = line.trim().parse::<i32>() {
+                                        if pid == my_pid {
+                                            log::debug!("Skipping own PID {} when killing dtach session {}", pid, session_name);
+                                            continue;
+                                        }
                                         unsafe {
                                             libc::kill(pid, libc::SIGTERM);
                                         }
