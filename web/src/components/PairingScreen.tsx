@@ -41,11 +41,11 @@ export function PairingScreen({ onPaired }: { onPaired: () => void }) {
             ref={inputRef}
             type="text"
             value={code}
-            onChange={(e) => setCode(e.target.value)}
-            placeholder="000000"
-            maxLength={6}
+            onChange={(e) => setCode(e.target.value.toUpperCase())}
+            placeholder="XXXX-XXXX"
+            maxLength={9}
             autoFocus
-            className="w-full px-4 py-3 text-center text-2xl tracking-[0.3em] font-mono
+            className="w-full px-4 py-3 text-center text-2xl tracking-[0.2em] font-mono
               bg-zinc-900 border border-zinc-700 rounded-lg text-zinc-100
               placeholder:text-zinc-600 focus:outline-none focus:border-blue-500
               disabled:opacity-50"
