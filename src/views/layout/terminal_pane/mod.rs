@@ -30,6 +30,7 @@ use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
@@ -378,6 +379,7 @@ impl TerminalPane {
             }
             Err(e) => {
                 log::error!("Failed to create terminal: {}", e);
+                ToastManager::error(format!("Failed to create terminal: {}", e), cx);
             }
         }
     }

@@ -2,6 +2,7 @@ use crate::remote::types::StateResponse;
 use crate::remote_client::config::RemoteConnectionConfig;
 use crate::remote_client::connection::{ConnectionEvent, ConnectionStatus, RemoteConnection};
 use crate::terminal::backend::TerminalBackend;
+use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::settings::{load_settings, save_settings};
 
@@ -199,7 +200,25 @@ impl RemoteConnectionManager {
                 status,
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
-                    conn.status = status;
+                    let prev = std::mem::replace(&mut conn.status, status.clone());
+                    let name = &conn.config.name;
+                    match &status {
+                        ConnectionStatus::Error(msg) => {
+                            ToastManager::error(format!("{}: {}", name, msg), cx);
+                        }
+                        ConnectionStatus::Reconnecting { attempt: 1 } => {
+                            ToastManager::warning(
+                                format!("{}: Connection lost, reconnecting...", name),
+                                cx,
+                            );
+                        }
+                        ConnectionStatus::Connected
+                            if matches!(prev, ConnectionStatus::Reconnecting { .. }) =>
+                        {
+                            ToastManager::info(format!("{}: Reconnected", name), cx);
+                        }
+                        _ => {}
+                    }
                 }
                 cx.notify();
             }
@@ -238,6 +257,17 @@ impl RemoteConnectionManager {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.update_stream_mappings(mappings);
                 }
+            }
+            ConnectionEvent::ServerWarning {
+                connection_id,
+                message,
+            } => {
+                let name = self
+                    .connections
+                    .get(&connection_id)
+                    .map(|c| c.config.name.as_str())
+                    .unwrap_or("Remote");
+                ToastManager::warning(format!("{}: {}", name, message), cx);
             }
         }
     }

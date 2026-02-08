@@ -149,7 +149,6 @@ impl ToastManager {
         Self::post(Toast::warning(message), cx);
     }
 
-    #[allow(dead_code)]
     pub fn info(message: impl Into<String>, cx: &App) {
         Self::post(Toast::info(message), cx);
     }

@@ -52,6 +52,11 @@ pub(crate) enum ConnectionEvent {
         connection_id: String,
         mappings: HashMap<String, u32>,
     },
+    /// Warning from the remote server (dropped messages, errors)
+    ServerWarning {
+        connection_id: String,
+        message: String,
+    },
 }
 
 /// Manages a single WebSocket connection to a remote Okena server.
@@ -799,6 +804,15 @@ impl RemoteConnection {
                                         config_host,
                                         config_port
                                     );
+                                    let _ = event_tx_clone
+                                        .send(ConnectionEvent::ServerWarning {
+                                            connection_id: config_id.clone(),
+                                            message: format!(
+                                                "Server dropped {} messages",
+                                                count
+                                            ),
+                                        })
+                                        .await;
                                 }
                                 "error" => {
                                     let error = value
@@ -806,6 +820,12 @@ impl RemoteConnection {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("unknown");
                                     log::warn!("Server error: {}", error);
+                                    let _ = event_tx_clone
+                                        .send(ConnectionEvent::ServerWarning {
+                                            connection_id: config_id.clone(),
+                                            message: format!("Server error: {}", error),
+                                        })
+                                        .await;
                                 }
                                 _ => {
                                     log::debug!("Unknown WS message type: {}", msg_type);

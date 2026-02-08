@@ -1,5 +1,6 @@
 use crate::settings::settings;
 use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::views::panels::toast::ToastManager;
 use crate::workspace::state::LayoutNode;
 use gpui::*;
 use std::sync::Arc;
@@ -61,6 +62,7 @@ impl RootView {
                 }
                 Err(e) => {
                     log::error!("Failed to spawn terminal for worktree at path {:?}: {}", path, e);
+                    ToastManager::error(format!("Failed to create terminal: {}", e), cx);
                 }
             }
         }
@@ -143,6 +145,7 @@ impl RootView {
             }
             Err(e) => {
                 log::error!("switch_terminal_shell: Failed to create terminal with new shell: {}", e);
+                ToastManager::error(format!("Failed to create terminal: {}", e), cx);
             }
         }
     }
