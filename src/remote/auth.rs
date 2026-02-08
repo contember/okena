@@ -524,6 +524,7 @@ mod tests {
 
     #[test]
     fn refresh_valid_token_returns_new_different_token() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let original = pair_token(&store);
 
@@ -540,6 +541,7 @@ mod tests {
 
     #[test]
     fn both_tokens_valid_after_refresh() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let original = pair_token(&store);
 
@@ -551,7 +553,7 @@ mod tests {
 
     #[test]
     fn file_based_pair_succeeds_and_deletes_file() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let code = generate_pairing_code();
 
@@ -579,7 +581,7 @@ mod tests {
 
     #[test]
     fn persisted_tokens_survive_reload() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = vec![99u8; 32];
 
         // Create a store, pair a token (which saves to disk)
@@ -610,7 +612,7 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_filters_expired() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap();
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let now = SystemTime::now();
         let expired_time = now - Duration::from_secs(TOKEN_TTL_SECS + 1);
         let valid_time = now - Duration::from_secs(100);
