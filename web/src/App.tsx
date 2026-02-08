@@ -50,6 +50,11 @@ export function App() {
     [fetchState],
   );
 
+  // Keep a ref to the latest handleWsMessage so the WS effect doesn't
+  // need to re-run (and kill the connection) when the handler changes.
+  const handleWsMessageRef = useRef(handleWsMessage);
+  useEffect(() => { handleWsMessageRef.current = handleWsMessage; });
+
   // Check auth on mount
   useEffect(() => {
     const token = loadToken();
@@ -71,19 +76,19 @@ export function App() {
       });
   }, []);
 
-  // Connect WS when authed
+  // Connect WS when authed — use ref for handler to avoid re-running on handler changes
   useEffect(() => {
     if (!authed) return;
     const ws = wsRef.current;
     const registry = registryRef.current;
 
     ws.onPtyData = (streamId, data) => registry.write(streamId, data);
-    ws.onJson = handleWsMessage;
+    ws.onJson = (msg) => handleWsMessageRef.current(msg);
     ws.onStatus = (status: WsStatus) => dispatch({ type: "set_ws_status", status });
     ws.connect();
 
     return () => ws.dispose();
-  }, [authed, handleWsMessage]);
+  }, [authed]);
 
   // Token refresh scheduler
   useEffect(() => {

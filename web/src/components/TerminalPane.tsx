@@ -22,36 +22,16 @@ export function TerminalPane({
   const { ws, registry, state } = useApp();
   const resizeTimer = useRef<ReturnType<typeof setTimeout>>(null);
 
-  // Subscribe to terminal on mount
+  // Keep a ref to streamMappings so closures always see the latest value
+  const streamMappingsRef = useRef(state.streamMappings);
+  streamMappingsRef.current = state.streamMappings;
+
+  // Subscribe to terminal on mount (snapshot arrives automatically)
   useEffect(() => {
     if (!terminalId) return;
     ws.subscribe([terminalId]);
     return () => ws.unsubscribe([terminalId]);
   }, [terminalId, ws]);
-
-  // Fetch initial content (retry a few times since terminal may not be spawned yet)
-  useEffect(() => {
-    if (!terminalId) return;
-    let cancelled = false;
-    const fetchContent = async (retries: number) => {
-      for (let i = 0; i < retries; i++) {
-        if (cancelled) return;
-        try {
-          const result = await postAction({ action: "read_content", terminal_id: terminalId });
-          if (!cancelled && result.content && termRef.current) {
-            termRef.current.write(result.content as string);
-          }
-          return;
-        } catch {
-          if (i < retries - 1) {
-            await new Promise((r) => setTimeout(r, 500));
-          }
-        }
-      }
-    };
-    fetchContent(5);
-    return () => { cancelled = true; };
-  }, [terminalId]);
 
   // Register in TerminalRegistry when streamId is available
   const streamId = terminalId ? state.streamMappings[terminalId] : undefined;
@@ -138,10 +118,15 @@ export function TerminalPane({
     termRef.current = term;
     fitRef.current = fit;
 
-    // Forward user input to server
+    // Forward user input to server (prefer binary frames when streamId is available)
     if (terminalId) {
       term.onData((data) => {
-        ws.sendText(terminalId, data);
+        const sid = streamMappingsRef.current[terminalId];
+        if (sid != null) {
+          ws.sendBinaryInput(sid, data);
+        } else {
+          ws.sendText(terminalId, data);
+        }
       });
     }
 

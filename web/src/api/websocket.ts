@@ -1,5 +1,5 @@
 import type { WsInbound, WsOutbound } from "./types";
-import { parsePtyFrame } from "./types";
+import { parseBinaryFrame, buildBinaryFrame, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, FRAME_TYPE_INPUT } from "./types";
 import { loadToken } from "../auth/token";
 
 export type WsStatus = "connecting" | "connected" | "disconnected";
@@ -19,7 +19,7 @@ export class WsManager {
   onStatus: StatusHandler = () => {};
 
   connect(): void {
-    if (this.disposed) return;
+    this.disposed = false;
     this.cleanup();
     this.onStatus("connecting");
 
@@ -38,8 +38,8 @@ export class WsManager {
 
     this.ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        const frame = parsePtyFrame(event.data);
-        if (frame) {
+        const frame = parseBinaryFrame(event.data);
+        if (frame && (frame.frameType === FRAME_TYPE_PTY || frame.frameType === FRAME_TYPE_SNAPSHOT)) {
           this.onPtyData(frame.streamId, frame.payload);
         }
         return;
@@ -81,6 +81,13 @@ export class WsManager {
 
   sendText(terminalId: string, text: string): void {
     this.sendJson({ type: "send_text", terminal_id: terminalId, text });
+  }
+
+  /** Send terminal input as a binary frame (more efficient than JSON for keystrokes). */
+  sendBinaryInput(streamId: number, text: string): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    const encoded = new TextEncoder().encode(text);
+    this.ws.send(buildBinaryFrame(FRAME_TYPE_INPUT, streamId, encoded));
   }
 
   resize(terminalId: string, cols: number, rows: number): void {

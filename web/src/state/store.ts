@@ -4,20 +4,44 @@ import { WsManager, type WsStatus } from "../api/websocket";
 
 // ── Terminal Registry ───────────────────────────────────────────────────────
 
-/** Maps streamId → xterm.write callback */
+/**
+ * Maps streamId → xterm.write callback, with buffering for data that
+ * arrives before a handler is registered (e.g. snapshot frames).
+ */
 export class TerminalRegistry {
   private handlers = new Map<number, (data: Uint8Array) => void>();
+  private pendingData = new Map<number, Uint8Array[]>();
 
   register(streamId: number, handler: (data: Uint8Array) => void): void {
     this.handlers.set(streamId, handler);
+    // Flush any data that arrived before the handler was registered
+    const pending = this.pendingData.get(streamId);
+    if (pending) {
+      for (const data of pending) {
+        handler(data);
+      }
+      this.pendingData.delete(streamId);
+    }
   }
 
   unregister(streamId: number): void {
     this.handlers.delete(streamId);
+    this.pendingData.delete(streamId);
   }
 
   write(streamId: number, data: Uint8Array): void {
-    this.handlers.get(streamId)?.(data);
+    const handler = this.handlers.get(streamId);
+    if (handler) {
+      handler(data);
+    } else {
+      // Buffer data until a handler is registered
+      let pending = this.pendingData.get(streamId);
+      if (!pending) {
+        pending = [];
+        this.pendingData.set(streamId, pending);
+      }
+      pending.push(data);
+    }
   }
 }
 

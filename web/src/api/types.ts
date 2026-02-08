@@ -102,15 +102,31 @@ export type SpecialKey =
   | "PageUp"
   | "PageDown";
 
-// ── Binary frame parsing ────────────────────────────────────────────────────
+// ── Binary frame protocol ───────────────────────────────────────────────────
 
-/** Parse a binary PTY frame: [proto=1][type=1][streamId:u32BE][data...] */
-export function parsePtyFrame(data: ArrayBuffer): { streamId: number; payload: Uint8Array } | null {
+export const FRAME_TYPE_PTY = 1; // server → client: live PTY output
+export const FRAME_TYPE_SNAPSHOT = 2; // server → client: full screen redraw
+export const FRAME_TYPE_INPUT = 3; // client → server: terminal input
+
+/** Parse a generic binary frame: [proto=1][frameType][streamId:u32BE][payload...] */
+export function parseBinaryFrame(data: ArrayBuffer): { frameType: number; streamId: number; payload: Uint8Array } | null {
   const view = new DataView(data);
-  if (data.byteLength < 6 || view.getUint8(0) !== 1 || view.getUint8(1) !== 1) {
+  if (data.byteLength < 6 || view.getUint8(0) !== 1) {
     return null;
   }
+  const frameType = view.getUint8(1);
   const streamId = view.getUint32(2, false); // big-endian
   const payload = new Uint8Array(data, 6);
-  return { streamId, payload };
+  return { frameType, streamId, payload };
+}
+
+/** Build a binary frame: [proto=1][frameType][streamId:u32BE][payload...] */
+export function buildBinaryFrame(frameType: number, streamId: number, payload: Uint8Array): ArrayBuffer {
+  const frame = new ArrayBuffer(6 + payload.length);
+  const view = new DataView(frame);
+  view.setUint8(0, 1); // proto version
+  view.setUint8(1, frameType);
+  view.setUint32(2, streamId, false); // big-endian
+  new Uint8Array(frame, 6).set(payload);
+  return frame;
 }
