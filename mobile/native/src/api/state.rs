@@ -81,6 +81,19 @@ pub async fn send_special_key(
     Ok(())
 }
 
+/// Get a project's layout tree as JSON.
+///
+/// Returns the `ApiLayoutNode` serialized as JSON, or `None` if the project
+/// has no layout. Using JSON avoids complex recursive enum FRB codegen.
+#[flutter_rust_bridge::frb(sync)]
+pub fn get_project_layout_json(conn_id: String, project_id: String) -> Option<String> {
+    let mgr = ConnectionManager::get();
+    let state = mgr.get_state(&conn_id)?;
+    let project = state.projects.iter().find(|p| p.id == project_id)?;
+    let layout = project.layout.as_ref()?;
+    serde_json::to_string(layout).ok()
+}
+
 /// Get all terminal IDs from the cached remote state (flat list).
 #[flutter_rust_bridge::frb(sync)]
 pub fn get_all_terminal_ids(conn_id: String) -> Vec<String> {

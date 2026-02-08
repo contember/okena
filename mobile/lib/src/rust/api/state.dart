@@ -36,6 +36,18 @@ Future<void> sendSpecialKey({
   key: key,
 );
 
+/// Get a project's layout tree as JSON.
+///
+/// Returns the `ApiLayoutNode` serialized as JSON, or `None` if the project
+/// has no layout. Using JSON avoids complex recursive enum FRB codegen.
+String? getProjectLayoutJson({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateGetProjectLayoutJson(
+  connId: connId,
+  projectId: projectId,
+);
+
 /// Get all terminal IDs from the cached remote state (flat list).
 List<String> getAllTerminalIds({required String connId}) =>
     RustLib.instance.api.crateApiStateGetAllTerminalIds(connId: connId);
