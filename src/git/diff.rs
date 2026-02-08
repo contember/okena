@@ -601,4 +601,144 @@ mod tests {
         assert_eq!(DiffMode::WorkingTree.toggle(), DiffMode::Staged);
         assert_eq!(DiffMode::Staged.toggle(), DiffMode::WorkingTree);
     }
+
+    #[test]
+    fn test_parse_multiple_hunks() {
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    println!("Hello");
+     println!("World");
+ }
+@@ -10,3 +11,4 @@
+ fn other() {
++    println!("Added");
+     println!("Existing");
+ }
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].hunks.len(), 2);
+        assert_eq!(result.files[0].lines_added, 2);
+    }
+
+    #[test]
+    fn test_parse_multiple_files() {
+        let diff = r#"diff --git a/file1.rs b/file1.rs
+--- a/file1.rs
++++ b/file1.rs
+@@ -1,2 +1,3 @@
+ line1
++added
+ line2
+diff --git a/file2.rs b/file2.rs
+--- a/file2.rs
++++ b/file2.rs
+@@ -1,3 +1,2 @@
+ line1
+-removed
+ line2
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(result.files[0].new_path, Some("file1.rs".to_string()));
+        assert_eq!(result.files[0].lines_added, 1);
+        assert_eq!(result.files[1].new_path, Some("file2.rs".to_string()));
+        assert_eq!(result.files[1].lines_removed, 1);
+    }
+
+    #[test]
+    fn test_parse_binary_file() {
+        let diff = r#"diff --git a/image.png b/image.png
+Binary files a/image.png and b/image.png differ
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].is_binary);
+        assert!(result.files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_diff() {
+        let result = parse_unified_diff("");
+        assert!(result.is_empty());
+        assert_eq!(result.total_added(), 0);
+        assert_eq!(result.total_removed(), 0);
+    }
+
+    #[test]
+    fn test_diff_result_stats() {
+        let diff = r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,3 +1,4 @@
+ ctx
++add1
++add2
+-rem1
+ ctx
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1,2 +1,3 @@
+ ctx
++add3
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.total_added(), 3);
+        assert_eq!(result.total_removed(), 1);
+    }
+
+    #[test]
+    fn test_file_diff_display_name() {
+        let file = FileDiff {
+            old_path: Some("old.rs".to_string()),
+            new_path: Some("new.rs".to_string()),
+            hunks: vec![],
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        assert_eq!(file.display_name(), "new.rs");
+
+        let deleted = FileDiff {
+            old_path: Some("old.rs".to_string()),
+            new_path: None,
+            hunks: vec![],
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        assert_eq!(deleted.display_name(), "old.rs");
+
+        let unknown = FileDiff {
+            old_path: None,
+            new_path: None,
+            hunks: vec![],
+            is_binary: false,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        assert_eq!(unknown.display_name(), "unknown");
+    }
+
+    #[test]
+    fn test_parse_no_newline_at_eof() {
+        let diff = r#"diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,2 +1,2 @@
+ line1
+-line2
+\ No newline at end of file
++line2_modified
+\ No newline at end of file
+"#;
+        let result = parse_unified_diff(diff);
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].lines_added, 1);
+        assert_eq!(result.files[0].lines_removed, 1);
+    }
 }

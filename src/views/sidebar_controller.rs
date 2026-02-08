@@ -251,4 +251,73 @@ mod tests {
         assert!(!ctrl.is_hover_shown());
         assert_eq!(target, AnimationTarget::Close);
     }
+
+    #[test]
+    fn test_width_clamping() {
+        let mut settings = test_settings();
+        let mut ctrl = SidebarController::new(&settings);
+
+        ctrl.set_width(10.0, &mut settings); // below MIN
+        assert_eq!(ctrl.width(), MIN_SIDEBAR_WIDTH);
+
+        ctrl.set_width(9999.0, &mut settings); // above MAX
+        assert_eq!(ctrl.width(), MAX_SIDEBAR_WIDTH);
+
+        ctrl.set_width(300.0, &mut settings); // within range
+        assert_eq!(ctrl.width(), 300.0);
+    }
+
+    #[test]
+    fn test_current_width_interpolation() {
+        let settings = test_settings();
+        let mut ctrl = SidebarController::new(&settings);
+        ctrl.set_animation(0.0);
+        assert_eq!(ctrl.current_width(), 0.0);
+
+        ctrl.set_animation(0.5);
+        assert!((ctrl.current_width() - ctrl.width() * 0.5).abs() < 0.01);
+
+        ctrl.set_animation(1.0);
+        assert_eq!(ctrl.current_width(), ctrl.width());
+    }
+
+    #[test]
+    fn test_should_render() {
+        let settings = test_settings();
+        let mut ctrl = SidebarController::new(&settings);
+        ctrl.set_animation(0.0);
+        assert!(!ctrl.should_render());
+
+        ctrl.set_animation(0.02);
+        assert!(ctrl.should_render());
+
+        ctrl.set_animation(1.0);
+        assert!(ctrl.should_render());
+    }
+
+    #[test]
+    fn test_ease_progress_endpoints() {
+        // At step 0, should be at current value
+        let val = SidebarController::ease_progress(0.0, 1.0, 0, 10);
+        assert!((val - 0.0).abs() < 0.01);
+
+        // At total_steps, should be at target value
+        let val = SidebarController::ease_progress(0.0, 1.0, 10, 10);
+        assert!((val - 1.0).abs() < 0.01);
+
+        // Midpoint should be between current and target
+        let val = SidebarController::ease_progress(0.0, 1.0, 5, 10);
+        assert!(val > 0.0 && val < 1.0);
+    }
+
+    #[test]
+    fn test_animation_clamping() {
+        let settings = test_settings();
+        let mut ctrl = SidebarController::new(&settings);
+        ctrl.set_animation(-0.5);
+        assert_eq!(ctrl.animation(), 0.0);
+
+        ctrl.set_animation(1.5);
+        assert_eq!(ctrl.animation(), 1.0);
+    }
 }
