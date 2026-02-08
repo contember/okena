@@ -430,7 +430,9 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_rx: &async_channel::Receiver<WsClientMessage>,
         handler: &Arc<H>,
     ) -> Result<(), SessionError> {
-        // Local reverse stream map: stream_id -> remote terminal_id
+        // Shared stream maps: terminal_id -> stream_id (for writer) and reverse (for reader)
+        let stream_map: Arc<std::sync::RwLock<HashMap<String, u32>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
         let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
         let ws_url = format!("ws://{}:{}/v1/stream", config.host, config.port);
 
@@ -572,8 +574,34 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Spawn writer task
         let ws_rx_clone = ws_rx.clone();
+        let stream_map_for_writer = stream_map.clone();
         let writer_handle = tokio::spawn(async move {
             while let Ok(msg) = ws_rx_clone.recv().await {
+                // For SendText, prefer binary frame when stream_id is known
+                if let WsClientMessage::SendText { terminal_id, text } = &msg {
+                    let stream_id = stream_map_for_writer
+                        .read()
+                        .ok()
+                        .and_then(|m| m.get(terminal_id).copied());
+                    if let Some(sid) = stream_id {
+                        let frame = crate::ws::build_binary_frame(
+                            crate::ws::FRAME_TYPE_INPUT,
+                            sid,
+                            text.as_bytes(),
+                        );
+                        if let Err(e) = futures::SinkExt::send(
+                            &mut ws_write,
+                            tungstenite::Message::Binary(frame.into()),
+                        )
+                        .await
+                        {
+                            log::warn!("Failed to send binary input: {}", e);
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
                 let json = match &msg {
                     WsClientMessage::SendText { terminal_id, text } => {
                         serde_json::json!({
@@ -630,20 +658,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         loop {
             match futures::StreamExt::next(&mut ws_read).await {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
-                    // Binary frame: [proto:1][type:1][stream_id:4 BE][data...]
-                    if data.len() < 6 {
-                        continue;
-                    }
-                    let _proto = data[0];
-                    let _msg_type = data[1];
-                    let stream_id =
-                        u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
-                    let payload = &data[6..];
-
-                    // Route binary data to the correct terminal via handler
-                    if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
-                        let prefixed = make_prefixed_id(&config_id, remote_tid);
-                        handler_clone.on_terminal_output(&prefixed, payload);
+                    // Generic binary frame: [proto:1][type:1][stream_id:4 BE][payload...]
+                    if let Some((frame_type, stream_id, payload)) =
+                        crate::ws::parse_binary_frame(&data)
+                    {
+                        match frame_type {
+                            crate::ws::FRAME_TYPE_PTY | crate::ws::FRAME_TYPE_SNAPSHOT => {
+                                // Route PTY output or snapshot to the correct terminal
+                                if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
+                                    let prefixed = make_prefixed_id(&config_id, remote_tid);
+                                    handler_clone.on_terminal_output(&prefixed, payload);
+                                }
+                            }
+                            _ => {
+                                log::debug!("Unknown binary frame type: {}", frame_type);
+                            }
+                        }
                     }
                 }
                 Some(Ok(tungstenite::Message::Text(text))) => {
@@ -669,6 +699,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             for (terminal_id, stream_id) in &map {
                                                 reverse_stream_map
                                                     .insert(*stream_id, terminal_id.clone());
+                                            }
+                                            // Update shared stream_map for writer task
+                                            if let Ok(mut sm) = stream_map.write() {
+                                                for (terminal_id, stream_id) in &map {
+                                                    sm.insert(terminal_id.clone(), *stream_id);
+                                                }
                                             }
                                             let _ = event_tx_clone
                                                 .send(ConnectionEvent::SubscriptionMappings {
