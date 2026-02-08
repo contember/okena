@@ -2,9 +2,11 @@ name: Build
 
 on:
   push:
+    branches: ['**']
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,7 +15,50 @@ env:
   RUSTUP_MAX_RETRIES: 10
 
 jobs:
+  # Runs on every push: Linux check + tests
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-unknown-linux-gnu
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libegl1-mesa-dev \
+            libssl-dev \
+            pkg-config \
+            cmake
+
+      - name: Check compilation
+        run: cargo check --release
+
+      - name: Run tests
+        run: cargo test
+
+  # Full multi-platform build: tags + manual trigger
   build:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,7 +93,6 @@ jobs:
           shared-key: ${{ matrix.target }}
           save-if: ${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # Linux dependencies (GPUI requires these)
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -67,16 +111,11 @@ jobs:
             pkg-config \
             cmake
 
-      - name: Check compilation
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: cargo check --release --target ${{ matrix.target }}
-
       - name: Build
-        if: startsWith(github.ref, 'refs/tags/v')
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare artifact (Linux)
-        if: runner.os == 'Linux' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist/icons
           cp target/${{ matrix.target }}/release/okena dist/
@@ -88,19 +127,18 @@ jobs:
           cp okena.desktop dist/
 
       - name: Create macOS app bundle
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'macOS'
         run: |
           chmod +x scripts/bundle-macos.sh
           ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
 
       - name: Prepare artifact (Windows)
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows'
         run: |
           mkdir dist
           copy target\${{ matrix.target }}\release\okena.exe dist\
 
       - name: Upload artifact
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
