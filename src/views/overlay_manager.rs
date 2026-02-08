@@ -219,10 +219,9 @@ pub enum OverlayManagerEvent {
     /// Project switcher: Toggle project visibility
     ToggleProjectVisibility(String),
 
-    /// Remote connect dialog: connection configured with pairing code
+    /// Remote connect dialog: connection paired and ready
     RemoteConnected {
         config: RemoteConnectionConfig,
-        code: String,
     },
 
     /// Remote context menu: reconnect to a connection
@@ -773,10 +772,9 @@ impl OverlayManager {
                     RemoteConnectDialogEvent::Close => {
                         this.close_modal(cx);
                     }
-                    RemoteConnectDialogEvent::Connected { config, code } => {
+                    RemoteConnectDialogEvent::Connected { config } => {
                         cx.emit(OverlayManagerEvent::RemoteConnected {
                             config: config.clone(),
-                            code: code.clone(),
                         });
                         this.close_modal(cx);
                     }

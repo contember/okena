@@ -108,6 +108,11 @@ impl RemoteConnectionManager {
         cx.notify();
     }
 
+    /// Get a handle to the tokio runtime (for running reqwest in dialogs).
+    pub fn runtime(&self) -> Arc<tokio::runtime::Runtime> {
+        self.runtime.clone()
+    }
+
     /// Pair with a remote server using a code.
     pub fn pair(&mut self, connection_id: &str, code: &str, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.get_mut(connection_id) {
