@@ -9,6 +9,11 @@ import '../../src/rust/api/state.dart' as state_ffi;
 import '../theme/app_theme.dart';
 import 'terminal_painter.dart';
 
+// Sentinel buffer: keeps spaces in the TextField so backspace always has
+// something to delete. Without this, Android's soft keyboard backspace
+// is a no-op on an empty field and onChanged never fires.
+const _kSentinel = '        '; // 8 spaces
+
 class TerminalView extends StatefulWidget {
   final String connId;
   final String terminalId;
@@ -41,8 +46,8 @@ class _TerminalViewState extends State<TerminalView> {
 
   // Keyboard input: TextField with its own FocusNode, delta-based tracking
   late final FocusNode _inputFocusNode;
-  final _textController = TextEditingController();
-  String _lastInputText = '';
+  final _textController = TextEditingController(text: _kSentinel);
+  String _lastInputText = _kSentinel;
 
   @override
   void initState() {
@@ -137,6 +142,13 @@ class _TerminalViewState extends State<TerminalView> {
     }
   }
 
+  void _resetSentinel() {
+    _textController.text = _kSentinel;
+    _textController.selection =
+        TextSelection.collapsed(offset: _kSentinel.length);
+    _lastInputText = _kSentinel;
+  }
+
   void _onTextChanged(String newText) {
     if (newText.length > _lastInputText.length) {
       // Characters added — send the delta
@@ -159,10 +171,13 @@ class _TerminalViewState extends State<TerminalView> {
     }
     _lastInputText = newText;
 
-    // Periodically reset to prevent unbounded string growth
+    // Re-seed if buffer runs low (backspace ate into the sentinel)
+    if (newText.length < 3) {
+      _resetSentinel();
+    }
+    // Reset if too long to prevent unbounded growth
     if (newText.length > 200) {
-      _textController.clear();
-      _lastInputText = '';
+      _resetSentinel();
     }
   }
 
@@ -176,6 +191,8 @@ class _TerminalViewState extends State<TerminalView> {
 
     if (key == LogicalKeyboardKey.enter) {
       specialKey = 'Enter';
+    } else if (key == LogicalKeyboardKey.backspace) {
+      specialKey = 'Backspace';
     } else if (key == LogicalKeyboardKey.arrowUp) {
       specialKey = 'ArrowUp';
     } else if (key == LogicalKeyboardKey.arrowDown) {
@@ -242,15 +259,16 @@ class _TerminalViewState extends State<TerminalView> {
                     fontFamily: TerminalTheme.fontFamily,
                   ),
                 ),
-                // Transparent text field overlay for soft keyboard input.
-                // Must be in-layout (not off-screen) so Android shows the keyboard.
+                // Transparent text field for soft keyboard input.
+                // Sized 1x1 in-layout (not off-screen) so Android shows the
+                // keyboard. Opacity > 0 to keep IME interaction working.
                 Positioned(
                   left: 0,
                   bottom: 0,
                   width: 1,
                   height: 1,
                   child: Opacity(
-                    opacity: 0,
+                    opacity: 0.01,
                     child: TextField(
                       focusNode: _inputFocusNode,
                       controller: _textController,
