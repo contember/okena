@@ -60,6 +60,10 @@ pub enum RemoteCommand {
     CreateTerminal {
         project_id: String,
     },
+    /// Render a terminal's visible content as ANSI bytes (for snapshots).
+    RenderSnapshot {
+        terminal_id: String,
+    },
 }
 
 /// Result of processing a RemoteCommand.
@@ -67,6 +71,8 @@ pub enum RemoteCommand {
 pub enum CommandResult {
     /// Success with optional JSON-serializable payload.
     Ok(Option<serde_json::Value>),
+    /// Success with raw bytes (e.g., terminal snapshots).
+    OkBytes(Vec<u8>),
     /// Error with a human-readable message.
     Err(String),
 }
