@@ -91,70 +91,36 @@ fn set_app_menus(cx: &mut App) {
     ]);
 }
 
-/// `okena pair` — retrieve the pairing code from a running Okena instance.
+/// `okena pair` — generate a pairing code and write it to a file for the running server to validate.
 fn cli_pair() -> i32 {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("okena");
-    let remote_json_path = config_dir.join("remote.json");
+    use crate::remote::auth::{generate_pairing_code, pair_code_path};
 
-    let data = match std::fs::read_to_string(&remote_json_path) {
-        Ok(d) => d,
-        Err(_) => {
-            eprintln!("Okena remote server is not running (no remote.json found).");
-            eprintln!("Start Okena with --remote or enable the remote server in settings.");
+    let code = generate_pairing_code();
+    let path = pair_code_path();
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("Failed to create config directory: {e}");
             return 1;
         }
-    };
+    }
 
-    let json: serde_json::Value = match serde_json::from_str(&data) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("Failed to parse remote.json.");
-            return 1;
-        }
-    };
-
-    let port = match json.get("port").and_then(|v| v.as_u64()) {
-        Some(p) => p as u16,
-        None => {
-            eprintln!("Invalid remote.json: missing port.");
-            return 1;
-        }
-    };
-
-    let url = format!("http://127.0.0.1:{port}/v1/local/pair-code");
-    let resp = match reqwest::blocking::get(&url) {
-        Ok(r) => r,
-        Err(_) => {
-            eprintln!("Could not connect to Okena on port {port}.");
-            eprintln!("The remote server may not be running.");
-            return 1;
-        }
-    };
-
-    if !resp.status().is_success() {
-        eprintln!("Server returned status {}.", resp.status());
+    if let Err(e) = std::fs::write(&path, &code) {
+        eprintln!("Failed to write pairing code: {e}");
         return 1;
     }
 
-    let body: serde_json::Value = match resp.json() {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("Invalid response from server.");
-            return 1;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            eprintln!("Warning: failed to set file permissions: {e}");
         }
-    };
-
-    let code = body
-        .get("code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("???");
-    let expires_in = body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(60);
+    }
 
     println!("Pairing code: {code}");
-    println!("Expires in {expires_in}s — run `okena pair` again for a fresh code.");
-    println!("Server port: {port}");
+    println!("Expires in 60s — run `okena pair` again for a fresh code.");
     0
 }
 

@@ -144,8 +144,8 @@ impl AuthStore {
             return Err(PairError::RateLimited);
         }
 
-        // Validate code
-        let valid = match &inner.current_code {
+        // Validate code — try in-memory first, then file-based fallback
+        let in_memory_valid = match &inner.current_code {
             Some(current) => {
                 let now = Instant::now();
                 let not_expired = now.duration_since(inner.code_created_at) < Duration::from_secs(60);
@@ -154,7 +154,13 @@ impl AuthStore {
             None => false,
         };
 
-        if !valid {
+        let file_valid = if !in_memory_valid {
+            check_file_pair_code(code)
+        } else {
+            false
+        };
+
+        if !in_memory_valid && !file_valid {
             return Err(PairError::InvalidCode);
         }
 
@@ -184,8 +190,13 @@ impl AuthStore {
             inner.tokens.drain(0..count - MAX_TOKENS);
         }
 
-        // Rotate the pairing code (invalidate current one)
-        inner.current_code = None;
+        // Invalidate the code that was used
+        if in_memory_valid {
+            inner.current_code = None;
+        }
+        if file_valid {
+            let _ = std::fs::remove_file(pair_code_path());
+        }
 
         Ok(token)
     }
@@ -261,6 +272,35 @@ pub enum PairError {
     RateLimited,
 }
 
+/// Check a pairing code against the file-based code written by `okena pair` CLI.
+/// Returns true if the file exists, was modified within 60s, and the code matches.
+fn check_file_pair_code(code: &str) -> bool {
+    let path = pair_code_path();
+    let metadata = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // Check mtime is within 60s
+    let modified = match metadata.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::from_secs(u64::MAX));
+    if age > Duration::from_secs(60) {
+        return false;
+    }
+
+    let file_code = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    constant_time_eq(file_code.trim().as_bytes(), code.as_bytes())
+}
+
 /// Compute HMAC-SHA256.
 fn compute_hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length is always valid");
@@ -277,8 +317,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+/// Path to the file-based pairing code (written by `okena pair` CLI).
+pub fn pair_code_path() -> std::path::PathBuf {
+    crate::workspace::persistence::config_dir().join("pair_code")
+}
+
 /// Generate a pairing code: "XXXX-XXXX" from base32 alphabet (A-Z, 2-7).
-fn generate_pairing_code() -> String {
+pub fn generate_pairing_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut rng = rand::thread_rng();
     let mut code = String::with_capacity(9);
@@ -379,5 +424,32 @@ mod tests {
 
         assert!(store.validate_token(&original), "original token should still be valid");
         assert!(store.validate_token(&refreshed), "refreshed token should be valid");
+    }
+
+    #[test]
+    fn file_based_pair_succeeds_and_deletes_file() {
+        let store = test_store();
+        let code = generate_pairing_code();
+
+        // Write code to a temp file and override pair_code_path by writing directly
+        let path = pair_code_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, &code).expect("write pair_code");
+
+        let result = store.try_pair(&code, test_ip());
+        assert!(result.is_ok(), "file-based pairing should succeed");
+        assert!(!path.exists(), "pair_code file should be deleted after successful pairing");
+    }
+
+    #[test]
+    fn no_in_memory_code_and_no_file_returns_invalid() {
+        let store = test_store();
+        // No in-memory code, no file
+        let _ = std::fs::remove_file(pair_code_path());
+
+        let result = store.try_pair("ABCD-EFGH", test_ip());
+        assert!(matches!(result, Err(PairError::InvalidCode)));
     }
 }
