@@ -1,9 +1,24 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { postAction } from "../api/client";
 import { useApp } from "../state/store";
+
+/** Minimum container dimensions (px) required for fit() to produce usable results. */
+const MIN_FIT_WIDTH = 40;
+const MIN_FIT_HEIGHT = 30;
+
+function safeFit(fit: FitAddon, container: HTMLElement): boolean {
+  const { width, height } = container.getBoundingClientRect();
+  if (width < MIN_FIT_WIDTH || height < MIN_FIT_HEIGHT) return false;
+  try {
+    fit.fit();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function TerminalPane({
   terminalId,
@@ -23,6 +38,9 @@ export function TerminalPane({
   const fitRef = useRef<FitAddon | null>(null);
   const { ws, registry, state } = useApp();
   const resizeTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  // Incremented when a new xterm instance is created, so the registration
+  // effect re-runs even if streamId hasn't changed (e.g. after split remount).
+  const [termReady, setTermReady] = useState(0);
 
   // Keep a ref to streamMappings so closures always see the latest value
   const streamMappingsRef = useRef(state.streamMappings);
@@ -35,7 +53,8 @@ export function TerminalPane({
     return () => ws.unsubscribe([terminalId]);
   }, [terminalId, ws]);
 
-  // Register in TerminalRegistry when streamId is available
+  // Register in TerminalRegistry when streamId is available AND terminal is ready.
+  // `termReady` ensures this re-runs after the xterm instance is (re)created.
   const streamId = terminalId ? state.streamMappings[terminalId] : undefined;
 
   useEffect(() => {
@@ -43,13 +62,13 @@ export function TerminalPane({
     const term = termRef.current;
     registry.register(streamId, (data) => term.write(data));
     return () => registry.unregister(streamId);
-  }, [streamId, registry]);
+  }, [streamId, registry, termReady]);
 
   // Send resize when terminal dimensions change
   const sendResize = useCallback(() => {
     if (!terminalId || !termRef.current) return;
     const { cols, rows } = termRef.current;
-    if (cols > 0 && rows > 0) {
+    if (cols > 1 && rows > 1) {
       ws.resize(terminalId, cols, rows);
     }
   }, [terminalId, ws]);
@@ -110,16 +129,22 @@ export function TerminalPane({
 
     // Try WebGL renderer, fall back to canvas
     try {
-      term.loadAddon(new WebglAddon());
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose(); // Falls back to canvas renderer
+      });
+      term.loadAddon(webgl);
     } catch {
       // WebGL not supported, canvas renderer is fine
     }
 
-    fit.fit();
-    sendResize(); // Send resize immediately so server knows our dimensions
+    const container = containerRef.current;
+    safeFit(fit, container);
+    sendResize();
 
     termRef.current = term;
     fitRef.current = fit;
+    setTermReady((r) => r + 1);
 
     // Forward user input to server (prefer binary frames when streamId is available)
     if (terminalId) {
@@ -137,11 +162,12 @@ export function TerminalPane({
     const observer = new ResizeObserver(() => {
       if (resizeTimer.current) clearTimeout(resizeTimer.current);
       resizeTimer.current = setTimeout(() => {
-        fit.fit();
-        sendResize();
+        if (safeFit(fit, container)) {
+          sendResize();
+        }
       }, 100);
     });
-    observer.observe(containerRef.current);
+    observer.observe(container);
 
     return () => {
       observer.disconnect();
@@ -195,7 +221,7 @@ export function TerminalPane({
           </button>
         </div>
       </div>
-      <div ref={containerRef} className="flex-1 min-h-0" />
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden" />
     </div>
   );
 }
