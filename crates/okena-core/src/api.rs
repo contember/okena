@@ -93,6 +93,9 @@ pub enum ActionRequest {
         cols: u16,
         rows: u16,
     },
+    CreateTerminal {
+        project_id: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -221,6 +224,9 @@ mod tests {
                 terminal_id: "t1".into(),
                 cols: 80,
                 rows: 24,
+            },
+            ActionRequest::CreateTerminal {
+                project_id: "p1".into(),
             },
         ];
         for action in actions {

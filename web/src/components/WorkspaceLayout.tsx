@@ -1,4 +1,5 @@
 import { useApp } from "../state/store";
+import { postAction } from "../api/client";
 import { Sidebar } from "./Sidebar";
 import { TerminalArea } from "./TerminalArea";
 import { StatusBar } from "./StatusBar";
@@ -18,9 +19,20 @@ export function WorkspaceLayout() {
             <TerminalArea layout={project.layout} project={project} />
           ) : (
             <div className="flex items-center justify-center h-full text-zinc-500">
-              {state.workspace
-                ? "Select a project"
-                : "Loading..."}
+              {state.workspace ? (
+                project ? (
+                  <button
+                    className="px-4 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 transition-colors"
+                    onClick={() => postAction({ action: "create_terminal", project_id: project.id })}
+                  >
+                    New Terminal
+                  </button>
+                ) : (
+                  "Select a project"
+                )
+              ) : (
+                "Loading..."
+              )}
             </div>
           )}
         </main>

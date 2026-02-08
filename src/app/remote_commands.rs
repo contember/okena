@@ -249,6 +249,14 @@ impl Okena {
                             })
                         })
                     }
+                    RemoteCommand::CreateTerminal { project_id } => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.start_terminal(&project_id, cx);
+                                CommandResult::Ok(None)
+                            })
+                        })
+                    }
                 };
 
                 let _ = msg.reply.send(result);

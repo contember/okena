@@ -56,6 +56,10 @@ pub enum RemoteCommand {
         cols: u16,
         rows: u16,
     },
+    /// Create a terminal for a project that has no layout.
+    CreateTerminal {
+        project_id: String,
+    },
 }
 
 /// Result of processing a RemoteCommand.
