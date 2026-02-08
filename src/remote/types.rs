@@ -4,7 +4,10 @@ pub use okena_core::api::{
     PairRequest, PairResponse, StateResponse,
 };
 #[allow(unused_imports)]
-pub use okena_core::ws::{WsInbound, WsOutbound, build_pty_frame, parse_pty_frame};
+pub use okena_core::ws::{
+    WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
+    parse_pty_frame, FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION,
+};
 
 use crate::workspace::state::LayoutNode;
 
