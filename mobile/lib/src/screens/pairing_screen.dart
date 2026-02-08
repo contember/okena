@@ -88,16 +88,17 @@ class _PairingScreenState extends State<PairingScreen> {
               TextField(
                 controller: _codeController,
                 decoration: const InputDecoration(
-                  labelText: 'Pairing Code',
+                  labelText: 'XXXX-XXXX',
                   border: OutlineInputBorder(),
                 ),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 24,
-                  letterSpacing: 8,
+                  letterSpacing: 4,
                   fontFamily: 'monospace',
                 ),
-                keyboardType: TextInputType.number,
+                textCapitalization: TextCapitalization.characters,
+                keyboardType: TextInputType.text,
                 autofocus: true,
                 onSubmitted: (_) => _submitCode(),
               ),
