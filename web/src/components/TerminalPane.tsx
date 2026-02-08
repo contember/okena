@@ -8,9 +8,13 @@ import { useApp } from "../state/store";
 export function TerminalPane({
   terminalId,
   name,
+  projectId,
+  path,
 }: {
   terminalId: string | null;
   name?: string;
+  projectId: string;
+  path: number[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -67,6 +71,21 @@ export function TerminalPane({
       ws.resize(terminalId, cols, rows);
     }
   }, [terminalId, ws]);
+
+  // Actions
+  const handleFocus = useCallback(() => {
+    if (!terminalId) return;
+    postAction({ action: "focus_terminal", project_id: projectId, terminal_id: terminalId }).catch(() => {});
+  }, [terminalId, projectId]);
+
+  const handleSplit = useCallback((direction: "horizontal" | "vertical") => {
+    postAction({ action: "split_terminal", project_id: projectId, path, direction }).catch(() => {});
+  }, [projectId, path]);
+
+  const handleClose = useCallback(() => {
+    if (!terminalId) return;
+    postAction({ action: "close_terminal", project_id: projectId, terminal_id: terminalId }).catch(() => {});
+  }, [terminalId, projectId]);
 
   // Create xterm.js instance
   useEffect(() => {
@@ -154,12 +173,36 @@ export function TerminalPane({
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {name && (
-        <div className="flex-shrink-0 px-2 py-1 text-xs text-zinc-500 bg-zinc-900 border-b border-zinc-800 truncate">
-          {name}
+    <div className="flex flex-col h-full" onMouseDown={handleFocus}>
+      {/* Header with name and action buttons */}
+      <div className="flex items-center flex-shrink-0 px-2 py-1 bg-zinc-900 border-b border-zinc-800">
+        <span className="text-xs text-zinc-500 truncate flex-1">
+          {name ?? "Terminal"}
+        </span>
+        <div className="flex items-center gap-0.5 ml-2">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleSplit("horizontal"); }}
+            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+            title="Split horizontal"
+          >
+            &#x2502;
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleSplit("vertical"); }}
+            className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700 rounded text-xs"
+            title="Split vertical"
+          >
+            &#x2500;
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleClose(); }}
+            className="p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-700 rounded text-xs"
+            title="Close terminal"
+          >
+            &#x2715;
+          </button>
         </div>
-      )}
+      </div>
       <div ref={containerRef} className="flex-1 min-h-0" />
     </div>
   );

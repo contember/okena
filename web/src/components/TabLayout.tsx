@@ -6,10 +6,12 @@ export function TabLayout({
   activeTab: initialActive,
   children,
   project,
+  path,
 }: {
   activeTab: number;
   children: ApiLayoutNode[];
   project: ApiProject;
+  path: number[];
 }) {
   const [activeIdx, setActiveIdx] = useState(initialActive);
   const clamped = Math.min(activeIdx, children.length - 1);
@@ -41,7 +43,7 @@ export function TabLayout({
       {/* Active tab content */}
       <div className="flex-1 min-h-0">
         {children[clamped] && (
-          <LayoutRenderer node={children[clamped]} project={project} />
+          <LayoutRenderer node={children[clamped]} project={project} path={[...path, clamped]} />
         )}
       </div>
     </div>

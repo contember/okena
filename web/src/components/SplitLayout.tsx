@@ -6,11 +6,13 @@ export function SplitLayout({
   sizes,
   children,
   project,
+  path,
 }: {
   direction: SplitDirection;
   sizes: number[];
   children: ApiLayoutNode[];
   project: ApiProject;
+  path: number[];
 }) {
   const total = sizes.reduce((a, b) => a + b, 0) || 1;
 
@@ -24,7 +26,7 @@ export function SplitLayout({
           className="min-w-0 min-h-0 overflow-hidden"
           style={{ flex: `${(sizes[i] ?? 1) / total}` }}
         >
-          <LayoutRenderer node={child} project={project} />
+          <LayoutRenderer node={child} project={project} path={[...path, i]} />
         </div>
       ))}
     </div>

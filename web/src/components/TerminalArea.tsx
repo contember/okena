@@ -12,7 +12,7 @@ export function TerminalArea({
 }) {
   return (
     <div className="h-full">
-      <LayoutRenderer node={layout} project={project} />
+      <LayoutRenderer node={layout} project={project} path={[]} />
     </div>
   );
 }
@@ -20,9 +20,11 @@ export function TerminalArea({
 export function LayoutRenderer({
   node,
   project,
+  path,
 }: {
   node: ApiLayoutNode;
   project: ApiProject;
+  path: number[];
 }) {
   switch (node.type) {
     case "terminal":
@@ -30,6 +32,8 @@ export function LayoutRenderer({
         <TerminalPane
           terminalId={node.terminal_id}
           name={node.terminal_id ? project.terminal_names[node.terminal_id] : undefined}
+          projectId={project.id}
+          path={path}
         />
       );
     case "split":
@@ -38,6 +42,7 @@ export function LayoutRenderer({
           direction={node.direction}
           sizes={node.sizes}
           project={project}
+          path={path}
         >
           {node.children}
         </SplitLayout>
@@ -47,6 +52,7 @@ export function LayoutRenderer({
         <TabLayout
           activeTab={node.active_tab}
           project={project}
+          path={path}
         >
           {node.children}
         </TabLayout>
