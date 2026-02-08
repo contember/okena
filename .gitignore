@@ -29,6 +29,7 @@ mobile/native/target/
 # Web client
 web/node_modules/
 web/dist/
+*.tsbuildinfo
 
 # claude
 .claude/settings.local.json
