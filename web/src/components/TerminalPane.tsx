@@ -25,16 +25,28 @@ export function TerminalPane({
     return () => ws.unsubscribe([terminalId]);
   }, [terminalId, ws]);
 
-  // Fetch initial content
+  // Fetch initial content (retry a few times since terminal may not be spawned yet)
   useEffect(() => {
     if (!terminalId) return;
-    postAction({ action: "read_content", terminal_id: terminalId })
-      .then((content) => {
-        if (content && termRef.current) {
-          termRef.current.write(content);
+    let cancelled = false;
+    const fetchContent = async (retries: number) => {
+      for (let i = 0; i < retries; i++) {
+        if (cancelled) return;
+        try {
+          const result = await postAction({ action: "read_content", terminal_id: terminalId });
+          if (!cancelled && result.content && termRef.current) {
+            termRef.current.write(result.content as string);
+          }
+          return;
+        } catch {
+          if (i < retries - 1) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
         }
-      })
-      .catch(() => {});
+      }
+    };
+    fetchContent(5);
+    return () => { cancelled = true; };
   }, [terminalId]);
 
   // Register in TerminalRegistry when streamId is available

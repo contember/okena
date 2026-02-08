@@ -36,7 +36,7 @@ export async function getState(): Promise<StateResponse> {
   return res.json();
 }
 
-export async function postAction(action: ActionRequest): Promise<string> {
+export async function postAction(action: ActionRequest): Promise<Record<string, unknown>> {
   const res = await fetch(`${baseUrl()}/v1/actions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -46,7 +46,7 @@ export async function postAction(action: ActionRequest): Promise<string> {
     const body = await res.json().catch(() => ({ error: "Action failed" }));
     throw new Error(body.error || `HTTP ${res.status}`);
   }
-  return res.text();
+  return res.json();
 }
 
 export async function refresh(): Promise<void> {
