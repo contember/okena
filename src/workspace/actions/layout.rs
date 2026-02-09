@@ -16,17 +16,40 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
-        self.with_layout_node_normalized(project_id, path, cx, |node| {
-            log::info!("Found node at path, splitting...");
-            let old_node = node.clone();
-            *node = LayoutNode::Split {
-                direction,
-                sizes: vec![50.0, 50.0],
-                children: vec![old_node, LayoutNode::new_terminal()],
-            };
-            log::info!("Split complete");
-            true
-        });
+
+        // Perform the split and find the new terminal's path after normalization.
+        // We can't use with_layout_node_normalized here because normalization may
+        // change the path of the newly created terminal (e.g. same-direction split
+        // flattening), and we need that path to set focus.
+        let new_path = if let Some(project) = self.project_mut(project_id) {
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    log::info!("Found node at path, splitting...");
+                    let old_node = node.clone();
+                    *node = LayoutNode::Split {
+                        direction,
+                        sizes: vec![50.0, 50.0],
+                        children: vec![old_node, LayoutNode::new_terminal()],
+                    };
+                    layout.normalize();
+                    log::info!("Split complete");
+                    // The newly created terminal has terminal_id: None — find its path
+                    layout.find_uninitialized_terminal_path()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.notify_data(cx);
+
+        if let Some(new_path) = new_path {
+            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+        }
     }
 
     /// Add a new tab - either to existing tab group (if parent is Tabs) or create new tab group

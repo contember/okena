@@ -495,6 +495,28 @@ impl LayoutNode {
         }
     }
 
+    /// Find the path to the first uninitialized terminal (terminal_id: None) in this subtree.
+    pub fn find_uninitialized_terminal_path(&self) -> Option<Vec<usize>> {
+        self.find_uninitialized_terminal_path_recursive(vec![])
+    }
+
+    fn find_uninitialized_terminal_path_recursive(&self, current_path: Vec<usize>) -> Option<Vec<usize>> {
+        match self {
+            LayoutNode::Terminal { terminal_id: None, .. } => Some(current_path),
+            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    let mut child_path = current_path.clone();
+                    child_path.push(i);
+                    if let Some(path) = child.find_uninitialized_terminal_path_recursive(child_path) {
+                        return Some(path);
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Find the path to the first terminal in this layout subtree
     pub fn find_first_terminal_path(&self) -> Vec<usize> {
         self.find_first_terminal_path_recursive(vec![])
