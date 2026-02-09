@@ -21,7 +21,7 @@ Types: `feat`, `fix`, `refactor`, `perf`, `chore`, `ci`, `docs`, `test`
 
 - If you have context about what work was done (e.g. you just finished implementing something), commit **only** that work. Don't bundle unrelated changes — leave other unstaged/untracked changes alone.
 - You MAY split your work into multiple logical commits if it makes sense (e.g. a refactor commit + a feature commit, or separating test changes from implementation).
-- If you have no prior context, read `git diff` and `git diff --cached` to understand all changes, then group them into reasonable logical commits by topic/purpose.
+- If you have no prior context, read `git diff` and `git diff --cached` to understand all changes, then group them into reasonable logical commits by topic/purpose. If some changes appear unrelated to each other and you can't determine what belongs together, ask before committing.
 - Each commit should be self-contained and buildable on its own when possible.
 
 ## Procedure
