@@ -9,6 +9,7 @@ mod git;
 mod keybindings;
 mod process;
 mod remote;
+mod remote_client;
 mod settings;
 #[cfg(target_os = "linux")]
 mod simple_root;
@@ -27,13 +28,16 @@ use gpui_component::Root;
 use crate::simple_root::SimpleRoot as Root;
 use std::sync::Arc;
 
+use std::net::IpAddr;
+
 use crate::app::Okena;
+use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::workspace::persistence;
 use crate::workspace::state::GlobalWorkspace;
 
@@ -88,6 +92,74 @@ fn set_app_menus(cx: &mut App) {
     ]);
 }
 
+/// `okena pair` — generate a pairing code and write it to a file for the running server to validate.
+fn cli_pair() -> i32 {
+    use crate::remote::auth::{generate_pairing_code, pair_code_path};
+
+    let code = generate_pairing_code();
+    let path = pair_code_path();
+
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("Failed to create config directory: {e}");
+            return 1;
+        }
+    }
+
+    if let Err(e) = std::fs::write(&path, &code) {
+        eprintln!("Failed to write pairing code: {e}");
+        return 1;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            eprintln!("Warning: failed to set file permissions: {e}");
+        }
+    }
+
+    println!("Pairing code: {code}");
+    println!("Expires in 60s — run `okena pair` again for a fresh code.");
+    0
+}
+
+/// Global handle keeping the headless app entity alive for the process lifetime.
+struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
+impl Global for GlobalHeadless {}
+
+/// Run the application in headless mode (no GUI, remote server only).
+fn run_headless(listen_addr: IpAddr) {
+    println!("Starting Okena in headless mode...");
+
+    Application::headless().run(move |cx: &mut App| {
+        cx.set_quit_mode(QuitMode::Explicit);
+
+        // Initialize global settings (must be before workspace load)
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
+        // Load or create workspace
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
+            log::warn!("Failed to load workspace: {}, using default", e);
+            persistence::default_workspace()
+        });
+
+        // Create PTY manager
+        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
+        let pty_manager = Arc::new(pty_manager);
+
+        // Create the headless app entity (starts PTY loop, command loop, and remote server)
+        // Must be stored in a global to keep the entity alive — dropping the handle
+        // would release the entity and cancel all spawned tasks + drop RemoteServer.
+        let headless = cx.new(|cx| {
+            HeadlessApp::new(workspace_data, pty_manager, pty_events, listen_addr, cx)
+        });
+        cx.set_global(GlobalHeadless(headless));
+    });
+}
+
 fn main() {
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
@@ -95,9 +167,63 @@ fn main() {
         return;
     }
 
+    // Handle `okena pair` subcommand before GPUI init
+    if std::env::args().nth(1).as_deref() == Some("pair") {
+        std::process::exit(cli_pair());
+    }
+
     env_logger::init();
 
-    Application::new().with_assets(Assets).run(|cx: &mut App| {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse --remote and --listen flags
+    let listen_addr: Option<IpAddr> = {
+        if let Some(pos) = args.iter().position(|a| a == "--listen") {
+            match args.get(pos + 1) {
+                Some(addr_str) => match addr_str.parse::<IpAddr>() {
+                    Ok(addr) => Some(addr),
+                    Err(_) => {
+                        eprintln!("Invalid address for --listen: {addr_str}");
+                        eprintln!("Expected an IP address, e.g. --listen 0.0.0.0");
+                        std::process::exit(1);
+                    }
+                },
+                None => {
+                    eprintln!("--listen requires an address argument, e.g. --listen 0.0.0.0");
+                    std::process::exit(1);
+                }
+            }
+        } else if args.iter().any(|a| a == "--remote") {
+            // --remote without --listen: force-enable server on localhost
+            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        } else {
+            None
+        }
+    };
+
+    // Determine headless mode:
+    // 1. Explicit --headless flag
+    // 2. Auto-detect on Linux: --listen provided but no DISPLAY/WAYLAND_DISPLAY
+    let explicit_headless = args.iter().any(|a| a == "--headless");
+    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+    let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
+
+    if headless {
+        if listen_addr.is_none() {
+            eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
+            std::process::exit(1);
+        }
+        run_headless(listen_addr.unwrap());
+        return;
+    }
+
+    if !has_display && cfg!(target_os = "linux") {
+        eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
+        eprintln!("Use --headless --listen <addr> to run without a GUI.");
+        std::process::exit(1);
+    }
+
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Quit the app when the last window is closed (default on macOS is to keep running)
         cx.set_quit_mode(QuitMode::LastWindowClosed);
 
@@ -116,8 +242,8 @@ fn main() {
         // Register keybindings
         keybindings::register_keybindings(cx);
 
-        // Initialize status messages for error notifications
-        cx.set_global(StatusMessages::new());
+        // Initialize toast notification system
+        cx.set_global(ToastManager::new());
 
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);
@@ -204,7 +330,7 @@ fn main() {
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
-                    Okena::new(workspace_data, pty_manager.clone(), pty_events, window, cx)
+                    Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
                 });
                 cx.new(|cx| Root::new(okena, window, cx))
             },

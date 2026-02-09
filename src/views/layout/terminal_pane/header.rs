@@ -10,6 +10,7 @@ use crate::theme::theme;
 use crate::ui::ClickDetector;
 use crate::views::components::{cancel_rename, finish_rename, start_rename, rename_input, RenameState, SimpleInput};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -40,6 +41,8 @@ pub struct TerminalHeader {
     workspace: Entity<Workspace>,
     /// Project ID
     project_id: String,
+    /// Layout path for this terminal within the project
+    layout_path: Vec<usize>,
     /// Terminal ID
     terminal_id: Option<String>,
     /// Terminal reference for title
@@ -52,6 +55,8 @@ pub struct TerminalHeader {
     click_detector: ClickDetector<()>,
     /// Whether PTY manager supports buffer capture
     supports_export: bool,
+    /// Whether this terminal is remote (hides local-only controls)
+    is_remote: bool,
     /// Unique ID suffix
     id_suffix: String,
 }
@@ -60,9 +65,11 @@ impl TerminalHeader {
     pub fn new(
         workspace: Entity<Workspace>,
         project_id: String,
+        layout_path: Vec<usize>,
         terminal_id: Option<String>,
         shell_type: ShellType,
         supports_export: bool,
+        is_remote: bool,
         id_suffix: String,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,12 +89,14 @@ impl TerminalHeader {
         Self {
             workspace,
             project_id,
+            layout_path,
             terminal_id,
             terminal: None,
             shell_selector,
             rename_state: None,
             click_detector: ClickDetector::new(),
             supports_export,
+            is_remote,
             id_suffix,
         }
     }
@@ -171,6 +180,7 @@ impl TerminalHeader {
         let t = theme(cx);
         let id = &self.id_suffix;
         let supports_export = self.supports_export;
+        let is_remote = self.is_remote;
 
         div()
             .flex()
@@ -222,13 +232,15 @@ impl TerminalHeader {
                         cx.emit(HeaderEvent::Fullscreen);
                     })),
             )
-            .child(
-                header_button_base(HeaderAction::Detach, id, ButtonSize::REGULAR, &t, None)
-                    .on_click(cx.listener(|_this, _, _window, cx| {
-                        cx.stop_propagation();
-                        cx.emit(HeaderEvent::Detach);
-                    })),
-            )
+            .when(!is_remote, |el| {
+                el.child(
+                    header_button_base(HeaderAction::Detach, id, ButtonSize::REGULAR, &t, None)
+                        .on_click(cx.listener(|_this, _, _window, cx| {
+                            cx.stop_propagation();
+                            cx.emit(HeaderEvent::Detach);
+                        })),
+                )
+            })
             .child(
                 header_button_base(HeaderAction::Close, id, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|_this, _, _window, cx| {
@@ -245,6 +257,22 @@ impl Render for TerminalHeader {
         let terminal_name = self.get_terminal_name(cx);
         let terminal_name_for_rename = terminal_name.clone();
 
+        // Check if this terminal can be dragged (must have an ID and not be the only terminal)
+        let can_drag = self.terminal_id.is_some() && {
+            let ws = self.workspace.read(cx);
+            ws.project(&self.project_id)
+                .and_then(|p| p.layout.as_ref())
+                .map(|l| l.collect_terminal_ids().len() > 1)
+                .unwrap_or(false)
+        };
+
+        let drag_payload = can_drag.then(|| PaneDrag {
+            project_id: self.project_id.clone(),
+            layout_path: self.layout_path.clone(),
+            terminal_id: self.terminal_id.clone().unwrap_or_default(),
+            terminal_name: terminal_name.clone(),
+        });
+
         div()
             .id("terminal-header-wrapper")
             .child(
@@ -260,6 +288,11 @@ impl Render for TerminalHeader {
                     .min_w_0()
                     .overflow_hidden()
                     .bg(rgb(t.bg_header))
+                    .when_some(drag_payload, |el, payload| {
+                        el.on_drag(payload, |drag, _position, _window, cx| {
+                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
+                        })
+                    })
                     .child(
                         if let Some(input) = rename_input(&self.rename_state) {
                             div()
@@ -326,7 +359,7 @@ impl Render for TerminalHeader {
                                 .into_any_element()
                         },
                     )
-                    .when(settings(cx).show_shell_selector, |el| {
+                    .when(settings(cx).show_shell_selector && !self.is_remote, |el| {
                         el.child(
                             div()
                                 .opacity(0.0)

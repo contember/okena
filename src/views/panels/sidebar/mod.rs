@@ -12,11 +12,13 @@ pub(super) mod drag;
 mod folder_list;
 mod item_widgets;
 mod project_list;
+mod remote_list;
 
 use crate::keybindings::{
     format_keystroke, get_config, ShowKeybindings, SidebarConfirm, SidebarDown,
     SidebarEscape, SidebarToggleExpand, SidebarUp,
 };
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
@@ -41,6 +43,10 @@ pub(super) enum SidebarCursorItem {
     Project { project_id: String },
     WorktreeProject { project_id: String },
     Terminal { project_id: String, terminal_id: String },
+    #[allow(dead_code)]
+    RemoteConnection { connection_id: String },
+    #[allow(dead_code)]
+    RemoteProject { connection_id: String, project_id: String },
 }
 
 /// Sidebar view with project and terminal list
@@ -75,6 +81,10 @@ pub struct Sidebar {
     cursor_index: Option<usize>,
     /// Saved focus handle to restore when leaving sidebar
     pub saved_focus: Option<FocusHandle>,
+    /// Remote connection manager (optional - set after creation)
+    pub(super) remote_manager: Option<Entity<RemoteConnectionManager>>,
+    /// Collapsed state for remote connections
+    pub(super) collapsed_connections: HashMap<String, bool>,
 }
 
 impl Sidebar {
@@ -111,6 +121,8 @@ impl Sidebar {
             scroll_handle: ScrollHandle::new(),
             cursor_index: None,
             saved_focus: None,
+            remote_manager: None,
+            collapsed_connections: HashMap::new(),
         }
     }
 
@@ -276,6 +288,15 @@ impl Sidebar {
     /// Public accessor for the focus handle (used by RootView for FocusSidebar)
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
+        // Observe remote manager for changes
+        cx.observe(&manager, |_this, _rm, cx| {
+            cx.notify();
+        }).detach();
+        self.remote_manager = Some(manager);
+        cx.notify();
     }
 
     /// Initialize cursor to the focused project or first item
@@ -482,6 +503,27 @@ impl Sidebar {
                     ws.toggle_folder_collapsed(&folder_id, cx);
                 });
             }
+            SidebarCursorItem::RemoteConnection { connection_id } => {
+                let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
+                self.collapsed_connections.insert(connection_id, !collapsed);
+            }
+            SidebarCursorItem::RemoteProject { connection_id, project_id } => {
+                // Clear local focus
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(None, cx);
+                });
+                // Set remote focus
+                if let Some(ref rm) = self.remote_manager {
+                    rm.update(cx, |rm, cx| {
+                        rm.set_focused_remote(Some((connection_id, project_id)), cx);
+                    });
+                }
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
         }
         cx.notify();
     }
@@ -503,6 +545,11 @@ impl Sidebar {
                 self.toggle_expanded(&project_id);
             }
             SidebarCursorItem::Terminal { .. } => {}
+            SidebarCursorItem::RemoteConnection { connection_id } => {
+                let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
+                self.collapsed_connections.insert(connection_id, !collapsed);
+            }
+            SidebarCursorItem::RemoteProject { .. } => {}
         }
         cx.notify();
     }
@@ -969,7 +1016,8 @@ impl Render for Sidebar {
                     .flex_1()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .children(flat_elements),
+                    .children(flat_elements)
+                    .child(self.render_remote_section(cx)),
             )
             .child(self.render_keybindings_hint(cx))
             // Color picker overlay

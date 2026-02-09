@@ -57,10 +57,8 @@ pub struct SideBySideLine {
     pub left: Option<SideContent>,
     pub right: Option<SideContent>,
     pub is_header: bool,
-    /// Header text content (for copy - future use).
-    #[allow(dead_code)]
+    /// Header text content (used for context extraction in rendering).
     pub header_text: String,
-    pub header_spans: Vec<HighlightedSpan>,
 }
 
 /// A processed line ready for display with syntax highlighting.
@@ -100,4 +98,13 @@ pub struct ScrollbarDrag {
     pub start_y: f32,
     /// Initial scroll offset.
     pub start_scroll_y: f32,
+}
+
+/// State for horizontal scrollbar dragging.
+#[derive(Clone, Copy)]
+pub struct HScrollbarDrag {
+    /// Initial mouse X position.
+    pub start_x: f32,
+    /// Initial scroll_x offset.
+    pub start_scroll_x: f32,
 }

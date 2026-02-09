@@ -581,7 +581,8 @@ impl Render for TerminalContent {
                                 self.url_detector.matches_arc(),
                                 self.url_detector.hovered_index(),
                             )
-                            .with_cursor_visible(self.cursor_visible),
+                            .with_cursor_visible(self.cursor_visible)
+                            .with_cursor_style(settings_entity(cx).read(cx).settings.cursor_style),
                     ),
             )
             .child(self.scrollbar.clone())

@@ -355,6 +355,38 @@ impl SimpleInputState {
                 self.select_all(cx);
                 return KeyHandled::Handled;
             }
+            "v" if modifiers.platform || modifiers.control => {
+                if let Some(clipboard_item) = cx.read_from_clipboard() {
+                    if let Some(text) = clipboard_item.text() {
+                        // Only insert first line (no newlines in single-line input)
+                        let line = text.lines().next().unwrap_or("");
+                        if !line.is_empty() {
+                            self.insert_text(line, cx);
+                        }
+                    }
+                }
+                return KeyHandled::Handled;
+            }
+            "c" if modifiers.platform || modifiers.control => {
+                if let Some(ref sel) = self.selection {
+                    let byte_range = self.byte_range_for_chars(sel);
+                    let selected_text = &self.value[byte_range];
+                    cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
+                }
+                return KeyHandled::Handled;
+            }
+            "x" if modifiers.platform || modifiers.control => {
+                if let Some(ref sel) = self.selection {
+                    let byte_range = self.byte_range_for_chars(sel);
+                    let selected_text = &self.value[byte_range];
+                    cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
+                }
+                // Delete selection (reuse delete_backward which handles selection)
+                if self.selection.is_some() {
+                    self.delete_backward(cx);
+                }
+                return KeyHandled::Handled;
+            }
             "escape" => {
                 // If there's a selection, clear it. Otherwise let parent handle.
                 if self.clear_selection(cx) {

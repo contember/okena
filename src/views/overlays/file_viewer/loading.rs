@@ -70,7 +70,6 @@ impl FileViewer {
             &self.content,
             path,
             &self.syntax_set,
-            &self.theme_set,
             MAX_LINES,
         );
         self.line_count = self.highlighted_lines.len();

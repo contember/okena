@@ -1,9 +1,16 @@
+[workspace]
+members = [".", "mobile/native", "crates/okena-core"]
+resolver = "2"
+
 [package]
 name = "okena"
 version = "0.4.4"
 edition = "2021"
 
 [dependencies]
+# Shared core types
+okena-core = { path = "crates/okena-core", features = ["client"] }
+
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
@@ -59,13 +66,17 @@ semver = "1"
 # Remote control server
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 base64 = "0.22"
 rand = "0.8"
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.5"
 data-encoding = "2.6"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
 
 # Pin core-text to 21.0.x to avoid core-graphics 0.24/0.25 conflict in zed-font-kit
 [target.'cfg(target_os = "macos")'.dependencies]

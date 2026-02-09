@@ -6,9 +6,10 @@
 //! - Split panes (horizontal/vertical splits)
 //! - Tab groups (via the `tabs` submodule)
 
-use crate::terminal::pty_manager::PtyManager;
-use crate::theme::theme;
+use crate::terminal::backend::TerminalBackend;
+use crate::theme::{theme, with_alpha};
 use crate::views::root::TerminalsRegistry;
+use crate::views::layout::pane_drag::{PaneDrag, DropZone};
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::views::layout::terminal_pane::TerminalPane;
 use crate::workspace::request_broker::RequestBroker;
@@ -27,7 +28,7 @@ pub struct LayoutContainer {
     pub(super) project_id: String,
     pub(super) project_path: String,
     pub(super) layout_path: Vec<usize>,
-    pub(super) pty_manager: Arc<PtyManager>,
+    pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     /// Stored terminal pane entity (for single terminal case)
     terminal_pane: Option<Entity<TerminalPane>>,
@@ -43,6 +44,8 @@ pub struct LayoutContainer {
     pub(super) drop_animation: Option<(usize, f32)>,
     /// Shared drag state for resize operations
     pub(super) active_drag: ActiveDrag,
+    /// External layout override (for remote projects not in workspace)
+    pub(super) external_layout: Option<LayoutNode>,
 }
 
 impl LayoutContainer {
@@ -52,7 +55,7 @@ impl LayoutContainer {
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
-        pty_manager: Arc<PtyManager>,
+        backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
     ) -> Self {
@@ -62,7 +65,7 @@ impl LayoutContainer {
             project_id,
             project_path,
             layout_path,
-            pty_manager,
+            backend,
             terminals,
             terminal_pane: None,
             child_containers: HashMap::new(),
@@ -73,7 +76,13 @@ impl LayoutContainer {
             tab_context_menu: None,
             drop_animation: None,
             active_drag,
+            external_layout: None,
         }
+    }
+
+    /// Set an external layout override (for remote projects).
+    pub fn set_external_layout(&mut self, layout: LayoutNode) {
+        self.external_layout = Some(layout);
     }
 
     fn ensure_terminal_pane(
@@ -99,7 +108,7 @@ impl LayoutContainer {
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
             let layout_path = self.layout_path.clone();
-            let pty_manager = self.pty_manager.clone();
+            let backend = self.backend.clone();
             let terminals = self.terminals.clone();
 
             self.terminal_pane = Some(cx.new(move |cx| {
@@ -112,7 +121,7 @@ impl LayoutContainer {
                     terminal_id,
                     minimized,
                     detached,
-                    pty_manager,
+                    backend,
                     terminals,
                     cx,
                 )
@@ -162,12 +171,115 @@ impl LayoutContainer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Ensure terminal pane exists (created once, not every render)
-        self.ensure_terminal_pane(terminal_id, minimized, detached, cx);
+        self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
 
         div()
             .size_full()
             .min_h_0()
+            .relative()
             .child(self.terminal_pane.clone().unwrap())
+            .child(self.render_drop_zones(terminal_id, cx))
+    }
+
+    /// Render the 5-zone drop overlay for pane drag-and-drop.
+    fn render_drop_zones(
+        &self,
+        terminal_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let highlight = with_alpha(t.border_active, 0.3);
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+        let tid = terminal_id.clone();
+        let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
+
+        let make_zone = |zone: DropZone, id_suffix: &str| -> Stateful<Div> {
+            let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
+            let ws = workspace.clone();
+            let pid = project_id.clone();
+            let this_tid = tid.clone();
+
+            div()
+                .id(ElementId::Name(zone_id.into()))
+                .drag_over::<PaneDrag>(move |style, _, _, _| {
+                    style.bg(highlight)
+                })
+                .on_drop(cx.listener({
+                    let pid = pid.clone();
+                    let this_tid = this_tid.clone();
+                    move |_this, drag: &PaneDrag, _window, cx| {
+                        // Self-drop check
+                        if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
+                            return;
+                        }
+                        // Same project check (v1)
+                        if drag.project_id != pid {
+                            return;
+                        }
+                        if let Some(ref target_id) = this_tid {
+                            ws.update(cx, |ws, cx| {
+                                ws.move_pane(
+                                    &drag.project_id,
+                                    &drag.terminal_id,
+                                    &pid,
+                                    target_id,
+                                    zone,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                }))
+        };
+
+        // 3-column layout: Left | Middle(Top/Center/Bottom) | Right
+        // Zero overlap, full coverage
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                // Left zone: 25% width, 100% height
+                make_zone(DropZone::Left, &id_suffix)
+                    .w(relative(0.25))
+                    .h_full(),
+            )
+            .child(
+                // Middle column: 50% width, contains Top/Center/Bottom
+                div()
+                    .w(relative(0.50))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // Top zone: 25% height
+                        make_zone(DropZone::Top, &id_suffix)
+                            .w_full()
+                            .h(relative(0.25)),
+                    )
+                    .child(
+                        // Center zone: 50% height
+                        make_zone(DropZone::Center, &id_suffix)
+                            .w_full()
+                            .h(relative(0.50)),
+                    )
+                    .child(
+                        // Bottom zone: 25% height
+                        make_zone(DropZone::Bottom, &id_suffix)
+                            .w_full()
+                            .h(relative(0.25)),
+                    ),
+            )
+            .child(
+                // Right zone: 25% width, 100% height
+                make_zone(DropZone::Right, &id_suffix)
+                    .w(relative(0.25))
+                    .h_full(),
+            )
     }
 
     fn render_split(
@@ -198,13 +310,20 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
                     })
                 })
                 .clone();
+
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[zoomed_idx].clone());
+                });
+            }
 
             return div()
                 .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
@@ -232,11 +351,7 @@ impl LayoutContainer {
         // Check which children are hidden (minimized or detached) and collect sizes for visible ones
         let mut visible_children_info: Vec<(usize, f32)> = Vec::new();
         for (i, child) in children.iter().enumerate() {
-            let is_hidden = match child {
-                LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
-                _ => false,
-            };
-            if !is_hidden {
+            if !child.is_all_hidden() {
                 let size = sizes.get(i).copied().unwrap_or(100.0 / num_children as f32);
                 visible_children_info.push((i, size));
             }
@@ -268,13 +383,20 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
                     })
                 })
                 .clone();
+
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[*original_idx].clone());
+                });
+            }
 
             // Add divider before this child (if not first visible child)
             if visible_idx > 0 {
@@ -329,7 +451,12 @@ impl Render for LayoutContainer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
-        let layout = self.get_layout(workspace).cloned();
+        // Use external layout if set (remote projects), otherwise read from workspace
+        let layout = if let Some(ref ext) = self.external_layout {
+            Some(ext.clone())
+        } else {
+            self.get_layout(workspace).cloned()
+        };
 
         // Clean up stale entities when layout type changes
         match &layout {

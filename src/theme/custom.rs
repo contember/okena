@@ -5,8 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::colors::ThemeColors;
-use super::types::ThemeInfo;
+use super::{ThemeColors, ThemeInfo};
 
 /// Custom theme configuration file format
 #[derive(Clone, Debug, Serialize, Deserialize)]

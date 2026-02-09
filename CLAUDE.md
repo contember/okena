@@ -2,8 +2,6 @@
 
 Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 
-Detailed module documentation lives in `src/*/CLAUDE.md` files.
-
 ## Build Commands
 
 **Linux:**
@@ -21,77 +19,18 @@ cargo run
 ## Project Structure
 
 ```
-src/
-├── main.rs               # Entry point, GPUI setup, window creation
-├── settings.rs           # Global settings entity (SettingsState, auto-save)
-├── assets.rs             # Embedded fonts and icons
-├── process.rs            # Cross-platform subprocess spawning
-├── macros.rs             # Shared macros (impl_focusable!)
-├── simple_root.rs        # Linux Wayland maximize workaround
-├── app/                  # Main app entity, PTY event routing
-├── terminal/             # Terminal emulation & PTY management
-├── workspace/            # State management & persistence
-├── views/                # UI views (root, layout, panels, overlays, components)
-├── elements/             # Custom GPUI rendering (terminal grid)
-├── keybindings/          # Keyboard actions & config
-├── git/                  # Git status, diff, worktree
-├── theme/                # Theming system (built-in + custom)
-├── ui/                   # Shared UI utilities
-├── remote/               # Remote control server (HTTP/WS API)
-└── updater/              # Self-update system
+src/            # Desktop app (Rust + GPUI)
+crates/         # Shared crates (okena-core)
+mobile/         # Mobile app (Flutter + Rust FFI)
+web/            # Web client
+assets/         # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
+scripts/        # Build & utility scripts
+macos/          # macOS-specific resources
+Casks/          # Homebrew cask definition
+docs/           # Documentation
 ```
 
-## Architecture
-
-### View Hierarchy
-
-```
-RootView (views/root/)
-├── TitleBar (views/chrome/)
-├── Sidebar (views/panels/sidebar/)
-├── ProjectColumn (views/panels/project_column.rs)
-│   └── LayoutContainer → TerminalPane / SplitPane / Tabs
-├── StatusBar (views/panels/status_bar.rs)
-└── Overlays (views/overlays/) — managed by OverlayManager
-```
-
-See `src/views/CLAUDE.md` for full hierarchy and file inventory.
-
-### Layout System
-
-Terminals are organized in a recursive tree structure (`LayoutNode`):
-- **Terminal** — single terminal pane
-- **Split** — horizontal/vertical split with children and ratios
-- **Tabs** — tabbed container with multiple children
-
-Path-based navigation: `Vec<usize>` indexes into the tree.
-
-### GPUI Entities
-
-Observable state with auto-notify:
-- `Workspace` — projects, layouts, focus (via FocusManager)
-- `RequestBroker` — decoupled transient UI request routing (overlay/sidebar requests)
-- `SettingsState` — user preferences with debounced auto-save
-- `AppTheme` — current theme mode and colors
-- `RootView` — main view, owns SidebarController + OverlayManager
-- `OverlayManager` — centralized modal overlay lifecycle
-- `Sidebar` — sidebar project list with drag-and-drop
-
-### Event Flow
-
-1. **PTY events**: `PtyManager` → `async_channel` → `Okena` → `Terminal` (+ `PtyBroadcaster` for remote clients)
-2. **UI requests**: `RequestBroker` → `cx.notify()` → observers in RootView/Sidebar
-3. **State mutations**: `Workspace` notify → observers update UI
-4. **Persistence**: debounced 500ms save to disk
-
-### Configuration Files
-
-Located in `~/.config/okena/`:
-- `workspace.json` — projects, layouts, terminal state
-- `settings.json` — font, theme, shell, session backend
-- `keybindings.json` — custom keyboard shortcuts
-- `themes/*.json` — custom theme files
-- `remote.json` — remote server discovery (auto-generated)
+Detailed documentation lives in `src/CLAUDE.md` and `src/*/CLAUDE.md` files.
 
 ## Platform Support
 

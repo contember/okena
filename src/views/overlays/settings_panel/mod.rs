@@ -55,6 +55,8 @@ pub struct SettingsPanel {
     pub(super) project_hook_worktree_close: Entity<SimpleInputState>,
     // File opener input
     pub(super) file_opener_input: Entity<SimpleInputState>,
+    // Remote listen address input
+    pub(super) listen_address_input: Entity<SimpleInputState>,
 }
 
 impl SettingsPanel {
@@ -207,6 +209,17 @@ impl SettingsPanel {
             settings_entity(cx).update(cx, |state, cx| state.set_file_opener(val, cx));
         }).detach();
 
+        // Remote listen address input
+        let listen_address_input = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .placeholder("e.g. 127.0.0.1, 0.0.0.0");
+            if !s.remote_listen_address.is_empty() { state.default_value(s.remote_listen_address.clone()) } else { state }
+        });
+        cx.subscribe(&listen_address_input, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = entity.read(cx).value().to_string();
+            settings_entity(cx).update(cx, |state, cx| state.set_remote_listen_address(val, cx));
+        }).detach();
+
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
@@ -226,6 +239,7 @@ impl SettingsPanel {
             project_hook_worktree_create,
             project_hook_worktree_close,
             file_opener_input,
+            listen_address_input,
         }
     }
 
@@ -318,7 +332,7 @@ impl Render for SettingsPanel {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        if !focus_handle.is_focused(window) {
+        if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
         }
 

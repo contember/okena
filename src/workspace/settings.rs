@@ -1,9 +1,37 @@
+use okena_core::client::RemoteConnectionConfig;
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::theme::ThemeMode;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+/// Terminal cursor shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CursorShape {
+    /// Full-cell block cursor (default, Linux-style)
+    #[default]
+    Block,
+    /// Thin vertical bar cursor (editor-style)
+    Bar,
+    /// Horizontal underline cursor
+    Underline,
+}
+
+impl CursorShape {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            CursorShape::Block => "Block",
+            CursorShape::Bar => "Bar",
+            CursorShape::Underline => "Underline",
+        }
+    }
+
+    pub fn all_variants() -> &'static [CursorShape] {
+        &[CursorShape::Block, CursorShape::Bar, CursorShape::Underline]
+    }
+}
 
 /// Display mode for the diff viewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +138,9 @@ pub struct AppSettings {
     pub file_font_size: f32,
 
     // Terminal settings
+    /// Cursor shape: Block, Bar, or Underline (default: Block)
+    #[serde(default)]
+    pub cursor_style: CursorShape,
     /// Enable cursor blinking (default: false)
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
@@ -148,6 +179,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub remote_server_enabled: bool,
 
+    /// Listen address for the remote server (default: "127.0.0.1")
+    #[serde(default = "default_remote_listen_address")]
+    pub remote_listen_address: String,
+
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
@@ -155,6 +190,10 @@ pub struct AppSettings {
     /// Enable automatic update checking (default: true)
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
+
+    /// Saved remote connections for the client feature
+    #[serde(default)]
+    pub remote_connections: Vec<RemoteConnectionConfig>,
 }
 
 impl Default for AppSettings {
@@ -170,6 +209,7 @@ impl Default for AppSettings {
             line_height: default_line_height(),
             ui_font_size: default_ui_font_size(),
             file_font_size: default_file_font_size(),
+            cursor_style: CursorShape::default(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
             default_shell: ShellType::default(),
@@ -179,8 +219,10 @@ impl Default for AppSettings {
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
+            remote_listen_address: default_remote_listen_address(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            remote_connections: Vec::new(),
         }
     }
 }
@@ -228,6 +270,10 @@ fn default_scrollback_lines() -> u32 {
 
 fn default_file_opener() -> String {
     String::new()
+}
+
+fn default_remote_listen_address() -> String {
+    "127.0.0.1".to_string()
 }
 
 /// Get the settings file path
@@ -348,6 +394,12 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
         settings.file_font_size = (v as f32).clamp(8.0, 24.0);
     }
 
+    if let Some(v) = obj.get("cursor_style") {
+        if let Ok(style) = serde_json::from_value::<CursorShape>(v.clone()) {
+            settings.cursor_style = style;
+        }
+    }
+
     if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {
         settings.cursor_blink = v;
     }
@@ -414,5 +466,74 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     }
     let content = serde_json::to_string_pretty(settings)?;
     std::fs::write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
+}
+
+/// Process-level mutex for settings file access.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Atomically load, update, and save the `remote_connections` field in settings.
+///
+/// Uses a process-level mutex to prevent concurrent read-modify-write races.
+/// On Unix, also uses file locking (flock) for cross-process safety.
+pub fn update_remote_connections<F>(updater: F) -> Result<()>
+where
+    F: FnOnce(&mut Vec<RemoteConnectionConfig>),
+{
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let path = get_settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write, Seek};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // Acquire exclusive file lock
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) };
+
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+
+        let mut settings: AppSettings = if content.is_empty() {
+            AppSettings::default()
+        } else {
+            serde_json::from_str(&content).unwrap_or_default()
+        };
+
+        updater(&mut settings.remote_connections);
+
+        let new_content = serde_json::to_string_pretty(&settings)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(new_content.as_bytes())?;
+
+        // Set restrictive permissions
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+
+        // Lock is released automatically when `file` is dropped
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut settings = load_settings();
+        updater(&mut settings.remote_connections);
+        save_settings(&settings)?;
+        Ok(())
+    }
 }

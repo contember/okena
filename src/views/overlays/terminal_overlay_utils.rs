@@ -7,8 +7,7 @@
 //! - Focus management
 
 use crate::terminal::input::key_to_bytes;
-use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::Workspace;
@@ -30,7 +29,7 @@ pub const DEFAULT_TERMINAL_SIZE: TerminalSize = TerminalSize {
 /// `cwd` is used for resolving relative file paths in URL detection.
 pub fn get_or_create_terminal(
     terminal_id: &str,
-    pty_manager: &Arc<PtyManager>,
+    transport: &Arc<dyn TerminalTransport>,
     terminals: &TerminalsRegistry,
     cwd: &str,
 ) -> Arc<Terminal> {
@@ -41,7 +40,7 @@ pub fn get_or_create_terminal(
         let terminal = Arc::new(Terminal::new(
             terminal_id.to_string(),
             DEFAULT_TERMINAL_SIZE,
-            pty_manager.clone(),
+            transport.clone(),
             cwd.to_string(),
         ));
         terminals_guard.insert(terminal_id.to_string(), terminal.clone());

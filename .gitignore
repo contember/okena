@@ -18,5 +18,18 @@ settings.local.json
 
 dist
 
+# Mobile (Flutter)
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/pubspec.lock
+mobile/native/target/
+
+# Web client
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
 # claude
 .claude/settings.local.json

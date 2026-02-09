@@ -26,6 +26,8 @@ pub enum OverlayRequest {
     ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
     AddProjectDialog,
     DiffViewer { path: String, file: Option<String> },
+    RemoteConnect,
+    RemoteConnectionContextMenu { connection_id: String, connection_name: String, position: gpui::Point<gpui::Pixels> },
 }
 
 /// Requests consumed by Sidebar::render()

@@ -5,7 +5,7 @@
 
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +73,12 @@ impl SettingsState {
     setting_setter!(set_line_height, line_height, f32, 1.0, 3.0);
     setting_setter!(set_ui_font_size, ui_font_size, f32, 8.0, 24.0);
     setting_setter!(set_file_font_size, file_font_size, f32, 8.0, 24.0);
+    /// Set the cursor style (Block, Bar, Underline)
+    pub fn set_cursor_style(&mut self, value: crate::workspace::settings::CursorShape, cx: &mut Context<Self>) {
+        self.settings.cursor_style = value;
+        self.save_and_notify(cx);
+    }
+
     setting_setter!(set_cursor_blink, cursor_blink, bool);
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
@@ -92,6 +98,12 @@ impl SettingsState {
     /// Set remote server enabled/disabled
     pub fn set_remote_server_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.remote_server_enabled = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the remote server listen address
+    pub fn set_remote_listen_address(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.remote_listen_address = value;
         self.save_and_notify(cx);
     }
 
@@ -171,7 +183,7 @@ impl SettingsState {
                 if let Err(e) = save_settings(&settings) {
                     log::error!("Failed to save settings: {}", e);
                     let _ = cx.update(|cx| {
-                        StatusMessages::post(format!("Failed to save settings: {}", e), cx);
+                        ToastManager::error(format!("Failed to save settings: {}", e), cx);
                     });
                 }
             }

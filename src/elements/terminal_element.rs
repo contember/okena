@@ -1,6 +1,7 @@
 use crate::settings::settings;
 use crate::terminal::terminal::Terminal;
-use crate::theme::theme;
+use crate::theme::{theme, ansi_to_hsla};
+use crate::workspace::settings::CursorShape;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::grid::Dimensions;
@@ -49,6 +50,7 @@ pub struct TerminalElement {
     url_matches: Arc<Vec<URLMatch>>,
     hovered_url_index: Option<usize>,
     cursor_visible: bool,
+    cursor_style: CursorShape,
     zoom_level: f32,
 }
 
@@ -62,6 +64,7 @@ impl TerminalElement {
             url_matches: Arc::new(Vec::new()),
             hovered_url_index: None,
             cursor_visible: true,
+            cursor_style: CursorShape::Block,
             zoom_level: 1.0,
         }
     }
@@ -93,6 +96,11 @@ impl TerminalElement {
 
     pub fn with_cursor_visible(mut self, visible: bool) -> Self {
         self.cursor_visible = visible;
+        self
+    }
+
+    pub fn with_cursor_style(mut self, style: CursorShape) -> Self {
+        self.cursor_style = style;
         self
     }
 }
@@ -307,8 +315,9 @@ impl Element for TerminalElement {
         // Get selection bounds
         let selection = self.terminal.selection_bounds();
 
-        // Capture cursor visibility for the closure
+        // Capture cursor state for the closure
         let cursor_visible = self.cursor_visible;
+        let cursor_style = self.cursor_style;
 
         self.terminal.with_content(|term| {
             let grid = term.grid();
@@ -386,7 +395,7 @@ impl Element for TerminalElement {
                     let bg_color = if is_selected {
                         Some(rgb(t.selection_bg).into())
                     } else if !is_default_bg(&bg, &t) {
-                        Some(t.ansi_to_hsla(&bg))
+                        Some(ansi_to_hsla(&t,&bg))
                     } else {
                         None
                     };
@@ -418,7 +427,7 @@ impl Element for TerminalElement {
                     let fg_color = if is_selected {
                         rgb(t.selection_fg).into()
                     } else {
-                        t.ansi_to_hsla(&fg)
+                        ansi_to_hsla(&t,&fg)
                     };
 
                     // Use pre-computed font variants to avoid repeated cloning
@@ -585,12 +594,6 @@ impl Element for TerminalElement {
                     let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
                     let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
 
-                    let cursor_bounds = Bounds {
-                        origin: point(cursor_x, cursor_y),
-                        size: size(cell_width, line_height),
-                    };
-
-                    // Block cursor with transparency
                     let cursor_rgba = rgb(t.cursor);
                     let cursor_color = Hsla::from(Rgba {
                         r: cursor_rgba.r,
@@ -598,6 +601,21 @@ impl Element for TerminalElement {
                         b: cursor_rgba.b,
                         a: 0.8,
                     });
+
+                    let cursor_bounds = match cursor_style {
+                        CursorShape::Block => Bounds {
+                            origin: point(cursor_x, cursor_y),
+                            size: size(cell_width, line_height),
+                        },
+                        CursorShape::Bar => Bounds {
+                            origin: point(cursor_x, cursor_y),
+                            size: size(px(2.0), line_height),
+                        },
+                        CursorShape::Underline => Bounds {
+                            origin: point(cursor_x, cursor_y + line_height - px(2.0)),
+                            size: size(cell_width, px(2.0)),
+                        },
+                    };
                     window.paint_quad(fill(cursor_bounds, cursor_color));
                 }
             }

@@ -70,6 +70,38 @@ impl RootView {
                     ws.toggle_project_visibility(project_id, cx);
                 });
             }
+            OverlayManagerEvent::RemoteReconnect { connection_id } => {
+                if let Some(ref rm) = self.remote_manager {
+                    rm.update(cx, |rm, cx| {
+                        rm.reconnect(connection_id, cx);
+                    });
+                }
+            }
+            OverlayManagerEvent::RemoteRemoveConnection { connection_id } => {
+                if let Some(ref rm) = self.remote_manager {
+                    rm.update(cx, |rm, cx| {
+                        rm.remove_connection(connection_id, cx);
+                    });
+                }
+            }
+            OverlayManagerEvent::RemoteConnected { config } => {
+                if let Some(ref rm) = self.remote_manager {
+                    let config_clone = config.clone();
+                    let result = rm.update(cx, |rm, cx| {
+                        rm.add_connection(config.clone(), cx)
+                    });
+                    if let Err(msg) = result {
+                        crate::views::panels::toast::ToastManager::warning(msg, cx);
+                        return;
+                    }
+                    // Save connection config (with token) to settings (atomic update)
+                    let _ = crate::workspace::settings::update_remote_connections(|conns| {
+                        if !conns.iter().any(|c| c.id == config_clone.id) {
+                            conns.push(config_clone);
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -79,7 +111,7 @@ impl RootView {
         {
             let terminals = self.terminals.lock();
             for terminal in terminals.values() {
-                self.pty_manager.kill(&terminal.terminal_id);
+                self.backend.kill(&terminal.terminal_id);
             }
         }
         self.terminals.lock().clear();
@@ -143,6 +175,21 @@ impl RootView {
                     self.overlay_manager.update(cx, |om, cx| {
                         om.show_diff_viewer(path, file, cx);
                     });
+                }
+                OverlayRequest::RemoteConnect => {
+                    if let Some(ref rm) = self.remote_manager {
+                        let rm = rm.clone();
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.toggle_remote_connect(rm, cx);
+                        });
+                    }
+                }
+                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, position } => {
+                    if !self.overlay_manager.read(cx).has_remote_context_menu() {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_remote_context_menu(connection_id, connection_name, position, cx);
+                        });
+                    }
                 }
             }
         }

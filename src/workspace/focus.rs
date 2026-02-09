@@ -170,6 +170,13 @@ impl FocusManager {
     /// - Updates the current focus target
     /// - Does NOT push to stack (direct user action)
     pub fn focus_terminal(&mut self, project_id: String, layout_path: Vec<usize>) {
+        if self.context == FocusContext::Fullscreen {
+            // Preserve fullscreen state — only update layout_path if same project
+            if let Some(ref mut focus) = self.current_focus {
+                focus.layout_path = layout_path;
+            }
+            return;
+        }
         self.current_focus = Some(FocusTarget::new(project_id, layout_path));
         self.context = FocusContext::Terminal;
     }
@@ -301,5 +308,96 @@ impl FocusManager {
     pub fn is_modal(&self) -> bool {
         self.context == FocusContext::Modal
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_exit_fullscreen_restores_state() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        fm.set_focused_project_id(None);
+
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+        assert!(fm.has_fullscreen());
+        assert_eq!(fm.fullscreen_project_id(), Some("proj1"));
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+        assert_eq!(fm.focused_project_id(), Some(&"proj1".to_string()));
+
+        let restored = fm.exit_fullscreen();
+        assert!(!fm.has_fullscreen());
+        assert!(restored.is_some());
+        let target = restored.unwrap();
+        assert_eq!(target.project_id, "proj1");
+        assert_eq!(target.layout_path, vec![0]);
+        // focused_project_id restored to None
+        assert_eq!(fm.focused_project_id(), None);
+    }
+
+    #[test]
+    fn enter_exit_modal_restores_focus() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.enter_modal();
+        assert!(fm.is_modal());
+        // Current focus is preserved for visual indicator
+        assert!(fm.focused_terminal_state().is_some());
+
+        let restored = fm.exit_modal();
+        assert!(!fm.is_modal());
+        assert_eq!(*fm.context(), FocusContext::Terminal);
+        let target = restored.unwrap();
+        assert_eq!(target.project_id, "proj1");
+    }
+
+    #[test]
+    fn stack_depth_limit_enforced() {
+        let mut fm = FocusManager::new();
+        // Push more than max_stack_depth (10) entries
+        for i in 0..15 {
+            fm.enter_fullscreen(format!("proj{}", i), vec![0], format!("term{}", i));
+        }
+        // Stack should be capped at 10
+        assert!(fm.focus_stack.len() <= fm.max_stack_depth);
+    }
+
+    #[test]
+    fn clear_all_resets_everything() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        fm.set_focused_project_id(Some("proj1".to_string()));
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+
+        fm.clear_all();
+        assert!(fm.focused_terminal_state().is_none());
+        assert_eq!(fm.focused_project_id(), None);
+        assert!(!fm.has_fullscreen());
+        assert!(fm.focus_stack.is_empty());
+        assert_eq!(*fm.context(), FocusContext::Terminal);
+    }
+
+    #[test]
+    fn focus_terminal_preserves_fullscreen() {
+        let mut fm = FocusManager::new();
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+        assert!(fm.has_fullscreen());
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+
+        // Clicking a terminal while fullscreened should NOT exit fullscreen
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        assert!(fm.has_fullscreen());
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+        assert_eq!(fm.fullscreen_state(), Some(("proj1", "term1")));
+    }
+
+    #[test]
+    fn exit_fullscreen_when_not_fullscreen_returns_none() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        let result = fm.exit_fullscreen();
+        assert!(result.is_none());
+    }
 }

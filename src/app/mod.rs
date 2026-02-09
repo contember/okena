@@ -1,4 +1,5 @@
 mod detached_terminals;
+pub mod headless;
 mod remote_commands;
 mod update_checker;
 
@@ -7,8 +8,9 @@ use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::settings::GlobalSettings;
-use crate::views::panels::status_bar::StatusMessages;
+use crate::views::panels::toast::ToastManager;
 use crate::updater::{GlobalUpdateInfo, UpdateInfo};
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
@@ -18,8 +20,10 @@ use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::watch as tokio_watch;
 
 /// Main application state and view
 pub struct Okena {
@@ -39,8 +43,11 @@ pub struct Okena {
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
-    pub(crate) state_version: Arc<AtomicU64>,
+    pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
+    listen_addr: IpAddr,
+    /// Whether the listen address was forced via CLI --listen flag
+    force_remote: bool,
 }
 
 impl Okena {
@@ -48,9 +55,16 @@ impl Okena {
         workspace_data: WorkspaceData,
         pty_manager: Arc<PtyManager>,
         pty_events: Receiver<PtyEvent>,
+        listen_addr: Option<IpAddr>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let force_remote = listen_addr.is_some();
+        let listen_addr = listen_addr.unwrap_or_else(|| {
+            cx.global::<GlobalSettings>().0.read(cx).get()
+                .remote_listen_address.parse::<IpAddr>()
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        });
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -90,7 +104,7 @@ impl Okena {
                     if let Err(e) = persistence::save_workspace(&data) {
                         log::error!("Failed to save workspace: {}", e);
                         let _ = cx.update(|cx| {
-                            StatusMessages::post(format!("Failed to save workspace: {}", e), cx);
+                            ToastManager::error(format!("Failed to save workspace: {}", e), cx);
                         });
                     }
                     last_saved.store(version, Ordering::Relaxed);
@@ -109,6 +123,19 @@ impl Okena {
         // Get terminals registry from root view
         let terminals = root_view.read(cx).terminals().clone();
 
+        // Create remote connection manager and wire to root view
+        let remote_manager = cx.new(|cx| {
+            RemoteConnectionManager::new(terminals.clone(), cx)
+        });
+        root_view.update(cx, |rv, cx| {
+            rv.set_remote_manager(remote_manager.clone(), cx);
+        });
+        // Auto-connect to saved connections with valid tokens
+        remote_manager.update(cx, |rm, cx| {
+            rm.auto_connect_all(cx);
+            rm.start_token_refresh_task(cx);
+        });
+
         // Observe window bounds changes to force re-render
         cx.observe_window_bounds(window, |_this, _window, cx| {
             cx.notify();
@@ -118,14 +145,15 @@ impl Okena {
         // ── Remote control setup ────────────────────────────────────────
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
-        let state_version = Arc::new(AtomicU64::new(0));
+        let (state_version_tx, _) = tokio_watch::channel(0u64);
+        let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();
         cx.set_global(GlobalRemoteInfo(remote_info.clone()));
 
         // Bump state_version on workspace changes
         let sv = state_version.clone();
         cx.observe(&workspace, move |_this, _workspace, _cx| {
-            sv.fetch_add(1, Ordering::Relaxed);
+            sv.send_modify(|v| *v += 1);
         })
         .detach();
 
@@ -145,13 +173,17 @@ impl Okena {
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
+            listen_addr,
+            force_remote,
         };
 
         // Start PTY event loop (centralized for all windows)
         manager.start_pty_event_loop(pty_events, cx);
 
         // Start remote command bridge loop
-        manager.start_remote_command_loop(bridge_rx, cx);
+        let local_backend: Arc<dyn crate::terminal::backend::TerminalBackend> =
+            Arc::new(crate::terminal::backend::LocalBackend::new(manager.pty_manager.clone()));
+        manager.start_remote_command_loop(bridge_rx, local_backend, cx);
 
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
@@ -159,22 +191,38 @@ impl Okena {
         })
         .detach();
 
-        // Auto-start remote server if enabled in settings
+        // Auto-start remote server if enabled in settings or forced via --remote
         let settings = cx.global::<GlobalSettings>().0.clone();
-        if settings.read(cx).get().remote_server_enabled {
+        if settings.read(cx).get().remote_server_enabled || force_remote {
             manager.start_remote_server(bridge_tx.clone());
         }
 
         // Observe settings changes to start/stop server dynamically
         let bridge_tx_for_observer = bridge_tx.clone();
         cx.observe(&settings, move |this, settings, cx| {
-            let enabled = settings.read(cx).get().remote_server_enabled;
+            let s = settings.read(cx).get();
+            let enabled = s.remote_server_enabled;
             let running = this.remote_server.is_some();
 
             if enabled && !running {
+                // Update listen_addr from settings if not forced via CLI
+                if !this.force_remote {
+                    if let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
+                        this.listen_addr = addr;
+                    }
+                }
                 this.start_remote_server(bridge_tx_for_observer.clone());
             } else if !enabled && running {
                 this.stop_remote_server();
+            } else if enabled && running && !this.force_remote {
+                // Check if address changed while server is running
+                if let Ok(new_addr) = s.remote_listen_address.parse::<IpAddr>() {
+                    if new_addr != this.listen_addr {
+                        this.listen_addr = new_addr;
+                        this.stop_remote_server();
+                        this.start_remote_server(bridge_tx_for_observer.clone());
+                    }
+                }
             }
         })
         .detach();
@@ -218,11 +266,18 @@ impl Okena {
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
+            self.listen_addr,
         ) {
             Ok(server) => {
                 let port = server.port();
                 self.remote_info.set_active(port, self.auth_store.clone());
                 log::info!("Remote server started on port {}", port);
+
+                let code = self.auth_store.get_or_create_code();
+                println!("Remote server listening on port {port}");
+                println!("Pairing code: {code} (expires in 60s)");
+                println!("Run `okena pair` anytime for a fresh code.");
+
                 self.remote_server = Some(server);
             }
             Err(e) => {

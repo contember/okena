@@ -20,7 +20,13 @@ use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelecto
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
+use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
+use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use okena_core::client::RemoteConnectionConfig;
+use crate::remote::GlobalRemoteInfo;
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
 use crate::workspace::state::{Workspace, WorkspaceData};
@@ -162,6 +168,18 @@ impl CloseEvent for DiffViewerEvent {
     }
 }
 
+impl CloseEvent for RemoteConnectDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, RemoteConnectDialogEvent::Close)
+    }
+}
+
+impl CloseEvent for PairingDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, PairingDialogEvent::Close)
+    }
+}
+
 // ============================================================================
 // OverlayManager Entity
 // ============================================================================
@@ -208,6 +226,17 @@ pub enum OverlayManagerEvent {
 
     /// Project switcher: Toggle project visibility
     ToggleProjectVisibility(String),
+
+    /// Remote connect dialog: connection paired and ready
+    RemoteConnected {
+        config: RemoteConnectionConfig,
+    },
+
+    /// Remote context menu: reconnect to a connection
+    RemoteReconnect { connection_id: String },
+
+    /// Remote context menu: remove a connection
+    RemoteRemoveConnection { connection_id: String },
 }
 
 /// Centralized overlay manager that handles all modal overlays.
@@ -228,6 +257,7 @@ pub struct OverlayManager {
     // Context menus remain separate (positioned popups, not full-screen modals)
     context_menu: OverlaySlot<ContextMenu>,
     folder_context_menu: OverlaySlot<FolderContextMenu>,
+    remote_context_menu: OverlaySlot<RemoteContextMenu>,
 }
 
 impl OverlayManager {
@@ -240,6 +270,7 @@ impl OverlayManager {
             modal_type_id: None,
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
+            remote_context_menu: OverlaySlot::new(),
         }
     }
 
@@ -341,6 +372,26 @@ impl OverlayManager {
                 }
             }).detach();
             self.open_modal(entity, cx);
+        }
+        cx.notify();
+    }
+
+    /// Toggle pairing dialog overlay.
+    pub fn toggle_pairing_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<PairingDialog>() {
+            self.close_modal(cx);
+        } else {
+            if let Some(remote_info) = cx.try_global::<GlobalRemoteInfo>() {
+                if let Some(auth_store) = remote_info.0.auth_store() {
+                    let entity = cx.new(|cx| PairingDialog::new(auth_store, cx));
+                    cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
+                        if event.is_close() {
+                            this.close_modal(cx);
+                        }
+                    }).detach();
+                    self.open_modal(entity, cx);
+                }
+            }
         }
         cx.notify();
     }
@@ -592,6 +643,67 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Remote connection context menu (positioned popup)
+    // ========================================================================
+
+    /// Check if remote context menu is open.
+    pub fn has_remote_context_menu(&self) -> bool {
+        self.remote_context_menu.is_open()
+    }
+
+    /// Show remote connection context menu.
+    pub fn show_remote_context_menu(
+        &mut self,
+        connection_id: String,
+        connection_name: String,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_modal(cx);
+        self.context_menu.close();
+        self.folder_context_menu.close();
+
+        let menu = cx.new(|cx| {
+            RemoteContextMenu::new(connection_id, connection_name, position, cx)
+        });
+
+        cx.subscribe(&menu, |this, _, event: &RemoteContextMenuEvent, cx| {
+            match event {
+                RemoteContextMenuEvent::Close => {
+                    this.hide_remote_context_menu(cx);
+                }
+                RemoteContextMenuEvent::Reconnect { connection_id } => {
+                    this.hide_remote_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RemoteReconnect {
+                        connection_id: connection_id.clone(),
+                    });
+                }
+                RemoteContextMenuEvent::RemoveConnection { connection_id } => {
+                    this.hide_remote_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RemoteRemoveConnection {
+                        connection_id: connection_id.clone(),
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.remote_context_menu.set(menu);
+        cx.notify();
+    }
+
+    /// Hide remote context menu.
+    pub fn hide_remote_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.remote_context_menu.close();
+        cx.notify();
+    }
+
+    /// Get remote context menu entity for rendering.
+    pub fn render_remote_context_menu(&self) -> Option<Entity<RemoteContextMenu>> {
+        self.remote_context_menu.render()
+    }
+
+    // ========================================================================
     // File search (parametric)
     // ========================================================================
 
@@ -666,6 +778,39 @@ impl OverlayManager {
         .detach();
 
         self.open_modal(viewer, cx);
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Remote connect dialog (parametric)
+    // ========================================================================
+
+    /// Toggle remote connect dialog overlay.
+    pub fn toggle_remote_connect(
+        &mut self,
+        remote_manager: Entity<RemoteConnectionManager>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_modal::<RemoteConnectDialog>() {
+            self.close_modal(cx);
+        } else {
+            let entity = cx.new(|cx| RemoteConnectDialog::new(remote_manager, cx));
+            cx.subscribe(&entity, |this, _, event: &RemoteConnectDialogEvent, cx| {
+                match event {
+                    RemoteConnectDialogEvent::Close => {
+                        this.close_modal(cx);
+                    }
+                    RemoteConnectDialogEvent::Connected { config } => {
+                        cx.emit(OverlayManagerEvent::RemoteConnected {
+                            config: config.clone(),
+                        });
+                        this.close_modal(cx);
+                    }
+                }
+            })
+            .detach();
+            self.open_modal(entity, cx);
+        }
         cx.notify();
     }
 

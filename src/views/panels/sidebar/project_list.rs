@@ -175,6 +175,7 @@ impl Sidebar {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.toggle_project_visibility(&project_id, cx);
                             });
+                            cx.stop_propagation();
                         }
                     }))
                     .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
@@ -317,6 +318,7 @@ impl Sidebar {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.toggle_project_visibility(&project_id, cx);
                             });
+                            cx.stop_propagation();
                         }
                     }))
                     .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))

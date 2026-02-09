@@ -3,6 +3,8 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
+use crate::remote_client::manager::RemoteConnectionManager;
+use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::Terminal;
 use crate::views::overlay_manager::OverlayManager;
@@ -11,6 +13,7 @@ use crate::views::sidebar_controller::SidebarController;
 use crate::views::panels::sidebar::Sidebar;
 use crate::views::layout::split_pane::{new_active_drag, ActiveDrag};
 use crate::views::panels::status_bar::StatusBar;
+use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::workspace::persistence::{load_settings, AppSettings};
 use crate::workspace::request_broker::RequestBroker;
@@ -27,7 +30,7 @@ pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<Terminal>>>>;
 pub struct RootView {
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
-    pty_manager: Arc<PtyManager>,
+    backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
     sidebar: Entity<Sidebar>,
     /// Sidebar state controller
@@ -42,10 +45,16 @@ pub struct RootView {
     status_bar: Entity<StatusBar>,
     /// Centralized overlay manager
     overlay_manager: Entity<OverlayManager>,
+    /// Toast notification overlay
+    toast_overlay: Entity<ToastOverlay>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
+    /// Remote connection manager (set after creation)
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
+    /// Cached remote project column entities
+    remote_project_columns: HashMap<String, Entity<ProjectColumn>>,
 }
 
 impl RootView {
@@ -74,6 +83,9 @@ impl RootView {
         // Create overlay manager
         let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));
 
+        // Create toast overlay
+        let toast_overlay = cx.new(ToastOverlay::new);
+
         // Subscribe to overlay manager events
         cx.subscribe(&overlay_manager, Self::handle_overlay_manager_event).detach();
 
@@ -87,10 +99,13 @@ impl RootView {
         // Create focus handle for global keybindings
         let focus_handle = cx.focus_handle();
 
+        // Wrap PtyManager in LocalBackend for the TerminalBackend trait
+        let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
+
         let mut view = Self {
             workspace,
             request_broker,
-            pty_manager,
+            backend,
             terminals,
             sidebar,
             sidebar_ctrl,
@@ -99,8 +114,11 @@ impl RootView {
             title_bar,
             status_bar,
             overlay_manager,
+            toast_overlay,
             active_drag: new_active_drag(),
             focus_handle,
+            remote_manager: None,
+            remote_project_columns: HashMap::new(),
         };
 
         // Initialize project columns
@@ -112,6 +130,34 @@ impl RootView {
     /// Get the terminals registry (for sharing with detached windows)
     pub fn terminals(&self) -> &TerminalsRegistry {
         &self.terminals
+    }
+
+    /// Set the remote connection manager (called after creation by Okena).
+    pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
+        // Observe remote manager for re-renders
+        cx.observe(&manager, |this, _rm, cx| {
+            this.remote_project_columns.clear();
+            cx.notify();
+        }).detach();
+
+        // Pass to sidebar
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_remote_manager(manager.clone(), cx);
+        });
+
+        // When local workspace focus changes, clear remote focus
+        let rm = manager.clone();
+        cx.observe(&self.workspace, move |_this, ws, cx| {
+            if ws.read(cx).focus_manager.focused_project_id().is_some() {
+                rm.update(cx, |rm, cx| {
+                    if rm.focused_remote().is_some() {
+                        rm.set_focused_remote(None, cx);
+                    }
+                });
+            }
+        }).detach();
+
+        self.remote_manager = Some(manager);
     }
 
     /// Ensure project columns exist for all visible projects
@@ -126,7 +172,7 @@ impl RootView {
             if !self.project_columns.contains_key(project_id) {
                 let workspace_clone = self.workspace.clone();
                 let request_broker_clone = self.request_broker.clone();
-                let pty_manager_clone = self.pty_manager.clone();
+                let backend_clone = self.backend.clone();
                 let terminals_clone = self.terminals.clone();
                 let active_drag_clone = self.active_drag.clone();
                 let id = project_id.clone();
@@ -135,7 +181,7 @@ impl RootView {
                         workspace_clone,
                         request_broker_clone,
                         id,
-                        pty_manager_clone,
+                        backend_clone,
                         terminals_clone,
                         active_drag_clone,
                         cx,

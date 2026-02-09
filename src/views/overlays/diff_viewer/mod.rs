@@ -18,11 +18,10 @@ use crate::views::components::{modal_backdrop, modal_content, syntax::load_synta
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
-use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use syntax::process_file;
-use types::{DiffDisplayFile, FileStats, FileTreeNode, ScrollbarDrag, SideBySideLine};
+use types::{DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine};
 
 mod side_by_side;
 
@@ -57,11 +56,18 @@ pub struct DiffViewer {
     error_message: Option<String>,
     line_num_width: usize,
     syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
     scrollbar_drag: Option<ScrollbarDrag>,
     file_font_size: f32,
     /// Cached side-by-side lines for current file.
     side_by_side_lines: Vec<SideBySideLine>,
+    /// Horizontal scroll offset in pixels.
+    scroll_x: f32,
+    /// Maximum line length in characters (for horizontal scroll range).
+    max_line_chars: usize,
+    /// Cached diff pane viewport width (updated from scroll handle geometry).
+    diff_pane_width: f32,
+    /// Horizontal scrollbar drag state.
+    h_scrollbar_drag: Option<HScrollbarDrag>,
 }
 
 impl DiffViewer {
@@ -90,10 +96,13 @@ impl DiffViewer {
             error_message: None,
             line_num_width: 4,
             syntax_set: load_syntax_set(),
-            theme_set: ThemeSet::load_defaults(),
             scrollbar_drag: None,
             file_font_size,
             side_by_side_lines: Vec::new(),
+            scroll_x: 0.0,
+            max_line_chars: 0,
+            diff_pane_width: 0.0,
+            h_scrollbar_drag: None,
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {
@@ -125,6 +134,8 @@ impl DiffViewer {
         self.selected_file_index = 0;
         self.selection.clear();
         self.side_by_side_lines.clear();
+        self.scroll_x = 0.0;
+        self.max_line_chars = 0;
 
         let path = std::path::Path::new(&self.project_path);
         match get_diff_with_options(path, mode, self.ignore_whitespace) {
@@ -164,12 +175,17 @@ impl DiffViewer {
                 raw_file,
                 &mut max_line_num,
                 &self.syntax_set,
-                &self.theme_set,
                 repo_path,
                 self.diff_mode,
             );
 
             self.line_num_width = max_line_num.to_string().len().max(3);
+            self.max_line_chars = display_file
+                .lines
+                .iter()
+                .map(|l| l.plain_text.chars().count())
+                .max()
+                .unwrap_or(0);
             self.current_file = Some(display_file);
         } else {
             self.current_file = None;
@@ -238,6 +254,7 @@ impl DiffViewer {
         if index < self.file_stats.len() {
             self.selected_file_index = index;
             self.selection.clear();
+            self.scroll_x = 0.0;
             self.process_current_file();
             self.update_side_by_side_cache();
             cx.notify();
@@ -375,6 +392,15 @@ impl Render for DiffViewer {
                     "w" => this.toggle_ignore_whitespace(cx),
                     "up" => this.prev_file(cx),
                     "down" => this.next_file(cx),
+                    "left" => {
+                        this.scroll_x = (this.scroll_x - 40.0).max(0.0);
+                        cx.notify();
+                    }
+                    "right" => {
+                        let max = this.max_scroll_x();
+                        this.scroll_x = (this.scroll_x + 40.0).min(max);
+                        cx.notify();
+                    }
                     "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
                     "a" if modifiers.platform || modifiers.control => this.select_all(cx),
                     _ => {}
@@ -383,7 +409,7 @@ impl Render for DiffViewer {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
-                    if this.scrollbar_drag.is_none() {
+                    if this.scrollbar_drag.is_none() && this.h_scrollbar_drag.is_none() {
                         this.close(cx);
                     }
                 }),
@@ -393,12 +419,26 @@ impl Render for DiffViewer {
                     let y = f32::from(event.position.y);
                     this.update_scrollbar_drag(y, cx);
                 }
+                if let Some(drag) = this.h_scrollbar_drag {
+                    let x = f32::from(event.position.x);
+                    let delta_x = x - drag.start_x;
+                    let max = this.max_scroll_x();
+                    let text_w = this.max_text_width();
+                    let avail_w = this.available_text_width();
+                    let scale = if avail_w > 0.0 { text_w / avail_w } else { 1.0 };
+                    this.scroll_x = (drag.start_scroll_x + delta_x * scale).clamp(0.0, max);
+                    cx.notify();
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
                     if this.scrollbar_drag.is_some() {
                         this.end_scrollbar_drag(cx);
+                    }
+                    if this.h_scrollbar_drag.is_some() {
+                        this.h_scrollbar_drag = None;
+                        cx.notify();
                     }
                 }),
             )

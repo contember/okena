@@ -8,6 +8,7 @@
 use crate::theme::theme;
 use crate::views::components::{context_menu_panel, menu_item, menu_item_disabled};
 use crate::views::layout::layout_container::LayoutContainer;
+use super::kill_terminals;
 use gpui::*;
 
 impl LayoutContainer {
@@ -54,9 +55,10 @@ impl LayoutContainer {
                                         let project_id = project_id.clone();
                                         let layout_path = layout_path.clone();
                                         cx.listener(move |this, _, _window, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.close_tab(&project_id, &layout_path, tab_index, cx);
+                                            let removed = workspace.update(cx, |ws, cx| {
+                                                ws.close_tab(&project_id, &layout_path, tab_index, cx)
                                             });
+                                            kill_terminals(&removed, &*this.backend, &this.terminals);
                                             this.hide_tab_context_menu(cx);
                                         })
                                     }),
@@ -69,9 +71,10 @@ impl LayoutContainer {
                                         let project_id = project_id.clone();
                                         let layout_path = layout_path.clone();
                                         cx.listener(move |this, _, _window, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.close_other_tabs(&project_id, &layout_path, tab_index, cx);
+                                            let removed = workspace.update(cx, |ws, cx| {
+                                                ws.close_other_tabs(&project_id, &layout_path, tab_index, cx)
                                             });
+                                            kill_terminals(&removed, &*this.backend, &this.terminals);
                                             this.hide_tab_context_menu(cx);
                                         })
                                     })
@@ -86,9 +89,10 @@ impl LayoutContainer {
                                         let project_id = project_id.clone();
                                         let layout_path = layout_path.clone();
                                         cx.listener(move |this, _, _window, cx| {
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.close_tabs_to_right(&project_id, &layout_path, tab_index, cx);
+                                            let removed = workspace.update(cx, |ws, cx| {
+                                                ws.close_tabs_to_right(&project_id, &layout_path, tab_index, cx)
                                             });
+                                            kill_terminals(&removed, &*this.backend, &this.terminals);
                                             this.hide_tab_context_menu(cx);
                                         })
                                     })

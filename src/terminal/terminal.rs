@@ -1,8 +1,7 @@
-use crate::terminal::pty_manager::PtyManager;
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
 use alacritty_terminal::term::cell::Flags;
@@ -10,6 +9,14 @@ use alacritty_terminal::grid::{Scroll, Dimensions};
 use parking_lot::Mutex;
 use regex::Regex;
 use std::sync::{Arc, OnceLock};
+
+/// Transport trait for terminal I/O operations.
+/// Implemented by PtyManager (local) and RemoteTransport (remote).
+pub trait TerminalTransport: Send + Sync {
+    fn send_input(&self, terminal_id: &str, data: &[u8]);
+    fn resize(&self, terminal_id: &str, cols: u16, rows: u16);
+    fn uses_mouse_backend(&self) -> bool;
+}
 
 /// Terminal size in cells and pixels
 #[derive(Clone, Copy, Debug)]
@@ -38,8 +45,8 @@ pub struct ZedEventListener {
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag
     has_bell: Arc<Mutex<bool>>,
-    /// PTY manager for writing responses back to the terminal
-    pty_manager: Arc<PtyManager>,
+    /// Transport for writing responses back to the terminal
+    transport: Arc<dyn TerminalTransport>,
     /// Terminal ID for PTY write operations
     terminal_id: String,
 }
@@ -48,10 +55,10 @@ impl ZedEventListener {
     pub fn new(
         title: Arc<Mutex<Option<String>>>,
         has_bell: Arc<Mutex<bool>>,
-        pty_manager: Arc<PtyManager>,
+        transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
-        Self { title, has_bell, pty_manager, terminal_id }
+        Self { title, has_bell, transport, terminal_id }
     }
 }
 
@@ -67,7 +74,7 @@ impl EventListener for ZedEventListener {
             TermEvent::PtyWrite(data) => {
                 // Write response back to PTY (e.g., cursor position report)
                 log::debug!("PtyWrite event: {:?}", data);
-                self.pty_manager.send_input(&self.terminal_id, data.as_bytes());
+                self.transport.send_input(&self.terminal_id, data.as_bytes());
             }
             _ => {
                 // Ignore other events
@@ -176,7 +183,7 @@ pub struct Terminal {
     processor: Mutex<Processor>,
     pub terminal_id: String,
     pub resize_state: Mutex<ResizeState>,
-    pty_manager: Arc<PtyManager>,
+    transport: Arc<dyn TerminalTransport>,
     selection_state: Mutex<SelectionState>,
     scroll_offset: Mutex<i32>,
     /// Terminal title from OSC sequences
@@ -194,7 +201,7 @@ impl Terminal {
     pub fn new(
         terminal_id: String,
         size: TerminalSize,
-        pty_manager: Arc<PtyManager>,
+        transport: Arc<dyn TerminalTransport>,
         initial_cwd: String,
     ) -> Self {
         let config = TermConfig::default();
@@ -206,7 +213,7 @@ impl Terminal {
         let event_listener = ZedEventListener::new(
             title.clone(),
             has_bell.clone(),
-            pty_manager.clone(),
+            transport.clone(),
             terminal_id.clone(),
         );
         let term = Term::new(config, &term_size, event_listener);
@@ -220,7 +227,7 @@ impl Terminal {
                 last_pty_resize: std::time::Instant::now(),
                 pending_pty_resize: None,
             }),
-            pty_manager,
+            transport,
             selection_state: Mutex::new(SelectionState::default()),
             scroll_offset: Mutex::new(0),
             title,
@@ -250,14 +257,14 @@ impl Terminal {
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_input(&self, input: &str) {
         self.scroll_to_bottom();
-        self.pty_manager.send_input(&self.terminal_id, input.as_bytes());
+        self.transport.send_input(&self.terminal_id, input.as_bytes());
     }
 
     /// Send raw bytes to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
         self.scroll_to_bottom();
-        self.pty_manager.send_input(&self.terminal_id, data);
+        self.transport.send_input(&self.terminal_id, data);
     }
 
     /// Clear the terminal screen by sending the clear sequence
@@ -265,7 +272,7 @@ impl Terminal {
         // Send ANSI escape sequence to clear screen and move cursor to home
         // \x1b[2J = clear entire screen
         // \x1b[H = move cursor to home position (0,0)
-        self.pty_manager.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
+        self.transport.send_input(&self.terminal_id, b"\x1b[2J\x1b[H");
         self.scroll_to_bottom();
     }
 
@@ -335,7 +342,7 @@ impl Terminal {
             rs.pending_pty_resize = None;
             rs.last_pty_resize = now;
             drop(rs);
-            self.pty_manager.resize(&self.terminal_id, new_size.cols, new_size.rows);
+            self.transport.resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
             // Store pending resize - will be applied on next resize that passes debounce
             rs.pending_pty_resize = Some((new_size.cols, new_size.rows));
@@ -348,7 +355,7 @@ impl Terminal {
         if let Some((cols, rows)) = rs.pending_pty_resize.take() {
             rs.last_pty_resize = std::time::Instant::now();
             drop(rs);
-            self.pty_manager.resize(&self.terminal_id, cols, rows);
+            self.transport.resize(&self.terminal_id, cols, rows);
         }
     }
 
@@ -748,6 +755,14 @@ impl Terminal {
         matches
     }
 
+    /// Render the terminal's visible content as ANSI escape sequences.
+    ///
+    /// Produces a byte stream that, when fed to another terminal emulator,
+    /// reproduces the current screen state including colors and attributes.
+    pub fn render_snapshot(&self) -> Vec<u8> {
+        self.with_content(|term| grid_to_ansi(term))
+    }
+
     /// Scroll to a specific position (0 = bottom, positive = towards top)
     pub fn scroll_to(&self, offset: usize) {
         let mut term = self.term.lock();
@@ -762,7 +777,7 @@ impl Terminal {
     /// Also returns true if using tmux backend (which handles mouse with `set mouse on`)
     pub fn is_mouse_mode(&self) -> bool {
         // If using tmux backend, tmux handles mouse events directly
-        if self.pty_manager.uses_mouse_backend() {
+        if self.transport.uses_mouse_backend() {
             return true;
         }
         // Otherwise check if the terminal itself requested mouse mode
@@ -784,7 +799,7 @@ impl Terminal {
     /// button: 64 for scroll up, 65 for scroll down
     pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize) {
         // Check if using tmux backend - always use SGR format (tmux supports it)
-        let use_sgr = if self.pty_manager.uses_mouse_backend() {
+        let use_sgr = if self.transport.uses_mouse_backend() {
             true
         } else {
             let term = self.term.lock();
@@ -806,5 +821,191 @@ impl Terminal {
             ];
             self.send_bytes(&bytes);
         }
+    }
+}
+
+// ── ANSI snapshot serialization ────────────────────────────────────────────
+
+/// Tracked SGR state to minimize escape sequences in snapshot output.
+#[derive(Clone, Default, PartialEq)]
+struct SgrState {
+    bold: bool,
+    dim: bool,
+    italic: bool,
+    underline: bool,
+    inverse: bool,
+    strikeout: bool,
+    fg: Option<Color>,
+    bg: Option<Color>,
+}
+
+/// Serialize the visible terminal grid to ANSI escape sequences.
+fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
+    let grid = term.grid();
+    let screen_lines = grid.screen_lines();
+    let cols = grid.columns();
+    let cursor = term.grid().cursor.point;
+    let cursor_hidden = !term.mode().contains(TermMode::SHOW_CURSOR);
+
+    // Generous pre-allocation
+    let mut buf = Vec::with_capacity(screen_lines * cols * 4);
+
+    // Clear screen + move cursor home
+    buf.extend_from_slice(b"\x1b[2J\x1b[H");
+
+    let default_fg = Color::Named(NamedColor::Foreground);
+    let default_bg = Color::Named(NamedColor::Background);
+
+    let mut current = SgrState::default();
+
+    for row in 0..screen_lines as i32 {
+        // Position cursor at start of row
+        write_csi_pos(&mut buf, row + 1, 1);
+
+        let mut col_idx = 0usize;
+        while col_idx < cols {
+            let cell = &grid[Point::new(Line(row), Column(col_idx))];
+
+            // Skip wide char spacer cells
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                col_idx += 1;
+                continue;
+            }
+
+            // Determine desired SGR state
+            let desired = SgrState {
+                bold: cell.flags.contains(Flags::BOLD),
+                dim: cell.flags.contains(Flags::DIM),
+                italic: cell.flags.contains(Flags::ITALIC),
+                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                inverse: cell.flags.contains(Flags::INVERSE),
+                strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                fg: if cell.fg == default_fg { None } else { Some(cell.fg.clone()) },
+                bg: if cell.bg == default_bg { None } else { Some(cell.bg.clone()) },
+            };
+
+            if desired != current {
+                emit_sgr(&mut buf, &desired);
+                current = desired;
+            }
+
+            // Write the character
+            let c = cell.c;
+            if c == '\0' || c == ' ' {
+                buf.push(b' ');
+            } else {
+                let mut utf8_buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut utf8_buf);
+                buf.extend_from_slice(encoded.as_bytes());
+            }
+
+            col_idx += 1;
+        }
+    }
+
+    // Reset attributes
+    buf.extend_from_slice(b"\x1b[0m");
+
+    // Position cursor
+    write_csi_pos(&mut buf, cursor.line.0 + 1, cursor.column.0 as i32 + 1);
+
+    // Hide cursor if needed
+    if cursor_hidden {
+        buf.extend_from_slice(b"\x1b[?25l");
+    }
+
+    buf
+}
+
+/// Write CSI cursor position: `\x1b[{row};{col}H`
+fn write_csi_pos(buf: &mut Vec<u8>, row: i32, col: i32) {
+    use std::io::Write;
+    let _ = write!(buf, "\x1b[{};{}H", row, col);
+}
+
+/// Emit a full SGR sequence from the desired state (always resets first).
+fn emit_sgr(buf: &mut Vec<u8>, state: &SgrState) {
+    use std::io::Write;
+
+    buf.extend_from_slice(b"\x1b[0");
+
+    if state.bold {
+        buf.extend_from_slice(b";1");
+    }
+    if state.dim {
+        buf.extend_from_slice(b";2");
+    }
+    if state.italic {
+        buf.extend_from_slice(b";3");
+    }
+    if state.underline {
+        buf.extend_from_slice(b";4");
+    }
+    if state.inverse {
+        buf.extend_from_slice(b";7");
+    }
+    if state.strikeout {
+        buf.extend_from_slice(b";9");
+    }
+    if let Some(ref color) = state.fg {
+        push_color_sgr(buf, color, true);
+    }
+    if let Some(ref color) = state.bg {
+        push_color_sgr(buf, color, false);
+    }
+
+    let _ = write!(buf, "m");
+}
+
+/// Append color SGR parameters (e.g. `;31` or `;38;5;123` or `;38;2;R;G;B`).
+fn push_color_sgr(buf: &mut Vec<u8>, color: &Color, is_fg: bool) {
+    use std::io::Write;
+
+    match color {
+        Color::Named(named) => {
+            let code = named_color_sgr_code(named, is_fg);
+            if let Some(code) = code {
+                let _ = write!(buf, ";{}", code);
+            }
+        }
+        Color::Indexed(idx) => {
+            let base = if is_fg { 38 } else { 48 };
+            let _ = write!(buf, ";{};5;{}", base, idx);
+        }
+        Color::Spec(rgb) => {
+            let base = if is_fg { 38 } else { 48 };
+            let _ = write!(buf, ";{};2;{};{};{}", base, rgb.r, rgb.g, rgb.b);
+        }
+    }
+}
+
+/// Map a NamedColor to its SGR code.
+fn named_color_sgr_code(color: &NamedColor, is_fg: bool) -> Option<u8> {
+    let code = match color {
+        NamedColor::Black => 0,
+        NamedColor::Red => 1,
+        NamedColor::Green => 2,
+        NamedColor::Yellow => 3,
+        NamedColor::Blue => 4,
+        NamedColor::Magenta => 5,
+        NamedColor::Cyan => 6,
+        NamedColor::White => 7,
+        NamedColor::BrightBlack => 8,
+        NamedColor::BrightRed => 9,
+        NamedColor::BrightGreen => 10,
+        NamedColor::BrightYellow => 11,
+        NamedColor::BrightBlue => 12,
+        NamedColor::BrightMagenta => 13,
+        NamedColor::BrightCyan => 14,
+        NamedColor::BrightWhite => 15,
+        // Foreground/Background/Cursor are default colors, no SGR code
+        _ => return None,
+    };
+
+    if code < 8 {
+        Some(if is_fg { 30 + code } else { 40 + code })
+    } else {
+        // Bright colors: 90-97 / 100-107
+        Some(if is_fg { 90 + (code - 8) } else { 100 + (code - 8) })
     }
 }

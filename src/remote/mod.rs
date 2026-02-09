@@ -42,17 +42,14 @@ impl RemoteInfo {
         inner.auth_store = None;
     }
 
-    /// Returns (port, pairing_code) if server is active.
-    /// The pairing code is always fresh (regenerated if expired).
-    pub fn status(&self) -> Option<(u16, String)> {
-        let inner = self.inner.lock();
-        match (inner.port, inner.auth_store.as_ref()) {
-            (Some(port), Some(auth_store)) => {
-                let code = auth_store.get_or_create_code();
-                Some((port, code))
-            }
-            _ => None,
-        }
+    /// Returns the port if the server is active.
+    pub fn port(&self) -> Option<u16> {
+        self.inner.lock().port
+    }
+
+    /// Returns the auth store if the server is active.
+    pub fn auth_store(&self) -> Option<Arc<AuthStore>> {
+        self.inner.lock().auth_store.clone()
     }
 }
 

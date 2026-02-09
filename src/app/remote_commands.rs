@@ -1,8 +1,9 @@
-use alacritty_terminal::grid::Dimensions;
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFullscreen, ApiLayoutNode, ApiProject, StateResponse};
+use crate::remote::types::{ApiFullscreen, ApiProject, StateResponse};
+use crate::terminal::backend::TerminalBackend;
+use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 use gpui::*;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::Okena;
 
@@ -12,6 +13,7 @@ impl Okena {
     pub(super) fn start_remote_command_loop(
         &mut self,
         bridge_rx: BridgeReceiver,
+        backend: Arc<dyn TerminalBackend>,
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
@@ -26,17 +28,25 @@ impl Okena {
                 };
 
                 let result = match msg.command {
+                    RemoteCommand::Action(action) => {
+                        cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                execute_action(action, ws, &*backend, &terminals, cx)
+                                    .into_command_result()
+                            })
+                        })
+                    }
                     RemoteCommand::GetState => {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
-                            let sv = state_version.load(Ordering::Relaxed);
+                            let sv = *state_version.borrow();
                             let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
                                     path: p.path.clone(),
                                     is_visible: p.is_visible,
-                                    layout: p.layout.as_ref().map(ApiLayoutNode::from_layout),
+                                    layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
                                 }
                             }).collect();
@@ -58,135 +68,16 @@ impl Okena {
                             CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
                         })
                     }
-                    RemoteCommand::SendText { terminal_id, text } => {
-                        let found = {
-                            let guard = terminals.lock();
-                            guard.get(&terminal_id).cloned()
-                        };
-                        match found {
-                            Some(term) => {
-                                term.send_input(&text);
-                                CommandResult::Ok(None)
-                            }
-                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                        }
-                    }
-                    RemoteCommand::RunCommand { terminal_id, command } => {
-                        let found = {
-                            let guard = terminals.lock();
-                            guard.get(&terminal_id).cloned()
-                        };
-                        match found {
-                            Some(term) => {
-                                term.send_input(&format!("{}\r", command));
-                                CommandResult::Ok(None)
-                            }
-                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                        }
-                    }
-                    RemoteCommand::SendSpecialKey { terminal_id, key } => {
-                        let found = {
-                            let guard = terminals.lock();
-                            guard.get(&terminal_id).cloned()
-                        };
-                        match found {
-                            Some(term) => {
-                                term.send_bytes(key.to_bytes());
-                                CommandResult::Ok(None)
-                            }
-                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                        }
-                    }
-                    RemoteCommand::ReadContent { terminal_id } => {
-                        let found = {
-                            let guard = terminals.lock();
-                            guard.get(&terminal_id).cloned()
-                        };
-                        match found {
-                            Some(term) => {
-                                let content = term.with_content(|term| {
-                                    let grid = term.grid();
-                                    let screen_lines = grid.screen_lines();
-                                    let cols = grid.columns();
-                                    let mut lines = Vec::with_capacity(screen_lines);
-
-                                    for row in 0..screen_lines as i32 {
-                                        let mut line = String::with_capacity(cols);
-                                        for col in 0..cols {
-                                            use alacritty_terminal::index::{Point, Line, Column};
-                                            let cell = &grid[Point::new(Line(row), Column(col))];
-                                            line.push(cell.c);
-                                        }
-                                        // Trim trailing spaces
-                                        let trimmed = line.trim_end().to_string();
-                                        lines.push(trimmed);
-                                    }
-
-                                    // Remove trailing empty lines
-                                    while lines.last().map_or(false, |l| l.is_empty()) {
-                                        lines.pop();
-                                    }
-
-                                    lines.join("\n")
-                                });
-                                CommandResult::Ok(Some(serde_json::json!({"content": content})))
-                            }
-                            None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                        }
-                    }
-                    RemoteCommand::SplitTerminal { project_id, path, direction } => {
+                    RemoteCommand::RenderSnapshot { terminal_id } => {
                         cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let ok = ws.with_layout_node(&project_id, &path, cx, |node| {
-                                    let existing = node.clone();
-                                    let new_terminal = crate::workspace::state::LayoutNode::new_terminal();
-                                    *node = crate::workspace::state::LayoutNode::Split {
-                                        direction,
-                                        sizes: vec![0.5, 0.5],
-                                        children: vec![existing, new_terminal],
-                                    };
-                                    true
-                                });
-                                if ok {
-                                    CommandResult::Ok(None)
-                                } else {
-                                    CommandResult::Err(format!("project or path not found: {}:{:?}", project_id, path))
+                            let ws = workspace.read(cx);
+                            match ensure_terminal(&terminal_id, &terminals, &*backend, ws) {
+                                Some(term) => {
+                                    let snapshot = term.render_snapshot();
+                                    CommandResult::OkBytes(snapshot)
                                 }
-                            })
-                        })
-                    }
-                    RemoteCommand::CloseTerminal { project_id, terminal_id } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let path = ws.project(&project_id)
-                                    .and_then(|p| p.layout.as_ref())
-                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
-
-                                match path {
-                                    Some(path) => {
-                                        ws.close_terminal(&project_id, &path, cx);
-                                        CommandResult::Ok(None)
-                                    }
-                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                                }
-                            })
-                        })
-                    }
-                    RemoteCommand::FocusTerminal { project_id, terminal_id } => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                let path = ws.project(&project_id)
-                                    .and_then(|p| p.layout.as_ref())
-                                    .and_then(|layout| layout.find_terminal_path(&terminal_id));
-
-                                match path {
-                                    Some(path) => {
-                                        ws.set_focused_terminal(project_id, path, cx);
-                                        CommandResult::Ok(None)
-                                    }
-                                    None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                                }
-                            })
+                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
+                            }
                         })
                     }
                 };

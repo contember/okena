@@ -377,4 +377,71 @@ mod tests {
         assert!(conflicts.is_empty(), "Default config should have no conflicts");
     }
 
+    #[test]
+    fn test_duplicate_keybinding_detected() {
+        let mut config = KeybindingConfig::defaults();
+        // Add a binding that conflicts with an existing one
+        config.bindings.insert(
+            "CustomAction".to_string(),
+            vec![KeybindingEntry::new("cmd-b", None)], // conflicts with ToggleSidebar
+        );
+        let conflicts = config.detect_conflicts();
+        assert!(!conflicts.is_empty(), "Should detect conflict on cmd-b");
+        assert!(conflicts.iter().any(|c| c.keystroke == "cmd-b"));
+    }
+
+    #[test]
+    fn test_same_key_different_context_no_conflict() {
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            "Action1".to_string(),
+            vec![KeybindingEntry::new("cmd-d", None)], // global
+        );
+        bindings.insert(
+            "Action2".to_string(),
+            vec![KeybindingEntry::new("cmd-d", Some("TerminalPane"))], // scoped
+        );
+        let config = KeybindingConfig { version: 1, bindings };
+        let conflicts = config.detect_conflicts();
+        assert!(conflicts.is_empty(), "Different contexts should not conflict");
+    }
+
+    #[test]
+    fn test_disabled_binding_no_conflict() {
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            "Action1".to_string(),
+            vec![KeybindingEntry::new("cmd-x", None)],
+        );
+        let mut disabled = KeybindingEntry::new("cmd-x", None);
+        disabled.enabled = false;
+        bindings.insert(
+            "Action2".to_string(),
+            vec![disabled],
+        );
+        let config = KeybindingConfig { version: 1, bindings };
+        let conflicts = config.detect_conflicts();
+        assert!(conflicts.is_empty(), "Disabled binding should not conflict");
+    }
+
+    #[test]
+    fn test_customized_actions_detected() {
+        let mut config = KeybindingConfig::defaults();
+        // Modify an existing action's binding
+        config.bindings.insert(
+            "ToggleSidebar".to_string(),
+            vec![KeybindingEntry::new("ctrl-shift-b", None)], // changed from default
+        );
+        let customized = config.get_customized_actions();
+        assert!(customized.contains("ToggleSidebar"), "Modified action should be detected");
+    }
+
+    #[test]
+    fn test_serialization_round_trip() {
+        let config = KeybindingConfig::defaults();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: KeybindingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.version, config.version);
+        assert_eq!(deserialized.bindings.len(), config.bindings.len());
+    }
 }

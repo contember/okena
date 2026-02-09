@@ -3,54 +3,12 @@ use gpui::*;
 use gpui_component::h_flex;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
 
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How long a status message stays visible
-const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
-
-/// A transient status message displayed in the status bar
-pub struct StatusMessage {
-    pub text: String,
-    pub created: Instant,
-}
-
-/// Global queue for status messages (e.g. save errors)
-#[derive(Clone)]
-pub struct StatusMessages(pub Arc<Mutex<Option<StatusMessage>>>);
-
-impl Global for StatusMessages {}
-
-impl StatusMessages {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(None)))
-    }
-
-    /// Post a status message visible in the status bar for STATUS_MESSAGE_TTL
-    pub fn post(text: String, cx: &App) {
-        if let Some(sm) = cx.try_global::<StatusMessages>() {
-            *sm.0.lock() = Some(StatusMessage {
-                text,
-                created: Instant::now(),
-            });
-        }
-    }
-
-    /// Get the current active message (if not expired)
-    fn current(&self) -> Option<String> {
-        let guard = self.0.lock();
-        if let Some(ref msg) = *guard {
-            if msg.created.elapsed() < STATUS_MESSAGE_TTL {
-                return Some(msg.text.clone());
-            }
-        }
-        None
-    }
-}
 
 /// Cached system stats
 #[derive(Clone, Default)]
@@ -194,22 +152,9 @@ impl Render for StatusBar {
             .border_t_1()
             .border_color(rgb(t.border))
             .text_size(px(11.0))
-            // Left side - status message + system stats
+            // Left side - system stats
             .child({
-                let mut left = h_flex().gap(px(16.0));
-
-                // Show status message if active
-                if let Some(sm) = cx.try_global::<StatusMessages>() {
-                    if let Some(msg) = sm.current() {
-                        left = left.child(
-                            div()
-                                .text_color(rgb(t.term_red))
-                                .child(msg)
-                        );
-                    }
-                }
-
-                left
+                h_flex().gap(px(16.0))
                     // CPU
                     .child(
                         h_flex()
@@ -246,17 +191,15 @@ impl Render for StatusBar {
                 let mut right = h_flex()
                     .gap(px(8.0));
 
-                // Show remote server pairing code if active
+                // Show remote server status if active
                 if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>() {
-                    if let Some((port, code)) = remote_info.0.status() {
-                        let code_for_click = code.clone();
+                    if let Some(port) = remote_info.0.port() {
                         right = right.child(
                             div()
                                 .id("remote-info")
-                                .cursor_pointer()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
+                                .gap(px(6.0))
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_cyan))
@@ -264,12 +207,23 @@ impl Render for StatusBar {
                                 )
                                 .child(
                                     div()
+                                        .id("pair-btn")
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
                                         .text_color(rgb(t.term_yellow))
-                                        .child(code)
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .child("Pair")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(crate::keybindings::ShowPairingDialog),
+                                                cx,
+                                            );
+                                        })
                                 )
-                                .on_click(move |_, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code_for_click.clone()));
-                                })
                         );
                     }
                 }

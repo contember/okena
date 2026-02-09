@@ -10,43 +10,7 @@ pub async fn post_actions(
     State(state): State<AppState>,
     Json(action): Json<ActionRequest>,
 ) -> impl IntoResponse {
-    let command = match action {
-        ActionRequest::SendText { terminal_id, text } => {
-            RemoteCommand::SendText { terminal_id, text }
-        }
-        ActionRequest::RunCommand { terminal_id, command } => {
-            RemoteCommand::RunCommand { terminal_id, command }
-        }
-        ActionRequest::SendSpecialKey { terminal_id, key } => {
-            RemoteCommand::SendSpecialKey { terminal_id, key }
-        }
-        ActionRequest::SplitTerminal {
-            project_id,
-            path,
-            direction,
-        } => RemoteCommand::SplitTerminal {
-            project_id,
-            path,
-            direction,
-        },
-        ActionRequest::CloseTerminal {
-            project_id,
-            terminal_id,
-        } => RemoteCommand::CloseTerminal {
-            project_id,
-            terminal_id,
-        },
-        ActionRequest::FocusTerminal {
-            project_id,
-            terminal_id,
-        } => RemoteCommand::FocusTerminal {
-            project_id,
-            terminal_id,
-        },
-        ActionRequest::ReadContent { terminal_id } => {
-            RemoteCommand::ReadContent { terminal_id }
-        }
-    };
+    let command = RemoteCommand::Action(action);
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let msg = BridgeMessage {
@@ -66,6 +30,9 @@ pub async fn post_actions(
         Ok(CommandResult::Ok(payload)) => {
             let body = payload.unwrap_or(serde_json::json!({"ok": true}));
             (StatusCode::OK, Json(body)).into_response()
+        }
+        Ok(CommandResult::OkBytes(_)) => {
+            (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Ok(CommandResult::Err(e)) => (
             StatusCode::BAD_REQUEST,

@@ -1,0 +1,21 @@
+[package]
+name = "okena-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+client = ["dep:tokio", "dep:reqwest", "dep:tokio-tungstenite", "dep:async-channel", "dep:futures", "dep:log"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+alacritty_terminal = "0.25"
+
+# Client feature deps (async networking)
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"], optional = true }
+async-channel = { version = "2.3", optional = true }
+futures = { version = "0.3", optional = true }
+log = { version = "0.4", optional = true }

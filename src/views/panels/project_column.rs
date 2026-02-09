@@ -1,6 +1,6 @@
 use crate::git::{self, FileDiffSummary};
 use crate::git::GitStatus;
-use crate::terminal::pty_manager::PtyManager;
+use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::root::TerminalsRegistry;
@@ -26,7 +26,7 @@ pub struct ProjectColumn {
     request_broker: Entity<RequestBroker>,
     project_id: String,
     #[allow(dead_code)]
-    pty_manager: Arc<PtyManager>,
+    backend: Arc<dyn TerminalBackend>,
     #[allow(dead_code)]
     terminals: TerminalsRegistry,
     /// Stored layout container entity (must be created in new(), not render())
@@ -43,6 +43,10 @@ pub struct ProjectColumn {
     cached_git_status: Option<GitStatus>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
+    /// For remote projects: layout provided externally (from remote state)
+    external_layout: Option<crate::workspace::state::LayoutNode>,
+    /// Whether this is a remote project column
+    is_remote: bool,
 }
 
 impl ProjectColumn {
@@ -50,7 +54,7 @@ impl ProjectColumn {
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
         project_id: String,
-        pty_manager: Arc<PtyManager>,
+        backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         cx: &mut Context<Self>,
@@ -66,7 +70,7 @@ impl ProjectColumn {
             workspace,
             request_broker,
             project_id,
-            pty_manager,
+            backend,
             terminals,
             layout_container: None, // Will be initialized on first render with cx
             diff_popover_visible: false,
@@ -75,6 +79,40 @@ impl ProjectColumn {
             hover_token: Arc::new(AtomicU64::new(0)),
             cached_git_status: None,
             active_drag,
+            external_layout: None,
+            is_remote: false,
+        }
+    }
+
+    pub fn new_remote(
+        workspace: Entity<Workspace>,
+        request_broker: Entity<RequestBroker>,
+        project_id: String,
+        project_name: String,
+        project_path: String,
+        backend: Arc<dyn TerminalBackend>,
+        terminals: TerminalsRegistry,
+        active_drag: ActiveDrag,
+        external_layout: Option<crate::workspace::state::LayoutNode>,
+        _cx: &mut Context<Self>,
+    ) -> Self {
+        // No git status for remote projects
+        let _ = (project_name, project_path);
+        Self {
+            workspace,
+            request_broker,
+            project_id,
+            backend,
+            terminals,
+            layout_container: None,
+            diff_popover_visible: false,
+            diff_file_summaries: Vec::new(),
+            diff_popover_project_path: String::new(),
+            hover_token: Arc::new(AtomicU64::new(0)),
+            cached_git_status: None,
+            active_drag,
+            external_layout,
+            is_remote: true,
         }
     }
 
@@ -137,12 +175,13 @@ impl ProjectColumn {
     }
 
     fn hide_diff_popover(&mut self, cx: &mut Context<Self>) {
+        // Always increment token to cancel any pending show task
+        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+
         if !self.diff_popover_visible {
             return;
         }
 
-        // Use token to allow cancellation if mouse enters popover
-        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
         let hover_token = self.hover_token.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -313,21 +352,26 @@ impl ProjectColumn {
             let workspace = self.workspace.clone();
             let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
-            let pty_manager = self.pty_manager.clone();
+            let backend = self.backend.clone();
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
+            let external_layout = self.external_layout.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
-                LayoutContainer::new(
+                let mut container = LayoutContainer::new(
                     workspace,
                     request_broker,
                     project_id,
                     project_path,
                     vec![],
-                    pty_manager,
+                    backend,
                     terminals,
                     active_drag,
-                )
+                );
+                if let Some(layout) = external_layout {
+                    container.set_external_layout(layout);
+                }
+                container
             }));
         }
     }
@@ -765,6 +809,88 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     .child(self.render_diff_popover(&t, cx))
+                    .into_any_element()
+            }
+
+            None if self.external_layout.is_some() => {
+                // Remote project: use external layout
+                self.ensure_layout_container("/remote".to_string(), cx);
+
+                let header = div()
+                    .id("remote-project-header")
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .bg(rgb(t.bg_header))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("{} (remote)", self.project_id)),
+                    );
+
+                let content = div()
+                    .id("project-column-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(self.layout_container.clone().unwrap())
+                    .into_any_element();
+
+                div()
+                    .id("project-column-main")
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_h_0()
+                    .bg(rgb(t.bg_primary))
+                    .child(header)
+                    .child(content)
+                    .into_any_element()
+            }
+
+            None if self.is_remote => {
+                // Remote bookmark project (no terminals)
+                let header = div()
+                    .id("remote-project-header")
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .bg(rgb(t.bg_header))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("{} (remote)", self.project_id)),
+                    );
+
+                div()
+                    .id("project-column-main")
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_h_0()
+                    .bg(rgb(t.bg_primary))
+                    .child(header)
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(t.text_muted))
+                            .child("No terminals on remote"),
+                    )
                     .into_any_element()
             }
 

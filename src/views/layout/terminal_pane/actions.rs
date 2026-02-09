@@ -3,6 +3,8 @@
 //! Contains handlers for split, close, minimize, fullscreen, detach,
 //! copy, paste, clear, select all, rename, export buffer, and file drop.
 
+use crate::remote::types::ActionRequest;
+use crate::workspace::actions::execute::execute_action;
 use crate::workspace::state::SplitDirection;
 use gpui::*;
 
@@ -10,8 +12,15 @@ use super::TerminalPane;
 
 impl TerminalPane {
     pub(super) fn handle_split(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        let action = ActionRequest::SplitTerminal {
+            project_id: self.project_id.clone(),
+            path: self.layout_path.clone(),
+            direction,
+        };
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
         self.workspace.update(cx, |ws, cx| {
-            ws.split_terminal(&self.project_id, &self.layout_path, direction, cx);
+            execute_action(action, ws, &*backend, &terminals, cx);
         });
     }
 
@@ -22,15 +31,17 @@ impl TerminalPane {
     }
 
     pub(super) fn handle_close(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref id) = self.terminal_id {
-            self.pty_manager.kill(id);
+        if let Some(terminal_id) = self.terminal_id.clone() {
+            let action = ActionRequest::CloseTerminal {
+                project_id: self.project_id.clone(),
+                terminal_id,
+            };
+            let backend = self.backend.clone();
+            let terminals = self.terminals.clone();
+            self.workspace.update(cx, |ws, cx| {
+                execute_action(action, ws, &*backend, &terminals, cx);
+            });
         }
-
-        let layout_path = self.layout_path.clone();
-        let project_id = self.project_id.clone();
-        self.workspace.update(cx, |ws, cx| {
-            ws.close_terminal_and_focus_sibling(&project_id, &layout_path, cx);
-        });
     }
 
     pub(super) fn handle_minimize(&mut self, cx: &mut Context<Self>) {
@@ -57,7 +68,7 @@ impl TerminalPane {
 
     pub(super) fn handle_export_buffer(&mut self, cx: &mut Context<Self>) {
         if let Some(ref terminal_id) = self.terminal_id {
-            if let Some(path) = self.pty_manager.capture_buffer(terminal_id) {
+            if let Some(path) = self.backend.capture_buffer(terminal_id) {
                 cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
             }
         }

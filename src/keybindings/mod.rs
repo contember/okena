@@ -70,6 +70,7 @@ actions!(
         SidebarConfirm,
         SidebarToggleExpand,
         SidebarEscape,
+        ShowPairingDialog,
     ]
 );
 
@@ -220,6 +221,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SidebarConfirm" => Some(KeyBinding::new(keystroke, SidebarConfirm, context)),
         "SidebarToggleExpand" => Some(KeyBinding::new(keystroke, SidebarToggleExpand, context)),
         "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
+        "ShowPairingDialog" => Some(KeyBinding::new(keystroke, ShowPairingDialog, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

@@ -1,73 +1,25 @@
 //! Tab bar rendering and management
 //!
 //! This module contains tab-related functionality for LayoutContainer:
-//! - TabDrag, TabDragView: Drag-and-drop support for tab reordering
-//! - TabActionContext: Helper for action button closures
 //! - Tab bar rendering with drag support and animations
+//! - TabActionContext: Helper for action button closures
+//! - Uses PaneDrag for unified drag-and-drop (tabs + terminal panes)
 
 mod context_menu;
 mod shell_selector;
 
+use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::layout::layout_container::LayoutContainer;
+use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
+use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::collections::HashSet;
-
-/// Drag payload for tab reordering
-#[derive(Clone)]
-pub(super) struct TabDrag {
-    pub project_id: String,
-    pub layout_path: Vec<usize>,
-    pub tab_index: usize,
-    pub tab_label: String,
-}
-
-/// Drag preview view for tabs - shows a polished ghost image during drag
-pub(super) struct TabDragView {
-    label: String,
-}
-
-impl TabDragView {
-    pub fn new(label: String) -> Self {
-        Self { label }
-    }
-}
-
-impl Render for TabDragView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-
-        // Ghost tab with enhanced visual feedback
-        div()
-            .px(px(12.0))
-            .py(px(6.0))
-            .bg(with_alpha(t.bg_primary, 0.95))
-            .border_1()
-            .border_color(rgb(t.border_active))
-            .rounded(px(6.0))
-            .shadow_xl()
-            .text_size(px(12.0))
-            .text_color(rgb(t.text_primary))
-            .font_weight(FontWeight::MEDIUM)
-            // Add a subtle glow effect using the active border color
-            .child(
-                h_flex()
-                    .gap(px(6.0))
-                    // Shell icon
-                    .child(
-                        svg()
-                            .path("icons/shell.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.success))
-                    )
-                    .child(self.label.clone())
-            )
-    }
-}
+use std::sync::Arc;
 
 /// Context for tab action button closures.
 ///
@@ -79,6 +31,16 @@ pub(super) struct TabActionContext {
     pub project_id: String,
     pub layout_path: Vec<usize>,
     pub active_tab: usize,
+    pub backend: Arc<dyn TerminalBackend>,
+    pub terminals: TerminalsRegistry,
+}
+
+/// Kill PTY processes and remove from registry for the given terminal IDs.
+pub(super) fn kill_terminals(ids: &[String], backend: &dyn TerminalBackend, terminals: &TerminalsRegistry) {
+    for id in ids {
+        backend.kill(id);
+        terminals.lock().remove(id);
+    }
 }
 
 impl LayoutContainer {
@@ -134,8 +96,8 @@ impl LayoutContainer {
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
         // Check if buffer capture is supported
-        let supports_buffer_capture = self.pty_manager.supports_buffer_capture();
-        let pty_manager_for_export = self.pty_manager.clone();
+        let supports_buffer_capture = self.backend.supports_buffer_capture();
+        let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id;
 
@@ -202,7 +164,7 @@ impl LayoutContainer {
                     header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
                         .on_click(move |_, _window, cx| {
                             if let Some(ref tid) = terminal_id_for_export {
-                                if let Some(path) = pty_manager_for_export.capture_buffer(tid) {
+                                if let Some(path) = backend_for_export.capture_buffer(tid) {
                                     cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
                                     log::info!("Buffer exported to {} (path copied to clipboard)", path.display());
                                 }
@@ -236,9 +198,10 @@ impl LayoutContainer {
             .child(
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
                     .on_click(move |_, _window, cx| {
-                        ctx_close.workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx);
+                        let removed = ctx_close.workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx)
                         });
+                        kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
                     }),
             )
     }
@@ -266,13 +229,20 @@ impl LayoutContainer {
                             self.project_id.clone(),
                             self.project_path.clone(),
                             child_path.clone(),
-                            self.pty_manager.clone(),
+                            self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
                         )
                     })
                 })
                 .clone();
+
+            // Propagate external layout to child
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[zoomed_idx].clone());
+                });
+            }
 
             return v_flex()
                 .size_full()
@@ -397,47 +367,64 @@ impl LayoutContainer {
                     let workspace = workspace.clone();
                     let project_id = project_id.clone();
                     let layout_path = layout_path.clone();
-                    cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&project_id, &layout_path, i, cx);
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        let removed = workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&project_id, &layout_path, i, cx)
                         });
+                        kill_terminals(&removed, &*this.backend, &this.terminals);
                         cx.stop_propagation();
                     })
                 })
-                // Drag source for tab reordering
-                .on_drag(
-                    TabDrag {
-                        project_id: project_id_for_drag,
-                        layout_path: layout_path_for_drag,
-                        tab_index: i,
-                        tab_label: tab_label.clone(),
-                    },
-                    move |drag, _position, _window, cx| {
-                        cx.new(|_| TabDragView::new(drag.tab_label.clone()))
-                    },
-                )
+                // Drag source — use PaneDrag so tabs can be dropped onto pane edge zones too
+                .when_some(terminal_id.clone(), |el, tid| {
+                    let mut terminal_path = layout_path_for_drag.clone();
+                    terminal_path.push(i);
+                    el.on_drag(
+                        PaneDrag {
+                            project_id: project_id_for_drag.clone(),
+                            layout_path: terminal_path,
+                            terminal_id: tid,
+                            terminal_name: tab_label.clone(),
+                        },
+                        move |drag, _position, _window, cx| {
+                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
+                        },
+                    )
+                })
                 // Enhanced drop target - show prominent indicator with glow
-                .drag_over::<TabDrag>(move |style, _, _, _| {
+                .drag_over::<PaneDrag>(move |style, _, _, _| {
                     style
                         .border_l(px(3.0))
                         .border_color(rgb(t.border_active))
                         .bg(with_alpha(t.border_active, 0.15))
                 })
-                .on_drop(cx.listener(move |this, drag: &TabDrag, _window, cx| {
-                    // Only allow reordering within the same tabs container
-                    if drag.project_id == project_id_for_drop
-                        && drag.layout_path == layout_path_for_drop
-                        && drag.tab_index != i
-                    {
-                        // Calculate the target index after move
-                        let target_index = if drag.tab_index < i { i - 1 } else { i };
+                .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
+                    if drag.project_id != project_id_for_drop {
+                        return;
+                    }
 
+                    let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
+                    let drag_tab_index = drag.layout_path.last().copied();
+
+                    if drag_parent == layout_path_for_drop.as_slice() {
+                        // Same tab group → reorder
+                        if let Some(from_index) = drag_tab_index {
+                            if from_index != i {
+                                let target_index = if from_index < i { i - 1 } else { i };
+                                workspace_for_drop.update(cx, |ws, cx| {
+                                    ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
+                                });
+                                this.start_drop_animation(target_index, cx);
+                            }
+                        }
+                    } else {
+                        // Cross-container → insert into this tab group
                         workspace_for_drop.update(cx, |ws, cx| {
-                            ws.move_tab(&project_id_for_drop, &layout_path_for_drop, drag.tab_index, i, cx);
+                            ws.move_terminal_to_tab_group(
+                                &drag.project_id, &drag.terminal_id,
+                                &layout_path_for_drop, Some(i), cx,
+                            );
                         });
-
-                        // Start drop animation on the moved tab
-                        this.start_drop_animation(target_index, cx);
                     }
                 }))
                 .on_click(move |_, _window, cx| {
@@ -457,25 +444,39 @@ impl LayoutContainer {
             .h_full()
             .min_w(px(20.0))
             // Enhanced drop zone indicator
-            .drag_over::<TabDrag>(move |style, _, _, _| {
+            .drag_over::<PaneDrag>(move |style, _, _, _| {
                 style
                     .border_l(px(3.0))
                     .border_color(rgb(t.border_active))
                     .bg(with_alpha(t.border_active, 0.1))
             })
-            .on_drop(cx.listener(move |this, drag: &TabDrag, _window, cx| {
-                // Only allow reordering within the same tabs container
-                if drag.project_id == project_id_for_end
-                    && drag.layout_path == layout_path_for_end
-                {
-                    let target_index = num_children;
-                    if drag.tab_index != target_index - 1 {
-                        workspace_for_end.update(cx, |ws, cx| {
-                            ws.move_tab(&project_id_for_end, &layout_path_for_end, drag.tab_index, target_index, cx);
-                        });
-                        // Start animation on the last tab (now at num_children - 1)
-                        this.start_drop_animation(num_children - 1, cx);
+            .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
+                if drag.project_id != project_id_for_end {
+                    return;
+                }
+
+                let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
+                let drag_tab_index = drag.layout_path.last().copied();
+
+                if drag_parent == layout_path_for_end.as_slice() {
+                    // Same tab group → reorder to end
+                    if let Some(from_index) = drag_tab_index {
+                        let target_index = num_children;
+                        if from_index != target_index - 1 {
+                            workspace_for_end.update(cx, |ws, cx| {
+                                ws.move_tab(&project_id_for_end, &layout_path_for_end, from_index, target_index, cx);
+                            });
+                            this.start_drop_animation(num_children - 1, cx);
+                        }
                     }
+                } else {
+                    // Cross-container → append to this tab group
+                    workspace_for_end.update(cx, |ws, cx| {
+                        ws.move_terminal_to_tab_group(
+                            &drag.project_id, &drag.terminal_id,
+                            &layout_path_for_end, None, cx,
+                        );
+                    });
                 }
             }));
 
@@ -490,6 +491,8 @@ impl LayoutContainer {
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab,
+            backend: self.backend.clone(),
+            terminals: self.terminals.clone(),
         };
 
         // Get terminal_id for actions that need it
@@ -550,7 +553,7 @@ impl LayoutContainer {
                     let mut child_path = self.layout_path.clone();
                     child_path.push(active_tab);
 
-                    self.child_containers
+                    let container = self.child_containers
                         .entry(child_path.clone())
                         .or_insert_with(|| {
                             cx.new(|_cx| {
@@ -560,13 +563,22 @@ impl LayoutContainer {
                                     self.project_id.clone(),
                                     self.project_path.clone(),
                                     child_path.clone(),
-                                    self.pty_manager.clone(),
+                                    self.backend.clone(),
                                     self.terminals.clone(),
                                     self.active_drag.clone(),
                                 )
                             })
                         })
-                        .clone()
+                        .clone();
+
+                    // Propagate external layout to child
+                    if self.external_layout.is_some() {
+                        container.update(cx, |c, _| {
+                            c.external_layout = Some(children[active_tab].clone());
+                        });
+                    }
+
+                    container
                 }),
             )
     }

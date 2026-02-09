@@ -272,3 +272,211 @@ impl Workspace {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::workspace::state::*;
+    use crate::workspace::settings::HooksConfig;
+    use crate::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            is_visible: true,
+            layout: Some(LayoutNode::new_terminal()),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+        }
+    }
+
+    fn make_workspace_data() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            project_widths: HashMap::new(),
+            folders: vec![],
+        }
+    }
+
+    fn simulate_delete_project(data: &mut WorkspaceData, project_id: &str) {
+        data.projects.retain(|p| p.id != project_id);
+        data.project_order.retain(|id| id != project_id);
+        for folder in &mut data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+        data.project_widths.remove(project_id);
+    }
+
+    #[test]
+    fn test_delete_project_removes_from_folders() {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["f1".to_string()];
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        simulate_delete_project(&mut data, "p1");
+
+        assert_eq!(data.folders[0].project_ids, vec!["p2".to_string()]);
+    }
+
+    #[test]
+    fn test_get_project_width() {
+        let ws = Workspace::new(make_workspace_data());
+        // Default: equal distribution
+        assert_eq!(ws.get_project_width("p1", 4), 25.0);
+    }
+
+    #[test]
+    fn test_get_project_width_custom() {
+        let mut data = make_workspace_data();
+        data.project_widths.insert("p1".to_string(), 60.0);
+        let ws = Workspace::new(data);
+        assert_eq!(ws.get_project_width("p1", 2), 60.0);
+    }
+}
+
+#[cfg(test)]
+mod gpui_tests {
+    use gpui::AppContext as _;
+    use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::workspace::settings::HooksConfig;
+    use crate::settings::{GlobalSettings, SettingsState};
+    use crate::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_workspace_data() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            project_widths: HashMap::new(),
+            folders: vec![],
+        }
+    }
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            is_visible: true,
+            layout: Some(LayoutNode::new_terminal()),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+        }
+    }
+
+    /// Initialize GlobalSettings for tests that call hooks (add_project, delete_project)
+    fn init_test_settings(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let entity = cx.new(|_cx| SettingsState::new(Default::default()));
+            cx.set_global(GlobalSettings(entity));
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_project_gpui(cx: &mut gpui::TestAppContext) {
+        init_test_settings(cx);
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().projects.len(), 1);
+            assert_eq!(ws.data().projects[0].name, "Test");
+            assert!(ws.data().projects[0].layout.is_some());
+            assert_eq!(ws.data().project_order.len(), 1);
+            assert_eq!(ws.data().project_order[0], ws.data().projects[0].id);
+            assert!(ws.data_version() > 0);
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_bookmark_project_gpui(cx: &mut gpui::TestAppContext) {
+        init_test_settings(cx);
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().projects[0].layout.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn test_delete_project_gpui(cx: &mut gpui::TestAppContext) {
+        init_test_settings(cx);
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_project("p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().projects.len(), 1);
+            assert_eq!(ws.data().projects[0].id, "p2");
+            assert!(!ws.data().project_order.contains(&"p1".to_string()));
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_project_gpui(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2"), make_project("p3")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string(), "p3".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_project("p3", 0, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().project_order, vec!["p3", "p1", "p2"]);
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_terminal_gpui(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_terminal("p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { children, .. } => {
+                    assert_eq!(children.len(), 2);
+                }
+                _ => panic!("Expected split after add_terminal"),
+            }
+        });
+    }
+}

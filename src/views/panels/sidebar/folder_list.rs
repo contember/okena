@@ -158,6 +158,11 @@ impl Sidebar {
                         move |this, _event: &ClickEvent, window, cx| {
                             if this.check_folder_double_click(&folder_id) {
                                 this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
+                            } else {
+                                this.cursor_index = None;
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.toggle_folder_collapsed(&folder_id, cx);
+                                });
                             }
                             cx.stop_propagation();
                         }
@@ -392,6 +397,7 @@ impl Sidebar {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.toggle_project_visibility(&project_id, cx);
                             });
+                            cx.stop_propagation();
                         }
                     }))
                     .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
