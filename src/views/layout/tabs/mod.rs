@@ -8,15 +8,18 @@
 mod context_menu;
 mod shell_selector;
 
+use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
+use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Context for tab action button closures.
 ///
@@ -28,6 +31,16 @@ pub(super) struct TabActionContext {
     pub project_id: String,
     pub layout_path: Vec<usize>,
     pub active_tab: usize,
+    pub backend: Arc<dyn TerminalBackend>,
+    pub terminals: TerminalsRegistry,
+}
+
+/// Kill PTY processes and remove from registry for the given terminal IDs.
+pub(super) fn kill_terminals(ids: &[String], backend: &dyn TerminalBackend, terminals: &TerminalsRegistry) {
+    for id in ids {
+        backend.kill(id);
+        terminals.lock().remove(id);
+    }
 }
 
 impl LayoutContainer {
@@ -185,9 +198,10 @@ impl LayoutContainer {
             .child(
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
                     .on_click(move |_, _window, cx| {
-                        ctx_close.workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx);
+                        let removed = ctx_close.workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx)
                         });
+                        kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
                     }),
             )
     }
@@ -353,10 +367,11 @@ impl LayoutContainer {
                     let workspace = workspace.clone();
                     let project_id = project_id.clone();
                     let layout_path = layout_path.clone();
-                    cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&project_id, &layout_path, i, cx);
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        let removed = workspace.update(cx, |ws, cx| {
+                            ws.close_tab(&project_id, &layout_path, i, cx)
                         });
+                        kill_terminals(&removed, &*this.backend, &this.terminals);
                         cx.stop_propagation();
                     })
                 })
@@ -476,6 +491,8 @@ impl LayoutContainer {
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab,
+            backend: self.backend.clone(),
+            terminals: self.terminals.clone(),
         };
 
         // Get terminal_id for actions that need it

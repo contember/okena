@@ -7,6 +7,29 @@ use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
 impl Workspace {
+    /// Remove terminal_names/hidden_terminals entries that are no longer in the layout.
+    /// Returns the orphaned terminal IDs (for PTY cleanup by callers).
+    fn cleanup_orphaned_metadata(&mut self, project_id: &str) -> Vec<String> {
+        let Some(project) = self.project_mut(project_id) else {
+            return vec![];
+        };
+
+        let layout_ids: std::collections::HashSet<String> = project.layout.as_ref()
+            .map(|l| l.collect_terminal_ids().into_iter().collect())
+            .unwrap_or_default();
+
+        let orphaned: Vec<String> = project.terminal_names.keys()
+            .filter(|id| !layout_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+
+        for id in &orphaned {
+            project.terminal_names.remove(id);
+            project.hidden_terminals.remove(id);
+        }
+
+        orphaned
+    }
     /// Split a terminal at a path
     pub fn split_terminal(
         &mut self,
@@ -103,15 +126,16 @@ impl Workspace {
         });
     }
 
-    /// Close a terminal at a path
-    pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
+    /// Close a terminal at a path.
+    /// Returns the terminal IDs that were removed from the layout.
+    pub fn close_terminal(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref mut layout) = project.layout {
                 if path.is_empty() {
                     // Closing root - remove layout entirely (project becomes bookmark)
                     project.layout = None;
                     self.notify_data(cx);
-                    return;
+                    return self.cleanup_orphaned_metadata(project_id);
                 }
 
                 let parent_path = &path[..path.len() - 1];
@@ -132,6 +156,7 @@ impl Workspace {
                                 }
                             }
                             self.notify_data(cx);
+                            return self.cleanup_orphaned_metadata(project_id);
                         }
                         LayoutNode::Tabs { children, .. } => {
                             if children.len() <= 2 {
@@ -143,23 +168,25 @@ impl Workspace {
                                 children.remove(child_index);
                             }
                             self.notify_data(cx);
+                            return self.cleanup_orphaned_metadata(project_id);
                         }
                         _ => {}
                     }
                 }
             }
         }
+        vec![]
     }
 
-    /// Close a terminal and focus its sibling (reverse of splitting)
-    /// Focuses the previous sibling, or the next one if closing the first child
-    pub fn close_terminal_and_focus_sibling(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) {
+    /// Close a terminal and focus its sibling (reverse of splitting).
+    /// Returns the terminal IDs that were removed from the layout.
+    pub fn close_terminal_and_focus_sibling(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>) -> Vec<String> {
         if path.is_empty() {
             // Closing root - remove layout (project becomes bookmark)
-            self.close_terminal(project_id, path, cx);
+            let removed = self.close_terminal(project_id, path, cx);
             // Clear focused terminal since there's nothing to focus
             self.focus_manager.clear_focus();
-            return;
+            return removed;
         }
 
         // Calculate the sibling to focus before closing
@@ -215,12 +242,14 @@ impl Workspace {
         };
 
         // Close the terminal
-        self.close_terminal(project_id, path, cx);
+        let removed = self.close_terminal(project_id, path, cx);
 
         // Focus the sibling
         if let Some(focus_path) = focus_path {
             self.set_focused_terminal(project_id.to_string(), focus_path, cx);
         }
+
+        removed
     }
 
     /// Update split sizes at a path
@@ -304,26 +333,21 @@ impl Workspace {
         });
     }
 
-    /// Close a tab at a specific index within a tabs container
+    /// Close a tab at a specific index within a tabs container.
+    /// Returns the terminal IDs that were removed.
     pub fn close_tab(
         &mut self,
         project_id: &str,
         path: &[usize],
         tab_index: usize,
         cx: &mut Context<Self>,
-    ) {
-        self.with_layout_node(project_id, path, cx, |node| {
+    ) -> Vec<String> {
+        let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {
-                if tab_index >= children.len() {
+                if tab_index >= children.len() || children.len() <= 1 {
                     return false;
                 }
 
-                if children.len() <= 1 {
-                    // Can't close the last tab
-                    return false;
-                }
-
-                // Remove the tab
                 children.remove(tab_index);
 
                 // If only one tab remains, dissolve the tab group
@@ -344,57 +368,58 @@ impl Workspace {
                 false
             }
         });
+
+        if applied { self.cleanup_orphaned_metadata(project_id) } else { vec![] }
     }
 
-    /// Close all tabs except the one at the specified index
+    /// Close all tabs except the one at the specified index.
+    /// Returns the terminal IDs that were removed.
     pub fn close_other_tabs(
         &mut self,
         project_id: &str,
         path: &[usize],
         keep_index: usize,
         cx: &mut Context<Self>,
-    ) {
-        self.with_layout_node(project_id, path, cx, |node| {
+    ) -> Vec<String> {
+        let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, .. } = node {
                 if keep_index >= children.len() {
                     return false;
                 }
 
-                // Keep only the tab at keep_index and dissolve the tab group
                 let kept_tab = children[keep_index].clone();
                 *node = kept_tab;
-
                 true
             } else {
                 false
             }
         });
+
+        if applied { self.cleanup_orphaned_metadata(project_id) } else { vec![] }
     }
 
-    /// Close all tabs to the right of the specified index
+    /// Close all tabs to the right of the specified index.
+    /// Returns the terminal IDs that were removed.
     pub fn close_tabs_to_right(
         &mut self,
         project_id: &str,
         path: &[usize],
         from_index: usize,
         cx: &mut Context<Self>,
-    ) {
-        self.with_layout_node(project_id, path, cx, |node| {
+    ) -> Vec<String> {
+        let applied = self.with_layout_node(project_id, path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {
                 if from_index >= children.len() {
                     return false;
                 }
 
-                // Remove all tabs after from_index
                 children.truncate(from_index + 1);
 
-                // If only one tab remains, dissolve the tab group
                 if children.len() == 1 {
                     *node = children.remove(0);
                     return true;
                 }
 
-                // Adjust active_tab if it was to the right
                 if *active_tab >= children.len() {
                     *active_tab = children.len().saturating_sub(1);
                 }
@@ -404,6 +429,8 @@ impl Workspace {
                 false
             }
         });
+
+        if applied { self.cleanup_orphaned_metadata(project_id) } else { vec![] }
     }
     /// Move a terminal pane to a new position relative to a target terminal.
     ///
@@ -1488,6 +1515,118 @@ mod gpui_tests {
                 }
                 _ => panic!("Expected vertical split"),
             }
+        });
+    }
+
+    // === metadata cleanup tests ===
+
+    fn make_project_with_names(id: &str, layout: LayoutNode, names: Vec<(&str, &str)>) -> ProjectData {
+        let mut p = make_project_with_layout(id, layout);
+        for (tid, name) in names {
+            p.terminal_names.insert(tid.to_string(), name.to_string());
+        }
+        p
+    }
+
+    #[gpui::test]
+    fn test_close_terminal_cleans_metadata(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_names("p1", layout, vec![("t1", "Term 1"), ("t2", "Term 2")]);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_terminal("p1", &[0], cx)
+        });
+
+        assert_eq!(removed, vec!["t1"]);
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(!p.terminal_names.contains_key("t1"));
+            assert!(p.terminal_names.contains_key("t2"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_close_tab_cleans_metadata(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Tabs {
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+            active_tab: 0,
+        };
+        let project = make_project_with_names("p1", layout, vec![
+            ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
+        ]);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_tab("p1", &[], 1, cx)
+        });
+
+        assert_eq!(removed, vec!["t2"]);
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(p.terminal_names.contains_key("t1"));
+            assert!(!p.terminal_names.contains_key("t2"));
+            assert!(p.terminal_names.contains_key("t3"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_close_other_tabs_cleans_metadata(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Tabs {
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+            active_tab: 0,
+        };
+        let project = make_project_with_names("p1", layout, vec![
+            ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
+        ]);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_other_tabs("p1", &[], 1, cx)
+        });
+
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"t1".to_string()));
+        assert!(removed.contains(&"t3".to_string()));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(!p.terminal_names.contains_key("t1"));
+            assert!(p.terminal_names.contains_key("t2"));
+            assert!(!p.terminal_names.contains_key("t3"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_close_tabs_to_right_cleans_metadata(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Tabs {
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+            active_tab: 0,
+        };
+        let project = make_project_with_names("p1", layout, vec![
+            ("t1", "Term 1"), ("t2", "Term 2"), ("t3", "Term 3"),
+        ]);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_tabs_to_right("p1", &[], 0, cx)
+        });
+
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"t2".to_string()));
+        assert!(removed.contains(&"t3".to_string()));
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(p.terminal_names.contains_key("t1"));
+            assert!(!p.terminal_names.contains_key("t2"));
+            assert!(!p.terminal_names.contains_key("t3"));
         });
     }
 }

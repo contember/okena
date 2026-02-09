@@ -62,6 +62,16 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
         }
     }
 
+    // Clean up orphaned terminal metadata (terminal_names/hidden_terminals entries
+    // for terminals no longer in the layout tree)
+    for project in &mut data.projects {
+        let layout_ids: std::collections::HashSet<String> = project.layout.as_ref()
+            .map(|l| l.collect_terminal_ids().into_iter().collect())
+            .unwrap_or_default();
+        project.terminal_names.retain(|id, _| layout_ids.contains(id));
+        project.hidden_terminals.retain(|id, _| layout_ids.contains(id));
+    }
+
     // Ensure project_order contains all project IDs (that aren't in a folder)
     let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
         .flat_map(|f| f.project_ids.iter().cloned())
@@ -374,5 +384,43 @@ mod tests {
         assert_eq!(deserialized.folders[0].name, "My Folder");
         assert!(deserialized.folders[0].collapsed);
         assert_eq!(deserialized.project_widths.get("p1"), Some(&60.0));
+    }
+
+    #[test]
+    fn validate_cleans_orphaned_terminal_metadata() {
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("t1".to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: crate::terminal::shell_config::ShellType::Default,
+            zoom_level: 1.0,
+        });
+        // t1 is in layout, t2 and t3 are orphaned
+        project.terminal_names.insert("t1".to_string(), "Term 1".to_string());
+        project.terminal_names.insert("t2".to_string(), "Term 2".to_string());
+        project.terminal_names.insert("t3".to_string(), "Term 3".to_string());
+        project.hidden_terminals.insert("t2".to_string(), true);
+
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+        validate_workspace_data(&mut data, false);
+
+        assert!(data.projects[0].terminal_names.contains_key("t1"));
+        assert!(!data.projects[0].terminal_names.contains_key("t2"));
+        assert!(!data.projects[0].terminal_names.contains_key("t3"));
+        assert!(!data.projects[0].hidden_terminals.contains_key("t2"));
+    }
+
+    #[test]
+    fn validate_cleans_all_metadata_when_no_layout() {
+        let mut project = make_project("p1");
+        project.layout = None;
+        project.terminal_names.insert("t1".to_string(), "Term 1".to_string());
+        project.terminal_names.insert("t2".to_string(), "Term 2".to_string());
+
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+        validate_workspace_data(&mut data, false);
+
+        assert!(data.projects[0].terminal_names.is_empty());
     }
 }
