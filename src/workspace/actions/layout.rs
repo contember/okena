@@ -98,15 +98,27 @@ impl Workspace {
 
                 if let Some(parent) = layout.get_at_path_mut(parent_path) {
                     match parent {
-                        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                        LayoutNode::Split { children, sizes, .. } => {
                             if children.len() <= 2 {
-                                // Replace parent with remaining child
                                 let remaining_index = if child_index == 0 { 1 } else { 0 };
                                 if let Some(remaining) = children.get(remaining_index).cloned() {
                                     *parent = remaining;
                                 }
                             } else {
-                                // Just remove the child
+                                children.remove(child_index);
+                                if child_index < sizes.len() {
+                                    sizes.remove(child_index);
+                                }
+                            }
+                            self.notify_data(cx);
+                        }
+                        LayoutNode::Tabs { children, .. } => {
+                            if children.len() <= 2 {
+                                let remaining_index = if child_index == 0 { 1 } else { 0 };
+                                if let Some(remaining) = children.get(remaining_index).cloned() {
+                                    *parent = remaining;
+                                }
+                            } else {
                                 children.remove(child_index);
                             }
                             self.notify_data(cx);
@@ -419,7 +431,22 @@ mod tests {
 
         if let Some(parent) = layout.get_at_path_mut(parent_path) {
             match parent {
-                LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                LayoutNode::Split { children, sizes, .. } => {
+                    if children.len() <= 2 {
+                        let remaining_index = if child_index == 0 { 1 } else { 0 };
+                        if let Some(remaining) = children.get(remaining_index).cloned() {
+                            *parent = remaining;
+                            return true;
+                        }
+                    } else {
+                        children.remove(child_index);
+                        if child_index < sizes.len() {
+                            sizes.remove(child_index);
+                        }
+                        return true;
+                    }
+                }
+                LayoutNode::Tabs { children, .. } => {
                     if children.len() <= 2 {
                         let remaining_index = if child_index == 0 { 1 } else { 0 };
                         if let Some(remaining) = children.get(remaining_index).cloned() {
@@ -531,14 +558,54 @@ mod tests {
         };
         simulate_close(&mut layout, &[1]);
         match &layout {
-            LayoutNode::Split { children, .. } => {
+            LayoutNode::Split { children, sizes, .. } => {
                 assert_eq!(children.len(), 2);
+                assert_eq!(sizes.len(), 2);
                 // t1 and t3 remain
                 let ids: Vec<_> = children.iter().map(|c| match c {
                     LayoutNode::Terminal { terminal_id: Some(id), .. } => id.as_str(),
                     _ => "",
                 }).collect();
                 assert_eq!(ids, vec!["t1", "t3"]);
+            }
+            _ => panic!("Expected split with 2 children"),
+        }
+    }
+
+    #[test]
+    fn test_close_terminal_from_3_child_sizes_consistent() {
+        // Verify that closing a child from a 3-child split keeps sizes in sync
+        // and that the remaining sizes sum correctly
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![25.0, 50.0, 25.0],
+            children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        };
+
+        // Close the middle terminal (index 1, size 50.0)
+        simulate_close(&mut layout, &[1]);
+        match &layout {
+            LayoutNode::Split { children, sizes, .. } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(sizes.len(), 2);
+                // Sizes should be [25.0, 25.0] — the middle entry was removed
+                assert_eq!(sizes, &vec![25.0, 25.0]);
+            }
+            _ => panic!("Expected split with 2 children"),
+        }
+
+        // Close the first terminal (index 0) — should collapse to single terminal
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![30.0, 40.0, 30.0],
+            children: vec![terminal_node("t1"), terminal_node("t2"), terminal_node("t3")],
+        };
+        simulate_close(&mut layout, &[0]);
+        match &layout {
+            LayoutNode::Split { children, sizes, .. } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(sizes.len(), 2);
+                assert_eq!(sizes, &vec![40.0, 30.0]);
             }
             _ => panic!("Expected split with 2 children"),
         }

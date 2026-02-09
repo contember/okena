@@ -520,6 +520,16 @@ impl LayoutNode {
             }
         }
 
+        // Fix sizes/children mismatch (can happen from stale workspace.json)
+        if let LayoutNode::Split { sizes, children, .. } = self {
+            if sizes.len() != children.len() {
+                sizes.truncate(children.len());
+                while sizes.len() < children.len() {
+                    sizes.push(100.0 / children.len() as f32);
+                }
+            }
+        }
+
         // Unwrap single-child or empty containers
         let should_unwrap = match self {
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
