@@ -107,6 +107,7 @@ impl TerminalPane {
             TerminalHeader::new(
                 workspace.clone(),
                 project_id.clone(),
+                layout_path.clone(),
                 terminal_id.clone(),
                 shell_type.clone(),
                 backend.supports_buffer_capture(),

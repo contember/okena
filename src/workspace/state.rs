@@ -505,6 +505,55 @@ impl LayoutNode {
         }
     }
 
+    /// Remove a child node at the given path.
+    /// If the parent has only one child left after removal, collapses the parent to that child.
+    /// Returns the removed node, or None if the path is invalid.
+    pub fn remove_at_path(&mut self, path: &[usize]) -> Option<LayoutNode> {
+        if path.is_empty() {
+            return None;
+        }
+
+        let parent_path = &path[..path.len() - 1];
+        let child_index = path[path.len() - 1];
+
+        let parent = self.get_at_path_mut(parent_path)?;
+
+        match parent {
+            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Split { children, sizes, .. } => {
+                if child_index >= children.len() {
+                    return None;
+                }
+                let removed = children.remove(child_index);
+                if child_index < sizes.len() {
+                    sizes.remove(child_index);
+                }
+                // Collapse if only one child remains
+                if children.len() == 1 {
+                    let remaining = children.remove(0);
+                    *parent = remaining;
+                }
+                Some(removed)
+            }
+            LayoutNode::Tabs { children, active_tab } => {
+                if child_index >= children.len() {
+                    return None;
+                }
+                let removed = children.remove(child_index);
+                // Adjust active_tab
+                if *active_tab >= children.len() {
+                    *active_tab = children.len().saturating_sub(1);
+                }
+                // Collapse if only one child remains
+                if children.len() == 1 {
+                    let remaining = children.remove(0);
+                    *parent = remaining;
+                }
+                Some(removed)
+            }
+        }
+    }
+
     /// Normalize the layout tree in-place:
     /// - Flatten nested splits with the same direction (merging sizes proportionally)
     /// - Unwrap splits/tabs with a single child
@@ -962,6 +1011,91 @@ mod tests {
                 assert_eq!(children.len(), 2);
                 assert!(matches!(&children[0], LayoutNode::Terminal { .. }));
                 assert!(matches!(&children[1], LayoutNode::Tabs { children, .. } if children.len() == 2));
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    // === remove_at_path ===
+
+    #[test]
+    fn remove_at_path_from_2_child_split_collapses() {
+        let mut node = hsplit(vec![terminal("t1"), terminal("t2")]);
+        let removed = node.remove_at_path(&[0]);
+        assert!(removed.is_some());
+        // Parent should collapse to remaining child
+        match &node {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                assert_eq!(terminal_id.as_deref(), Some("t2"));
+            }
+            _ => panic!("Expected terminal after collapsing 2-child split"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_from_3_child_split_keeps_2() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![33.0, 33.0, 34.0],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+        };
+        let removed = node.remove_at_path(&[1]);
+        assert!(removed.is_some());
+        match &node {
+            LayoutNode::Split { children, sizes, .. } => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(sizes.len(), 2);
+            }
+            _ => panic!("Expected split with 2 children"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_from_tabs_collapses_if_1() {
+        let mut node = tabs(vec![terminal("t1"), terminal("t2")]);
+        let removed = node.remove_at_path(&[0]);
+        assert!(removed.is_some());
+        match &node {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                assert_eq!(terminal_id.as_deref(), Some("t2"));
+            }
+            _ => panic!("Expected terminal after collapsing 2-child tabs"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_invalid_index_returns_none() {
+        let mut node = hsplit(vec![terminal("t1"), terminal("t2")]);
+        let removed = node.remove_at_path(&[5]);
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn remove_at_path_empty_returns_none() {
+        let mut node = terminal("t1");
+        let removed = node.remove_at_path(&[]);
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn remove_at_path_nested() {
+        // H[t1, V[t2, t3]] -> remove t2 at [1, 0] -> H[t1, t3]
+        let mut node = hsplit(vec![
+            terminal("t1"),
+            vsplit(vec![terminal("t2"), terminal("t3")]),
+        ]);
+        let removed = node.remove_at_path(&[1, 0]);
+        assert!(removed.is_some());
+        match &node {
+            LayoutNode::Split { children, .. } => {
+                assert_eq!(children.len(), 2);
+                // Second child should now be t3 (vsplit collapsed)
+                match &children[1] {
+                    LayoutNode::Terminal { terminal_id, .. } => {
+                        assert_eq!(terminal_id.as_deref(), Some("t3"));
+                    }
+                    _ => panic!("Expected terminal t3"),
+                }
             }
             _ => panic!("Expected split"),
         }

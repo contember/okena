@@ -1,0 +1,67 @@
+//! Pane drag-and-drop types for terminal rearrangement.
+//!
+//! Defines the drag payload, ghost view, and drop zone enum used
+//! when dragging a terminal pane header onto another pane's edge zones.
+
+use crate::theme::theme;
+use gpui::*;
+use gpui_component::h_flex;
+
+/// Drag payload emitted from a terminal header.
+#[derive(Clone)]
+pub struct PaneDrag {
+    pub project_id: String,
+    pub layout_path: Vec<usize>,
+    pub terminal_id: String,
+    pub terminal_name: String,
+}
+
+/// Ghost view rendered while dragging a terminal pane.
+pub struct PaneDragView {
+    label: String,
+}
+
+impl PaneDragView {
+    pub fn new(label: String) -> Self {
+        Self { label }
+    }
+}
+
+impl Render for PaneDragView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        div()
+            .px(px(12.0))
+            .py(px(6.0))
+            .bg(crate::theme::with_alpha(t.bg_primary, 0.95))
+            .border_1()
+            .border_color(rgb(t.border_active))
+            .rounded(px(6.0))
+            .shadow_xl()
+            .text_size(px(12.0))
+            .text_color(rgb(t.text_primary))
+            .font_weight(FontWeight::MEDIUM)
+            .child(
+                h_flex()
+                    .gap(px(6.0))
+                    .child(
+                        svg()
+                            .path("icons/shell.svg")
+                            .size(px(12.0))
+                            .text_color(rgb(t.success)),
+                    )
+                    .child(self.label.clone()),
+            )
+    }
+}
+
+/// Which edge zone the user dropped onto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropZone {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}

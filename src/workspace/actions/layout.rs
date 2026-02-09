@@ -2,6 +2,7 @@
 //!
 //! Actions for splitting, tabs, and closing terminals within layouts.
 
+use crate::views::layout::pane_drag::DropZone;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
@@ -384,6 +385,134 @@ impl Workspace {
             }
         });
     }
+    /// Move a terminal pane to a new position relative to a target terminal.
+    ///
+    /// Extracts the source terminal from its current position and inserts it
+    /// next to the target based on the drop zone (Top/Bottom/Left/Right/Center).
+    pub fn move_pane(
+        &mut self,
+        source_project_id: &str,
+        source_terminal_id: &str,
+        target_project_id: &str,
+        target_terminal_id: &str,
+        zone: DropZone,
+        cx: &mut Context<Self>,
+    ) {
+        // v1: same-project moves only
+        if source_project_id != target_project_id {
+            return;
+        }
+        // Self-drop check
+        if source_terminal_id == target_terminal_id {
+            return;
+        }
+
+        let project_id = source_project_id;
+
+        let project = match self.project(project_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let layout = match project.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Only-terminal check: don't move if it's the only terminal
+        if layout.collect_terminal_ids().len() <= 1 {
+            return;
+        }
+
+        // Find source path
+        let source_path = match layout.find_terminal_path(source_terminal_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Clone source node before removal
+        let source_node = match layout.get_at_path(&source_path) {
+            Some(node) => node.clone(),
+            None => return,
+        };
+
+        if source_path.is_empty() {
+            // Source is root — can't remove root
+            return;
+        }
+
+        // Perform the mutation in a block to limit mutable borrow scope
+        let new_focus_path = {
+            let project = match self.project_mut(project_id) {
+                Some(p) => p,
+                None => return,
+            };
+            let layout = match project.layout.as_mut() {
+                Some(l) => l,
+                None => return,
+            };
+
+            if layout.remove_at_path(&source_path).is_none() {
+                return;
+            }
+
+            // Re-find target path after removal (indices may have shifted)
+            let target_path = match layout.find_terminal_path(target_terminal_id) {
+                Some(p) => p,
+                None => return,
+            };
+
+            // Get target node and replace it with wrapper
+            let target_node = match layout.get_at_path(&target_path) {
+                Some(node) => node.clone(),
+                None => return,
+            };
+
+            let wrapper = match zone {
+                DropZone::Top => LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![source_node, target_node],
+                },
+                DropZone::Bottom => LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![target_node, source_node],
+                },
+                DropZone::Left => LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![source_node, target_node],
+                },
+                DropZone::Right => LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![target_node, source_node],
+                },
+                DropZone::Center => LayoutNode::Tabs {
+                    children: vec![target_node, source_node],
+                    active_tab: 1,
+                },
+            };
+
+            // Replace target node with wrapper
+            if let Some(node) = layout.get_at_path_mut(&target_path) {
+                *node = wrapper;
+            }
+
+            // Normalize to flatten nested same-direction splits
+            layout.normalize();
+
+            // Find the new path for focus before releasing borrow
+            layout.find_terminal_path(source_terminal_id)
+        };
+
+        self.notify_data(cx);
+
+        // Update focus to moved terminal's new path
+        if let Some(new_path) = new_focus_path {
+            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -641,6 +770,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
+    use crate::views::layout::pane_drag::DropZone;
     use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use crate::terminal::shell_config::ShellType;
@@ -870,6 +1000,236 @@ mod gpui_tests {
                     assert_eq!(*active_tab, 2); // active_tab was 0 (the moved tab), should follow
                 }
                 _ => panic!("Expected tabs"),
+            }
+        });
+    }
+
+    // === move_pane tests ===
+
+    fn terminal_node_t(id: &str) -> LayoutNode {
+        LayoutNode::Terminal {
+            terminal_id: Some(id.to_string()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+        }
+    }
+
+    fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            is_visible: true,
+            layout: Some(layout),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+        }
+    }
+
+    #[gpui::test]
+    fn test_move_pane_left_creates_vertical_split(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t2", DropZone::Left, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            // t1 dropped on left of t2 -> V[t1, t2] which is same direction as parent,
+            // so normalize flattens it back. Result is still V[t1, t2].
+            let ids = layout.collect_terminal_ids();
+            assert_eq!(ids, vec!["t1", "t2"]);
+            match layout {
+                LayoutNode::Split { direction, .. } => {
+                    assert_eq!(*direction, SplitDirection::Vertical);
+                }
+                _ => panic!("Expected vertical split"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_top_creates_horizontal_split(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t2", DropZone::Top, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            // t1 removed -> t2 becomes root. t1 dropped on top of t2 -> H[t1, t2]
+            match layout {
+                LayoutNode::Split { direction, children, .. } => {
+                    assert_eq!(*direction, SplitDirection::Horizontal);
+                    assert_eq!(children.len(), 2);
+                    let ids = layout.collect_terminal_ids();
+                    assert_eq!(ids, vec!["t1", "t2"]);
+                }
+                _ => panic!("Expected horizontal split"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_bottom_creates_horizontal_split(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t2", DropZone::Bottom, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { direction, children, .. } => {
+                    assert_eq!(*direction, SplitDirection::Horizontal);
+                    assert_eq!(children.len(), 2);
+                    let ids = layout.collect_terminal_ids();
+                    // Bottom: target first, then source
+                    assert_eq!(ids, vec!["t2", "t1"]);
+                }
+                _ => panic!("Expected horizontal split"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_center_creates_tab_group(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t2", DropZone::Center, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Tabs { children, active_tab } => {
+                    assert_eq!(children.len(), 2);
+                    assert_eq!(*active_tab, 1);
+                    let ids = layout.collect_terminal_ids();
+                    assert_eq!(ids, vec!["t2", "t1"]);
+                }
+                _ => panic!("Expected tabs, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_self_drop_is_noop(cx: &mut gpui::TestAppContext) {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t1", DropZone::Top, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Version should not have changed
+            assert_eq!(ws.data_version(), v0);
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_only_terminal_is_noop(cx: &mut gpui::TestAppContext) {
+        // Single terminal - can't move it
+        let project = make_project("p1");
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "term_p1", "p1", "term_p1", DropZone::Left, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), v0);
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_pane_3_children_with_flatten(cx: &mut gpui::TestAppContext) {
+        // V[t1, t2, t3] -> drag t1 to top of t3 -> V[t2, H[t1, t3]]
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![33.0, 33.0, 34.0],
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_pane("p1", "t1", "p1", "t3", DropZone::Top, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { direction, children, .. } => {
+                    assert_eq!(*direction, SplitDirection::Vertical);
+                    assert_eq!(children.len(), 2);
+                    // First child is t2
+                    assert!(matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "t2"));
+                    // Second child is H[t1, t3]
+                    match &children[1] {
+                        LayoutNode::Split { direction: inner_dir, children: inner_children, .. } => {
+                            assert_eq!(*inner_dir, SplitDirection::Horizontal);
+                            assert_eq!(inner_children.len(), 2);
+                            let inner_ids: Vec<_> = inner_children.iter().filter_map(|c| match c {
+                                LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                                _ => None,
+                            }).collect();
+                            assert_eq!(inner_ids, vec!["t1", "t3"]);
+                        }
+                        _ => panic!("Expected inner horizontal split"),
+                    }
+                }
+                _ => panic!("Expected vertical split"),
             }
         });
     }

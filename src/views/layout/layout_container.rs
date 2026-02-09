@@ -7,8 +7,9 @@
 //! - Tab groups (via the `tabs` submodule)
 
 use crate::terminal::backend::TerminalBackend;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::views::root::TerminalsRegistry;
+use crate::views::layout::pane_drag::{PaneDrag, DropZone};
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::views::layout::terminal_pane::TerminalPane;
 use crate::workspace::request_broker::RequestBroker;
@@ -170,12 +171,115 @@ impl LayoutContainer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Ensure terminal pane exists (created once, not every render)
-        self.ensure_terminal_pane(terminal_id, minimized, detached, cx);
+        self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
 
         div()
             .size_full()
             .min_h_0()
+            .relative()
             .child(self.terminal_pane.clone().unwrap())
+            .child(self.render_drop_zones(terminal_id, cx))
+    }
+
+    /// Render the 5-zone drop overlay for pane drag-and-drop.
+    fn render_drop_zones(
+        &self,
+        terminal_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let highlight = with_alpha(t.border_active, 0.3);
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+        let tid = terminal_id.clone();
+        let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
+
+        let make_zone = |zone: DropZone, id_suffix: &str| -> Stateful<Div> {
+            let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
+            let ws = workspace.clone();
+            let pid = project_id.clone();
+            let this_tid = tid.clone();
+
+            div()
+                .id(ElementId::Name(zone_id.into()))
+                .drag_over::<PaneDrag>(move |style, _, _, _| {
+                    style.bg(highlight)
+                })
+                .on_drop(cx.listener({
+                    let pid = pid.clone();
+                    let this_tid = this_tid.clone();
+                    move |_this, drag: &PaneDrag, _window, cx| {
+                        // Self-drop check
+                        if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
+                            return;
+                        }
+                        // Same project check (v1)
+                        if drag.project_id != pid {
+                            return;
+                        }
+                        if let Some(ref target_id) = this_tid {
+                            ws.update(cx, |ws, cx| {
+                                ws.move_pane(
+                                    &drag.project_id,
+                                    &drag.terminal_id,
+                                    &pid,
+                                    target_id,
+                                    zone,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                }))
+        };
+
+        // 3-column layout: Left | Middle(Top/Center/Bottom) | Right
+        // Zero overlap, full coverage
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                // Left zone: 25% width, 100% height
+                make_zone(DropZone::Left, &id_suffix)
+                    .w(relative(0.25))
+                    .h_full(),
+            )
+            .child(
+                // Middle column: 50% width, contains Top/Center/Bottom
+                div()
+                    .w(relative(0.50))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // Top zone: 25% height
+                        make_zone(DropZone::Top, &id_suffix)
+                            .w_full()
+                            .h(relative(0.25)),
+                    )
+                    .child(
+                        // Center zone: 50% height
+                        make_zone(DropZone::Center, &id_suffix)
+                            .w_full()
+                            .h(relative(0.50)),
+                    )
+                    .child(
+                        // Bottom zone: 25% height
+                        make_zone(DropZone::Bottom, &id_suffix)
+                            .w_full()
+                            .h(relative(0.25)),
+                    ),
+            )
+            .child(
+                // Right zone: 25% width, 100% height
+                make_zone(DropZone::Right, &id_suffix)
+                    .w(relative(0.25))
+                    .h_full(),
+            )
     }
 
     fn render_split(
