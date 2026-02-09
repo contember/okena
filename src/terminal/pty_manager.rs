@@ -396,16 +396,24 @@ impl PtyManager {
     /// Kill a terminal
     /// Also kills the underlying tmux/screen session if applicable
     pub fn kill(&self, terminal_id: &str) {
-        // Remove handle from map (releases the mutex before joining threads)
+        // Remove handle from map immediately (fast, non-blocking)
         let handle = self.terminals.lock().remove(terminal_id);
+        let session_backend = self.session_backend;
+        let session_name = session_backend.session_name(terminal_id);
+        let short_id = terminal_id[..8.min(terminal_id.len())].to_string();
 
-        if let Some(handle) = handle {
-            Self::shutdown_handle(handle);
+        // Move blocking cleanup (thread joins, subprocess calls) to a background thread
+        if let Err(e) = std::thread::Builder::new()
+            .name(format!("pty-shutdown-{}", short_id))
+            .spawn(move || {
+                if let Some(handle) = handle {
+                    Self::shutdown_handle(handle);
+                }
+                session_backend.kill_session(&session_name);
+            })
+        {
+            log::error!("Failed to spawn shutdown thread: {}", e);
         }
-
-        // Also kill the session backend session
-        self.session_backend
-            .kill_session(&self.session_backend.session_name(terminal_id));
     }
 
     /// Perform coordinated shutdown of a single PTY handle
