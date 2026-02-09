@@ -191,17 +191,15 @@ impl Render for StatusBar {
                 let mut right = h_flex()
                     .gap(px(8.0));
 
-                // Show remote server pairing code if active
+                // Show remote server status if active
                 if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>() {
-                    if let Some((port, code)) = remote_info.0.status() {
-                        let code_for_click = code.clone();
+                    if let Some(port) = remote_info.0.port() {
                         right = right.child(
                             div()
                                 .id("remote-info")
-                                .cursor_pointer()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
+                                .gap(px(6.0))
                                 .child(
                                     div()
                                         .text_color(rgb(t.term_cyan))
@@ -209,12 +207,23 @@ impl Render for StatusBar {
                                 )
                                 .child(
                                     div()
+                                        .id("pair-btn")
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
                                         .text_color(rgb(t.term_yellow))
-                                        .child(code)
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .child("Pair")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(crate::keybindings::ShowPairingDialog),
+                                                cx,
+                                            );
+                                        })
                                 )
-                                .on_click(move |_, _window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code_for_click.clone()));
-                                })
                         );
                     }
                 }

@@ -20,10 +20,12 @@ use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelecto
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
+use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use okena_core::client::RemoteConnectionConfig;
+use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
@@ -169,6 +171,12 @@ impl CloseEvent for DiffViewerEvent {
 impl CloseEvent for RemoteConnectDialogEvent {
     fn is_close(&self) -> bool {
         matches!(self, RemoteConnectDialogEvent::Close)
+    }
+}
+
+impl CloseEvent for PairingDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, PairingDialogEvent::Close)
     }
 }
 
@@ -364,6 +372,26 @@ impl OverlayManager {
                 }
             }).detach();
             self.open_modal(entity, cx);
+        }
+        cx.notify();
+    }
+
+    /// Toggle pairing dialog overlay.
+    pub fn toggle_pairing_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<PairingDialog>() {
+            self.close_modal(cx);
+        } else {
+            if let Some(remote_info) = cx.try_global::<GlobalRemoteInfo>() {
+                if let Some(auth_store) = remote_info.0.auth_store() {
+                    let entity = cx.new(|cx| PairingDialog::new(auth_store, cx));
+                    cx.subscribe(&entity, |this, _, event: &PairingDialogEvent, cx| {
+                        if event.is_close() {
+                            this.close_modal(cx);
+                        }
+                    }).detach();
+                    self.open_modal(entity, cx);
+                }
+            }
         }
         cx.notify();
     }

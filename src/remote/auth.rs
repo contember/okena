@@ -140,6 +140,33 @@ impl AuthStore {
         code
     }
 
+    /// Generate a fresh pairing code unconditionally (for explicit pairing dialog).
+    pub fn generate_fresh_code(&self) -> String {
+        let mut inner = self.inner.lock();
+        let code = generate_pairing_code();
+        inner.current_code = Some(code.clone());
+        inner.code_created_at = Instant::now();
+        code
+    }
+
+    /// Invalidate the current pairing code (called when pairing dialog closes).
+    pub fn invalidate_code(&self) {
+        let mut inner = self.inner.lock();
+        inner.current_code = None;
+    }
+
+    /// Returns seconds remaining for the current code, or 0 if no code/expired.
+    pub fn code_remaining_secs(&self) -> u64 {
+        let inner = self.inner.lock();
+        match &inner.current_code {
+            Some(_) => {
+                let elapsed = Instant::now().duration_since(inner.code_created_at).as_secs();
+                60u64.saturating_sub(elapsed)
+            }
+            None => 0,
+        }
+    }
+
     /// Attempt to pair with a code. Returns a bearer token on success.
     pub fn try_pair(&self, code: &str, ip: IpAddr) -> Result<String, PairError> {
         let mut inner = self.inner.lock();

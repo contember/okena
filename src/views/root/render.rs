@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
 use crate::settings::open_settings_file;
 use crate::theme::theme;
 use crate::views::layout::navigation::clear_pane_map;
@@ -350,6 +350,13 @@ impl Render for RootView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowSettings, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(cx));
+                }
+            }))
+            // Handle show pairing dialog action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowPairingDialog, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_pairing_dialog(cx));
                 }
             }))
             // Handle new project action
