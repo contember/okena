@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::net::IpAddr;
 
 use crate::app::Okena;
+use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit};
 use crate::settings::GlobalSettings;
@@ -124,6 +125,41 @@ fn cli_pair() -> i32 {
     0
 }
 
+/// Global handle keeping the headless app entity alive for the process lifetime.
+struct GlobalHeadless(Entity<HeadlessApp>);
+impl Global for GlobalHeadless {}
+
+/// Run the application in headless mode (no GUI, remote server only).
+fn run_headless(listen_addr: IpAddr) {
+    println!("Starting Okena in headless mode...");
+
+    Application::headless().run(move |cx: &mut App| {
+        cx.set_quit_mode(QuitMode::Explicit);
+
+        // Initialize global settings (must be before workspace load)
+        let settings_entity = settings::init_settings(cx);
+        let app_settings = settings_entity.read(cx).get().clone();
+
+        // Load or create workspace
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
+            log::warn!("Failed to load workspace: {}, using default", e);
+            persistence::default_workspace()
+        });
+
+        // Create PTY manager
+        let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
+        let pty_manager = Arc::new(pty_manager);
+
+        // Create the headless app entity (starts PTY loop, command loop, and remote server)
+        // Must be stored in a global to keep the entity alive — dropping the handle
+        // would release the entity and cancel all spawned tasks + drop RemoteServer.
+        let headless = cx.new(|cx| {
+            HeadlessApp::new(workspace_data, pty_manager, pty_events, listen_addr, cx)
+        });
+        cx.set_global(GlobalHeadless(headless));
+    });
+}
+
 fn main() {
     // Handle --version before initializing anything (used by updater validation)
     if std::env::args().any(|a| a == "--version") {
@@ -138,9 +174,10 @@ fn main() {
 
     env_logger::init();
 
+    let args: Vec<String> = std::env::args().collect();
+
     // Parse --remote and --listen flags
     let listen_addr: Option<IpAddr> = {
-        let args: Vec<String> = std::env::args().collect();
         if let Some(pos) = args.iter().position(|a| a == "--listen") {
             match args.get(pos + 1) {
                 Some(addr_str) => match addr_str.parse::<IpAddr>() {
@@ -163,6 +200,28 @@ fn main() {
             None
         }
     };
+
+    // Determine headless mode:
+    // 1. Explicit --headless flag
+    // 2. Auto-detect on Linux: --listen provided but no DISPLAY/WAYLAND_DISPLAY
+    let explicit_headless = args.iter().any(|a| a == "--headless");
+    let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+    let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
+
+    if headless {
+        if listen_addr.is_none() {
+            eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
+            std::process::exit(1);
+        }
+        run_headless(listen_addr.unwrap());
+        return;
+    }
+
+    if !has_display && cfg!(target_os = "linux") {
+        eprintln!("No display server found (DISPLAY/WAYLAND_DISPLAY not set).");
+        eprintln!("Use --headless --listen <addr> to run without a GUI.");
+        std::process::exit(1);
+    }
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Quit the app when the last window is closed (default on macOS is to keep running)

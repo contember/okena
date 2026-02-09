@@ -1,4 +1,5 @@
 mod detached_terminals;
+pub mod headless;
 mod remote_commands;
 mod update_checker;
 
