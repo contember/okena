@@ -351,11 +351,7 @@ impl LayoutContainer {
         // Check which children are hidden (minimized or detached) and collect sizes for visible ones
         let mut visible_children_info: Vec<(usize, f32)> = Vec::new();
         for (i, child) in children.iter().enumerate() {
-            let is_hidden = match child {
-                LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
-                _ => false,
-            };
-            if !is_hidden {
+            if !child.is_all_hidden() {
                 let size = sizes.get(i).copied().unwrap_or(100.0 / num_children as f32);
                 visible_children_info.push((i, size));
             }

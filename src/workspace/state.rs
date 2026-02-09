@@ -328,6 +328,16 @@ impl Workspace {
 }
 
 impl LayoutNode {
+    /// Returns true if this node is effectively hidden (all terminals within it are minimized or detached).
+    pub fn is_all_hidden(&self) -> bool {
+        match self {
+            LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                children.iter().all(|c| c.is_all_hidden())
+            }
+        }
+    }
+
     /// Create a new empty terminal node
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
@@ -838,6 +848,46 @@ mod tests {
     fn find_terminal_path_missing() {
         let node = terminal("t1");
         assert_eq!(node.find_terminal_path("nonexistent"), None);
+    }
+
+    // === is_all_hidden ===
+
+    #[test]
+    fn is_all_hidden_single_terminal() {
+        assert!(!terminal("t1").is_all_hidden());
+        assert!(terminal_minimized("t1").is_all_hidden());
+        assert!(terminal_detached("t1").is_all_hidden());
+    }
+
+    #[test]
+    fn is_all_hidden_split_mixed() {
+        let node = hsplit(vec![terminal("t1"), terminal_minimized("t2")]);
+        assert!(!node.is_all_hidden());
+    }
+
+    #[test]
+    fn is_all_hidden_split_all_minimized() {
+        let node = hsplit(vec![terminal_minimized("t1"), terminal_minimized("t2")]);
+        assert!(node.is_all_hidden());
+    }
+
+    #[test]
+    fn is_all_hidden_nested_split() {
+        // Outer split where inner split has all minimized children
+        let node = hsplit(vec![
+            terminal("t1"),
+            vsplit(vec![terminal_minimized("t2"), terminal_minimized("t3")]),
+        ]);
+        assert!(!node.is_all_hidden()); // t1 is still visible
+    }
+
+    #[test]
+    fn is_all_hidden_nested_all_hidden() {
+        let node = hsplit(vec![
+            terminal_minimized("t1"),
+            vsplit(vec![terminal_minimized("t2"), terminal_detached("t3")]),
+        ]);
+        assert!(node.is_all_hidden());
     }
 
     // === collect_minimized_terminals ===
