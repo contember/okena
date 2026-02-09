@@ -143,12 +143,12 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x61afef,
     folder_purple: 0xc678dd,
     folder_pink: 0xe06c9f,
-    diff_added_bg: 0x1e3a1e,
-    diff_removed_bg: 0x3a1e1e,
-    diff_added_fg: 0x4ec9b0,
-    diff_removed_fg: 0xf14c4c,
-    diff_hunk_header_bg: 0x2d3748,
-    diff_hunk_header_fg: 0x569cd6,
+    diff_added_bg: 0x2ea043,
+    diff_removed_bg: 0xf85149,
+    diff_added_fg: 0x3fb950,
+    diff_removed_fg: 0xf85149,
+    diff_hunk_header_bg: 0x1d2d3e,
+    diff_hunk_header_fg: 0x79b8ff,
 };
 
 /// Light theme (VSCode Light-like)
@@ -267,12 +267,12 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x7dcfff,
     folder_purple: 0xbb9af7,
     folder_pink: 0xf472b6,
-    diff_added_bg: 0x1a2e1a,
-    diff_removed_bg: 0x2e1a1a,
-    diff_added_fg: 0xa8ff60,
-    diff_removed_fg: 0xff6c60,
-    diff_hunk_header_bg: 0x282828,
-    diff_hunk_header_fg: 0x96cbfe,
+    diff_added_bg: 0x2ea043,
+    diff_removed_bg: 0xf85149,
+    diff_added_fg: 0x56d364,
+    diff_removed_fg: 0xf85149,
+    diff_hunk_header_bg: 0x1c2333,
+    diff_hunk_header_fg: 0x79b8ff,
 };
 
 /// High Contrast theme for accessibility

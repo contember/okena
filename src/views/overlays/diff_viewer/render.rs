@@ -280,6 +280,18 @@ impl DiffViewer {
             self.view_mode
         };
 
+        // Horizontal scrollbar
+        let scroll_x = self.scroll_x;
+        self.viewport_width(); // update cached width from scroll handle
+        let has_h_scroll = if self.diff_pane_width > 0.0 {
+            self.max_scroll_x() > 1.0
+        } else {
+            // Viewport not yet measured — skip scrollbar, schedule re-render
+            cx.notify();
+            false
+        };
+        let max_scroll = self.max_scroll_x();
+
         div()
             .flex_1()
             .flex()
@@ -345,6 +357,9 @@ impl DiffViewer {
                             } else {
                                 CursorStyle::Arrow
                             })
+                            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
+                                this.handle_scroll_x(event, cx);
+                            }))
                             .track_scroll(&self.scroll_handle),
                         )
                         .when(scrollbar_geometry.is_some(), |d| {
@@ -358,6 +373,10 @@ impl DiffViewer {
                             ))
                         }),
                 )
+                // Horizontal scrollbar
+                .when(has_h_scroll, |d| {
+                    d.child(self.render_horizontal_scrollbar(t, scroll_x, max_scroll, cx))
+                })
             })
     }
 
@@ -410,6 +429,88 @@ impl DiffViewer {
                         t.scrollbar
                     }))
                     .hover(|s| s.bg(rgb(t.scrollbar_hover))),
+            )
+    }
+
+    pub(super) fn render_horizontal_scrollbar(
+        &self,
+        t: &ThemeColors,
+        scroll_x: f32,
+        max_scroll: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let track_height = 10.0;
+        let is_dragging_h = self.h_scrollbar_drag.is_some();
+
+        // Thumb size: visible fraction of total content
+        let text_w = self.max_text_width();
+        let avail_w = self.available_text_width();
+        let visible_ratio = if text_w > 0.0 {
+            (avail_w / text_w).clamp(0.05, 0.95)
+        } else {
+            1.0
+        };
+        // Scroll position ratio
+        let scroll_ratio = if max_scroll > 0.0 {
+            (scroll_x / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        div()
+            .id("diff-h-scrollbar-track")
+            .w_full()
+            .h(px(track_height))
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .cursor(CursorStyle::Arrow)
+            .relative()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let x = f32::from(event.position.x);
+                    this.h_scrollbar_drag = Some(super::types::HScrollbarDrag {
+                        start_x: x,
+                        start_scroll_x: this.scroll_x,
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if let Some(drag) = this.h_scrollbar_drag {
+                    let x = f32::from(event.position.x);
+                    let delta_x = x - drag.start_x;
+                    let max = this.max_scroll_x();
+                    // Scale mouse movement: track width ≈ viewport, content can be much wider
+                    let text_w = this.max_text_width();
+                    let avail_w = this.available_text_width();
+                    let scale = if avail_w > 0.0 { text_w / avail_w } else { 1.0 };
+                    this.scroll_x = (drag.start_scroll_x + delta_x * scale).clamp(0.0, max);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.h_scrollbar_drag = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.0))
+                    .h(px(track_height - 4.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(if is_dragging_h {
+                        t.scrollbar_hover
+                    } else {
+                        t.scrollbar
+                    }))
+                    .hover(|s| s.bg(rgb(t.scrollbar_hover)))
+                    // Position and size using percentages of the track
+                    .left(relative(scroll_ratio * (1.0 - visible_ratio)))
+                    .w(relative(visible_ratio)),
             )
     }
 

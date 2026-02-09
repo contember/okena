@@ -2,12 +2,13 @@
 
 use super::types::{DiffDisplayFile, DisplayLine, HighlightedSpan};
 use crate::git::{get_file_contents_for_diff, DiffLineType, DiffMode, FileDiff};
-use crate::views::components::syntax::{default_text_color, get_syntax_for_path, highlight_line};
+use crate::views::components::syntax::{
+    default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
+};
 use gpui::Rgba;
 use std::collections::HashMap;
 use std::path::Path;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
@@ -49,7 +50,6 @@ pub fn process_file(
     file: &FileDiff,
     max_line_num: &mut usize,
     syntax_set: &SyntaxSet,
-    theme_set: &ThemeSet,
     repo_path: &Path,
     diff_mode: DiffMode,
 ) -> DiffDisplayFile {
@@ -58,7 +58,7 @@ pub fn process_file(
 
     // Get syntax highlighter for this file
     let syntax = get_syntax_for_path(Path::new(path), syntax_set);
-    let theme = &theme_set.themes["base16-ocean.dark"];
+    let theme = load_syntax_theme();
 
     // Fetch and pre-highlight the full file content for both old and new versions.
     // This ensures correct syntax state for all hunks, even those starting mid-file.

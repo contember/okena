@@ -7,12 +7,15 @@ use gpui::Rgba;
 use std::path::Path;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 /// Global cached syntax set with extended syntaxes (including TypeScript/TSX).
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+
+/// Global cached syntax highlighting theme.
+static SYNTAX_THEME: OnceLock<Theme> = OnceLock::new();
 
 /// Load a SyntaxSet with extended syntaxes including TypeScript/TSX.
 /// Uses the two-face crate which provides many additional syntaxes.
@@ -20,6 +23,17 @@ pub fn load_syntax_set() -> SyntaxSet {
     SYNTAX_SET
         .get_or_init(|| two_face::syntax::extra_newlines())
         .clone()
+}
+
+/// Load the syntax highlighting theme (cached).
+/// Uses Dracula theme from two-face for vibrant, modern syntax colors.
+pub fn load_syntax_theme() -> &'static Theme {
+    SYNTAX_THEME.get_or_init(|| {
+        let theme_set = two_face::theme::extra();
+        theme_set
+            .get(two_face::theme::EmbeddedThemeName::Dracula)
+            .clone()
+    })
 }
 
 /// A pre-processed span with color and text ready for display.
@@ -176,17 +190,15 @@ pub fn highlight_line(
 /// * `content` - The file content to highlight
 /// * `path` - Path to the file (used for syntax detection)
 /// * `syntax_set` - Syntect syntax set
-/// * `theme_set` - Syntect theme set
 /// * `max_lines` - Maximum number of lines to process (0 = unlimited)
 pub fn highlight_content(
     content: &str,
     path: &Path,
     syntax_set: &SyntaxSet,
-    theme_set: &ThemeSet,
     max_lines: usize,
 ) -> Vec<HighlightedLine> {
     let syntax = get_syntax_for_path(path, syntax_set);
-    let theme = &theme_set.themes["base16-ocean.dark"];
+    let theme = load_syntax_theme();
     let mut highlighter = HighlightLines::new(syntax, theme);
     let default_color = default_text_color();
 

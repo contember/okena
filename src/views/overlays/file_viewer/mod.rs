@@ -14,7 +14,6 @@ use super::markdown_renderer::{MarkdownDocument, MarkdownSelection};
 use super::markdown_renderer;
 use gpui::*;
 use std::path::PathBuf;
-use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 /// Maximum file size to load (5MB)
@@ -60,8 +59,6 @@ pub struct FileViewer {
     scrollbar_drag: Option<ScrollbarDrag>,
     /// Syntax set for highlighting
     syntax_set: SyntaxSet,
-    /// Theme set for highlighting
-    theme_set: ThemeSet,
     /// File font size from settings
     file_font_size: f32,
 }
@@ -90,7 +87,6 @@ impl FileViewer {
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
             syntax_set: load_syntax_set(),
-            theme_set: ThemeSet::load_defaults(),
             file_font_size,
         };
 

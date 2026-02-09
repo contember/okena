@@ -14,6 +14,39 @@ use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::sync::Arc;
 
+/// Build a StyledText from highlighted spans — renders as a single text
+/// element with no sub-pixel gaps between colored tokens.
+fn build_styled_text(spans: &[crate::views::components::syntax::HighlightedSpan]) -> StyledText {
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+
+    for span in spans {
+        let start = text.len();
+        text.push_str(&span.text);
+        let end = text.len();
+
+        if start < end {
+            highlights.push((
+                start..end,
+                HighlightStyle {
+                    color: Some(span.color.into()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    StyledText::new(text).with_highlights(highlights)
+}
+
+/// Helper to create rgba from u32 color and alpha.
+fn rgba(color: u32, alpha: f32) -> Rgba {
+    let r = ((color >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
+    let b = (color & 0xFF) as f32 / 255.0;
+    Rgba { r, g, b, a: alpha }
+}
+
 impl FileViewer {
     /// Render a single highlighted line with selection support.
     pub(super) fn render_line(&self, line_number: usize, line: &HighlightedLine, t: &ThemeColors, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -31,7 +64,9 @@ impl FileViewer {
         };
 
         let font_size = self.file_font_size;
-        let line_height = font_size * 1.5;
+        let line_height = font_size * 1.8;
+        let char_width = font_size * 0.6;
+        let gutter_width = (self.line_num_width as f32) * char_width + 16.0;
 
         div()
             .id(ElementId::Name(format!("line-{}", line_number).into()))
@@ -60,13 +95,23 @@ impl FileViewer {
             .child(
                 // Line number gutter
                 div()
-                    .w(px((self.line_num_width * 8 + 16) as f32))
-                    .pr(px(8.0))
-                    .text_color(rgb(t.text_muted))
+                    .w(px(gutter_width))
+                    .pr(px(10.0))
+                    .text_color(rgba(t.text_muted, 0.6))
                     .flex()
+                    .items_center()
                     .justify_end()
                     .flex_shrink_0()
-                    .child(line_num_str),
+                    .child(line_num_str)
+                    // Subtle separator
+                    .child(
+                        div()
+                            .ml(px(10.0))
+                            .w(px(1.0))
+                            .h(px(line_height * 0.6))
+                            .bg(rgba(t.border, 0.3))
+                            .flex_shrink_0(),
+                    ),
             )
             .child(
                 // Line content with syntax highlighting and selection
@@ -74,18 +119,14 @@ impl FileViewer {
                     // Render with selection highlighting
                     self.render_line_with_selection(line_number, line, t, selection_bg)
                 } else {
-                    // Simple render without selection
+                    // Simple render without selection — StyledText for gap-free rendering
                     div()
                         .flex_1()
-                        .flex()
+                        .pl(px(10.0))
                         .overflow_hidden()
-                        .children(
-                            line.spans.iter().map(|span| {
-                                div()
-                                    .text_color(span.color)
-                                    .child(span.text.clone())
-                            }),
-                        )
+                        .whitespace_nowrap()
+                        .line_height(px(line_height))
+                        .child(build_styled_text(&line.spans))
                 },
             )
     }
@@ -98,20 +139,19 @@ impl FileViewer {
         _t: &ThemeColors,
         selection_bg: Rgba,
     ) -> Div {
+        let font_size = self.file_font_size;
+        let line_height = font_size * 1.8;
+
         let ((start_line, start_col), (end_line, end_col)) = match self.selection.normalized() {
             Some(range) => range,
             None => {
                 return div()
                     .flex_1()
-                    .flex()
+                    .pl(px(10.0))
                     .overflow_hidden()
-                    .children(
-                        line.spans.iter().map(|span| {
-                            div()
-                                .text_color(span.color)
-                                .child(span.text.clone())
-                        }),
-                    );
+                    .whitespace_nowrap()
+                    .line_height(px(line_height))
+                    .child(build_styled_text(&line.spans));
             }
         };
 
@@ -120,65 +160,44 @@ impl FileViewer {
         let sel_start = if line_number == start_line { start_col.min(line_len) } else { 0 };
         let sel_end = if line_number == end_line { end_col.min(line_len) } else { line_len };
 
-        // Build character-level rendering with selection
-        let mut elements: Vec<Div> = Vec::new();
-        let mut current_col = 0;
+        // Build StyledText with selection background highlight
+        let mut text = String::new();
+        let mut highlights = Vec::new();
 
         for span in &line.spans {
-            let span_len = span.text.len();
-            let span_end = current_col + span_len;
+            let start = text.len();
+            text.push_str(&span.text);
+            let end = text.len();
 
-            // Check if this span intersects with selection
-            let span_sel_start = sel_start.max(current_col);
-            let span_sel_end = sel_end.min(span_end);
-
-            if span_sel_start < span_sel_end && span_sel_start < span_end && span_sel_end > current_col {
-                // Span has some selection - split into parts
-                let rel_sel_start = span_sel_start - current_col;
-                let rel_sel_end = span_sel_end - current_col;
-
-                // Before selection
-                if rel_sel_start > 0 {
-                    elements.push(
-                        div()
-                            .text_color(span.color)
-                            .child(span.text[..rel_sel_start].to_string())
-                    );
-                }
-
-                // Selected part
-                elements.push(
-                    div()
-                        .bg(selection_bg)
-                        .text_color(span.color)
-                        .child(span.text[rel_sel_start..rel_sel_end].to_string())
-                );
-
-                // After selection
-                if rel_sel_end < span_len {
-                    elements.push(
-                        div()
-                            .text_color(span.color)
-                            .child(span.text[rel_sel_end..].to_string())
-                    );
-                }
-            } else {
-                // No selection in this span
-                elements.push(
-                    div()
-                        .text_color(span.color)
-                        .child(span.text.clone())
-                );
+            if start < end {
+                highlights.push((
+                    start..end,
+                    HighlightStyle {
+                        color: Some(span.color.into()),
+                        ..Default::default()
+                    },
+                ));
             }
+        }
 
-            current_col = span_end;
+        // Add selection background
+        if sel_start < sel_end {
+            highlights.push((
+                sel_start..sel_end,
+                HighlightStyle {
+                    background_color: Some(selection_bg.into()),
+                    ..Default::default()
+                },
+            ));
         }
 
         div()
             .flex_1()
-            .flex()
+            .pl(px(10.0))
             .overflow_hidden()
-            .children(elements)
+            .whitespace_nowrap()
+            .line_height(px(line_height))
+            .child(StyledText::new(text).with_highlights(highlights))
     }
 
     /// Render visible lines for the virtualized list.
