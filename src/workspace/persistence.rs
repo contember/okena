@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[allow(unused_imports)]
 pub use super::settings::{
     load_settings, save_settings, get_settings_path,
-    AppSettings, DiffViewMode, HooksConfig, SidebarSettings,
+    AppSettings, CursorShape, DiffViewMode, HooksConfig, SidebarSettings,
     DEFAULT_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
     SETTINGS_VERSION,
 };

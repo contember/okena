@@ -7,6 +7,32 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
+/// Terminal cursor shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CursorShape {
+    /// Full-cell block cursor (default, Linux-style)
+    #[default]
+    Block,
+    /// Thin vertical bar cursor (editor-style)
+    Bar,
+    /// Horizontal underline cursor
+    Underline,
+}
+
+impl CursorShape {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            CursorShape::Block => "Block",
+            CursorShape::Bar => "Bar",
+            CursorShape::Underline => "Underline",
+        }
+    }
+
+    pub fn all_variants() -> &'static [CursorShape] {
+        &[CursorShape::Block, CursorShape::Bar, CursorShape::Underline]
+    }
+}
+
 /// Display mode for the diff viewer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffViewMode {
@@ -112,6 +138,9 @@ pub struct AppSettings {
     pub file_font_size: f32,
 
     // Terminal settings
+    /// Cursor shape: Block, Bar, or Underline (default: Block)
+    #[serde(default)]
+    pub cursor_style: CursorShape,
     /// Enable cursor blinking (default: false)
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
@@ -180,6 +209,7 @@ impl Default for AppSettings {
             line_height: default_line_height(),
             ui_font_size: default_ui_font_size(),
             file_font_size: default_file_font_size(),
+            cursor_style: CursorShape::default(),
             cursor_blink: default_cursor_blink(),
             scrollback_lines: default_scrollback_lines(),
             default_shell: ShellType::default(),
@@ -362,6 +392,12 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("file_font_size").and_then(|v| v.as_f64()) {
         settings.file_font_size = (v as f32).clamp(8.0, 24.0);
+    }
+
+    if let Some(v) = obj.get("cursor_style") {
+        if let Ok(style) = serde_json::from_value::<CursorShape>(v.clone()) {
+            settings.cursor_style = style;
+        }
     }
 
     if let Some(v) = obj.get("cursor_blink").and_then(|v| v.as_bool()) {
