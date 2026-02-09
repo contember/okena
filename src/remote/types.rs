@@ -14,6 +14,7 @@ use crate::workspace::state::LayoutNode;
 // ── Conversion helpers ──────────────────────────────────────────────────────
 
 impl LayoutNode {
+    #[allow(dead_code)]
     pub fn from_api(api: &ApiLayoutNode) -> Self {
         match api {
             ApiLayoutNode::Terminal {

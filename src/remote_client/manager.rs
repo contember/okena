@@ -136,6 +136,7 @@ impl RemoteConnectionManager {
     }
 
     /// Pair with a remote server using a code.
+    #[allow(dead_code)]
     pub fn pair(&mut self, connection_id: &str, code: &str, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.get_mut(connection_id) {
             conn.pair(code);

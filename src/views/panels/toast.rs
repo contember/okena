@@ -29,6 +29,7 @@ const ACCENT_WIDTH: f32 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastLevel {
+    #[allow(dead_code)]
     Success,
     Error,
     Warning,
@@ -77,6 +78,7 @@ impl Toast {
         }
     }
 
+    #[allow(dead_code)]
     pub fn success(message: impl Into<String>) -> Self {
         Self::new(ToastLevel::Success, message)
     }
@@ -93,6 +95,7 @@ impl Toast {
         Self::new(ToastLevel::Info, message)
     }
 
+    #[allow(dead_code)]
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
@@ -137,6 +140,7 @@ impl ToastManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn success(message: impl Into<String>, cx: &App) {
         Self::post(Toast::success(message), cx);
     }

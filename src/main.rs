@@ -126,7 +126,7 @@ fn cli_pair() -> i32 {
 }
 
 /// Global handle keeping the headless app entity alive for the process lifetime.
-struct GlobalHeadless(Entity<HeadlessApp>);
+struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
 impl Global for GlobalHeadless {}
 
 /// Run the application in headless mode (no GUI, remote server only).

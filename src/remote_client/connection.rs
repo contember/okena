@@ -88,6 +88,7 @@ impl RemoteConnection {
         self.client.connect();
     }
 
+    #[allow(dead_code)]
     pub fn pair(&mut self, code: &str) {
         self.client.pair(code);
     }
@@ -112,6 +113,7 @@ impl RemoteConnection {
         self.client.status_mut()
     }
 
+    #[allow(dead_code)]
     pub fn set_status(&mut self, status: ConnectionStatus) {
         self.client.set_status(status);
     }

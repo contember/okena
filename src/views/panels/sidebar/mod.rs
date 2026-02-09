@@ -43,7 +43,9 @@ pub(super) enum SidebarCursorItem {
     Project { project_id: String },
     WorktreeProject { project_id: String },
     Terminal { project_id: String, terminal_id: String },
+    #[allow(dead_code)]
     RemoteConnection { connection_id: String },
+    #[allow(dead_code)]
     RemoteProject { connection_id: String, project_id: String },
 }
 
