@@ -95,6 +95,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set the remote server listen address
+    pub fn set_remote_listen_address(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.remote_listen_address = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set auto-update enabled/disabled
     pub fn set_auto_update_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.auto_update_enabled = value;

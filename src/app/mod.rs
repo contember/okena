@@ -46,6 +46,8 @@ pub struct Okena {
     pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
+    /// Whether the listen address was forced via CLI --listen flag
+    force_remote: bool,
 }
 
 impl Okena {
@@ -58,7 +60,11 @@ impl Okena {
         cx: &mut Context<Self>,
     ) -> Self {
         let force_remote = listen_addr.is_some();
-        let listen_addr = listen_addr.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let listen_addr = listen_addr.unwrap_or_else(|| {
+            cx.global::<GlobalSettings>().0.read(cx).get()
+                .remote_listen_address.parse::<IpAddr>()
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        });
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
@@ -168,6 +174,7 @@ impl Okena {
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
             listen_addr,
+            force_remote,
         };
 
         // Start PTY event loop (centralized for all windows)
@@ -193,13 +200,29 @@ impl Okena {
         // Observe settings changes to start/stop server dynamically
         let bridge_tx_for_observer = bridge_tx.clone();
         cx.observe(&settings, move |this, settings, cx| {
-            let enabled = settings.read(cx).get().remote_server_enabled;
+            let s = settings.read(cx).get();
+            let enabled = s.remote_server_enabled;
             let running = this.remote_server.is_some();
 
             if enabled && !running {
+                // Update listen_addr from settings if not forced via CLI
+                if !this.force_remote {
+                    if let Ok(addr) = s.remote_listen_address.parse::<IpAddr>() {
+                        this.listen_addr = addr;
+                    }
+                }
                 this.start_remote_server(bridge_tx_for_observer.clone());
             } else if !enabled && running {
                 this.stop_remote_server();
+            } else if enabled && running && !this.force_remote {
+                // Check if address changed while server is running
+                if let Ok(new_addr) = s.remote_listen_address.parse::<IpAddr>() {
+                    if new_addr != this.listen_addr {
+                        this.listen_addr = new_addr;
+                        this.stop_remote_server();
+                        this.start_remote_server(bridge_tx_for_observer.clone());
+                    }
+                }
             }
         })
         .detach();

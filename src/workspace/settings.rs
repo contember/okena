@@ -150,6 +150,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub remote_server_enabled: bool,
 
+    /// Listen address for the remote server (default: "127.0.0.1")
+    #[serde(default = "default_remote_listen_address")]
+    pub remote_listen_address: String,
+
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
@@ -185,6 +189,7 @@ impl Default for AppSettings {
             hooks: HooksConfig::default(),
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
+            remote_listen_address: default_remote_listen_address(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
             remote_connections: Vec::new(),
@@ -235,6 +240,10 @@ fn default_scrollback_lines() -> u32 {
 
 fn default_file_opener() -> String {
     String::new()
+}
+
+fn default_remote_listen_address() -> String {
+    "127.0.0.1".to_string()
 }
 
 /// Get the settings file path
