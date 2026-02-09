@@ -332,7 +332,7 @@ impl Render for SettingsPanel {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
 
-        if !focus_handle.is_focused(window) {
+        if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
         }
 
