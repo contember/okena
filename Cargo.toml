@@ -6,6 +6,7 @@ resolver = "2"
 name = "okena"
 version = "0.4.4"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 # Shared core types
