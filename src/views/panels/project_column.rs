@@ -175,12 +175,13 @@ impl ProjectColumn {
     }
 
     fn hide_diff_popover(&mut self, cx: &mut Context<Self>) {
+        // Always increment token to cancel any pending show task
+        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+
         if !self.diff_popover_visible {
             return;
         }
 
-        // Use token to allow cancellation if mouse enters popover
-        let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
         let hover_token = self.hover_token.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
