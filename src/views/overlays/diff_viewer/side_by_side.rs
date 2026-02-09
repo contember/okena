@@ -1,5 +1,6 @@
 //! Side-by-side diff view transformation and rendering.
 
+use super::line_render::{rgba, ACCENT_WIDTH};
 use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideContent};
 use super::DiffViewer;
 use crate::git::DiffLineType;
@@ -77,7 +78,6 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                     right: None,
                     is_header: true,
                     header_text: line.plain_text.clone(),
-                    header_spans: line.spans.clone(),
                 });
                 i += 1;
             }
@@ -97,7 +97,6 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                     }),
                     is_header: false,
                     header_text: String::new(),
-                    header_spans: Vec::new(),
                 });
                 i += 1;
             }
@@ -148,7 +147,6 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                         right,
                         is_header: false,
                         header_text: String::new(),
-                        header_spans: Vec::new(),
                     });
                 }
             }
@@ -173,7 +171,6 @@ pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
                     }),
                     is_header: false,
                     header_text: String::new(),
-                    header_spans: Vec::new(),
                 });
                 i += 1;
             }
@@ -209,29 +206,10 @@ impl DiffViewer {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let font_size = self.file_font_size;
-        let line_height = font_size * 1.6;
+        let line_height = self.line_height();
 
         if line.is_header {
-            // Chunk header - full width separator with border (same style as unified view)
-            return div()
-                .id(ElementId::Name(format!("sbs-header-{}", idx).into()))
-                .w_full()
-                .h(px(line_height))
-                .flex()
-                .items_center()
-                .font_family("monospace")
-                .bg(rgba(t.diff_hunk_header_bg, 0.6))
-                .border_y_1()
-                .border_color(rgb(t.border))
-                .px(px(12.0))
-                .child(
-                    div()
-                        .text_size(px(font_size * 0.85))
-                        .text_color(rgb(t.diff_hunk_header_fg))
-                        .children(line.header_spans.iter().map(|span| {
-                            div().text_color(span.color).child(span.text.clone())
-                        })),
-                );
+            return self.render_hunk_header(&line.header_text, idx, "sbs-header", t);
         }
 
         // Two-column layout
@@ -246,7 +224,7 @@ impl DiffViewer {
             .text_size(px(font_size))
             .font_family("monospace")
             .flex()
-            .child(self.render_side_column_content(&left, t, font_size, line_height))
+            .child(self.render_side_column_content(&left, t, line_height))
             .child(
                 div()
                     .w(px(1.0))
@@ -254,7 +232,7 @@ impl DiffViewer {
                     .bg(rgb(border_color))
                     .flex_shrink_0(),
             )
-            .child(self.render_side_column_content(&right, t, font_size, line_height))
+            .child(self.render_side_column_content(&right, t, line_height))
     }
 
     /// Render one column (left or right) of a side-by-side line.
@@ -262,32 +240,14 @@ impl DiffViewer {
         &self,
         content: &Option<SideContent>,
         t: &ThemeColors,
-        font_size: f32,
         line_height: f32,
     ) -> Div {
-        // Character width for monospace font (approximately 0.6 of font size)
-        let char_width = font_size * 0.6;
-        let num_col_width = (self.line_num_width as f32) * char_width + 4.0;
+        let char_width = self.char_width();
+        let num_col_width = (self.line_num_width as f32) * char_width + 8.0;
 
         match content {
             Some(c) => {
-                // Two-level background: light tint for the line, stronger for changed words
-                let (indicator, line_bg, word_bg, indicator_color) = match c.line_type {
-                    DiffLineType::Added => (
-                        "+",
-                        Some(rgba(t.diff_added_bg, 0.35)),
-                        Some(rgba(t.diff_added_bg, 0.8)),
-                        t.diff_added_fg,
-                    ),
-                    DiffLineType::Removed => (
-                        "-",
-                        Some(rgba(t.diff_removed_bg, 0.35)),
-                        Some(rgba(t.diff_removed_bg, 0.8)),
-                        t.diff_removed_fg,
-                    ),
-                    DiffLineType::Context => (" ", None, None, t.text_muted),
-                    DiffLineType::Header => ("", None, None, t.text_secondary),
-                };
+                let (line_bg, word_bg, accent_color) = self.line_colors(c.line_type, t);
 
                 // Format line number - show empty for 0
                 let line_num = if c.line_num > 0 {
@@ -307,7 +267,14 @@ impl DiffViewer {
                     column = column.bg(bg);
                 }
 
-                // Gutter with line number and indicator
+                // Left accent bar (fixed width child, always present for alignment)
+                let accent = div()
+                    .w(px(ACCENT_WIDTH))
+                    .h_full()
+                    .flex_shrink_0()
+                    .when_some(accent_color, |d, color| d.bg(color));
+
+                // Gutter with line number
                 let gutter = div()
                     .flex_shrink_0()
                     .flex()
@@ -316,18 +283,18 @@ impl DiffViewer {
                     .child(
                         div()
                             .w(px(num_col_width))
-                            .pr(px(4.0))
-                            .text_color(rgb(t.text_muted))
+                            .pr(px(8.0))
+                            .text_color(rgba(t.text_muted, 0.6))
                             .text_right()
                             .child(line_num),
                     )
+                    // Subtle separator
                     .child(
                         div()
-                            .w(px(20.0))
-                            .text_center()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(indicator_color))
-                            .child(indicator),
+                            .w(px(1.0))
+                            .h(px(line_height * 0.6))
+                            .bg(rgba(t.border, 0.3))
+                            .flex_shrink_0(),
                     );
 
                 // Content with word-level highlighting
@@ -335,9 +302,10 @@ impl DiffViewer {
                     &c.spans,
                     &c.changed_ranges,
                     word_bg,
+                    line_height,
                 );
 
-                column.child(gutter).child(content_div)
+                column.child(accent).child(gutter).child(content_div)
             }
             None => {
                 // Empty side - very subtle background
@@ -350,75 +318,47 @@ impl DiffViewer {
     }
 
     /// Render spans with word-level highlighting for changed ranges.
+    /// Uses StyledText for gap-free rendering.
     fn render_spans_with_word_highlight(
         &self,
         spans: &[super::types::HighlightedSpan],
         changed_ranges: &[ChangedRange],
         word_bg: Option<Rgba>,
+        line_height: f32,
     ) -> Div {
-        let mut content_div = div().flex_1().flex().pl(px(4.0)).overflow_hidden();
+        // Convert char-based changed_ranges to byte-based background ranges
+        let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> =
+            if let Some(word_bg) = word_bg {
+                if !changed_ranges.is_empty() {
+                    // Build text to get char-to-byte mapping
+                    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                    let chars: Vec<char> = text.chars().collect();
 
-        if changed_ranges.is_empty() || word_bg.is_none() {
-            // No word-level highlighting, just render spans normally
-            for span in spans {
-                content_div = content_div.child(div().text_color(span.color).child(span.text.clone()));
-            }
-            return content_div;
-        }
-
-        let word_bg = word_bg.unwrap();
-        let mut current_col = 0;
-
-        for span in spans {
-            let span_chars: Vec<char> = span.text.chars().collect();
-            let span_len = span_chars.len();
-            let span_end = current_col + span_len;
-
-            // Check if any changed range overlaps this span
-            let mut char_idx = 0;
-            while char_idx < span_len {
-                let global_idx = current_col + char_idx;
-
-                // Find if this character is in a changed range
-                let in_changed = changed_ranges
-                    .iter()
-                    .any(|r| global_idx >= r.start && global_idx < r.end);
-
-                // Find the extent of this segment (changed or unchanged)
-                let segment_start = char_idx;
-                while char_idx < span_len {
-                    let g_idx = current_col + char_idx;
-                    let is_changed = changed_ranges
+                    changed_ranges
                         .iter()
-                        .any(|r| g_idx >= r.start && g_idx < r.end);
-                    if is_changed != in_changed {
-                        break;
-                    }
-                    char_idx += 1;
+                        .filter_map(|range| {
+                            let byte_start: usize = chars[..range.start.min(chars.len())]
+                                .iter()
+                                .map(|c| c.len_utf8())
+                                .sum();
+                            let byte_end: usize = chars[..range.end.min(chars.len())]
+                                .iter()
+                                .map(|c| c.len_utf8())
+                                .sum();
+                            if byte_start < byte_end {
+                                Some((byte_start..byte_end, Hsla::from(word_bg)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
                 }
+            } else {
+                vec![]
+            };
 
-                // Render this segment
-                let segment: String = span_chars[segment_start..char_idx].iter().collect();
-                if !segment.is_empty() {
-                    let mut seg_div = div().text_color(span.color);
-                    if in_changed {
-                        seg_div = seg_div.bg(word_bg).rounded(px(2.0));
-                    }
-                    content_div = content_div.child(seg_div.child(segment));
-                }
-            }
-
-            current_col = span_end;
-        }
-
-        content_div
+        self.render_scrollable_content(spans, &bg_ranges, line_height)
     }
-}
-
-/// Helper to create rgba from u32 color and alpha.
-fn rgba(color: u32, alpha: f32) -> Rgba {
-    let r = ((color >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((color >> 8) & 0xFF) as f32 / 255.0;
-    let b = (color & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: alpha }
 }
