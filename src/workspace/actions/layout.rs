@@ -513,6 +513,133 @@ impl Workspace {
             self.set_focused_terminal(project_id.to_string(), new_path, cx);
         }
     }
+    /// Move a terminal into an existing tab group.
+    ///
+    /// Extracts the source terminal from its current position and inserts it
+    /// into the Tabs container at `tabs_path` at the given `insert_index`
+    /// (or appends if `None`). This avoids the nested-Tabs problem that
+    /// `move_pane(Center)` would create when the target is already inside
+    /// a tab group.
+    ///
+    /// After removal the layout may collapse (e.g. a 2-child split dissolves),
+    /// so we locate the target tab group by finding a reference terminal that
+    /// was already in it, rather than relying on the original `tabs_path`.
+    pub fn move_terminal_to_tab_group(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        tabs_path: &[usize],
+        insert_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let project = match self.project(project_id) {
+            Some(p) => p,
+            None => return,
+        };
+        let layout = match project.layout.as_ref() {
+            Some(l) => l,
+            None => return,
+        };
+
+        // Find source path
+        let source_path = match layout.find_terminal_path(terminal_id) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // Don't move if source is already in the target tab group
+        if !source_path.is_empty() {
+            let source_parent = &source_path[..source_path.len() - 1];
+            if source_parent == tabs_path {
+                // Already in this tab group — treat as reorder or noop
+                if let Some(idx) = insert_index {
+                    let from = source_path[source_path.len() - 1];
+                    if from != idx {
+                        self.move_tab(project_id, tabs_path, from, idx, cx);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Clone source node
+        let source_node = match layout.get_at_path(&source_path) {
+            Some(node) => node.clone(),
+            None => return,
+        };
+
+        if source_path.is_empty() {
+            return; // Can't remove root
+        }
+
+        // Find a reference terminal already in the target tab group so we can
+        // re-locate the group after removal may have shifted paths.
+        let reference_tid = match layout.get_at_path(tabs_path) {
+            Some(node) => {
+                let ids = node.collect_terminal_ids();
+                // Pick a terminal that isn't the one we're moving
+                ids.into_iter().find(|id| id != terminal_id)
+            }
+            None => return,
+        };
+        let reference_tid = match reference_tid {
+            Some(id) => id,
+            None => return, // Tab group has no other terminals
+        };
+
+        // Perform mutation
+        let new_focus_path = {
+            let project = match self.project_mut(project_id) {
+                Some(p) => p,
+                None => return,
+            };
+            let layout = match project.layout.as_mut() {
+                Some(l) => l,
+                None => return,
+            };
+
+            if layout.remove_at_path(&source_path).is_none() {
+                return;
+            }
+
+            // Re-find the tabs container via the reference terminal
+            let ref_path = match layout.find_terminal_path(&reference_tid) {
+                Some(p) => p,
+                None => return,
+            };
+            // The Tabs node is the parent of the reference terminal
+            let new_tabs_path = if ref_path.is_empty() {
+                // Reference terminal is at root — layout collapsed unexpectedly
+                return;
+            } else {
+                &ref_path[..ref_path.len() - 1]
+            };
+
+            let tabs_node = match layout.get_at_path_mut(new_tabs_path) {
+                Some(node) => node,
+                None => return,
+            };
+
+            if let LayoutNode::Tabs { children, active_tab } = tabs_node {
+                let idx = insert_index.unwrap_or(children.len());
+                let clamped = idx.min(children.len());
+                children.insert(clamped, source_node);
+                *active_tab = clamped;
+            } else {
+                // Target is not a Tabs container (layout shifted) — abort
+                return;
+            }
+
+            layout.normalize();
+            layout.find_terminal_path(terminal_id)
+        };
+
+        self.notify_data(cx);
+
+        if let Some(new_path) = new_focus_path {
+            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1188,6 +1315,116 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data_version(), v0);
+        });
+    }
+
+    // === move_terminal_to_tab_group tests ===
+
+    #[gpui::test]
+    fn test_move_terminal_to_tab_group_inserts_at_position(cx: &mut gpui::TestAppContext) {
+        // V[Tabs[t1, t2], t3] → move t3 into tabs at index 1 → Tabs[t1, t3, t2]
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Tabs {
+                    children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+                    active_tab: 0,
+                },
+                terminal_node_t("t3"),
+            ],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_terminal_to_tab_group("p1", "t3", &[0], Some(1), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Tabs { children, active_tab } => {
+                    assert_eq!(children.len(), 3);
+                    assert_eq!(*active_tab, 1);
+                    let ids: Vec<_> = children.iter().filter_map(|c| match c {
+                        LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                        _ => None,
+                    }).collect();
+                    assert_eq!(ids, vec!["t1", "t3", "t2"]);
+                }
+                _ => panic!("Expected tabs, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_terminal_to_tab_group_appends(cx: &mut gpui::TestAppContext) {
+        // V[Tabs[t1, t2], t3] → move t3 into tabs at end → Tabs[t1, t2, t3]
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![50.0, 50.0],
+            children: vec![
+                LayoutNode::Tabs {
+                    children: vec![terminal_node_t("t1"), terminal_node_t("t2")],
+                    active_tab: 0,
+                },
+                terminal_node_t("t3"),
+            ],
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_terminal_to_tab_group("p1", "t3", &[0], None, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Tabs { children, active_tab } => {
+                    assert_eq!(children.len(), 3);
+                    assert_eq!(*active_tab, 2);
+                    let ids: Vec<_> = children.iter().filter_map(|c| match c {
+                        LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                        _ => None,
+                    }).collect();
+                    assert_eq!(ids, vec!["t1", "t2", "t3"]);
+                }
+                _ => panic!("Expected tabs, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_move_terminal_to_tab_group_same_group_reorders(cx: &mut gpui::TestAppContext) {
+        // Tabs[t1, t2, t3] → move t1 (already in group) to index 2 → reorder
+        let layout = LayoutNode::Tabs {
+            children: vec![terminal_node_t("t1"), terminal_node_t("t2"), terminal_node_t("t3")],
+            active_tab: 0,
+        };
+        let project = make_project_with_layout("p1", layout);
+        let data = make_workspace_data(vec![project], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.move_terminal_to_tab_group("p1", "t1", &[], Some(2), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Tabs { children, .. } => {
+                    let ids: Vec<_> = children.iter().filter_map(|c| match c {
+                        LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.as_str()),
+                        _ => None,
+                    }).collect();
+                    assert_eq!(ids, vec!["t2", "t3", "t1"]);
+                }
+                _ => panic!("Expected tabs, got {:?}", layout),
+            }
         });
     }
 
