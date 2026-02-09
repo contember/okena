@@ -289,27 +289,7 @@ impl Workspace {
         false
     }
 
-    /// Helper to mutate a layout node at a path, normalize the root layout, then notify.
-    /// Use this instead of `with_layout_node` when the mutation may create nested splits
-    /// that should be flattened (e.g. splitting a terminal).
-    /// Returns true if the mutation was applied.
-    pub fn with_layout_node_normalized<F>(&mut self, project_id: &str, path: &[usize], cx: &mut Context<Self>, f: F) -> bool
-    where
-        F: FnOnce(&mut LayoutNode) -> bool,
-    {
-        if let Some(project) = self.project_mut(project_id) {
-            if let Some(ref mut layout) = project.layout {
-                if let Some(node) = layout.get_at_path_mut(path) {
-                    if f(node) {
-                        layout.normalize();
-                        self.notify_data(cx);
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
+
 
     /// Helper to mutate a project, with automatic notify.
     /// Returns true if the mutation was applied.
@@ -1462,58 +1442,6 @@ mod gpui_tests {
         });
     }
 
-    #[gpui::test]
-    fn test_with_layout_node_normalized_flattens_nested_split(cx: &mut gpui::TestAppContext) {
-        // Start with a horizontal split
-        let mut project = make_project("p1");
-        project.layout = Some(LayoutNode::Split {
-            direction: SplitDirection::Horizontal,
-            sizes: vec![50.0, 50.0],
-            children: vec![
-                LayoutNode::Terminal {
-                    terminal_id: Some("t1".to_string()),
-                    minimized: false,
-                    detached: false,
-                    shell_type: ShellType::Default,
-                    zoom_level: 1.0,
-                },
-                LayoutNode::Terminal {
-                    terminal_id: Some("t2".to_string()),
-                    minimized: false,
-                    detached: false,
-                    shell_type: ShellType::Default,
-                    zoom_level: 1.0,
-                },
-            ],
-        });
-        let data = make_workspace_data(vec![project], vec!["p1"]);
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        // Split t1 horizontally — this creates a nested horizontal split that should flatten
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.with_layout_node_normalized("p1", &[0], cx, |node| {
-                let old = node.clone();
-                *node = LayoutNode::Split {
-                    direction: SplitDirection::Horizontal,
-                    sizes: vec![50.0, 50.0],
-                    children: vec![old, LayoutNode::new_terminal()],
-                };
-                true
-            });
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            match layout {
-                LayoutNode::Split { direction, children, .. } => {
-                    assert_eq!(*direction, SplitDirection::Horizontal);
-                    // Should be flattened: t1, new_terminal, t2 (3 children, not nested)
-                    assert_eq!(children.len(), 3);
-                }
-                _ => panic!("Expected flattened split"),
-            }
-        });
-    }
 
     #[gpui::test]
     fn test_replace_data_resets_focus(cx: &mut gpui::TestAppContext) {

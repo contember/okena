@@ -18,9 +18,6 @@ impl Workspace {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
 
         // Perform the split and find the new terminal's path after normalization.
-        // We can't use with_layout_node_normalized here because normalization may
-        // change the path of the newly created terminal (e.g. same-direction split
-        // flattening), and we need that path to set focus.
         let new_path = if let Some(project) = self.project_mut(project_id) {
             if let Some(ref mut layout) = project.layout {
                 if let Some(node) = layout.get_at_path_mut(path) {
