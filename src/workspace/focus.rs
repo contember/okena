@@ -170,6 +170,13 @@ impl FocusManager {
     /// - Updates the current focus target
     /// - Does NOT push to stack (direct user action)
     pub fn focus_terminal(&mut self, project_id: String, layout_path: Vec<usize>) {
+        if self.context == FocusContext::Fullscreen {
+            // Preserve fullscreen state — only update layout_path if same project
+            if let Some(ref mut focus) = self.current_focus {
+                focus.layout_path = layout_path;
+            }
+            return;
+        }
         self.current_focus = Some(FocusTarget::new(project_id, layout_path));
         self.context = FocusContext::Terminal;
     }
@@ -370,6 +377,20 @@ mod tests {
         assert!(!fm.has_fullscreen());
         assert!(fm.focus_stack.is_empty());
         assert_eq!(*fm.context(), FocusContext::Terminal);
+    }
+
+    #[test]
+    fn focus_terminal_preserves_fullscreen() {
+        let mut fm = FocusManager::new();
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+        assert!(fm.has_fullscreen());
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+
+        // Clicking a terminal while fullscreened should NOT exit fullscreen
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+        assert!(fm.has_fullscreen());
+        assert!(fm.is_terminal_fullscreened("proj1", "term1"));
+        assert_eq!(fm.fullscreen_state(), Some(("proj1", "term1")));
     }
 
     #[test]
