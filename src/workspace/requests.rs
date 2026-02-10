@@ -28,6 +28,20 @@ pub enum OverlayRequest {
     DiffViewer { path: String, file: Option<String> },
     RemoteConnect,
     RemoteConnectionContextMenu { connection_id: String, connection_name: String, position: gpui::Point<gpui::Pixels> },
+    TerminalContextMenu {
+        terminal_id: String,
+        project_id: String,
+        layout_path: Vec<usize>,
+        position: gpui::Point<gpui::Pixels>,
+        has_selection: bool,
+    },
+    TabContextMenu {
+        tab_index: usize,
+        num_tabs: usize,
+        project_id: String,
+        layout_path: Vec<usize>,
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Requests consumed by Sidebar::render()

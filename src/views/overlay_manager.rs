@@ -23,6 +23,8 @@ use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
+use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
+use crate::views::overlays::terminal_context_menu::{TerminalContextMenu, TerminalContextMenuEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use okena_core::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
@@ -237,6 +239,26 @@ pub enum OverlayManagerEvent {
 
     /// Remote context menu: remove a connection
     RemoteRemoveConnection { connection_id: String },
+
+    /// Terminal context menu: copy
+    TerminalCopy { terminal_id: String },
+    /// Terminal context menu: paste
+    TerminalPaste { terminal_id: String },
+    /// Terminal context menu: clear
+    TerminalClear { terminal_id: String },
+    /// Terminal context menu: select all
+    TerminalSelectAll { terminal_id: String },
+    /// Terminal context menu: split
+    TerminalSplit { project_id: String, layout_path: Vec<usize>, direction: crate::workspace::state::SplitDirection },
+    /// Terminal context menu: close terminal
+    TerminalClose { project_id: String, terminal_id: String },
+
+    /// Tab context menu: close tab
+    TabClose { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    /// Tab context menu: close other tabs
+    TabCloseOthers { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+    /// Tab context menu: close tabs to the right
+    TabCloseToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
 }
 
 /// Centralized overlay manager that handles all modal overlays.
@@ -258,6 +280,8 @@ pub struct OverlayManager {
     context_menu: OverlaySlot<ContextMenu>,
     folder_context_menu: OverlaySlot<FolderContextMenu>,
     remote_context_menu: OverlaySlot<RemoteContextMenu>,
+    terminal_context_menu: OverlaySlot<TerminalContextMenu>,
+    tab_context_menu: OverlaySlot<TabContextMenu>,
 }
 
 impl OverlayManager {
@@ -271,6 +295,8 @@ impl OverlayManager {
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
             remote_context_menu: OverlaySlot::new(),
+            terminal_context_menu: OverlaySlot::new(),
+            tab_context_menu: OverlaySlot::new(),
         }
     }
 
@@ -313,6 +339,15 @@ impl OverlayManager {
     // Context menu visibility checks (kept separate)
     // ========================================================================
 
+    /// Close all context menu slots (mutual exclusion).
+    fn close_all_context_menus(&mut self) {
+        self.context_menu.close();
+        self.folder_context_menu.close();
+        self.remote_context_menu.close();
+        self.terminal_context_menu.close();
+        self.tab_context_menu.close();
+    }
+
     /// Check if context menu is open.
     pub fn has_context_menu(&self) -> bool {
         self.context_menu.is_open()
@@ -321,6 +356,16 @@ impl OverlayManager {
     /// Check if folder context menu is open.
     pub fn has_folder_context_menu(&self) -> bool {
         self.folder_context_menu.is_open()
+    }
+
+    /// Check if terminal context menu is open.
+    pub fn has_terminal_context_menu(&self) -> bool {
+        self.terminal_context_menu.is_open()
+    }
+
+    /// Check if tab context menu is open.
+    pub fn has_tab_context_menu(&self) -> bool {
+        self.tab_context_menu.is_open()
     }
 
     // ========================================================================
@@ -538,7 +583,7 @@ impl OverlayManager {
     /// Show context menu for a project.
     pub fn show_context_menu(&mut self, request: ContextMenuRequest, cx: &mut Context<Self>) {
         self.close_modal(cx);
-        self.folder_context_menu.close();
+        self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
         let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
@@ -603,7 +648,7 @@ impl OverlayManager {
     /// Show folder context menu.
     pub fn show_folder_context_menu(&mut self, request: FolderContextMenuRequest, cx: &mut Context<Self>) {
         self.close_modal(cx);
-        self.context_menu.close();
+        self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
         let menu = cx.new(|cx| FolderContextMenu::new(workspace.clone(), request, cx));
@@ -660,8 +705,7 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
-        self.context_menu.close();
-        self.folder_context_menu.close();
+        self.close_all_context_menus();
 
         let menu = cx.new(|cx| {
             RemoteContextMenu::new(connection_id, connection_name, position, cx)
@@ -701,6 +745,151 @@ impl OverlayManager {
     /// Get remote context menu entity for rendering.
     pub fn render_remote_context_menu(&self) -> Option<Entity<RemoteContextMenu>> {
         self.remote_context_menu.render()
+    }
+
+    // ========================================================================
+    // Terminal context menu (positioned popup)
+    // ========================================================================
+
+    /// Show terminal context menu.
+    pub fn show_terminal_context_menu(
+        &mut self,
+        terminal_id: String,
+        project_id: String,
+        layout_path: Vec<usize>,
+        position: gpui::Point<gpui::Pixels>,
+        has_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_modal(cx);
+        self.close_all_context_menus();
+
+        let menu = cx.new(|cx| {
+            TerminalContextMenu::new(terminal_id, project_id, layout_path, position, has_selection, cx)
+        });
+
+        cx.subscribe(&menu, |this, _, event: &TerminalContextMenuEvent, cx| {
+            match event {
+                TerminalContextMenuEvent::Close => {
+                    this.hide_terminal_context_menu(cx);
+                }
+                TerminalContextMenuEvent::Copy { terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalCopy { terminal_id: terminal_id.clone() });
+                }
+                TerminalContextMenuEvent::Paste { terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalPaste { terminal_id: terminal_id.clone() });
+                }
+                TerminalContextMenuEvent::Clear { terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalClear { terminal_id: terminal_id.clone() });
+                }
+                TerminalContextMenuEvent::SelectAll { terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalSelectAll { terminal_id: terminal_id.clone() });
+                }
+                TerminalContextMenuEvent::Split { project_id, layout_path, direction } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalSplit {
+                        project_id: project_id.clone(),
+                        layout_path: layout_path.clone(),
+                        direction: *direction,
+                    });
+                }
+                TerminalContextMenuEvent::CloseTerminal { project_id, terminal_id } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TerminalClose {
+                        project_id: project_id.clone(),
+                        terminal_id: terminal_id.clone(),
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.terminal_context_menu.set(menu);
+        cx.notify();
+    }
+
+    /// Hide terminal context menu.
+    pub fn hide_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.terminal_context_menu.close();
+        cx.notify();
+    }
+
+    /// Get terminal context menu entity for rendering.
+    pub fn render_terminal_context_menu(&self) -> Option<Entity<TerminalContextMenu>> {
+        self.terminal_context_menu.render()
+    }
+
+    // ========================================================================
+    // Tab context menu (positioned popup)
+    // ========================================================================
+
+    /// Show tab context menu.
+    pub fn show_tab_context_menu(
+        &mut self,
+        tab_index: usize,
+        num_tabs: usize,
+        project_id: String,
+        layout_path: Vec<usize>,
+        position: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_modal(cx);
+        self.close_all_context_menus();
+
+        let menu = cx.new(|cx| {
+            TabContextMenu::new(tab_index, num_tabs, project_id, layout_path, position, cx)
+        });
+
+        cx.subscribe(&menu, |this, _, event: &TabContextMenuEvent, cx| {
+            match event {
+                TabContextMenuEvent::Close => {
+                    this.hide_tab_context_menu(cx);
+                }
+                TabContextMenuEvent::CloseTab { project_id, layout_path, tab_index } => {
+                    this.hide_tab_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TabClose {
+                        project_id: project_id.clone(),
+                        layout_path: layout_path.clone(),
+                        tab_index: *tab_index,
+                    });
+                }
+                TabContextMenuEvent::CloseOtherTabs { project_id, layout_path, tab_index } => {
+                    this.hide_tab_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TabCloseOthers {
+                        project_id: project_id.clone(),
+                        layout_path: layout_path.clone(),
+                        tab_index: *tab_index,
+                    });
+                }
+                TabContextMenuEvent::CloseTabsToRight { project_id, layout_path, tab_index } => {
+                    this.hide_tab_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::TabCloseToRight {
+                        project_id: project_id.clone(),
+                        layout_path: layout_path.clone(),
+                        tab_index: *tab_index,
+                    });
+                }
+            }
+        })
+        .detach();
+
+        self.tab_context_menu.set(menu);
+        cx.notify();
+    }
+
+    /// Hide tab context menu.
+    pub fn hide_tab_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.tab_context_menu.close();
+        cx.notify();
+    }
+
+    /// Get tab context menu entity for rendering.
+    pub fn render_tab_context_menu(&self) -> Option<Entity<TabContextMenu>> {
+        self.tab_context_menu.render()
     }
 
     // ========================================================================

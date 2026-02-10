@@ -102,19 +102,6 @@ impl TerminalPane {
         }
     }
 
-    pub(super) fn handle_clear(&mut self, _cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            terminal.clear();
-        }
-    }
-
-    pub(super) fn handle_select_all(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal) = self.terminal {
-            terminal.select_all();
-            cx.notify();
-        }
-    }
-
     pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
         let Some(ref terminal) = self.terminal else {
             return;

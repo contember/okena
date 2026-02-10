@@ -1,4 +1,6 @@
+use crate::remote::types::ActionRequest;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
+use crate::workspace::actions::execute::execute_action;
 use crate::workspace::requests::OverlayRequest;
 use crate::workspace::requests::SidebarRequest;
 use gpui::*;
@@ -82,6 +84,87 @@ impl RootView {
                     rm.update(cx, |rm, cx| {
                         rm.remove_connection(connection_id, cx);
                     });
+                }
+            }
+            OverlayManagerEvent::TerminalCopy { terminal_id } => {
+                let terminals = self.terminals.lock();
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    if let Some(text) = terminal.get_selected_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                }
+            }
+            OverlayManagerEvent::TerminalPaste { terminal_id } => {
+                let text = cx.read_from_clipboard()
+                    .and_then(|item| item.text().map(|t| t.to_string()));
+                if let Some(text) = text {
+                    let terminals = self.terminals.lock();
+                    if let Some(terminal) = terminals.get(terminal_id) {
+                        terminal.send_input(&text);
+                    }
+                }
+            }
+            OverlayManagerEvent::TerminalClear { terminal_id } => {
+                let terminals = self.terminals.lock();
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    terminal.clear();
+                }
+            }
+            OverlayManagerEvent::TerminalSelectAll { terminal_id } => {
+                let terminals = self.terminals.lock();
+                if let Some(terminal) = terminals.get(terminal_id) {
+                    terminal.select_all();
+                }
+                cx.notify();
+            }
+            OverlayManagerEvent::TerminalSplit { project_id, layout_path, direction } => {
+                let action = ActionRequest::SplitTerminal {
+                    project_id: project_id.clone(),
+                    path: layout_path.clone(),
+                    direction: *direction,
+                };
+                let backend = self.backend.clone();
+                let terminals = self.terminals.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    execute_action(action, ws, &*backend, &terminals, cx);
+                });
+            }
+            OverlayManagerEvent::TerminalClose { project_id, terminal_id } => {
+                let action = ActionRequest::CloseTerminal {
+                    project_id: project_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                };
+                let backend = self.backend.clone();
+                let terminals = self.terminals.clone();
+                self.workspace.update(cx, |ws, cx| {
+                    execute_action(action, ws, &*backend, &terminals, cx);
+                });
+            }
+            OverlayManagerEvent::TabClose { project_id, layout_path, tab_index } => {
+                let removed = self.workspace.update(cx, |ws, cx| {
+                    ws.close_tab(project_id, layout_path, *tab_index, cx)
+                });
+                for id in &removed {
+                    self.backend.kill(id);
+                    self.terminals.lock().remove(id);
+                }
+            }
+            OverlayManagerEvent::TabCloseOthers { project_id, layout_path, tab_index } => {
+                let removed = self.workspace.update(cx, |ws, cx| {
+                    ws.close_other_tabs(project_id, layout_path, *tab_index, cx)
+                });
+                for id in &removed {
+                    self.backend.kill(id);
+                    self.terminals.lock().remove(id);
+                }
+            }
+            OverlayManagerEvent::TabCloseToRight { project_id, layout_path, tab_index } => {
+                let removed = self.workspace.update(cx, |ws, cx| {
+                    ws.close_tabs_to_right(project_id, layout_path, *tab_index, cx)
+                });
+                for id in &removed {
+                    self.backend.kill(id);
+                    self.terminals.lock().remove(id);
                 }
             }
             OverlayManagerEvent::RemoteConnected { config } => {
@@ -190,6 +273,16 @@ impl RootView {
                             om.show_remote_context_menu(connection_id, connection_name, position, cx);
                         });
                     }
+                }
+                OverlayRequest::TerminalContextMenu { terminal_id, project_id, layout_path, position, has_selection } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, cx);
+                    });
+                }
+                OverlayRequest::TabContextMenu { tab_index, num_tabs, project_id, layout_path, position } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
+                    });
                 }
             }
         }

@@ -37,8 +37,6 @@ pub struct LayoutContainer {
     pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer>>,
     /// Shared bounds of this container (updated during prepaint via canvas)
     pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
-    /// Tab context menu state: (tab_index, position, num_tabs)
-    pub(super) tab_context_menu: Option<(usize, Point<Pixels>, usize)>,
     /// Animation state for recently dropped tab (tab_index, animation_progress)
     /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     pub(super) drop_animation: Option<(usize, f32)>,
@@ -73,7 +71,6 @@ impl LayoutContainer {
                 origin: Point::default(),
                 size: Size { width: px(800.0), height: px(600.0) },
             })),
-            tab_context_menu: None,
             drop_animation: None,
             active_drag,
             external_layout: None,

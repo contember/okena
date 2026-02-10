@@ -19,7 +19,7 @@ mod navigation;
 mod render;
 
 // Internal imports
-use content::ContextMenuEvent;
+use content::TerminalContentEvent;
 use search_bar::{SearchBar, SearchBarEvent};
 use header::{TerminalHeader, HeaderEvent};
 
@@ -135,7 +135,7 @@ impl TerminalPane {
         // Subscribe to search bar events
         cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
 
-        // Subscribe to content events (context menu actions)
+        // Subscribe to content events (context menu request)
         cx.subscribe(&content, Self::handle_content_event).detach();
 
         let mut pane = Self {
@@ -228,20 +228,30 @@ impl TerminalPane {
         }
     }
 
-    /// Handle events from content (context menu actions).
+    /// Handle events from content (context menu request).
     fn handle_content_event(
         &mut self,
         _: Entity<TerminalContent>,
-        event: &ContextMenuEvent,
+        event: &TerminalContentEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
-            ContextMenuEvent::Copy => self.handle_copy(cx),
-            ContextMenuEvent::Paste => self.handle_paste(cx),
-            ContextMenuEvent::Clear => self.handle_clear(cx),
-            ContextMenuEvent::SelectAll => self.handle_select_all(cx),
-            ContextMenuEvent::Split(dir) => self.handle_split(*dir, cx),
-            ContextMenuEvent::Close => self.handle_close(cx),
+            TerminalContentEvent::RequestContextMenu { position, has_selection } => {
+                if let Some(ref terminal_id) = self.terminal_id {
+                    self.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            crate::workspace::requests::OverlayRequest::TerminalContextMenu {
+                                terminal_id: terminal_id.clone(),
+                                project_id: self.project_id.clone(),
+                                layout_path: self.layout_path.clone(),
+                                position: *position,
+                                has_selection: *has_selection,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            }
         }
     }
 

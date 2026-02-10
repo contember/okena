@@ -5,11 +5,9 @@
 use crate::elements::terminal_element::{LinkKind, SearchMatch, TerminalElement};
 use crate::settings::settings_entity;
 use crate::terminal::terminal::Terminal;
-use crate::theme::{theme, ThemeColors};
-use crate::views::components::{menu_item, menu_item_conditional, menu_item_with_color};
+use crate::theme::theme;
 use crate::views::layout::navigation::register_pane_bounds;
-use crate::workspace::state::{SplitDirection, Workspace};
-use gpui::prelude::FluentBuilder;
+use crate::workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,14 +15,10 @@ use std::time::Instant;
 use super::scrollbar::Scrollbar;
 use super::url_detector::UrlDetector;
 
-/// Events emitted by context menu actions.
-pub enum ContextMenuEvent {
-    Copy,
-    Paste,
-    Clear,
-    SelectAll,
-    Split(SplitDirection),
-    Close,
+/// Events emitted by terminal content.
+pub enum TerminalContentEvent {
+    /// Request to show context menu at a position.
+    RequestContextMenu { position: Point<Pixels>, has_selection: bool },
 }
 
 /// Terminal content view handling display and mouse interactions.
@@ -51,8 +45,6 @@ pub struct TerminalContent {
     search_matches: Arc<Vec<SearchMatch>>,
     /// Current search match index
     search_current_index: Option<usize>,
-    /// Context menu position (if open)
-    context_menu_position: Option<Point<Pixels>>,
     /// Project ID for pane registration
     project_id: String,
     /// Layout path for pane registration
@@ -85,7 +77,6 @@ impl TerminalContent {
             cursor_visible: true,
             search_matches: Arc::new(Vec::new()),
             search_current_index: None,
-            context_menu_position: None,
             project_id,
             layout_path,
             workspace,
@@ -178,12 +169,6 @@ impl TerminalContent {
         self.scrollbar.update(cx, |scrollbar, cx| {
             scrollbar.end_drag(cx);
         });
-    }
-
-    /// Hide context menu.
-    pub fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu_position = None;
-        cx.notify();
     }
 
     /// Convert pixel position to cell coordinates.
@@ -345,121 +330,6 @@ impl TerminalContent {
         }
     }
 
-    /// Render context menu with click handlers.
-    fn render_context_menu_with_handlers(
-        &self,
-        has_selection: bool,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let position = self.context_menu_position.unwrap_or_default();
-
-        // Calculate menu height for positioning
-        let menu_height = 9.0 * 26.0 + 3.0 * 9.0 + 8.0;
-
-        // Calculate relative position and direction
-        let (relative_pos, open_upward) = if let Some(bounds) = self.element_bounds {
-            let rel_x = position.x - bounds.origin.x;
-            let rel_y = position.y - bounds.origin.y;
-            let space_below = f32::from(bounds.size.height) - f32::from(rel_y);
-            let should_open_up = space_below < menu_height;
-            (Point { x: rel_x, y: rel_y }, should_open_up)
-        } else {
-            (position, false)
-        };
-
-        let menu = div()
-            .id("terminal-context-menu-interactive")
-            .absolute()
-            .left(relative_pos.x)
-            .bg(rgb(t.bg_secondary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(4.0))
-            .shadow_lg()
-            .py(px(4.0))
-            .min_w(px(120.0))
-            // Stop propagation so parent doesn't hide menu before click is processed
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            // Copy (conditional - requires selection)
-            .child(
-                menu_item_conditional("context-menu-copy", "icons/copy.svg", "Copy", has_selection, t)
-                    .when(has_selection, |el| {
-                        el.on_click(cx.listener(|this, _, _window, cx| {
-                            cx.emit(ContextMenuEvent::Copy);
-                            this.hide_context_menu(cx);
-                        }))
-                    }),
-            )
-            // Paste
-            .child(
-                menu_item("context-menu-paste", "icons/clipboard-paste.svg", "Paste", t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::Paste);
-                        this.hide_context_menu(cx);
-                    })),
-            )
-            // Separator
-            .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
-            // Clear
-            .child(
-                menu_item("context-menu-clear", "icons/eraser.svg", "Clear", t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::Clear);
-                        this.hide_context_menu(cx);
-                    })),
-            )
-            // Select All
-            .child(
-                menu_item("context-menu-select-all", "icons/select-all.svg", "Select All", t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::SelectAll);
-                        this.hide_context_menu(cx);
-                    })),
-            )
-            // Separator
-            .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
-            // Split Horizontal
-            .child(
-                menu_item("context-menu-split-h", "icons/split-horizontal.svg", "Split Horizontal", t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::Split(SplitDirection::Horizontal));
-                        this.hide_context_menu(cx);
-                    })),
-            )
-            // Split Vertical
-            .child(
-                menu_item("context-menu-split-v", "icons/split-vertical.svg", "Split Vertical", t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::Split(SplitDirection::Vertical));
-                        this.hide_context_menu(cx);
-                    })),
-            )
-            // Separator
-            .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
-            // Close
-            .child(
-                menu_item_with_color("context-menu-close", "icons/close.svg", "Close", t.error, t.error, t)
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        cx.emit(ContextMenuEvent::Close);
-                        this.hide_context_menu(cx);
-                    })),
-            );
-
-        // Position menu
-        if open_upward {
-            let bottom_offset = if let Some(bounds) = self.element_bounds {
-                f32::from(bounds.size.height) - f32::from(relative_pos.y)
-            } else {
-                0.0
-            };
-            menu.bottom(px(bottom_offset))
-        } else {
-            menu.top(relative_pos.y)
-        }
-    }
 }
 
 impl Render for TerminalContent {
@@ -488,7 +358,6 @@ impl Render for TerminalContent {
 
         let terminal_clone = terminal.clone();
         let focus_handle = self.focus_handle.clone();
-        let has_selection = terminal.has_selection();
         let zoom_level = self.workspace.read(cx).get_terminal_zoom(&self.project_id, &self.layout_path);
 
         let element_bounds_setter = {
@@ -516,10 +385,6 @@ impl Render for TerminalContent {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if this.context_menu_position.is_some() {
-                        this.hide_context_menu(cx);
-                        return;
-                    }
                     if this.scrollbar.read(cx).is_dragging() {
                         this.end_scrollbar_drag(cx);
                         return;
@@ -563,8 +428,11 @@ impl Render for TerminalContent {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                    this.context_menu_position = Some(event.position);
-                    cx.notify();
+                    let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
+                    cx.emit(TerminalContentEvent::RequestContextMenu {
+                        position: event.position,
+                        has_selection,
+                    });
                 }),
             )
             .child(canvas(element_bounds_setter, |_, _, _, _| {}).absolute().size_full())
@@ -586,12 +454,8 @@ impl Render for TerminalContent {
                     ),
             )
             .child(self.scrollbar.clone())
-            // Context menu with click handlers
-            .when(self.context_menu_position.is_some(), |el: Stateful<Div>| {
-                el.child(self.render_context_menu_with_handlers(has_selection, &t, cx))
-            })
             .into_any_element()
     }
 }
 
-impl EventEmitter<ContextMenuEvent> for TerminalContent {}
+impl EventEmitter<TerminalContentEvent> for TerminalContent {}

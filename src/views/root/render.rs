@@ -207,6 +207,8 @@ impl Render for RootView {
         let has_context_menu = om.has_context_menu();
         let has_folder_context_menu = om.has_folder_context_menu();
         let has_remote_context_menu = om.has_remote_context_menu();
+        let has_terminal_context_menu = om.has_terminal_context_menu();
+        let has_tab_context_menu = om.has_tab_context_menu();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -645,6 +647,14 @@ impl Render for RootView {
             // Remote connection context menu overlay (positioned popup)
             .when(has_remote_context_menu, |d| {
                 d.children(self.overlay_manager.read(cx).render_remote_context_menu())
+            })
+            // Terminal context menu overlay (positioned popup)
+            .when(has_terminal_context_menu, |d| {
+                d.children(self.overlay_manager.read(cx).render_terminal_context_menu())
+            })
+            // Tab context menu overlay (positioned popup)
+            .when(has_tab_context_menu, |d| {
+                d.children(self.overlay_manager.read(cx).render_tab_context_menu())
             })
             // Single active modal overlay (renders on top of everything)
             .when_some(self.overlay_manager.read(cx).render_modal(), |d, modal| {

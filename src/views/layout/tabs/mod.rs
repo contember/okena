@@ -5,7 +5,6 @@
 //! - TabActionContext: Helper for action button closures
 //! - Uses PaneDrag for unified drag-and-drop (tabs + terminal panes)
 
-mod context_menu;
 mod shell_selector;
 
 use crate::terminal::backend::TerminalBackend;
@@ -358,10 +357,25 @@ impl LayoutContainer {
                         .child(tab_label.clone())
                 )
                 // Right-click for context menu
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_tab_context_menu(i, event.position, num_children, cx);
-                    cx.stop_propagation();
-                }))
+                .on_mouse_down(MouseButton::Right, {
+                    let project_id = project_id.clone();
+                    let layout_path = layout_path.clone();
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(
+                                crate::workspace::requests::OverlayRequest::TabContextMenu {
+                                    tab_index: i,
+                                    num_tabs: num_children,
+                                    project_id: project_id.clone(),
+                                    layout_path: layout_path.clone(),
+                                    position: event.position,
+                                },
+                                cx,
+                            );
+                        });
+                        cx.stop_propagation();
+                    })
+                })
                 // Middle-click to close tab
                 .on_mouse_down(MouseButton::Middle, {
                     let workspace = workspace.clone();
@@ -500,11 +514,6 @@ impl LayoutContainer {
                 }
             }));
 
-        // Render context menu if visible
-        let context_menu = self.tab_context_menu.map(|(tab_idx, pos, num)| {
-            self.render_tab_context_menu(tab_idx, pos, num, cx)
-        });
-
         // Build action context for tab buttons
         let action_ctx = TabActionContext {
             workspace: self.workspace.clone(),
@@ -540,12 +549,6 @@ impl LayoutContainer {
                 },
                 |_bounds, _prepaint, _window, _cx| {},
             ).absolute().size_full())
-            // Close context menu on left-click anywhere in tabs area
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
-                if this.tab_context_menu.is_some() {
-                    this.hide_tab_context_menu(cx);
-                }
-            }))
             .child(
                 // Tab bar
                 div()
@@ -566,7 +569,6 @@ impl LayoutContainer {
                             .child(action_buttons),
                     ),
             )
-            .children(context_menu)
             .child(
                 // Active tab content
                 div().flex_1().child({
