@@ -34,7 +34,7 @@ pub use rename_state::{
 pub use simple_input::{SimpleInput, SimpleInputState};
 pub use syntax::{highlight_content, load_syntax_set, HighlightedLine};
 pub use code_view::{
-    build_styled_text_with_backgrounds, extract_selected_text, get_scrollbar_geometry,
-    get_selected_text, selection_bg_ranges, start_scrollbar_drag, update_scrollbar_drag,
-    ScrollbarDrag,
+    build_styled_text_with_backgrounds, extract_selected_text, find_word_boundaries,
+    get_scrollbar_geometry, get_selected_text, selection_bg_ranges, start_scrollbar_drag,
+    update_scrollbar_drag, ScrollbarDrag,
 };

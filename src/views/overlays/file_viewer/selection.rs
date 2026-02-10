@@ -72,16 +72,8 @@ impl FileViewer {
         }
     }
 
-    /// Calculate column position from x coordinate.
-    pub(super) fn x_to_column(&self, x: f32, line_num_width: usize) -> usize {
-        // Approximate char width based on font size (monospace fonts are ~0.6 of font size)
-        let char_width = self.file_font_size * 0.6;
-        let gutter_width = (line_num_width * 8 + 16) as f32;
-        let text_x = (x - gutter_width).max(0.0);
-        (text_x / char_width) as usize
-    }
-
     // Scrollbar methods using shared utilities
+
 
     pub(super) fn start_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
         let mut drag = start_scrollbar_drag(&self.source_scroll_handle);

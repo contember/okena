@@ -61,6 +61,8 @@ pub struct FileViewer {
     syntax_set: SyntaxSet,
     /// File font size from settings
     file_font_size: f32,
+    /// Measured monospace character width (from font metrics)
+    measured_char_width: f32,
 }
 
 impl FileViewer {
@@ -88,6 +90,7 @@ impl FileViewer {
             scrollbar_drag: None,
             syntax_set: load_syntax_set(),
             file_font_size,
+            measured_char_width: file_font_size * 0.6,
         };
 
         // Load and highlight the file

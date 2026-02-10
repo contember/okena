@@ -2,10 +2,11 @@
 
 use crate::keybindings::Cancel;
 use crate::theme::{theme, ThemeColors};
-use crate::ui::Selection1DExtension;
+use crate::ui::{Selection1DExtension, Selection2DNonEmpty};
 use crate::views::components::{
-    build_styled_text_with_backgrounds, code_block_container, get_scrollbar_geometry,
-    modal_backdrop, modal_content, segmented_toggle, selection_bg_ranges, HighlightedLine,
+    build_styled_text_with_backgrounds, code_block_container, find_word_boundaries,
+    get_scrollbar_geometry, modal_backdrop, modal_content, segmented_toggle, selection_bg_ranges,
+    HighlightedLine,
 };
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer};
@@ -27,14 +28,20 @@ impl FileViewer {
     pub(super) fn render_line(&self, line_number: usize, line: &HighlightedLine, t: &ThemeColors, cx: &mut Context<Self>) -> Stateful<Div> {
         // Format line number with right padding
         let line_num_str = format!("{:>width$}", line_number + 1, width = self.line_num_width);
-        let line_num_width = self.line_num_width;
 
         let font_size = self.file_font_size;
         let line_height = font_size * 1.8;
-        let char_width = font_size * 0.6;
+        let char_width = self.measured_char_width;
         let gutter_width = (self.line_num_width as f32) * char_width + 16.0;
 
         let bg_ranges = selection_bg_ranges(&self.selection, line_number, line.plain_text.len());
+
+        let plain_text = line.plain_text.clone();
+        let line_len = line.plain_text.len();
+
+        // Build styled text and capture its layout for accurate position-to-index mapping
+        let styled_text = build_styled_text_with_backgrounds(&line.spans, &bg_ranges);
+        let text_layout = styled_text.layout().clone();
 
         div()
             .id(ElementId::Name(format!("line-{}", line_number).into()))
@@ -42,20 +49,42 @@ impl FileViewer {
             .h(px(line_height))
             .text_size(px(font_size))
             .font_family("monospace")
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                let col = this.x_to_column(f32::from(event.position.x), line_num_width);
-                this.selection.start = Some((line_number, col));
-                this.selection.end = Some((line_number, col));
-                this.selection.is_selecting = true;
-                cx.notify();
-            }))
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                if this.selection.is_selecting {
-                    let col = this.x_to_column(f32::from(event.position.x), line_num_width);
-                    this.selection.end = Some((line_number, col));
+            .on_mouse_down(MouseButton::Left, {
+                let text_layout = text_layout.clone();
+                let plain_text = plain_text.clone();
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    let col = text_layout.index_for_position(event.position)
+                        .unwrap_or_else(|ix| ix)
+                        .min(line_len);
+                    if event.click_count >= 3 {
+                        this.selection.start = Some((line_number, 0));
+                        this.selection.end = Some((line_number, line_len));
+                        this.selection.finish();
+                    } else if event.click_count == 2 {
+                        let (start, end) = find_word_boundaries(&plain_text, col);
+                        this.selection.start = Some((line_number, start));
+                        this.selection.end = Some((line_number, end));
+                        this.selection.finish();
+                    } else {
+                        this.selection.start = Some((line_number, col));
+                        this.selection.end = Some((line_number, col));
+                        this.selection.is_selecting = true;
+                    }
                     cx.notify();
-                }
-            }))
+                })
+            })
+            .on_mouse_move({
+                let text_layout = text_layout.clone();
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    if this.selection.is_selecting {
+                        let col = text_layout.index_for_position(event.position)
+                            .unwrap_or_else(|ix| ix)
+                            .min(line_len);
+                        this.selection.end = Some((line_number, col));
+                        cx.notify();
+                    }
+                })
+            })
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _window, cx| {
                 this.selection.finish();
                 cx.notify();
@@ -88,7 +117,7 @@ impl FileViewer {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .line_height(px(line_height))
-                    .child(build_styled_text_with_backgrounds(&line.spans, &bg_ranges)),
+                    .child(styled_text),
             )
     }
 
@@ -166,7 +195,6 @@ impl Render for FileViewer {
         let focus_handle = self.focus_handle.clone();
         let has_error = self.error_message.is_some();
         let error_message = self.error_message.clone();
-        let has_selection = self.selection.normalized().is_some();
         let is_markdown = self.is_markdown;
         let display_mode = self.display_mode;
         let is_preview_mode = display_mode == DisplayMode::Preview;
@@ -177,6 +205,21 @@ impl Render for FileViewer {
             .unwrap_or_else(|| "File".to_string());
 
         let relative_path = self.file_path.to_string_lossy().to_string();
+
+        // Measure actual monospace character width from font metrics
+        let font = Font {
+            family: "monospace".into(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            ..Default::default()
+        };
+        let font_size = self.file_font_size;
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font);
+        self.measured_char_width = text_system
+            .advance(font_id, px(font_size), 'm')
+            .map(|size| f32::from(size.width))
+            .unwrap_or(font_size * 0.6);
 
         // Virtualization setup
         let line_count = self.line_count;
@@ -194,8 +237,6 @@ impl Render for FileViewer {
         } else {
             Vec::new()
         };
-        let has_markdown_selection = self.markdown_selection.normalized_non_empty().is_some();
-
         // Focus on first render
         if !focus_handle.is_focused(window) {
             window.focus(&focus_handle, cx);
@@ -210,7 +251,7 @@ impl Render for FileViewer {
                 if is_preview && this.markdown_selection.normalized_non_empty().is_some() {
                     this.markdown_selection.clear();
                     cx.notify();
-                } else if this.selection.normalized().is_some() {
+                } else if this.selection.normalized_non_empty().is_some() {
                     this.selection.clear();
                     cx.notify();
                 } else {
@@ -721,16 +762,10 @@ impl Render for FileViewer {
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(t.text_muted))
-                                    .when(has_selection && !is_preview_mode, |d| {
-                                        d.child("Selection active")
-                                    })
-                                    .when(!has_selection && !is_preview_mode, |d| {
+                                    .when(!is_preview_mode, |d| {
                                         d.child(format!("{} lines", self.line_count))
                                     })
-                                    .when(is_preview_mode && has_markdown_selection, |d| {
-                                        d.child("Selection active")
-                                    })
-                                    .when(is_preview_mode && !has_markdown_selection, |d| {
+                                    .when(is_preview_mode, |d| {
                                         d.child("Preview mode")
                                     }),
                             ),

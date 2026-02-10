@@ -134,3 +134,55 @@ impl Selection1DExtension for SelectionState<usize> {
         }
     }
 }
+
+/// Extension trait for SelectionState with 2D positions to check non-empty selection.
+pub trait Selection2DNonEmpty {
+    /// Get normalized selection only if start != end (zero-width clicks return None).
+    fn normalized_non_empty(&self) -> Option<((usize, usize), (usize, usize))>;
+}
+
+impl Selection2DNonEmpty for SelectionState<(usize, usize)> {
+    fn normalized_non_empty(&self) -> Option<((usize, usize), (usize, usize))> {
+        match (&self.start, &self.end) {
+            (Some(s), Some(e)) if s != e => {
+                Some(<(usize, usize)>::normalized_pair(*s, *e))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_2d_non_empty_zero_width_returns_none() {
+        let mut sel = SelectionState::<(usize, usize)>::default();
+        sel.start = Some((5, 3));
+        sel.end = Some((5, 3));
+        assert!(sel.normalized_non_empty().is_none());
+    }
+
+    #[test]
+    fn test_2d_non_empty_with_selection() {
+        let mut sel = SelectionState::<(usize, usize)>::default();
+        sel.start = Some((5, 3));
+        sel.end = Some((5, 10));
+        assert_eq!(sel.normalized_non_empty(), Some(((5, 3), (5, 10))));
+    }
+
+    #[test]
+    fn test_2d_non_empty_reversed() {
+        let mut sel = SelectionState::<(usize, usize)>::default();
+        sel.start = Some((10, 0));
+        sel.end = Some((5, 3));
+        assert_eq!(sel.normalized_non_empty(), Some(((5, 3), (10, 0))));
+    }
+
+    #[test]
+    fn test_2d_non_empty_no_start() {
+        let sel = SelectionState::<(usize, usize)>::default();
+        assert!(sel.normalized_non_empty().is_none());
+    }
+}

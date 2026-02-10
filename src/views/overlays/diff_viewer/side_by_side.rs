@@ -6,7 +6,7 @@ use super::DiffViewer;
 use crate::git::DiffLineType;
 use crate::theme::ThemeColors;
 use crate::ui::Selection2DExtension;
-use crate::views::components::selection_bg_ranges;
+use crate::views::components::{find_word_boundaries, selection_bg_ranges};
 use gpui::prelude::*;
 use gpui::*;
 
@@ -266,6 +266,31 @@ impl DiffViewer {
                     " ".repeat(self.line_num_width)
                 };
 
+                let sbs_plain_text = c.plain_text.clone();
+                let sbs_line_len = c.plain_text.len();
+
+                // Content with word-level + selection highlighting
+                let has_selection = self.selection_side == Some(side)
+                    && self.selection.line_has_selection(sbs_line_index);
+
+                let (content_div, text_layout) = if has_selection {
+                    self.render_spans_with_combined_highlight(
+                        &c.spans,
+                        &c.changed_ranges,
+                        word_bg,
+                        &c.plain_text,
+                        sbs_line_index,
+                        line_height,
+                    )
+                } else {
+                    self.render_spans_with_word_highlight(
+                        &c.spans,
+                        &c.changed_ranges,
+                        word_bg,
+                        line_height,
+                    )
+                };
+
                 let mut column = div()
                     .id(ElementId::Name(format!("sbs-{}-{}", side_label, sbs_line_index).into()))
                     .flex_1()
@@ -275,22 +300,44 @@ impl DiffViewer {
                     .overflow_hidden()
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                            let col = this.x_to_column_sbs(f32::from(event.position.x), side);
-                            this.selection.start = Some((sbs_line_index, col));
-                            this.selection.end = Some((sbs_line_index, col));
-                            this.selection.is_selecting = true;
-                            this.selection_side = Some(side);
-                            cx.notify();
-                        }),
+                        {
+                            let text_layout = text_layout.clone();
+                            let sbs_plain_text = sbs_plain_text.clone();
+                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                let col = text_layout.index_for_position(event.position)
+                                    .unwrap_or_else(|ix| ix)
+                                    .min(sbs_line_len);
+                                if event.click_count >= 3 {
+                                    this.selection.start = Some((sbs_line_index, 0));
+                                    this.selection.end = Some((sbs_line_index, sbs_line_len));
+                                    this.selection.finish();
+                                } else if event.click_count == 2 {
+                                    let (start, end) = find_word_boundaries(&sbs_plain_text, col);
+                                    this.selection.start = Some((sbs_line_index, start));
+                                    this.selection.end = Some((sbs_line_index, end));
+                                    this.selection.finish();
+                                } else {
+                                    this.selection.start = Some((sbs_line_index, col));
+                                    this.selection.end = Some((sbs_line_index, col));
+                                    this.selection.is_selecting = true;
+                                }
+                                this.selection_side = Some(side);
+                                cx.notify();
+                            })
+                        },
                     )
-                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                        if this.selection.is_selecting && this.selection_side == Some(side) {
-                            let col = this.x_to_column_sbs(f32::from(event.position.x), side);
-                            this.selection.end = Some((sbs_line_index, col));
-                            cx.notify();
-                        }
-                    }))
+                    .on_mouse_move({
+                        let text_layout = text_layout.clone();
+                        cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                            if this.selection.is_selecting && this.selection_side == Some(side) {
+                                let col = text_layout.index_for_position(event.position)
+                                    .unwrap_or_else(|ix| ix)
+                                    .min(sbs_line_len);
+                                this.selection.end = Some((sbs_line_index, col));
+                                cx.notify();
+                            }
+                        })
+                    })
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(|this, _, _window, cx| {
@@ -333,28 +380,6 @@ impl DiffViewer {
                             .flex_shrink_0(),
                     );
 
-                // Content with word-level + selection highlighting
-                let has_selection = self.selection_side == Some(side)
-                    && self.selection.line_has_selection(sbs_line_index);
-
-                let content_div = if has_selection {
-                    self.render_spans_with_combined_highlight(
-                        &c.spans,
-                        &c.changed_ranges,
-                        word_bg,
-                        &c.plain_text,
-                        sbs_line_index,
-                        line_height,
-                    )
-                } else {
-                    self.render_spans_with_word_highlight(
-                        &c.spans,
-                        &c.changed_ranges,
-                        word_bg,
-                        line_height,
-                    )
-                };
-
                 column.child(accent).child(gutter).child(content_div)
             }
             None => {
@@ -382,19 +407,20 @@ impl DiffViewer {
     }
 
     /// Render spans with word-level highlighting for changed ranges.
-    /// Uses StyledText for gap-free rendering.
+    /// Returns `(Div, TextLayout)` for position-to-index mapping.
     fn render_spans_with_word_highlight(
         &self,
         spans: &[super::types::HighlightedSpan],
         changed_ranges: &[ChangedRange],
         word_bg: Option<Rgba>,
         line_height: f32,
-    ) -> Div {
+    ) -> (Div, TextLayout) {
         let bg_ranges = self.compute_word_bg_ranges(spans, changed_ranges, word_bg);
         self.render_scrollable_content(spans, &bg_ranges, line_height)
     }
 
     /// Render spans with both word-level diff and selection highlighting merged.
+    /// Returns `(Div, TextLayout)` for position-to-index mapping.
     fn render_spans_with_combined_highlight(
         &self,
         spans: &[super::types::HighlightedSpan],
@@ -403,9 +429,7 @@ impl DiffViewer {
         plain_text: &str,
         line_index: usize,
         line_height: f32,
-    ) -> Div {
-        // Selection ranges go first so they take priority over word-diff highlighting
-        // (build_styled_text_with_backgrounds uses the first matching range)
+    ) -> (Div, TextLayout) {
         let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, plain_text.len());
         bg_ranges.extend(self.compute_word_bg_ranges(spans, changed_ranges, word_bg));
 

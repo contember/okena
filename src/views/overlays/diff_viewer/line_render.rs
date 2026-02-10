@@ -3,11 +3,11 @@
 //! Also contains shared rendering helpers, constants, and methods used by
 //! both the unified and side-by-side diff views.
 
-use super::types::{DisplayLine, HighlightedSpan, SideBySideSide};
-use super::{DiffViewer, SIDEBAR_WIDTH};
+use super::types::{DisplayLine, HighlightedSpan};
+use super::DiffViewer;
 use crate::git::DiffLineType;
 use crate::theme::ThemeColors;
-use crate::views::components::{build_styled_text_with_backgrounds, selection_bg_ranges};
+use crate::views::components::{build_styled_text_with_backgrounds, find_word_boundaries, selection_bg_ranges};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -24,8 +24,6 @@ pub(super) const WORD_BG_ALPHA: f32 = 0.18;
 pub(super) const ACCENT_ALPHA: f32 = 0.7;
 /// Line height as a multiple of font size.
 pub(super) const LINE_HEIGHT_FACTOR: f32 = 1.8;
-/// Character width as a fraction of font size (monospace approximation).
-pub(super) const CHAR_WIDTH_FACTOR: f32 = 0.6;
 /// Padding before text content.
 pub(super) const CONTENT_PADDING: f32 = 10.0;
 
@@ -63,9 +61,9 @@ impl DiffViewer {
         self.file_font_size * LINE_HEIGHT_FACTOR
     }
 
-    /// Approximate character width for monospace font.
+    /// Measured character width for monospace font.
     pub(super) fn char_width(&self) -> f32 {
-        self.file_font_size * CHAR_WIDTH_FACTOR
+        self.measured_char_width
     }
 
     /// Get background, word-highlight, and accent colors for a given line type.
@@ -140,11 +138,33 @@ impl DiffViewer {
     }
 
     /// Render scrollable content div with syntax-highlighted text.
-    /// Used by both unified and side-by-side views.
+    /// Returns `(Div, TextLayout)` so callers can use the layout for position mapping.
     pub(super) fn render_scrollable_content(
         &self,
         spans: &[HighlightedSpan],
         bg_ranges: &[(std::ops::Range<usize>, Hsla)],
+        line_height: f32,
+    ) -> (Div, TextLayout) {
+        let styled_text = build_styled_text_with_backgrounds(spans, bg_ranges);
+        let text_layout = styled_text.layout().clone();
+        let content = div()
+            .flex_1()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .line_height(px(line_height))
+            .child(
+                div()
+                    .pl(px(CONTENT_PADDING))
+                    .ml(px(-self.scroll_x))
+                    .child(styled_text),
+            );
+        (content, text_layout)
+    }
+
+    /// Render scrollable content div with a pre-built StyledText.
+    fn render_scrollable_content_with_text(
+        &self,
+        styled_text: StyledText,
         line_height: f32,
     ) -> Div {
         div()
@@ -156,32 +176,8 @@ impl DiffViewer {
                 div()
                     .pl(px(CONTENT_PADDING))
                     .ml(px(-self.scroll_x))
-                    .child(build_styled_text_with_backgrounds(spans, bg_ranges)),
+                    .child(styled_text),
             )
-    }
-
-    /// Calculate column position from x coordinate.
-    pub(super) fn x_to_column(&self, x: f32, gutter_width: f32) -> usize {
-        let char_width = self.char_width();
-        let text_x = (x - gutter_width - SIDEBAR_WIDTH).max(0.0);
-        (text_x / char_width) as usize
-    }
-
-    /// Calculate column position from x coordinate in side-by-side mode.
-    pub(super) fn x_to_column_sbs(&self, x: f32, side: SideBySideSide) -> usize {
-        let char_width = self.char_width();
-        let num_col_width = (self.line_num_width as f32) * char_width + 8.0;
-        let half_width = self.diff_pane_width / 2.0;
-
-        // X relative to the start of this side's column
-        let column_x = match side {
-            SideBySideSide::Left => x - SIDEBAR_WIDTH,
-            SideBySideSide::Right => x - SIDEBAR_WIDTH - half_width - 1.0, // 1px divider
-        };
-
-        // Subtract accent bar, gutter, separator, and content padding; add scroll offset
-        let text_x = (column_x - ACCENT_WIDTH - num_col_width - 1.0 - CONTENT_PADDING + self.scroll_x).max(0.0);
-        (text_x / char_width) as usize
     }
 
     /// Render a single diff line with syntax highlighting.
@@ -190,7 +186,7 @@ impl DiffViewer {
         line_index: usize,
         line: &DisplayLine,
         t: &ThemeColors,
-        gutter_width: f32,
+        _gutter_width: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let font_size = self.file_font_size;
@@ -213,8 +209,14 @@ impl DiffViewer {
 
         let bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
 
+        let plain_text = line.plain_text.clone();
+        let line_len = line.plain_text.len();
         let char_width = self.char_width();
         let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
+
+        // Build styled text and capture layout for position-to-index mapping
+        let styled_text = build_styled_text_with_backgrounds(&line.spans, &bg_ranges);
+        let text_layout = styled_text.layout().clone();
 
         div()
             .id(ElementId::Name(format!("diff-line-{}", line_index).into()))
@@ -226,21 +228,44 @@ impl DiffViewer {
             .when(line_bg.is_some(), |d| d.bg(line_bg.unwrap()))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    let col = this.x_to_column(f32::from(event.position.x), gutter_width);
-                    this.selection.start = Some((line_index, col));
-                    this.selection.end = Some((line_index, col));
-                    this.selection.is_selecting = true;
-                    cx.notify();
-                }),
+                {
+                    let text_layout = text_layout.clone();
+                    let plain_text = plain_text.clone();
+                    cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        let col = text_layout.index_for_position(event.position)
+                            .unwrap_or_else(|ix| ix)
+                            .min(line_len);
+                        if event.click_count >= 3 {
+                            this.selection.start = Some((line_index, 0));
+                            this.selection.end = Some((line_index, line_len));
+                            this.selection.finish();
+                        } else if event.click_count == 2 {
+                            let (start, end) = find_word_boundaries(&plain_text, col);
+                            this.selection.start = Some((line_index, start));
+                            this.selection.end = Some((line_index, end));
+                            this.selection.finish();
+                        } else {
+                            this.selection.start = Some((line_index, col));
+                            this.selection.end = Some((line_index, col));
+                            this.selection.is_selecting = true;
+                        }
+                        this.selection_side = None;
+                        cx.notify();
+                    })
+                },
             )
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
-                if this.selection.is_selecting {
-                    let col = this.x_to_column(f32::from(event.position.x), gutter_width);
-                    this.selection.end = Some((line_index, col));
-                    cx.notify();
-                }
-            }))
+            .on_mouse_move({
+                let text_layout = text_layout.clone();
+                cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                    if this.selection.is_selecting {
+                        let col = text_layout.index_for_position(event.position)
+                            .unwrap_or_else(|ix| ix)
+                            .min(line_len);
+                        this.selection.end = Some((line_index, col));
+                        cx.notify();
+                    }
+                })
+            })
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
@@ -288,7 +313,7 @@ impl DiffViewer {
                     ),
             )
             // Content — use StyledText for gap-free rendering
-            .child(self.render_scrollable_content(&line.spans, &bg_ranges, line_height))
+            .child(self.render_scrollable_content_with_text(styled_text, line_height))
     }
 
     /// Render visible lines for the virtualized list.

@@ -510,7 +510,7 @@ impl DiffViewer {
             )
     }
 
-    pub(super) fn render_footer(&self, t: &ThemeColors, has_selection: bool) -> impl IntoElement {
+    pub(super) fn render_footer(&self, t: &ThemeColors) -> impl IntoElement {
         div()
             .px(px(16.0))
             .py(px(8.0))
@@ -536,18 +536,6 @@ impl DiffViewer {
                         t,
                     )),
             )
-            .when(has_selection, |d| {
-                d.child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(t.bg_selection))
-                        .text_size(px(11.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child("Selection active"),
-                )
-            })
     }
 
     pub(super) fn render_hint(

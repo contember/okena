@@ -13,7 +13,7 @@ use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileD
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::theme;
-use crate::ui::{copy_to_clipboard, SelectionState};
+use crate::ui::{copy_to_clipboard, Selection2DNonEmpty, SelectionState};
 use crate::views::components::{extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
 use gpui::prelude::*;
 use gpui::*;
@@ -70,6 +70,8 @@ pub struct DiffViewer {
     h_scrollbar_drag: Option<HScrollbarDrag>,
     /// Which side of the side-by-side view the current selection belongs to.
     selection_side: Option<SideBySideSide>,
+    /// Measured monospace character width (from font metrics).
+    measured_char_width: f32,
 }
 
 impl DiffViewer {
@@ -106,6 +108,7 @@ impl DiffViewer {
             diff_pane_width: 0.0,
             h_scrollbar_drag: None,
             selection_side: None,
+            measured_char_width: file_font_size * 0.6,
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {
@@ -367,6 +370,20 @@ impl EventEmitter<DiffViewerEvent> for DiffViewer {}
 
 impl Render for DiffViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Measure actual monospace character width from font metrics
+        let font = Font {
+            family: "monospace".into(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            ..Default::default()
+        };
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font);
+        self.measured_char_width = text_system
+            .advance(font_id, px(self.file_font_size), 'm')
+            .map(|size| f32::from(size.width))
+            .unwrap_or(self.file_font_size * 0.6);
+
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let has_error = self.error_message.is_some();
@@ -374,9 +391,10 @@ impl Render for DiffViewer {
         let diff_mode = self.diff_mode;
         let is_working = diff_mode == DiffMode::WorkingTree;
         let has_files = !self.file_stats.is_empty();
-        let has_selection = self.selection.normalized().is_some();
-
-        let gutter_width = (self.line_num_width * 8 * 2 + 8 + 16) as f32;
+        // Gutter: two number columns + separator, matching render_line layout
+        let char_width = self.char_width();
+        let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
+        let gutter_width = 2.0 * num_col_width + 1.0;
 
         let current_stats = self.file_stats.get(self.selected_file_index);
         let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
@@ -403,7 +421,7 @@ impl Render for DiffViewer {
             .key_context("DiffViewer")
             .items_center()
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                if this.selection.normalized().is_some() {
+                if this.selection.normalized_non_empty().is_some() {
                     this.selection.clear();
                     this.selection_side = None;
                     cx.notify();
@@ -479,7 +497,7 @@ impl Render for DiffViewer {
                     .max_h(px(950.0))
                     .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, is_working, self.ignore_whitespace, cx))
                     .child(self.render_content(&t, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
-                    .child(self.render_footer(&t, has_selection)),
+                    .child(self.render_footer(&t)),
             )
     }
 }
