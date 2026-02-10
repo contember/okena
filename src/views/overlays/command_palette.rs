@@ -187,9 +187,11 @@ impl Render for CommandPalette {
             window.focus(&focus_handle, cx);
         }
 
-        div()
+        modal_backdrop("command-palette-backdrop", &t)
             .track_focus(&focus_handle)
             .key_context("CommandPalette")
+            .items_start()
+            .pt(px(80.0))
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 this.close(cx);
             }))
@@ -211,47 +213,43 @@ impl Render for CommandPalette {
                     _ => {}
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.close(cx);
+                }),
+            )
             .child(
-                modal_backdrop("command-palette-backdrop", &t)
-                    .items_start()
-                    .pt(px(80.0))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            this.close(cx);
-                        }),
-                    )
+                modal_content("command-palette-modal", &t)
+                    .w(px(config_width))
+                    .max_h(px(config_max_height))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(search_input_area(&search_query, &search_placeholder, &t))
                     .child(
-                        modal_content("command-palette-modal", &t)
-                            .w(px(config_width))
-                            .max_h(px(config_max_height))
-                            .child(search_input_area(&search_query, &search_placeholder, &t))
-                            .child(
-                                // Command list
-                                div()
-                                    .id("command-list")
-                                    .flex_1()
-                                    .overflow_y_scroll()
-                                    .track_scroll(&self.state.scroll_handle)
-                                    .children(
-                                        self.state.filtered
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
-                                    )
-                                    .when(self.state.is_empty(), |d| {
-                                        d.child(
-                                            div()
-                                                .px(px(12.0))
-                                                .py(px(20.0))
-                                                .text_size(px(13.0))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(empty_message.clone()),
-                                        )
-                                    }),
+                        // Command list
+                        div()
+                            .id("command-list")
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.state.scroll_handle)
+                            .children(
+                                self.state.filtered
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
                             )
-                            .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
-                    ),
+                            .when(self.state.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .px(px(12.0))
+                                        .py(px(20.0))
+                                        .text_size(px(13.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(empty_message.clone()),
+                                )
+                            }),
+                    )
+                    .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
             )
     }
 }
