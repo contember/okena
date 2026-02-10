@@ -13,6 +13,8 @@ pub struct PathSuggestion {
     pub full_path: String,
     /// Whether this is a directory
     pub is_directory: bool,
+    /// Whether this is the "select current folder" entry
+    pub is_select_current: bool,
 }
 
 /// Path auto-complete state wrapping SimpleInputState
@@ -209,6 +211,7 @@ impl PathAutoCompleteState {
                     display_name: name,
                     full_path: display_full_path,
                     is_directory: is_dir,
+                    is_select_current: false,
                 });
             }
         }
@@ -225,6 +228,18 @@ impl PathAutoCompleteState {
         // Limit suggestions
         new_suggestions.truncate(10);
 
+        // Add "Select this folder" at the top when the current path is a valid directory
+        let expanded = Self::expand_path(&current_value);
+        let expanded_path = PathBuf::from(&expanded);
+        if expanded_path.is_dir() && !new_suggestions.is_empty() {
+            new_suggestions.insert(0, PathSuggestion {
+                display_name: "Select this folder".to_string(),
+                full_path: current_value.clone(),
+                is_directory: true,
+                is_select_current: true,
+            });
+        }
+
         self.suggestions = new_suggestions;
         self.show_suggestions = !self.suggestions.is_empty();
         self.selected_index = 0;
@@ -234,9 +249,15 @@ impl PathAutoCompleteState {
     fn complete_selected(&mut self, cx: &mut Context<Self>) {
         // Clone suggestion data before borrowing self mutably
         let suggestion_data = self.suggestions.get(self.selected_index)
-            .map(|s| (s.full_path.clone(), s.is_directory));
+            .map(|s| (s.full_path.clone(), s.is_directory, s.is_select_current));
 
-        if let Some((full_path, is_directory)) = suggestion_data {
+        if let Some((full_path, is_directory, is_select_current)) = suggestion_data {
+            // "Select this folder" — just confirm the current path
+            if is_select_current {
+                self.hide_suggestions(cx);
+                return;
+            }
+
             let mut path = full_path;
             if is_directory && !path.ends_with('/') {
                 path.push('/');

@@ -146,13 +146,17 @@ impl AddProjectDialog {
                                 .gap(px(8.0))
                                 .child(
                                     svg()
-                                        .path(if suggestion.is_directory {
+                                        .path(if suggestion.is_select_current {
+                                            "icons/check.svg"
+                                        } else if suggestion.is_directory {
                                             "icons/folder.svg"
                                         } else {
                                             "icons/file.svg"
                                         })
                                         .size(px(14.0))
-                                        .text_color(if suggestion.is_directory {
+                                        .text_color(if suggestion.is_select_current {
+                                            rgb(t.border_active)
+                                        } else if suggestion.is_directory {
                                             rgb(t.border_active)
                                         } else {
                                             rgb(t.text_muted)
@@ -161,7 +165,11 @@ impl AddProjectDialog {
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
+                                        .text_color(if suggestion.is_select_current {
+                                            rgb(t.border_active)
+                                        } else {
+                                            rgb(t.text_primary)
+                                        })
                                         .child(suggestion.display_name.clone()),
                                 )
                                 .on_click(move |_, _window, cx| {
