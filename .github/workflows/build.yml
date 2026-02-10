@@ -87,11 +87,76 @@ jobs:
              assets/app-icon-512.png dist/icons/
           cp okena.desktop dist/
 
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+
+          # Create and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          security import "$CERT_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search list
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Clean up certificate file
+          rm -f "$CERT_PATH"
+
       - name: Create macOS app bundle
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           chmod +x scripts/bundle-macos.sh
-          ./scripts/bundle-macos.sh --target ${{ matrix.target }} --skip-build --dmg
+          BUNDLE_ARGS=(--target ${{ matrix.target }} --skip-build --dmg)
+          if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+            BUNDLE_ARGS+=(--sign "$APPLE_SIGNING_IDENTITY" --entitlements macos/entitlements.plist)
+          fi
+          ./scripts/bundle-macos.sh "${BUNDLE_ARGS[@]}"
+
+      - name: Notarize macOS DMG
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          DMG_PATH=$(ls dist/*.dmg)
+          echo "==> Submitting $DMG_PATH for notarization..."
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          echo "==> Stapling notarization ticket..."
+          xcrun stapler staple "$DMG_PATH"
+
+      - name: Clean up signing keychain
+        if: always() && runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
 
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')

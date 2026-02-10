@@ -3,6 +3,7 @@ set -euo pipefail
 
 # macOS App Bundle Script for Okena
 # Usage: ./scripts/bundle-macos.sh [--target <target>] [--skip-build] [--dmg]
+#        [--sign <identity>] [--entitlements <path>]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -11,6 +12,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 TARGET=""
 SKIP_BUILD=false
 CREATE_DMG=false
+SIGN_IDENTITY=""
+ENTITLEMENTS=""
 APP_NAME="Okena"
 BUNDLE_ID="com.contember.okena"
 
@@ -28,6 +31,14 @@ while [[ $# -gt 0 ]]; do
         --dmg)
             CREATE_DMG=true
             shift
+            ;;
+        --sign)
+            SIGN_IDENTITY="$2"
+            shift 2
+            ;;
+        --entitlements)
+            ENTITLEMENTS="$2"
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -129,9 +140,19 @@ rm -rf "$ICONSET_DIR"
 # Create PkgInfo
 echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
-echo "==> Ad-hoc code signing..."
-codesign --force --sign - "$MACOS_DIR/okena"
-codesign --force --sign - "$APP_BUNDLE"
+if [[ -n "$SIGN_IDENTITY" ]]; then
+    echo "==> Code signing with identity: $SIGN_IDENTITY"
+    CODESIGN_ARGS=(--force --sign "$SIGN_IDENTITY" --options runtime --timestamp)
+    if [[ -n "$ENTITLEMENTS" ]]; then
+        CODESIGN_ARGS+=(--entitlements "$ENTITLEMENTS")
+    fi
+    codesign "${CODESIGN_ARGS[@]}" "$MACOS_DIR/okena"
+    codesign "${CODESIGN_ARGS[@]}" "$APP_BUNDLE"
+else
+    echo "==> Ad-hoc code signing..."
+    codesign --force --sign - "$MACOS_DIR/okena"
+    codesign --force --sign - "$APP_BUNDLE"
+fi
 
 echo "==> App bundle created at: $APP_BUNDLE"
 
