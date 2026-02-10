@@ -352,11 +352,7 @@ impl DiffViewer {
                             })
                             .size_full()
                             .bg(rgb(t.bg_secondary))
-                            .cursor(if view_mode == DiffViewMode::Unified {
-                                CursorStyle::IBeam
-                            } else {
-                                CursorStyle::Arrow
-                            })
+                            .cursor(CursorStyle::IBeam)
                             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
                                 this.handle_scroll_x(event, cx);
                             }))

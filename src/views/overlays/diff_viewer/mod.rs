@@ -14,14 +14,14 @@ use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, SelectionState};
-use crate::views::components::{modal_backdrop, modal_content, syntax::load_syntax_set};
+use crate::views::components::{extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
 use syntax::process_file;
-use types::{DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine};
+use types::{DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine, SideBySideSide};
 
 mod side_by_side;
 
@@ -68,6 +68,8 @@ pub struct DiffViewer {
     diff_pane_width: f32,
     /// Horizontal scrollbar drag state.
     h_scrollbar_drag: Option<HScrollbarDrag>,
+    /// Which side of the side-by-side view the current selection belongs to.
+    selection_side: Option<SideBySideSide>,
 }
 
 impl DiffViewer {
@@ -103,6 +105,7 @@ impl DiffViewer {
             max_line_chars: 0,
             diff_pane_width: 0.0,
             h_scrollbar_drag: None,
+            selection_side: None,
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {
@@ -133,6 +136,7 @@ impl DiffViewer {
         self.file_tree = FileTreeNode::default();
         self.selected_file_index = 0;
         self.selection.clear();
+        self.selection_side = None;
         self.side_by_side_lines.clear();
         self.scroll_x = 0.0;
         self.max_line_chars = 0;
@@ -220,6 +224,8 @@ impl DiffViewer {
 
     fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
         self.view_mode = self.view_mode.toggle();
+        self.selection.clear();
+        self.selection_side = None;
         self.update_side_by_side_cache();
         // Save to global settings
         settings_entity(cx).update(cx, |settings, cx| {
@@ -254,6 +260,7 @@ impl DiffViewer {
         if index < self.file_stats.len() {
             self.selected_file_index = index;
             self.selection.clear();
+            self.selection_side = None;
             self.scroll_x = 0.0;
             self.process_current_file();
             self.update_side_by_side_cache();
@@ -278,37 +285,22 @@ impl DiffViewer {
     }
 
     fn get_selected_text(&self) -> Option<String> {
-        let file = self.current_file.as_ref()?;
-        let ((start_line, start_col), (end_line, end_col)) = self.selection.normalized()?;
-
-        let mut result = String::new();
-
-        for line_idx in start_line..=end_line {
-            if line_idx >= file.lines.len() {
-                break;
-            }
-
-            let line = &file.lines[line_idx];
-            let text = &line.plain_text;
-
-            if start_line == end_line {
-                let start = start_col.min(text.len());
-                let end = end_col.min(text.len());
-                result.push_str(&text[start..end]);
-            } else if line_idx == start_line {
-                let start = start_col.min(text.len());
-                result.push_str(&text[start..]);
-                result.push('\n');
-            } else if line_idx == end_line {
-                let end = end_col.min(text.len());
-                result.push_str(&text[..end]);
-            } else {
-                result.push_str(text);
-                result.push('\n');
-            }
+        if let Some(side) = self.selection_side {
+            let lines = &self.side_by_side_lines;
+            extract_selected_text(&self.selection, lines.len(), |i| {
+                let sbs_line = &lines[i];
+                let content = match side {
+                    SideBySideSide::Left => &sbs_line.left,
+                    SideBySideSide::Right => &sbs_line.right,
+                };
+                content.as_ref().map(|c| c.plain_text.as_str()).unwrap_or("")
+            })
+        } else {
+            let file = self.current_file.as_ref()?;
+            extract_selected_text(&self.selection, file.lines.len(), |i| {
+                &file.lines[i].plain_text
+            })
         }
-
-        if result.is_empty() { None } else { Some(result) }
     }
 
     fn copy_selection(&self, cx: &mut Context<Self>) {
@@ -316,15 +308,51 @@ impl DiffViewer {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        if let Some(file) = &self.current_file {
-            if file.lines.is_empty() {
-                return;
+        // Use effective view mode (new/deleted files forced to unified)
+        let is_new_or_deleted = self
+            .file_stats
+            .get(self.selected_file_index)
+            .map(|f| f.is_new || f.is_deleted)
+            .unwrap_or(false);
+        let effective_mode = if is_new_or_deleted {
+            DiffViewMode::Unified
+        } else {
+            self.view_mode
+        };
+
+        match effective_mode {
+            DiffViewMode::Unified => {
+                if let Some(file) = &self.current_file {
+                    if file.lines.is_empty() {
+                        return;
+                    }
+                    let last_line = file.lines.len() - 1;
+                    let last_col = file.lines[last_line].plain_text.len();
+                    self.selection.start = Some((0, 0));
+                    self.selection.end = Some((last_line, last_col));
+                    self.selection_side = None;
+                    cx.notify();
+                }
             }
-            let last_line = file.lines.len() - 1;
-            let last_col = file.lines[last_line].plain_text.len();
-            self.selection.start = Some((0, 0));
-            self.selection.end = Some((last_line, last_col));
-            cx.notify();
+            DiffViewMode::SideBySide => {
+                if self.side_by_side_lines.is_empty() {
+                    return;
+                }
+                let side = self.selection_side.unwrap_or(SideBySideSide::Right);
+                let last_line = self.side_by_side_lines.len() - 1;
+                let last_col = {
+                    let sbs_line = &self.side_by_side_lines[last_line];
+                    let content = match side {
+                        SideBySideSide::Left => &sbs_line.left,
+                        SideBySideSide::Right => &sbs_line.right,
+                    };
+                    content.as_ref().map(|c| c.plain_text.len()).unwrap_or(0)
+                };
+                self.selection.start = Some((0, 0));
+                self.selection.end = Some((last_line, last_col));
+                self.selection_side = Some(side);
+                cx.notify();
+            }
         }
     }
 }
@@ -377,6 +405,7 @@ impl Render for DiffViewer {
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 if this.selection.normalized().is_some() {
                     this.selection.clear();
+                    this.selection_side = None;
                     cx.notify();
                 } else {
                     this.close(cx);

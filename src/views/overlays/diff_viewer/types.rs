@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 
 pub use crate::workspace::persistence::DiffViewMode;
 
+/// Which side of the side-by-side diff view a selection belongs to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SideBySideSide {
+    Left,
+    Right,
+}
+
 /// Lightweight file stats for sidebar display (no syntax highlighting).
 pub struct FileStats {
     pub path: String,
@@ -44,8 +51,7 @@ pub struct SideContent {
     pub line_num: usize,
     pub line_type: DiffLineType,
     pub spans: Vec<HighlightedSpan>,
-    /// Plain text content (for selection/copy - future use).
-    #[allow(dead_code)]
+    /// Plain text content (for selection/copy).
     pub plain_text: String,
     /// Ranges of characters that actually changed (for word-level highlighting).
     pub changed_ranges: Vec<ChangedRange>,

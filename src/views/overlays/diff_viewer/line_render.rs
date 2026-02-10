@@ -3,11 +3,11 @@
 //! Also contains shared rendering helpers, constants, and methods used by
 //! both the unified and side-by-side diff views.
 
-use super::types::{DisplayLine, HighlightedSpan};
+use super::types::{DisplayLine, HighlightedSpan, SideBySideSide};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use crate::git::DiffLineType;
 use crate::theme::ThemeColors;
-use crate::ui::Selection2DExtension;
+use crate::views::components::{build_styled_text_with_backgrounds, selection_bg_ranges};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -53,90 +53,6 @@ pub(super) fn extract_hunk_context(header: &str) -> &str {
         }
     }
     ""
-}
-
-/// Build a StyledText with optional background highlights (e.g. selection or word-level diff).
-/// Splits syntax color highlights at background range boundaries to produce
-/// non-overlapping highlights (required by `StyledText::compute_runs`).
-pub(super) fn build_styled_text_with_backgrounds(
-    spans: &[HighlightedSpan],
-    bg_ranges: &[(std::ops::Range<usize>, Hsla)],
-) -> StyledText {
-    let mut text = String::new();
-    let mut highlights = Vec::new();
-
-    for span in spans {
-        text.push_str(&span.text);
-    }
-
-    if bg_ranges.is_empty() {
-        // Fast path: no background highlights, just syntax colors
-        let mut offset = 0;
-        for span in spans {
-            let start = offset;
-            offset += span.text.len();
-            if start < offset {
-                highlights.push((
-                    start..offset,
-                    HighlightStyle {
-                        color: Some(span.color.into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
-    } else {
-        // Split syntax spans at background range boundaries so no highlights overlap
-        let mut offset = 0;
-        for span in spans {
-            let span_start = offset;
-            let span_end = offset + span.text.len();
-            offset = span_end;
-
-            if span_start >= span_end {
-                continue;
-            }
-
-            // Collect boundary points from bg_ranges that fall within this span
-            let mut boundaries = vec![span_start];
-            for (br, _) in bg_ranges {
-                if br.start > span_start && br.start < span_end {
-                    boundaries.push(br.start);
-                }
-                if br.end > span_start && br.end < span_end {
-                    boundaries.push(br.end);
-                }
-            }
-            boundaries.push(span_end);
-            boundaries.sort();
-            boundaries.dedup();
-
-            for window in boundaries.windows(2) {
-                let sub_start = window[0];
-                let sub_end = window[1];
-                if sub_start >= sub_end {
-                    continue;
-                }
-
-                let mut style = HighlightStyle {
-                    color: Some(span.color.into()),
-                    ..Default::default()
-                };
-
-                // Apply background if this sub-range falls within any background range
-                for (br, bg_color) in bg_ranges {
-                    if sub_start >= br.start && sub_end <= br.end {
-                        style.background_color = Some(*bg_color);
-                        break;
-                    }
-                }
-
-                highlights.push((sub_start..sub_end, style));
-            }
-        }
-    }
-
-    StyledText::new(text).with_highlights(highlights)
 }
 
 // ── Shared DiffViewer methods ───────────────────────────────────────────
@@ -251,6 +167,23 @@ impl DiffViewer {
         (text_x / char_width) as usize
     }
 
+    /// Calculate column position from x coordinate in side-by-side mode.
+    pub(super) fn x_to_column_sbs(&self, x: f32, side: SideBySideSide) -> usize {
+        let char_width = self.char_width();
+        let num_col_width = (self.line_num_width as f32) * char_width + 8.0;
+        let half_width = self.diff_pane_width / 2.0;
+
+        // X relative to the start of this side's column
+        let column_x = match side {
+            SideBySideSide::Left => x - SIDEBAR_WIDTH,
+            SideBySideSide::Right => x - SIDEBAR_WIDTH - half_width - 1.0, // 1px divider
+        };
+
+        // Subtract accent bar, gutter, separator, and content padding; add scroll offset
+        let text_x = (column_x - ACCENT_WIDTH - num_col_width - 1.0 - CONTENT_PADDING + self.scroll_x).max(0.0);
+        (text_x / char_width) as usize
+    }
+
     /// Render a single diff line with syntax highlighting.
     pub(super) fn render_line(
         &self,
@@ -260,7 +193,6 @@ impl DiffViewer {
         gutter_width: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let has_selection = self.selection.line_has_selection(line_index);
         let font_size = self.file_font_size;
         let line_height = self.line_height();
 
@@ -279,8 +211,7 @@ impl DiffViewer {
 
         let (line_bg, _, accent_color) = self.line_colors(line.line_type, t);
 
-        let spans = line.spans.clone();
-        let plain_text = line.plain_text.clone();
+        let bg_ranges = selection_bg_ranges(&self.selection, line_index, line.plain_text.len());
 
         let char_width = self.char_width();
         let num_col_width = (self.line_num_width as f32) * char_width + 12.0;
@@ -357,55 +288,7 @@ impl DiffViewer {
                     ),
             )
             // Content — use StyledText for gap-free rendering
-            .child(if has_selection {
-                self.render_line_with_selection(line_index, &plain_text, &spans, false)
-            } else {
-                self.render_scrollable_content(&spans, &[], line_height)
-            })
-    }
-
-    /// Render a line with selection highlighting (uses individual divs for selection ranges).
-    pub(super) fn render_line_with_selection(
-        &self,
-        line_index: usize,
-        plain_text: &str,
-        spans: &[HighlightedSpan],
-        _is_header: bool,
-    ) -> Div {
-        let selection_bg = Rgba {
-            r: 0.25,
-            g: 0.45,
-            b: 0.75,
-            a: 0.35,
-        };
-
-        let ((start_line, start_col), (end_line, end_col)) = match self.selection.normalized() {
-            Some(range) => range,
-            None => {
-                return self.render_scrollable_content(spans, &[], self.line_height());
-            }
-        };
-
-        let line_len = plain_text.len();
-        let sel_start = if line_index == start_line {
-            start_col.min(line_len)
-        } else {
-            0
-        };
-        let sel_end = if line_index == end_line {
-            end_col.min(line_len)
-        } else {
-            line_len
-        };
-
-        // Build background ranges for selection
-        let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = if sel_start < sel_end {
-            vec![(sel_start..sel_end, selection_bg.into())]
-        } else {
-            vec![]
-        };
-
-        self.render_scrollable_content(spans, &bg_ranges, self.line_height())
+            .child(self.render_scrollable_content(&line.spans, &bg_ranges, line_height))
     }
 
     /// Render visible lines for the virtualized list.

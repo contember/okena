@@ -1,10 +1,12 @@
 //! Side-by-side diff view transformation and rendering.
 
 use super::line_render::{rgba, ACCENT_WIDTH};
-use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideContent};
+use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideBySideSide, SideContent};
 use super::DiffViewer;
 use crate::git::DiffLineType;
 use crate::theme::ThemeColors;
+use crate::ui::Selection2DExtension;
+use crate::views::components::selection_bg_ranges;
 use gpui::prelude::*;
 use gpui::*;
 
@@ -203,7 +205,7 @@ impl DiffViewer {
         idx: usize,
         line: &SideBySideLine,
         t: &ThemeColors,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let font_size = self.file_font_size;
         let line_height = self.line_height();
@@ -224,7 +226,7 @@ impl DiffViewer {
             .text_size(px(font_size))
             .font_family("monospace")
             .flex()
-            .child(self.render_side_column_content(&left, t, line_height))
+            .child(self.render_side_column_content(&left, SideBySideSide::Left, idx, t, line_height, cx))
             .child(
                 div()
                     .w(px(1.0))
@@ -232,18 +234,26 @@ impl DiffViewer {
                     .bg(rgb(border_color))
                     .flex_shrink_0(),
             )
-            .child(self.render_side_column_content(&right, t, line_height))
+            .child(self.render_side_column_content(&right, SideBySideSide::Right, idx, t, line_height, cx))
     }
 
     /// Render one column (left or right) of a side-by-side line.
     fn render_side_column_content(
         &self,
         content: &Option<SideContent>,
+        side: SideBySideSide,
+        sbs_line_index: usize,
         t: &ThemeColors,
         line_height: f32,
-    ) -> Div {
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let char_width = self.char_width();
         let num_col_width = (self.line_num_width as f32) * char_width + 8.0;
+
+        let side_label = match side {
+            SideBySideSide::Left => "left",
+            SideBySideSide::Right => "right",
+        };
 
         match content {
             Some(c) => {
@@ -257,11 +267,37 @@ impl DiffViewer {
                 };
 
                 let mut column = div()
+                    .id(ElementId::Name(format!("sbs-{}-{}", side_label, sbs_line_index).into()))
                     .flex_1()
                     .h(px(line_height))
                     .flex()
                     .items_center()
-                    .overflow_hidden();
+                    .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            let col = this.x_to_column_sbs(f32::from(event.position.x), side);
+                            this.selection.start = Some((sbs_line_index, col));
+                            this.selection.end = Some((sbs_line_index, col));
+                            this.selection.is_selecting = true;
+                            this.selection_side = Some(side);
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                        if this.selection.is_selecting && this.selection_side == Some(side) {
+                            let col = this.x_to_column_sbs(f32::from(event.position.x), side);
+                            this.selection.end = Some((sbs_line_index, col));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            this.selection.finish();
+                            cx.notify();
+                        }),
+                    );
 
                 if let Some(bg) = line_bg {
                     column = column.bg(bg);
@@ -297,22 +333,50 @@ impl DiffViewer {
                             .flex_shrink_0(),
                     );
 
-                // Content with word-level highlighting
-                let content_div = self.render_spans_with_word_highlight(
-                    &c.spans,
-                    &c.changed_ranges,
-                    word_bg,
-                    line_height,
-                );
+                // Content with word-level + selection highlighting
+                let has_selection = self.selection_side == Some(side)
+                    && self.selection.line_has_selection(sbs_line_index);
+
+                let content_div = if has_selection {
+                    self.render_spans_with_combined_highlight(
+                        &c.spans,
+                        &c.changed_ranges,
+                        word_bg,
+                        &c.plain_text,
+                        sbs_line_index,
+                        line_height,
+                    )
+                } else {
+                    self.render_spans_with_word_highlight(
+                        &c.spans,
+                        &c.changed_ranges,
+                        word_bg,
+                        line_height,
+                    )
+                };
 
                 column.child(accent).child(gutter).child(content_div)
             }
             None => {
-                // Empty side - very subtle background
+                // Empty side - very subtle background, with drag-through support
                 div()
+                    .id(ElementId::Name(format!("sbs-{}-{}", side_label, sbs_line_index).into()))
                     .flex_1()
                     .h(px(line_height))
                     .bg(rgba(t.bg_secondary, 0.5))
+                    .on_mouse_move(cx.listener(move |this, _event: &MouseMoveEvent, _window, cx| {
+                        if this.selection.is_selecting && this.selection_side == Some(side) {
+                            this.selection.end = Some((sbs_line_index, 0));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            this.selection.finish();
+                            cx.notify();
+                        }),
+                    )
             }
         }
     }
@@ -326,39 +390,63 @@ impl DiffViewer {
         word_bg: Option<Rgba>,
         line_height: f32,
     ) -> Div {
-        // Convert char-based changed_ranges to byte-based background ranges
-        let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> =
-            if let Some(word_bg) = word_bg {
-                if !changed_ranges.is_empty() {
-                    // Build text to get char-to-byte mapping
-                    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-                    let chars: Vec<char> = text.chars().collect();
+        let bg_ranges = self.compute_word_bg_ranges(spans, changed_ranges, word_bg);
+        self.render_scrollable_content(spans, &bg_ranges, line_height)
+    }
 
-                    changed_ranges
-                        .iter()
-                        .filter_map(|range| {
-                            let byte_start: usize = chars[..range.start.min(chars.len())]
-                                .iter()
-                                .map(|c| c.len_utf8())
-                                .sum();
-                            let byte_end: usize = chars[..range.end.min(chars.len())]
-                                .iter()
-                                .map(|c| c.len_utf8())
-                                .sum();
-                            if byte_start < byte_end {
-                                Some((byte_start..byte_end, Hsla::from(word_bg)))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
-            };
+    /// Render spans with both word-level diff and selection highlighting merged.
+    fn render_spans_with_combined_highlight(
+        &self,
+        spans: &[super::types::HighlightedSpan],
+        changed_ranges: &[ChangedRange],
+        word_bg: Option<Rgba>,
+        plain_text: &str,
+        line_index: usize,
+        line_height: f32,
+    ) -> Div {
+        // Selection ranges go first so they take priority over word-diff highlighting
+        // (build_styled_text_with_backgrounds uses the first matching range)
+        let mut bg_ranges = selection_bg_ranges(&self.selection, line_index, plain_text.len());
+        bg_ranges.extend(self.compute_word_bg_ranges(spans, changed_ranges, word_bg));
 
         self.render_scrollable_content(spans, &bg_ranges, line_height)
+    }
+
+    /// Convert char-based changed_ranges to byte-based background ranges.
+    fn compute_word_bg_ranges(
+        &self,
+        spans: &[super::types::HighlightedSpan],
+        changed_ranges: &[ChangedRange],
+        word_bg: Option<Rgba>,
+    ) -> Vec<(std::ops::Range<usize>, Hsla)> {
+        if let Some(word_bg) = word_bg {
+            if !changed_ranges.is_empty() {
+                let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                let chars: Vec<char> = text.chars().collect();
+
+                changed_ranges
+                    .iter()
+                    .filter_map(|range| {
+                        let byte_start: usize = chars[..range.start.min(chars.len())]
+                            .iter()
+                            .map(|c| c.len_utf8())
+                            .sum();
+                        let byte_end: usize = chars[..range.end.min(chars.len())]
+                            .iter()
+                            .map(|c| c.len_utf8())
+                            .sum();
+                        if byte_start < byte_end {
+                            Some((byte_start..byte_end, Hsla::from(word_bg)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
     }
 }
