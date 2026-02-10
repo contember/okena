@@ -178,7 +178,7 @@ impl LayoutContainer {
             .min_h_0()
             .relative()
             .child(self.terminal_pane.clone().unwrap())
-            .child(self.render_drop_zones(terminal_id, cx))
+            .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone()))
     }
 
     /// Render the 5-zone drop overlay for pane drag-and-drop.
@@ -186,6 +186,7 @@ impl LayoutContainer {
         &self,
         terminal_id: Option<String>,
         cx: &mut Context<Self>,
+        active_drag: &ActiveDrag,
     ) -> impl IntoElement {
         let t = theme(cx);
         let highlight = with_alpha(t.border_active, 0.3);
@@ -194,21 +195,31 @@ impl LayoutContainer {
         let tid = terminal_id.clone();
         let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
 
-        let make_zone = |zone: DropZone, id_suffix: &str| -> Stateful<Div> {
+        let make_zone = |zone: DropZone, id_suffix: &str, active_drag: &ActiveDrag| -> Stateful<Div> {
             let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
             let ws = workspace.clone();
             let pid = project_id.clone();
             let this_tid = tid.clone();
+            let active_drag_for_hover = active_drag.clone();
+            let active_drag_for_drop = active_drag.clone();
 
             div()
                 .id(ElementId::Name(zone_id.into()))
                 .drag_over::<PaneDrag>(move |style, _, _, _| {
+                    // Don't show drop highlight when a resize is in progress
+                    if active_drag_for_hover.borrow().is_some() {
+                        return style;
+                    }
                     style.bg(highlight)
                 })
                 .on_drop(cx.listener({
                     let pid = pid.clone();
                     let this_tid = this_tid.clone();
                     move |_this, drag: &PaneDrag, _window, cx| {
+                        // Ignore drop when a resize is/was in progress
+                        if active_drag_for_drop.borrow().is_some() {
+                            return;
+                        }
                         // Self-drop check
                         if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
                             return;
@@ -244,7 +255,7 @@ impl LayoutContainer {
             .flex_row()
             .child(
                 // Left zone: 25% width, 100% height
-                make_zone(DropZone::Left, &id_suffix)
+                make_zone(DropZone::Left, &id_suffix, active_drag)
                     .w(relative(0.25))
                     .h_full(),
             )
@@ -257,26 +268,26 @@ impl LayoutContainer {
                     .flex_col()
                     .child(
                         // Top zone: 25% height
-                        make_zone(DropZone::Top, &id_suffix)
+                        make_zone(DropZone::Top, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.25)),
                     )
                     .child(
                         // Center zone: 50% height
-                        make_zone(DropZone::Center, &id_suffix)
+                        make_zone(DropZone::Center, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.50)),
                     )
                     .child(
                         // Bottom zone: 25% height
-                        make_zone(DropZone::Bottom, &id_suffix)
+                        make_zone(DropZone::Bottom, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.25)),
                     ),
             )
             .child(
                 // Right zone: 25% width, 100% height
-                make_zone(DropZone::Right, &id_suffix)
+                make_zone(DropZone::Right, &id_suffix, active_drag)
                     .w(relative(0.25))
                     .h_full(),
             )

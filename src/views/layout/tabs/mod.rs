@@ -392,39 +392,51 @@ impl LayoutContainer {
                     )
                 })
                 // Enhanced drop target - show prominent indicator with glow
-                .drag_over::<PaneDrag>(move |style, _, _, _| {
-                    style
-                        .border_l(px(3.0))
-                        .border_color(rgb(t.border_active))
-                        .bg(with_alpha(t.border_active, 0.15))
-                })
-                .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
-                    if drag.project_id != project_id_for_drop {
-                        return;
-                    }
-
-                    let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
-                    let drag_tab_index = drag.layout_path.last().copied();
-
-                    if drag_parent == layout_path_for_drop.as_slice() {
-                        // Same tab group → reorder
-                        if let Some(from_index) = drag_tab_index {
-                            if from_index != i {
-                                let target_index = if from_index < i { i - 1 } else { i };
-                                workspace_for_drop.update(cx, |ws, cx| {
-                                    ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
-                                });
-                                this.start_drop_animation(target_index, cx);
-                            }
+                .drag_over::<PaneDrag>({
+                    let active_drag = self.active_drag.clone();
+                    move |style, _, _, _| {
+                        if active_drag.borrow().is_some() {
+                            return style;
                         }
-                    } else {
-                        // Cross-container → insert into this tab group
-                        workspace_for_drop.update(cx, |ws, cx| {
-                            ws.move_terminal_to_tab_group(
-                                &drag.project_id, &drag.terminal_id,
-                                &layout_path_for_drop, Some(i), cx,
-                            );
-                        });
+                        style
+                            .border_l(px(3.0))
+                            .border_color(rgb(t.border_active))
+                            .bg(with_alpha(t.border_active, 0.15))
+                    }
+                })
+                .on_drop(cx.listener({
+                    let active_drag = self.active_drag.clone();
+                    move |this, drag: &PaneDrag, _window, cx| {
+                        if active_drag.borrow().is_some() {
+                            return;
+                        }
+                        if drag.project_id != project_id_for_drop {
+                            return;
+                        }
+
+                        let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
+                        let drag_tab_index = drag.layout_path.last().copied();
+
+                        if drag_parent == layout_path_for_drop.as_slice() {
+                            // Same tab group → reorder
+                            if let Some(from_index) = drag_tab_index {
+                                if from_index != i {
+                                    let target_index = if from_index < i { i - 1 } else { i };
+                                    workspace_for_drop.update(cx, |ws, cx| {
+                                        ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
+                                    });
+                                    this.start_drop_animation(target_index, cx);
+                                }
+                            }
+                        } else {
+                            // Cross-container → insert into this tab group
+                            workspace_for_drop.update(cx, |ws, cx| {
+                                ws.move_terminal_to_tab_group(
+                                    &drag.project_id, &drag.terminal_id,
+                                    &layout_path_for_drop, Some(i), cx,
+                                );
+                            });
+                        }
                     }
                 }))
                 .on_click(move |_, _window, cx| {
@@ -438,6 +450,8 @@ impl LayoutContainer {
         let workspace_for_end = self.workspace.clone();
         let project_id_for_end = self.project_id.clone();
         let layout_path_for_end = self.layout_path.clone();
+        let active_drag_for_end_hover = self.active_drag.clone();
+        let active_drag_for_end_drop = self.active_drag.clone();
         let end_drop_zone = div()
             .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
             .flex_1()
@@ -445,12 +459,18 @@ impl LayoutContainer {
             .min_w(px(20.0))
             // Enhanced drop zone indicator
             .drag_over::<PaneDrag>(move |style, _, _, _| {
+                if active_drag_for_end_hover.borrow().is_some() {
+                    return style;
+                }
                 style
                     .border_l(px(3.0))
                     .border_color(rgb(t.border_active))
                     .bg(with_alpha(t.border_active, 0.1))
             })
             .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
+                if active_drag_for_end_drop.borrow().is_some() {
+                    return;
+                }
                 if drag.project_id != project_id_for_end {
                     return;
                 }
