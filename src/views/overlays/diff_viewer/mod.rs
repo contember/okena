@@ -14,7 +14,7 @@ use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::{copy_to_clipboard, Selection2DNonEmpty, SelectionState};
-use crate::views::components::{extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
+use crate::views::components::{build_file_tree, extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -200,23 +200,9 @@ impl DiffViewer {
     }
 
     fn build_file_tree(&mut self) {
-        self.file_tree = FileTreeNode::default();
-
-        for (index, file) in self.file_stats.iter().enumerate() {
-            let parts: Vec<&str> = file.path.split('/').collect();
-            let mut node = &mut self.file_tree;
-
-            for (i, part) in parts.iter().enumerate() {
-                if i == parts.len() - 1 {
-                    node.files.push(index);
-                } else {
-                    node = node
-                        .children
-                        .entry(part.to_string())
-                        .or_insert_with(FileTreeNode::default);
-                }
-            }
-        }
+        self.file_tree = build_file_tree(
+            self.file_stats.iter().enumerate().map(|(i, f)| (i, &f.path))
+        );
     }
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {

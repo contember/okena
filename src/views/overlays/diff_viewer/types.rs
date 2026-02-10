@@ -2,9 +2,9 @@
 
 use crate::git::{DiffLineType, FileDiff};
 pub use crate::views::components::syntax::HighlightedSpan;
-use std::collections::BTreeMap;
-
 pub use crate::workspace::persistence::DiffViewMode;
+
+pub use crate::views::components::file_tree::FileTreeNode;
 
 /// Which side of the side-by-side diff view a selection belongs to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,15 +86,6 @@ pub struct DisplayLine {
 pub struct DiffDisplayFile {
     /// Processed lines for display.
     pub lines: Vec<DisplayLine>,
-}
-
-/// A node in the file tree.
-#[derive(Default, Clone)]
-pub struct FileTreeNode {
-    /// Files at this level (index into files vec).
-    pub files: Vec<usize>,
-    /// Subdirectories.
-    pub children: BTreeMap<String, FileTreeNode>,
 }
 
 /// State for scrollbar dragging.
