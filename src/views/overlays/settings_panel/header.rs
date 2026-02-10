@@ -92,13 +92,13 @@ impl SettingsPanel {
                     .child("\u{2014}"),
             )
             .child(
-                dropdown_button("project-selector-btn", &label, self.project_dropdown_open, &t)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                dropdown_button("project-selector-btn", &label, self.project_dropdown_open, &t,
+                    Self::bounds_setter(cx, |s, b| s.project_button_bounds = b))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                         this.project_dropdown_open = !this.project_dropdown_open;
                         this.font_dropdown_open = false;
                         this.shell_dropdown_open = false;
                         this.session_backend_dropdown_open = false;
-                        this.dropdown_position = event.position;
                         cx.notify();
                     })),
             )

@@ -6,27 +6,16 @@ use crate::theme::{with_alpha, ThemeColors};
 use gpui::*;
 use gpui::prelude::*;
 
-/// Create a dropdown trigger button.
+/// Create a dropdown trigger button that tracks its own bounds for overlay positioning.
 ///
-/// # Arguments
-/// * `id` - Unique element ID
-/// * `label` - Currently selected value label
-/// * `is_open` - Whether dropdown is currently open
-/// * `t` - Theme colors
-///
-/// # Example
-/// ```rust
-/// dropdown_button("font-dropdown", &current_font, self.font_dropdown_open, &t)
-///     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-///         this.font_dropdown_open = !this.font_dropdown_open;
-///         cx.notify();
-///     }))
-/// ```
+/// The `on_bounds` callback is called during each paint with the button's window-absolute bounds.
+/// Use these bounds with `dropdown_anchored_below()` to position the overlay.
 pub fn dropdown_button(
     id: impl Into<SharedString>,
     label: &str,
     is_open: bool,
     t: &ThemeColors,
+    on_bounds: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
@@ -52,19 +41,20 @@ pub fn dropdown_button(
                 .text_color(rgb(t.text_muted))
                 .child(if is_open { "▲" } else { "▼" }),
         )
+        .child(canvas(on_bounds, |_, _, _, _| {}).absolute().size_full())
+}
+
+/// Position a dropdown overlay below the given trigger bounds.
+pub fn dropdown_anchored_below(bounds: Bounds<Pixels>, child: impl IntoElement) -> Deferred {
+    deferred(
+        anchored()
+            .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
+            .snap_to_window()
+            .child(child)
+    )
 }
 
 /// Create a dropdown overlay container.
-///
-/// # Arguments
-/// * `id` - Unique element ID
-/// * `t` - Theme colors
-///
-/// # Example
-/// ```rust
-/// dropdown_overlay("font-dropdown-list", &t)
-///     .children(options.iter().map(|opt| dropdown_option(...)))
-/// ```
 pub fn dropdown_overlay(
     id: impl Into<SharedString>,
     t: &ThemeColors,
@@ -91,20 +81,6 @@ pub fn dropdown_overlay(
 }
 
 /// Create a single dropdown option row.
-///
-/// # Arguments
-/// * `id` - Unique element ID
-/// * `label` - Display text
-/// * `is_selected` - Whether this option is currently selected
-/// * `t` - Theme colors
-///
-/// # Example
-/// ```rust
-/// dropdown_option("opt-jetbrains", "JetBrains Mono", is_selected, &t)
-///     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-///         // handle selection
-///     }))
-/// ```
 pub fn dropdown_option(
     id: impl Into<SharedString>,
     label: &str,

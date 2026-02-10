@@ -19,7 +19,7 @@ pub mod simple_input;
 pub mod syntax;
 pub mod ui_helpers;
 
-pub use dropdown::{dropdown_button, dropdown_option, dropdown_overlay};
+pub use dropdown::{dropdown_anchored_below, dropdown_button, dropdown_option, dropdown_overlay};
 pub use list_overlay::{
     handle_list_overlay_key, substring_filter, ListOverlayAction, ListOverlayConfig,
     ListOverlayState,

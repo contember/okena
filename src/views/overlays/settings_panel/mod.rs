@@ -21,7 +21,7 @@ use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::terminal::shell_config::{available_shells, AvailableShell};
 use crate::theme::theme;
-use crate::views::components::{modal_backdrop, modal_content};
+use crate::views::components::{dropdown_anchored_below, modal_backdrop, modal_content};
 use crate::views::components::simple_input::{InputChangedEvent, SimpleInputState};
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -42,7 +42,10 @@ pub struct SettingsPanel {
     pub(super) font_dropdown_open: bool,
     pub(super) shell_dropdown_open: bool,
     pub(super) session_backend_dropdown_open: bool,
-    pub(super) dropdown_position: Point<Pixels>,
+    pub(super) project_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) font_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) shell_button_bounds: Option<Bounds<Pixels>>,
+    pub(super) session_backend_button_bounds: Option<Bounds<Pixels>>,
     pub(super) available_shells: Vec<AvailableShell>,
     // Global hook inputs
     pub(super) hook_project_open: Entity<SimpleInputState>,
@@ -230,7 +233,10 @@ impl SettingsPanel {
             font_dropdown_open: false,
             shell_dropdown_open: false,
             session_backend_dropdown_open: false,
-            dropdown_position: Point::default(),
+            project_button_bounds: None,
+            font_button_bounds: None,
+            shell_button_bounds: None,
+            session_backend_button_bounds: None,
             available_shells: available_shells(),
             hook_project_open,
             hook_project_close,
@@ -247,6 +253,19 @@ impl SettingsPanel {
 
     fn close(&self, cx: &mut Context<Self>) {
         cx.emit(SettingsPanelEvent::Close);
+    }
+
+    /// Create a bounds tracking callback for dropdown buttons.
+    pub(super) fn bounds_setter(
+        cx: &mut Context<Self>,
+        setter: fn(&mut Self, Option<Bounds<Pixels>>),
+    ) -> impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static {
+        let entity = cx.entity().downgrade();
+        move |bounds, _, cx: &mut App| {
+            if let Some(entity) = entity.upgrade() {
+                entity.update(cx, |this, _| setter(this, Some(bounds)));
+            }
+        }
     }
 
     pub(super) fn close_all_dropdowns(&mut self) {
@@ -390,44 +409,21 @@ impl Render for SettingsPanel {
                                 }))
                         )
                     })
-                    // Dropdown overlays using deferred+anchored
-                    .when(self.project_dropdown_open, |modal| {
-                        modal.child(deferred(
-                            anchored()
-                                .position(self.dropdown_position)
-                                .snap_to_window()
-                                .child(self.render_project_dropdown_overlay(cx))
-                        ))
+                    // Dropdown overlays positioned below trigger button
+                    .when(self.project_dropdown_open && self.project_button_bounds.is_some(), |modal| {
+                        modal.child(dropdown_anchored_below(self.project_button_bounds.unwrap(), self.render_project_dropdown_overlay(cx)))
                     })
-                    .when(self.font_dropdown_open, |modal| {
-                        let settings = settings_entity(cx);
-                        let current = settings.read(cx).settings.font_family.clone();
-                        modal.child(deferred(
-                            anchored()
-                                .position(self.dropdown_position)
-                                .snap_to_window()
-                                .child(self.render_font_dropdown_overlay(&current, cx))
-                        ))
+                    .when(self.font_dropdown_open && self.font_button_bounds.is_some(), |modal| {
+                        let current = settings_entity(cx).read(cx).settings.font_family.clone();
+                        modal.child(dropdown_anchored_below(self.font_button_bounds.unwrap(), self.render_font_dropdown_overlay(&current, cx)))
                     })
-                    .when(self.shell_dropdown_open, |modal| {
-                        let settings = settings_entity(cx);
-                        let current = settings.read(cx).settings.default_shell.clone();
-                        modal.child(deferred(
-                            anchored()
-                                .position(self.dropdown_position)
-                                .snap_to_window()
-                                .child(self.render_shell_dropdown_overlay(&current, cx))
-                        ))
+                    .when(self.shell_dropdown_open && self.shell_button_bounds.is_some(), |modal| {
+                        let current = settings_entity(cx).read(cx).settings.default_shell.clone();
+                        modal.child(dropdown_anchored_below(self.shell_button_bounds.unwrap(), self.render_shell_dropdown_overlay(&current, cx)))
                     })
-                    .when(self.session_backend_dropdown_open, |modal| {
-                        let settings = settings_entity(cx);
-                        let current = settings.read(cx).settings.session_backend;
-                        modal.child(deferred(
-                            anchored()
-                                .position(self.dropdown_position)
-                                .snap_to_window()
-                                .child(self.render_session_backend_dropdown_overlay(&current, cx))
-                        ))
+                    .when(self.session_backend_dropdown_open && self.session_backend_button_bounds.is_some(), |modal| {
+                        let current = settings_entity(cx).read(cx).settings.session_backend;
+                        modal.child(dropdown_anchored_below(self.session_backend_button_bounds.unwrap(), self.render_session_backend_dropdown_overlay(&current, cx)))
                     }),
             )
     }

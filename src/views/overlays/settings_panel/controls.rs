@@ -117,13 +117,13 @@ impl SettingsPanel {
         let t = theme(cx);
 
         settings_row("font-family".to_string(), "Font Family", &t, true).child(
-            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t,
+                Self::bounds_setter(cx, |s, b| s.font_button_bounds = b))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.font_dropdown_open = !this.font_dropdown_open;
                     this.shell_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
-                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
@@ -157,13 +157,13 @@ impl SettingsPanel {
         let display_name = current_shell.display_name();
 
         settings_row("default-shell".to_string(), "Default Shell", &t, true).child(
-            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t,
+                Self::bounds_setter(cx, |s, b| s.shell_button_bounds = b))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
                     this.font_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
-                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
@@ -204,13 +204,13 @@ impl SettingsPanel {
         let display_name = current_backend.display_name();
 
         settings_row_with_desc("session-backend".to_string(), "Session Backend", "Requires restart", &t, true).child(
-            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t,
+                Self::bounds_setter(cx, |s, b| s.session_backend_button_bounds = b))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
                     this.font_dropdown_open = false;
                     this.shell_dropdown_open = false;
                     this.project_dropdown_open = false;
-                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
