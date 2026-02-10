@@ -42,6 +42,7 @@ pub struct SettingsPanel {
     pub(super) font_dropdown_open: bool,
     pub(super) shell_dropdown_open: bool,
     pub(super) session_backend_dropdown_open: bool,
+    pub(super) dropdown_position: Point<Pixels>,
     pub(super) available_shells: Vec<AvailableShell>,
     // Global hook inputs
     pub(super) hook_project_open: Entity<SimpleInputState>,
@@ -229,6 +230,7 @@ impl SettingsPanel {
             font_dropdown_open: false,
             shell_dropdown_open: false,
             session_backend_dropdown_open: false,
+            dropdown_position: Point::default(),
             available_shells: available_shells(),
             hook_project_open,
             hook_project_close,
@@ -375,24 +377,57 @@ impl Render for SettingsPanel {
                     )
                     // Footer
                     .child(self.render_footer(cx))
-                    // Dropdown overlays (rendered last to be on top)
+                    // Click-outside backdrop (covers the modal, under the dropdown)
+                    .when(self.has_open_dropdown(), |modal| {
+                        modal.child(
+                            div()
+                                .id("dropdown-backdrop")
+                                .absolute()
+                                .inset_0()
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.close_all_dropdowns();
+                                    cx.notify();
+                                }))
+                        )
+                    })
+                    // Dropdown overlays using deferred+anchored
                     .when(self.project_dropdown_open, |modal| {
-                        modal.child(self.render_project_dropdown_overlay(cx))
+                        modal.child(deferred(
+                            anchored()
+                                .position(self.dropdown_position)
+                                .snap_to_window()
+                                .child(self.render_project_dropdown_overlay(cx))
+                        ))
                     })
                     .when(self.font_dropdown_open, |modal| {
                         let settings = settings_entity(cx);
                         let current = settings.read(cx).settings.font_family.clone();
-                        modal.child(self.render_font_dropdown_overlay(&current, cx))
+                        modal.child(deferred(
+                            anchored()
+                                .position(self.dropdown_position)
+                                .snap_to_window()
+                                .child(self.render_font_dropdown_overlay(&current, cx))
+                        ))
                     })
                     .when(self.shell_dropdown_open, |modal| {
                         let settings = settings_entity(cx);
                         let current = settings.read(cx).settings.default_shell.clone();
-                        modal.child(self.render_shell_dropdown_overlay(&current, cx))
+                        modal.child(deferred(
+                            anchored()
+                                .position(self.dropdown_position)
+                                .snap_to_window()
+                                .child(self.render_shell_dropdown_overlay(&current, cx))
+                        ))
                     })
                     .when(self.session_backend_dropdown_open, |modal| {
                         let settings = settings_entity(cx);
                         let current = settings.read(cx).settings.session_backend;
-                        modal.child(self.render_session_backend_dropdown_overlay(&current, cx))
+                        modal.child(deferred(
+                            anchored()
+                                .position(self.dropdown_position)
+                                .snap_to_window()
+                                .child(self.render_session_backend_dropdown_overlay(&current, cx))
+                        ))
                     }),
             )
     }

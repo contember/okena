@@ -118,11 +118,12 @@ impl SettingsPanel {
 
         settings_row("font-family".to_string(), "Font Family", &t, true).child(
             dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.font_dropdown_open = !this.font_dropdown_open;
                     this.shell_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
+                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
@@ -131,7 +132,7 @@ impl SettingsPanel {
     pub(super) fn render_font_dropdown_overlay(&self, current: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        dropdown_overlay("font-family-dropdown-list", 140.0, 32.0, &t)
+        dropdown_overlay("font-family-dropdown-list", &t)
             .children(FONT_FAMILIES.iter().map(|family| {
                 let is_selected = *family == current;
                 let family_str = family.to_string();
@@ -157,11 +158,12 @@ impl SettingsPanel {
 
         settings_row("default-shell".to_string(), "Default Shell", &t, true).child(
             dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
                     this.font_dropdown_open = false;
                     this.session_backend_dropdown_open = false;
                     this.project_dropdown_open = false;
+                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
@@ -174,7 +176,7 @@ impl SettingsPanel {
             .filter(|s| s.available)
             .collect();
 
-        dropdown_overlay("shell-dropdown-list", 290.0, 32.0, &t)
+        dropdown_overlay("shell-dropdown-list", &t)
             .min_w(px(180.0))
             .max_h(px(250.0))
             .children(available.into_iter().map(|shell_info| {
@@ -203,11 +205,12 @@ impl SettingsPanel {
 
         settings_row_with_desc("session-backend".to_string(), "Session Backend", "Requires restart", &t, true).child(
             dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
                     this.font_dropdown_open = false;
                     this.shell_dropdown_open = false;
                     this.project_dropdown_open = false;
+                    this.dropdown_position = event.position;
                     cx.notify();
                 })),
         )
@@ -216,7 +219,7 @@ impl SettingsPanel {
     pub(super) fn render_session_backend_dropdown_overlay(&self, current_backend: &SessionBackend, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        dropdown_overlay("session-backend-dropdown-list", 290.0, 70.0, &t)
+        dropdown_overlay("session-backend-dropdown-list", &t)
             .min_w(px(180.0))
             .children(SessionBackend::all_variants().iter().map(|backend| {
                 let is_selected = backend == current_backend;

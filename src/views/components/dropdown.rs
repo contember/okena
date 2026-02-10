@@ -58,27 +58,20 @@ pub fn dropdown_button(
 ///
 /// # Arguments
 /// * `id` - Unique element ID
-/// * `top` - Top offset in pixels
-/// * `right` - Right offset in pixels
 /// * `t` - Theme colors
 ///
 /// # Example
 /// ```rust
-/// dropdown_overlay("font-dropdown-list", 140.0, 32.0, &t)
+/// dropdown_overlay("font-dropdown-list", &t)
 ///     .children(options.iter().map(|opt| dropdown_option(...)))
 /// ```
 pub fn dropdown_overlay(
     id: impl Into<SharedString>,
-    top: f32,
-    right: f32,
     t: &ThemeColors,
 ) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
         .occlude()
-        .absolute()
-        .top(px(top))
-        .right(px(right))
         .min_w(px(150.0))
         .max_h(px(200.0))
         .overflow_y_scroll()
@@ -90,6 +83,9 @@ pub fn dropdown_overlay(
         .py(px(4.0))
         // Prevent scroll events from propagating to terminal underneath
         .on_scroll_wheel(|_, _, cx| {
+            cx.stop_propagation();
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
 }

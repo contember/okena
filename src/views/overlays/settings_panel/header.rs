@@ -93,11 +93,12 @@ impl SettingsPanel {
             )
             .child(
                 dropdown_button("project-selector-btn", &label, self.project_dropdown_open, &t)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                         this.project_dropdown_open = !this.project_dropdown_open;
                         this.font_dropdown_open = false;
                         this.shell_dropdown_open = false;
                         this.session_backend_dropdown_open = false;
+                        this.dropdown_position = event.position;
                         cx.notify();
                     })),
             )
@@ -112,9 +113,7 @@ impl SettingsPanel {
 
         let is_user_selected = self.selected_project_id.is_none();
 
-        dropdown_overlay("project-selector-dropdown", 44.0, 32.0, &t)
-            .left(px(16.0))
-            .right_auto()
+        dropdown_overlay("project-selector-dropdown", &t)
             .min_w(px(180.0))
             .max_h(px(250.0))
             .child(
