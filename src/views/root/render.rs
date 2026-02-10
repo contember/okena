@@ -630,8 +630,8 @@ impl Render for RootView {
             )
             // Status bar at the bottom
             .child(self.status_bar.clone())
-            // App menu dropdown (renders on top of everything)
-            .when(self.title_bar.read(cx).is_menu_open(), |d| {
+            // App menu dropdown (renders on top of everything, not on macOS where native menu is used)
+            .when(!cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(), |d| {
                 d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx)))
             })
             // Context menu overlay (positioned popup, separate from modals)

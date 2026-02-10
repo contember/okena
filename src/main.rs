@@ -33,7 +33,7 @@ use std::net::IpAddr;
 use crate::app::Okena;
 use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
-use crate::keybindings::{About, Quit};
+use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
@@ -72,6 +72,8 @@ fn set_app_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("About Okena", About),
                 MenuItem::separator(),
+                MenuItem::action("Settings...", ShowSettings),
+                MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
                 MenuItem::action("Quit Okena", Quit),
@@ -87,6 +89,15 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::os_action("Copy", crate::keybindings::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", crate::keybindings::Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", crate::keybindings::Copy, OsAction::SelectAll),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Command Palette", ShowCommandPalette),
+                MenuItem::action("Select Theme", ShowThemeSelector),
+                MenuItem::separator(),
+                MenuItem::action("Keyboard Shortcuts", ShowKeybindings),
             ],
         },
     ]);

@@ -465,40 +465,43 @@ impl Render for TitleBar {
                                 window.dispatch_action(Box::new(ToggleSidebar), cx);
                             }),
                     )
-                    .child({
-                        let menu_open = self.menu_open;
-                        let chevron = if menu_open { "▲" } else { "▼" };
-                        div()
-                            .id("app-menu-trigger")
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .when(menu_open, |d| d.bg(rgb(t.bg_hover)))
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(t.text_primary))
-                                    .child(self.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(8.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(chevron),
-                            )
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_menu(cx);
-                            }))
+                    // On macOS, app menu items live in the native menu bar
+                    .when(!cfg!(target_os = "macos"), |d| {
+                        d.child({
+                            let menu_open = self.menu_open;
+                            let chevron = if menu_open { "▲" } else { "▼" };
+                            div()
+                                .id("app-menu-trigger")
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .when(menu_open, |d| d.bg(rgb(t.bg_hover)))
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(t.text_primary))
+                                        .child(self.title.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(8.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(chevron),
+                                )
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_menu(cx);
+                                }))
+                        })
                     }),
             )
             .child(
