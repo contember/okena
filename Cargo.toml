@@ -67,7 +67,6 @@ semver = "1"
 # Remote control server
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["fs"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 base64 = "0.22"
 rand = "0.8"

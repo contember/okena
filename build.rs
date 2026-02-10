@@ -1,4 +1,17 @@
 fn main() {
+    // Ensure web/dist/ exists so rust-embed compiles even without a pre-built web client
+    let web_dist = std::path::Path::new("web/dist");
+    if !web_dist.exists() {
+        std::fs::create_dir_all(web_dist).expect("failed to create web/dist directory");
+        // Create a minimal placeholder index.html
+        std::fs::write(
+            web_dist.join("index.html"),
+            "<html><body>Web client not built. Run: cd web && bun install && bun run build</body></html>",
+        )
+        .expect("failed to write placeholder index.html");
+    }
+    println!("cargo:rerun-if-changed=web/dist");
+
     // Windows: Embed icon into executable
     #[cfg(target_os = "windows")]
     {

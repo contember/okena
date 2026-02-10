@@ -50,6 +50,12 @@ jobs:
             pkg-config \
             cmake
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build web client
+        run: cd web && bun install --frozen-lockfile && bun run build
+
       - name: Check compilation
         run: cargo check --release
 
@@ -110,6 +116,12 @@ jobs:
             libssl-dev \
             pkg-config \
             cmake
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build web client
+        run: cd web && bun install --frozen-lockfile && bun run build
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

@@ -14,9 +14,13 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use rust_embed::RustEmbed;
 use std::sync::Arc;
 use std::time::Instant;
-use tower_http::services::{ServeDir, ServeFile};
+
+#[derive(RustEmbed)]
+#[folder = "web/dist"]
+struct WebAssets;
 
 /// Shared state available to all route handlers.
 #[derive(Clone)]
@@ -60,39 +64,50 @@ pub fn build_router(
         .route("/health", axum::routing::get(health::get_health))
         .route("/v1/pair", axum::routing::post(pair::post_pair));
 
-    // Serve web client as fallback (SPA with index.html fallback for client-side routing)
-    let web_dir = web_client_dir();
-    let serve_web = ServeDir::new(&web_dir)
-        .append_index_html_on_directories(true)
-        .not_found_service(ServeFile::new(web_dir.join("index.html")));
-
     public
         .merge(protected)
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
-        .fallback_service(serve_web)
+        .fallback(serve_web_asset)
         .with_state(state)
 }
 
-/// Find the web client directory. Checks `./web/dist` (dev) then next to executable (production).
-fn web_client_dir() -> std::path::PathBuf {
-    // Dev: project root web/dist
-    let dev_dir = std::path::PathBuf::from("web/dist");
-    if dev_dir.is_dir() {
-        return dev_dir;
-    }
+/// Serve embedded web client assets (SPA with index.html fallback for client-side routing).
+async fn serve_web_asset(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::response::IntoResponse;
 
-    // Production: next to the executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let prod_dir = parent.join("web");
-            if prod_dir.is_dir() {
-                return prod_dir;
+    let path = uri.path().trim_start_matches('/');
+    let file = if path.is_empty() { "index.html" } else { path };
+
+    match WebAssets::get(file) {
+        Some(content) => serve_embedded_file(file, content),
+        None => {
+            // SPA fallback: serve index.html for unmatched routes
+            match WebAssets::get("index.html") {
+                Some(content) => serve_embedded_file("index.html", content),
+                None => (StatusCode::NOT_FOUND, "web client not available").into_response(),
             }
         }
     }
+}
 
-    // Fallback to dev path (ServeDir will just 404 if it doesn't exist)
-    dev_dir
+fn serve_embedded_file(path: &str, file: rust_embed::EmbeddedFile) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let mime = match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("mjs") => "application/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+
+    ([(axum::http::header::CONTENT_TYPE, mime)], file.data).into_response()
 }
 
 /// Auth middleware: validates Bearer token on protected routes.
