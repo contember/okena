@@ -718,18 +718,20 @@ impl OverlayManager {
 
     /// Show file search dialog for a project.
     pub fn show_file_search(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
-        let dialog = cx.new(|cx| FileSearchDialog::new(project_path, cx));
+        let dialog = cx.new(|cx| FileSearchDialog::new(project_path.clone(), cx));
+        let pp = project_path;
 
-        cx.subscribe(&dialog, |this, _, event: &FileSearchDialogEvent, cx| {
+        cx.subscribe(&dialog, move |this, _, event: &FileSearchDialogEvent, cx| {
             match event {
                 FileSearchDialogEvent::Close => {
                     this.close_modal(cx);
                 }
                 FileSearchDialogEvent::FileSelected(path) => {
                     let path = path.clone();
+                    let project_path = pp.clone();
                     this.close_modal(cx);
                     // Open the file viewer
-                    this.show_file_viewer(path, cx);
+                    this.show_file_viewer(path, project_path, cx);
                 }
             }
         })
@@ -744,8 +746,8 @@ impl OverlayManager {
     // ========================================================================
 
     /// Show file viewer for a file.
-    pub fn show_file_viewer(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| FileViewer::new(file_path, cx));
+    pub fn show_file_viewer(&mut self, file_path: PathBuf, project_path: PathBuf, cx: &mut Context<Self>) {
+        let viewer = cx.new(|cx| FileViewer::new(file_path, project_path, cx));
 
         cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {

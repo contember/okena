@@ -72,6 +72,43 @@ impl FileViewer {
         }
     }
 
+    /// Select a file from the tree and load it.
+    pub(super) fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(file) = self.files.get(index) {
+            self.selected_file_index = Some(index);
+            let path = file.path.clone();
+            self.file_path = path.clone();
+            self.is_markdown = Self::is_markdown_file(&self.file_path);
+            self.display_mode = if self.is_markdown { DisplayMode::Preview } else { DisplayMode::Source };
+            self.content.clear();
+            self.highlighted_lines.clear();
+            self.line_count = 0;
+            self.error_message = None;
+            self.selection.clear();
+            self.markdown_doc = None;
+            self.markdown_selection.clear();
+            self.load_file(&path);
+            // Expand ancestors of the newly selected file
+            let expanded = Self::compute_expanded_for_path(&self.file_path, &self.project_path);
+            self.expanded_folders.extend(expanded);
+            cx.notify();
+        }
+    }
+
+    /// Toggle a folder's expanded/collapsed state.
+    pub(super) fn toggle_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
+        if !self.expanded_folders.remove(folder_path) {
+            self.expanded_folders.insert(folder_path.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Toggle sidebar visibility.
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
     // Scrollbar methods using shared utilities
 
 

@@ -117,7 +117,7 @@ impl FileSearchDialog {
     }
 
     /// Scan files in the project directory.
-    fn scan_files(project_path: &PathBuf) -> Vec<FileEntry> {
+    pub fn scan_files(project_path: &PathBuf) -> Vec<FileEntry> {
         let mut files = Vec::new();
         Self::scan_dir(project_path, project_path, 0, &mut files);
 
