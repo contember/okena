@@ -2,10 +2,10 @@
 
 use crate::keybindings::Cancel;
 use crate::theme::{theme, ThemeColors};
-use crate::ui::{Selection1DExtension, Selection2DExtension};
+use crate::ui::Selection1DExtension;
 use crate::views::components::{
-    code_block_container, get_scrollbar_geometry, modal_backdrop, modal_content,
-    segmented_toggle, HighlightedLine,
+    build_styled_text_with_backgrounds, code_block_container, get_scrollbar_geometry,
+    modal_backdrop, modal_content, segmented_toggle, selection_bg_ranges, HighlightedLine,
 };
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer};
@@ -13,31 +13,6 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::sync::Arc;
-
-/// Build a StyledText from highlighted spans — renders as a single text
-/// element with no sub-pixel gaps between colored tokens.
-fn build_styled_text(spans: &[crate::views::components::syntax::HighlightedSpan]) -> StyledText {
-    let mut text = String::new();
-    let mut highlights = Vec::new();
-
-    for span in spans {
-        let start = text.len();
-        text.push_str(&span.text);
-        let end = text.len();
-
-        if start < end {
-            highlights.push((
-                start..end,
-                HighlightStyle {
-                    color: Some(span.color.into()),
-                    ..Default::default()
-                },
-            ));
-        }
-    }
-
-    StyledText::new(text).with_highlights(highlights)
-}
 
 /// Helper to create rgba from u32 color and alpha.
 fn rgba(color: u32, alpha: f32) -> Rgba {
@@ -52,21 +27,14 @@ impl FileViewer {
     pub(super) fn render_line(&self, line_number: usize, line: &HighlightedLine, t: &ThemeColors, cx: &mut Context<Self>) -> Stateful<Div> {
         // Format line number with right padding
         let line_num_str = format!("{:>width$}", line_number + 1, width = self.line_num_width);
-        let has_selection = self.selection.line_has_selection(line_number);
         let line_num_width = self.line_num_width;
-
-        // Selection highlight color
-        let selection_bg = Rgba {
-            r: 0.2,
-            g: 0.4,
-            b: 0.7,
-            a: 0.4,
-        };
 
         let font_size = self.file_font_size;
         let line_height = font_size * 1.8;
         let char_width = font_size * 0.6;
         let gutter_width = (self.line_num_width as f32) * char_width + 16.0;
+
+        let bg_ranges = selection_bg_ranges(&self.selection, line_number, line.plain_text.len());
 
         div()
             .id(ElementId::Name(format!("line-{}", line_number).into()))
@@ -114,90 +82,14 @@ impl FileViewer {
                     ),
             )
             .child(
-                // Line content with syntax highlighting and selection
-                if has_selection {
-                    // Render with selection highlighting
-                    self.render_line_with_selection(line_number, line, t, selection_bg)
-                } else {
-                    // Simple render without selection — StyledText for gap-free rendering
-                    div()
-                        .flex_1()
-                        .pl(px(10.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .line_height(px(line_height))
-                        .child(build_styled_text(&line.spans))
-                },
-            )
-    }
-
-    /// Render a line with selection highlighting.
-    fn render_line_with_selection(
-        &self,
-        line_number: usize,
-        line: &HighlightedLine,
-        _t: &ThemeColors,
-        selection_bg: Rgba,
-    ) -> Div {
-        let font_size = self.file_font_size;
-        let line_height = font_size * 1.8;
-
-        let ((start_line, start_col), (end_line, end_col)) = match self.selection.normalized() {
-            Some(range) => range,
-            None => {
-                return div()
+                div()
                     .flex_1()
                     .pl(px(10.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .line_height(px(line_height))
-                    .child(build_styled_text(&line.spans));
-            }
-        };
-
-        // Determine selection bounds for this line
-        let line_len = line.plain_text.len();
-        let sel_start = if line_number == start_line { start_col.min(line_len) } else { 0 };
-        let sel_end = if line_number == end_line { end_col.min(line_len) } else { line_len };
-
-        // Build StyledText with selection background highlight
-        let mut text = String::new();
-        let mut highlights = Vec::new();
-
-        for span in &line.spans {
-            let start = text.len();
-            text.push_str(&span.text);
-            let end = text.len();
-
-            if start < end {
-                highlights.push((
-                    start..end,
-                    HighlightStyle {
-                        color: Some(span.color.into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-        }
-
-        // Add selection background
-        if sel_start < sel_end {
-            highlights.push((
-                sel_start..sel_end,
-                HighlightStyle {
-                    background_color: Some(selection_bg.into()),
-                    ..Default::default()
-                },
-            ));
-        }
-
-        div()
-            .flex_1()
-            .pl(px(10.0))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .line_height(px(line_height))
-            .child(StyledText::new(text).with_highlights(highlights))
+                    .child(build_styled_text_with_backgrounds(&line.spans, &bg_ranges)),
+            )
     }
 
     /// Render visible lines for the virtualized list.
