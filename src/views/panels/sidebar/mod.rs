@@ -470,6 +470,18 @@ impl Sidebar {
     }
 
     fn handle_sidebar_confirm(&mut self, _: &SidebarConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_rename.is_some() {
+            self.finish_project_rename(cx);
+            return;
+        }
+        if self.folder_rename.is_some() {
+            self.finish_folder_rename(cx);
+            return;
+        }
+        if self.terminal_rename.is_some() {
+            self.finish_rename(cx);
+            return;
+        }
         if self.is_interactive_mode_active() { return; }
         let items = self.build_cursor_items(cx);
         let Some(idx) = self.cursor_index else { return };
@@ -555,6 +567,18 @@ impl Sidebar {
     }
 
     fn handle_sidebar_escape(&mut self, _: &SidebarEscape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_rename.is_some() {
+            self.cancel_project_rename(cx);
+            return;
+        }
+        if self.folder_rename.is_some() {
+            self.cancel_folder_rename(cx);
+            return;
+        }
+        if self.terminal_rename.is_some() {
+            self.cancel_rename(cx);
+            return;
+        }
         self.cursor_index = None;
         if let Some(ref saved) = self.saved_focus {
             window.focus(saved, cx);

@@ -1,6 +1,6 @@
 //! Project and terminal list rendering for the sidebar
 
-use crate::keybindings::{Cancel, MinimizeTerminal, ToggleFullscreen};
+use crate::keybindings::{MinimizeTerminal, ToggleFullscreen};
 use crate::theme::theme;
 use crate::views::components::is_renaming;
 use gpui::*;
@@ -119,22 +119,9 @@ impl Sidebar {
             .child(
                 // Project name (or input if renaming)
                 if is_renaming {
-                    if let Some(input_el) = sidebar_rename_input("project-rename-input", &self.project_rename, &t) {
-                        input_el
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_project_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_project_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().into_any_element()
-                    }
+                    sidebar_rename_input("project-rename-input", &self.project_rename, &t)
+                        .map(|el| el.into_any_element())
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("project-name-{}", project.id).into()),
@@ -262,22 +249,9 @@ impl Sidebar {
             .child(
                 // Project name (or input if renaming)
                 if is_renaming {
-                    if let Some(input_el) = sidebar_rename_input("worktree-rename-input", &self.project_rename, &t) {
-                        input_el
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_project_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_project_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().into_any_element()
-                    }
+                    sidebar_rename_input("worktree-rename-input", &self.project_rename, &t)
+                        .map(|el| el.into_any_element())
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("worktree-name-{}", project.id).into()),
@@ -433,26 +407,13 @@ impl Sidebar {
             .child(
                 // Terminal name (or input if renaming)
                 if is_renaming {
-                    if let Some(input_el) = sidebar_rename_input(
+                    sidebar_rename_input(
                         ElementId::Name(format!("{}terminal-rename-input", id_prefix).into()),
                         &self.terminal_rename,
                         &t,
-                    ) {
-                        input_el
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().min_w_0().into_any_element()
-                    }
+                    )
+                        .map(|el| el.into_any_element())
+                        .unwrap_or_else(|| div().flex_1().min_w_0().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("{}terminal-name-{}", id_prefix, terminal_id).into()),

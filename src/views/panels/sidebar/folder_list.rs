@@ -1,6 +1,6 @@
 //! Folder list rendering for the sidebar
 
-use crate::keybindings::Cancel;
+
 use crate::theme::theme;
 use crate::views::components::is_renaming;
 use gpui::*;
@@ -129,22 +129,9 @@ impl Sidebar {
             .child(
                 // Folder name (or input if renaming)
                 if is_renaming {
-                    if let Some(input_el) = sidebar_rename_input("folder-rename-input", &self.folder_rename, &t) {
-                        input_el
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_folder_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_folder_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().into_any_element()
-                    }
+                    sidebar_rename_input("folder-rename-input", &self.folder_rename, &t)
+                        .map(|el| el.into_any_element())
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("folder-name-{}", folder.id).into()),
@@ -341,22 +328,9 @@ impl Sidebar {
             .child(
                 // Project name (or input if renaming)
                 if is_renaming {
-                    if let Some(input_el) = sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t) {
-                        input_el
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_project_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                match event.keystroke.key.as_str() {
-                                    "enter" => this.finish_project_rename(cx),
-                                    _ => {}
-                                }
-                            }))
-                            .into_any_element()
-                    } else {
-                        div().flex_1().into_any_element()
-                    }
+                    sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t)
+                        .map(|el| el.into_any_element())
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("fp-project-name-{}", project.id).into()),

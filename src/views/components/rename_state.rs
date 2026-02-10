@@ -13,12 +13,14 @@ pub struct RenameState<Id> {
     pub target: Id,
     /// The input entity for editing the name
     pub input: Entity<SimpleInputState>,
+    /// Holds the blur subscription alive so the on_blur handler fires
+    _blur_subscription: Option<Subscription>,
 }
 
 impl<Id> RenameState<Id> {
     /// Create a new rename state.
     pub fn new(target: Id, input: Entity<SimpleInputState>) -> Self {
-        Self { target, input }
+        Self { target, input, _blur_subscription: None }
     }
 
     /// Get the current input value.
@@ -102,12 +104,12 @@ where
 
     // Set up blur handler
     let focus_handle = input.read(cx).focus_handle(cx);
-    let _ = cx.on_blur(&focus_handle, window, on_blur);
+    let subscription = cx.on_blur(&focus_handle, window, on_blur);
 
     // Focus will be set by on_blur registration
     window.focus(&focus_handle, cx);
 
-    RenameState::new(target, input)
+    RenameState { target, input, _blur_subscription: Some(subscription) }
 }
 
 /// Finish a rename operation and get the result.
