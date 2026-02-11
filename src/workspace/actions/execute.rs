@@ -45,7 +45,7 @@ pub fn execute_action(
 ) -> ActionResult {
     match action {
         ActionRequest::CreateTerminal { project_id } => {
-            ws.start_terminal(&project_id, cx);
+            ws.add_terminal(&project_id, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::SplitTerminal {
