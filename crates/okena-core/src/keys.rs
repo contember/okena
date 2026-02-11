@@ -17,6 +17,8 @@ pub enum SpecialKey {
     End,
     PageUp,
     PageDown,
+    Backspace,
+    Delete,
 }
 
 impl SpecialKey {
@@ -37,6 +39,8 @@ impl SpecialKey {
             SpecialKey::End => b"\x1b[F",
             SpecialKey::PageUp => b"\x1b[5~",
             SpecialKey::PageDown => b"\x1b[6~",
+            SpecialKey::Backspace => b"\x7f",
+            SpecialKey::Delete => b"\x1b[3~",
         }
     }
 }
@@ -62,6 +66,8 @@ mod tests {
             SpecialKey::End,
             SpecialKey::PageUp,
             SpecialKey::PageDown,
+            SpecialKey::Backspace,
+            SpecialKey::Delete,
         ];
         for key in keys {
             let json = serde_json::to_string(&key).unwrap();
@@ -86,5 +92,7 @@ mod tests {
         assert_eq!(SpecialKey::End.to_bytes(), b"\x1b[F");
         assert_eq!(SpecialKey::PageUp.to_bytes(), b"\x1b[5~");
         assert_eq!(SpecialKey::PageDown.to_bytes(), b"\x1b[6~");
+        assert_eq!(SpecialKey::Backspace.to_bytes(), b"\x7f");
+        assert_eq!(SpecialKey::Delete.to_bytes(), b"\x1b[3~");
     }
 }
