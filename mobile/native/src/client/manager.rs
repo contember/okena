@@ -48,13 +48,13 @@ impl ConnectionManager {
     }
 
     /// Create a new connection and return its ID.
-    pub fn add_connection(&self, host: &str, port: u16) -> String {
+    pub fn add_connection(&self, host: &str, port: u16, saved_token: Option<String>) -> String {
         let config = RemoteConnectionConfig {
             id: uuid::Uuid::new_v4().to_string(),
             name: format!("{}:{}", host, port),
             host: host.to_string(),
             port,
-            saved_token: None,
+            saved_token,
             token_obtained_at: None,
         };
         let conn_id = config.id.clone();
@@ -135,6 +135,14 @@ impl ConnectionManager {
         } else {
             ConnectionStatus::Disconnected
         }
+    }
+
+    /// Get the current auth token for a connection.
+    pub fn get_token(&self, conn_id: &str) -> Option<String> {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .and_then(|conn| conn.client.read().config().saved_token.clone())
     }
 
     /// Get the cached remote state.

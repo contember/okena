@@ -4,12 +4,21 @@ class SavedServer {
   final String host;
   final int port;
   final String? label;
+  final String? token;
 
   const SavedServer({
     required this.host,
     required this.port,
     this.label,
+    this.token,
   });
+
+  SavedServer copyWith({String? token}) => SavedServer(
+        host: host,
+        port: port,
+        label: label,
+        token: token ?? this.token,
+      );
 
   String get displayName => label ?? '$host:$port';
 
@@ -17,12 +26,14 @@ class SavedServer {
         'host': host,
         'port': port,
         if (label != null) 'label': label,
+        if (token != null) 'token': token,
       };
 
   factory SavedServer.fromJson(Map<String, dynamic> json) => SavedServer(
         host: json['host'] as String,
         port: json['port'] as int,
         label: json['label'] as String?,
+        token: json['token'] as String?,
       );
 
   static List<SavedServer> listFromJson(String jsonString) {
