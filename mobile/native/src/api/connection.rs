@@ -38,12 +38,19 @@ pub fn init_app() {
 }
 
 /// Connect to an Okena remote server. Returns a connection ID.
+/// If a saved token is provided, it will be used to skip pairing.
 #[flutter_rust_bridge::frb(sync)]
-pub fn connect(host: String, port: u16) -> String {
+pub fn connect(host: String, port: u16, saved_token: Option<String>) -> String {
     let mgr = ConnectionManager::get();
-    let conn_id = mgr.add_connection(&host, port);
+    let conn_id = mgr.add_connection(&host, port, saved_token);
     mgr.connect(&conn_id);
     conn_id
+}
+
+/// Get the current auth token for a connection (if paired).
+#[flutter_rust_bridge::frb(sync)]
+pub fn get_token(conn_id: String) -> Option<String> {
+    ConnectionManager::get().get_token(&conn_id)
 }
 
 /// Pair with the server using a pairing code.

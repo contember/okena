@@ -70,7 +70,8 @@ class ConnectionProvider extends ChangeNotifier {
     }
 
     _activeServer = server;
-    _connId = ffi.connect(host: server.host, port: server.port);
+    _connId = ffi.connect(
+        host: server.host, port: server.port, savedToken: server.token);
     _status = const ffi.ConnectionStatus.connecting();
     notifyListeners();
     _startPolling(fast: true);
@@ -97,6 +98,20 @@ class ConnectionProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _persistToken() {
+    if (_connId == null || _activeServer == null) return;
+    final token = ffi.getToken(connId: _connId!);
+    if (token != null && token != _activeServer!.token) {
+      final updated = _activeServer!.copyWith(token: token);
+      final idx = _servers.indexOf(_activeServer!);
+      if (idx >= 0) {
+        _servers[idx] = updated;
+      }
+      _activeServer = updated;
+      _saveServers();
+    }
+  }
+
   void _startPolling({bool fast = false}) {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(
@@ -115,11 +130,12 @@ class ConnectionProvider extends ChangeNotifier {
     final oldStatus = _status;
     _status = ffi.connectionStatus(connId: _connId!);
 
-    // Switch to slow polling once connected
+    // Switch to slow polling once connected, and persist the token
     if (_status is ffi.ConnectionStatus_Connected &&
         oldStatus is! ffi.ConnectionStatus_Connected) {
       _stopPolling();
       _startPolling(fast: false);
+      _persistToken();
     }
 
     // Stop polling on disconnect or error

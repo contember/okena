@@ -11,8 +11,17 @@ part 'connection.freezed.dart';
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`, `from`
 
 /// Connect to an Okena remote server. Returns a connection ID.
-String connect({required String host, required int port}) =>
-    RustLib.instance.api.crateApiConnectionConnect(host: host, port: port);
+/// If a saved token is provided, it will be used to skip pairing.
+String connect({required String host, required int port, String? savedToken}) =>
+    RustLib.instance.api.crateApiConnectionConnect(
+      host: host,
+      port: port,
+      savedToken: savedToken,
+    );
+
+/// Get the current auth token for a connection (if paired).
+String? getToken({required String connId}) =>
+    RustLib.instance.api.crateApiConnectionGetToken(connId: connId);
 
 /// Pair with the server using a pairing code.
 Future<void> pair({required String connId, required String code}) =>
