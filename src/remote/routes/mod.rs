@@ -4,6 +4,7 @@ pub mod pair;
 pub mod refresh;
 pub mod state;
 pub mod stream;
+pub mod tokens;
 
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge::BridgeSender;
@@ -54,6 +55,8 @@ pub fn build_router(
         .route("/v1/actions", axum::routing::post(actions::post_actions))
         .route("/v1/stream", axum::routing::get(stream::ws_handler))
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
+        .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
+        .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
