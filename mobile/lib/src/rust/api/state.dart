@@ -49,6 +49,17 @@ Future<void> createTerminal({
   projectId: projectId,
 );
 
+/// Close a terminal in the given project via POST /v1/actions.
+Future<void> closeTerminal({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateCloseTerminal(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+);
+
 /// Flat FFI-friendly project info.
 class ProjectInfo {
   final String id;

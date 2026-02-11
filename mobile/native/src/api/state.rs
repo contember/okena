@@ -122,3 +122,20 @@ pub async fn create_terminal(conn_id: String, project_id: String) -> anyhow::Res
     .await
 }
 
+/// Close a terminal in the given project via POST /v1/actions.
+pub async fn close_terminal(
+    conn_id: String,
+    project_id: String,
+    terminal_id: String,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::CloseTerminal {
+            project_id,
+            terminal_id,
+        },
+    )
+    .await
+}
+

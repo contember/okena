@@ -33,6 +33,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  SelectionBounds dco_decode_box_autoadd_selection_bounds(dynamic raw);
+
+  @protected
   CellData dco_decode_cell_data(dynamic raw);
 
   @protected
@@ -43,6 +46,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CursorState dco_decode_cursor_state(dynamic raw);
+
+  @protected
+  double dco_decode_f_64(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -66,10 +72,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  SelectionBounds? dco_decode_opt_box_autoadd_selection_bounds(dynamic raw);
+
+  @protected
   ProjectInfo dco_decode_project_info(dynamic raw);
 
   @protected
   (String, String) dco_decode_record_string_string(dynamic raw);
+
+  @protected
+  ScrollInfo dco_decode_scroll_info(dynamic raw);
+
+  @protected
+  SelectionBounds dco_decode_selection_bounds(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -98,6 +113,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  SelectionBounds sse_decode_box_autoadd_selection_bounds(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   CellData sse_decode_cell_data(SseDeserializer deserializer);
 
   @protected
@@ -108,6 +128,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CursorState sse_decode_cursor_state(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -133,12 +156,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  SelectionBounds? sse_decode_opt_box_autoadd_selection_bounds(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer);
 
   @protected
   (String, String) sse_decode_record_string_string(
     SseDeserializer deserializer,
   );
+
+  @protected
+  ScrollInfo sse_decode_scroll_info(SseDeserializer deserializer);
+
+  @protected
+  SelectionBounds sse_decode_selection_bounds(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -171,6 +205,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_selection_bounds(
+    SelectionBounds self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_cell_data(CellData self, SseSerializer serializer);
 
   @protected
@@ -184,6 +224,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_cursor_state(CursorState self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -216,11 +259,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_selection_bounds(
+    SelectionBounds? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer);
 
   @protected
   void sse_encode_record_string_string(
     (String, String) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_scroll_info(ScrollInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_selection_bounds(
+    SelectionBounds self,
     SseSerializer serializer,
   );
 

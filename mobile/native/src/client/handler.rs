@@ -1,9 +1,10 @@
 use crate::client::terminal_holder::TerminalHolder;
 
 use okena_core::client::{is_remote_terminal, ConnectionHandler, WsClientMessage};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Mobile-specific handler that creates `TerminalHolder` objects.
 ///
@@ -11,15 +12,24 @@ use std::sync::Arc;
 /// can read from it.
 pub struct MobileConnectionHandler {
     terminals: Arc<RwLock<HashMap<String, TerminalHolder>>>,
+    last_activity: Mutex<Instant>,
 }
 
 impl MobileConnectionHandler {
     pub fn new(terminals: Arc<RwLock<HashMap<String, TerminalHolder>>>) -> Self {
-        Self { terminals }
+        Self {
+            terminals,
+            last_activity: Mutex::new(Instant::now()),
+        }
     }
 
     pub fn terminals(&self) -> &Arc<RwLock<HashMap<String, TerminalHolder>>> {
         &self.terminals
+    }
+
+    /// Seconds since last WS activity (terminal output).
+    pub fn seconds_since_activity(&self) -> f64 {
+        self.last_activity.lock().elapsed().as_secs_f64()
     }
 }
 
@@ -38,6 +48,7 @@ impl ConnectionHandler for MobileConnectionHandler {
     }
 
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
+        *self.last_activity.lock() = Instant::now();
         if let Some(holder) = self.terminals.read().get(prefixed_id) {
             holder.process_output(data);
         }

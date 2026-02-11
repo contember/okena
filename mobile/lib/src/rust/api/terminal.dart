@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Get the visible terminal cells for rendering.
 List<CellData> getVisibleCells({
@@ -23,6 +23,88 @@ CursorState getCursor({required String connId, required String terminalId}) =>
       connId: connId,
       terminalId: terminalId,
     );
+
+/// Scroll the terminal display (positive = up, negative = down).
+void scroll({
+  required String connId,
+  required String terminalId,
+  required int delta,
+}) => RustLib.instance.api.crateApiTerminalScroll(
+  connId: connId,
+  terminalId: terminalId,
+  delta: delta,
+);
+
+/// Get scroll info: total lines, visible lines, display offset.
+ScrollInfo getScrollInfo({
+  required String connId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiTerminalGetScrollInfo(
+  connId: connId,
+  terminalId: terminalId,
+);
+
+/// Start a character-level selection at col/row.
+void startSelection({
+  required String connId,
+  required String terminalId,
+  required int col,
+  required int row,
+}) => RustLib.instance.api.crateApiTerminalStartSelection(
+  connId: connId,
+  terminalId: terminalId,
+  col: col,
+  row: row,
+);
+
+/// Start a word (semantic) selection at col/row.
+void startWordSelection({
+  required String connId,
+  required String terminalId,
+  required int col,
+  required int row,
+}) => RustLib.instance.api.crateApiTerminalStartWordSelection(
+  connId: connId,
+  terminalId: terminalId,
+  col: col,
+  row: row,
+);
+
+/// Extend the current selection to col/row.
+void updateSelection({
+  required String connId,
+  required String terminalId,
+  required int col,
+  required int row,
+}) => RustLib.instance.api.crateApiTerminalUpdateSelection(
+  connId: connId,
+  terminalId: terminalId,
+  col: col,
+  row: row,
+);
+
+/// Clear the current selection.
+void clearSelection({required String connId, required String terminalId}) =>
+    RustLib.instance.api.crateApiTerminalClearSelection(
+      connId: connId,
+      terminalId: terminalId,
+    );
+
+/// Get the selected text, if any.
+String? getSelectedText({required String connId, required String terminalId}) =>
+    RustLib.instance.api.crateApiTerminalGetSelectedText(
+      connId: connId,
+      terminalId: terminalId,
+    );
+
+/// Get selection bounds for rendering.
+SelectionBounds? getSelectionBounds({
+  required String connId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiTerminalGetSelectionBounds(
+  connId: connId,
+  terminalId: terminalId,
+);
 
 /// Send text input to a terminal.
 Future<void> sendText({
@@ -114,4 +196,59 @@ class CursorState {
           row == other.row &&
           shape == other.shape &&
           visible == other.visible;
+}
+
+/// Scroll info for FFI transfer.
+class ScrollInfo {
+  final int totalLines;
+  final int visibleLines;
+  final int displayOffset;
+
+  const ScrollInfo({
+    required this.totalLines,
+    required this.visibleLines,
+    required this.displayOffset,
+  });
+
+  @override
+  int get hashCode =>
+      totalLines.hashCode ^ visibleLines.hashCode ^ displayOffset.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ScrollInfo &&
+          runtimeType == other.runtimeType &&
+          totalLines == other.totalLines &&
+          visibleLines == other.visibleLines &&
+          displayOffset == other.displayOffset;
+}
+
+/// Selection bounds for FFI transfer.
+class SelectionBounds {
+  final int startCol;
+  final int startRow;
+  final int endCol;
+  final int endRow;
+
+  const SelectionBounds({
+    required this.startCol,
+    required this.startRow,
+    required this.endCol,
+    required this.endRow,
+  });
+
+  @override
+  int get hashCode =>
+      startCol.hashCode ^ startRow.hashCode ^ endCol.hashCode ^ endRow.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SelectionBounds &&
+          runtimeType == other.runtimeType &&
+          startCol == other.startCol &&
+          startRow == other.startRow &&
+          endCol == other.endCol &&
+          endRow == other.endRow;
 }

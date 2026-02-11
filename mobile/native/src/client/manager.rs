@@ -167,6 +167,15 @@ impl ConnectionManager {
         Some(f(holder))
     }
 
+    /// Get seconds since last WS activity for a connection.
+    pub fn seconds_since_activity(&self, conn_id: &str) -> f64 {
+        let connections = self.connections.read();
+        connections
+            .get(conn_id)
+            .map(|conn| conn.handler.seconds_since_activity())
+            .unwrap_or(f64::MAX)
+    }
+
     /// Send a WebSocket message for a connection.
     pub fn send_ws_message(&self, conn_id: &str, msg: WsClientMessage) {
         let connections = self.connections.read();
