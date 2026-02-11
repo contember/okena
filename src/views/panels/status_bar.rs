@@ -1,4 +1,5 @@
 use crate::theme::theme;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
 use parking_lot::Mutex;
@@ -362,11 +363,13 @@ impl Render for StatusBar {
                 }
 
                 right
-                    .child(
-                        div()
-                            .text_color(rgb(t.text_muted))
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION")))
-                    )
+                    .when(cfg!(not(target_os = "macos")), |el| {
+                        el.child(
+                            div()
+                                .text_color(rgb(t.text_muted))
+                                .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        )
+                    })
                     .child(
                         div()
                             .text_color(rgb(t.text_secondary))

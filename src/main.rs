@@ -58,10 +58,109 @@ fn quit(_: &Quit, cx: &mut App) {
     cx.quit();
 }
 
-/// About action handler - shows about dialog
+/// About action handler - shows native macOS about panel
+#[cfg(target_os = "macos")]
 fn about(_: &About, _cx: &mut App) {
-    // TODO: Show about dialog when GPUI supports it
-    log::info!("Okena - A fast, native terminal multiplexer");
+    use std::ffi::c_void;
+
+    // Non-variadic objc_msgSend trampolines — ARM64 requires the standard
+    // (non-variadic) calling convention; declaring `...` misplaces arguments.
+    #[allow(clashing_extern_declarations)]
+    extern "C" {
+        fn objc_getClass(name: *const u8) -> *mut c_void;
+        fn sel_registerName(name: *const u8) -> *mut c_void;
+
+        #[link_name = "objc_msgSend"]
+        fn msg(obj: *mut c_void, sel: *mut c_void) -> *mut c_void;
+
+        #[link_name = "objc_msgSend"]
+        fn msg_str(obj: *mut c_void, sel: *mut c_void, s: *const u8) -> *mut c_void;
+
+        #[link_name = "objc_msgSend"]
+        fn msg_id(obj: *mut c_void, sel: *mut c_void, a: *mut c_void) -> *mut c_void;
+
+        #[link_name = "objc_msgSend"]
+        fn msg_id2(obj: *mut c_void, sel: *mut c_void, a: *mut c_void, b: *mut c_void) -> *mut c_void;
+
+        #[link_name = "objc_msgSend"]
+        fn msg_bytes_len(obj: *mut c_void, sel: *mut c_void, bytes: *const u8, len: usize) -> *mut c_void;
+    }
+
+    unsafe {
+        let alloc = sel_registerName(b"alloc\0".as_ptr());
+        let init_utf8 = sel_registerName(b"initWithUTF8String:\0".as_ptr());
+        let ns_string = objc_getClass(b"NSString\0".as_ptr());
+
+        // Helper: create NSString from null-terminated bytes
+        let nsstring = |s: &[u8]| -> *mut c_void {
+            msg_str(msg(ns_string, alloc), init_utf8, s.as_ptr())
+        };
+
+        // Build options dictionary with version
+        let dict = msg(
+            objc_getClass(b"NSMutableDictionary\0".as_ptr()),
+            sel_registerName(b"new\0".as_ptr()),
+        );
+        let set_obj = sel_registerName(b"setObject:forKey:\0".as_ptr());
+        let version_cstr = concat!(env!("CARGO_PKG_VERSION"), "\0");
+        msg_id2(
+            dict,
+            set_obj,
+            nsstring(version_cstr.as_bytes()),
+            nsstring(b"ApplicationVersion\0"),
+        );
+
+        // Load embedded app icon as NSImage
+        let icon_png = include_bytes!("../assets/logo.png");
+        let ns_data = msg_bytes_len(
+            objc_getClass(b"NSData\0".as_ptr()),
+            sel_registerName(b"dataWithBytes:length:\0".as_ptr()),
+            icon_png.as_ptr(),
+            icon_png.len(),
+        );
+        let ns_image = msg_id(
+            msg(objc_getClass(b"NSImage\0".as_ptr()), alloc),
+            sel_registerName(b"initWithData:\0".as_ptr()),
+            ns_data,
+        );
+        if !ns_image.is_null() {
+            msg_id2(dict, set_obj, ns_image, nsstring(b"ApplicationIcon\0"));
+        }
+
+        // Credits as attributed string from HTML (supports clickable link)
+        let html = b"<div style=\"text-align:center; font-family:-apple-system; font-size:11px;\">Created by Contember Ltd.<br><a href=\"https://contember.com\">contember.com</a></div>";
+        let html_data = msg_bytes_len(
+            objc_getClass(b"NSData\0".as_ptr()),
+            sel_registerName(b"dataWithBytes:length:\0".as_ptr()),
+            html.as_ptr(),
+            html.len(),
+        );
+        let credits = msg_id2(
+            msg(objc_getClass(b"NSAttributedString\0".as_ptr()), alloc),
+            sel_registerName(b"initWithHTML:documentAttributes:\0".as_ptr()),
+            html_data,
+            std::ptr::null_mut::<c_void>(),
+        );
+        if !credits.is_null() {
+            msg_id2(dict, set_obj, credits, nsstring(b"Credits\0"));
+        }
+
+        // [[NSApplication sharedApplication] orderFrontStandardAboutPanelWithOptions:dict]
+        let app = msg(
+            objc_getClass(b"NSApplication\0".as_ptr()),
+            sel_registerName(b"sharedApplication\0".as_ptr()),
+        );
+        msg_id(
+            app,
+            sel_registerName(b"orderFrontStandardAboutPanelWithOptions:\0".as_ptr()),
+            dict,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn about(_: &About, _cx: &mut App) {
+    log::info!("Okena v{}", env!("CARGO_PKG_VERSION"));
 }
 
 /// Set up macOS application menu
