@@ -408,10 +408,12 @@ impl LayoutContainer {
 
             // Add divider before this child (if not first visible child)
             if visible_idx > 0 {
+                let left_original_idx = visible_children_info[visible_idx - 1].0;
                 let divider = render_split_divider(
                     self.workspace.clone(),
                     self.project_id.clone(),
-                    visible_idx - 1,
+                    left_original_idx,
+                    *original_idx,
                     direction,
                     self.layout_path.clone(),
                     container_bounds_ref.clone(),
