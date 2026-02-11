@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../providers/connection_provider.dart';
 import '../providers/workspace_provider.dart';
+import '../rust/api/state.dart' as state_ffi;
 import 'status_indicator.dart';
 
 class ProjectDrawer extends StatelessWidget {
@@ -66,7 +67,7 @@ class ProjectDrawer extends StatelessWidget {
                         workspace.selectProject(project.id);
                       },
                     ),
-                    if (isSelected)
+                    if (isSelected) ...[
                       ...project.terminalIds.map((tid) {
                         final isTerminalSelected =
                             tid == workspace.selectedTerminalId;
@@ -99,6 +100,35 @@ class ProjectDrawer extends StatelessWidget {
                           },
                         );
                       }),
+                      if (connection.connId != null)
+                        ListTile(
+                          contentPadding:
+                              const EdgeInsets.only(left: 56, right: 16),
+                          leading: Icon(
+                            Icons.add,
+                            size: 20,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                          title: Text(
+                            'New Terminal',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
+                          dense: true,
+                          onTap: () {
+                            state_ffi.createTerminal(
+                              connId: connection.connId!,
+                              projectId: project.id,
+                            );
+                            Navigator.of(context).pop();
+                          },
+                        ),
+                    ],
                   ],
                 );
               },
