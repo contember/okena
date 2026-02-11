@@ -1,8 +1,9 @@
 use crate::api::terminal::{CellData, CursorShape, CursorState};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term};
@@ -148,6 +149,82 @@ impl TerminalHolder {
         term.resize(size);
         *self.cols.lock() = cols;
         *self.rows.lock() = rows;
+    }
+
+    /// Scroll the terminal display by delta lines (positive = up, negative = down).
+    pub fn scroll(&self, delta: i32) {
+        let mut term = self.term.lock();
+        term.scroll_display(Scroll::Delta(delta));
+        drop(term);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Get scroll information: (total_lines, visible_lines, display_offset).
+    pub fn scroll_info(&self) -> (usize, usize, usize) {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let visible_lines = grid.screen_lines();
+        let history_size = grid.history_size();
+        let total_lines = visible_lines + history_size;
+        let display_offset = grid.display_offset();
+        (total_lines, visible_lines, display_offset)
+    }
+
+    /// Start a simple (character-level) selection at the given visual col/row.
+    pub fn start_selection(&self, col: usize, row: usize) {
+        let mut term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let buffer_row = row as i32 - display_offset;
+        let point = Point::new(Line(buffer_row), Column(col));
+        let selection = Selection::new(SelectionType::Simple, point, Side::Left);
+        term.selection = Some(selection);
+    }
+
+    /// Start a word (semantic) selection at the given visual col/row.
+    pub fn start_word_selection(&self, col: usize, row: usize) {
+        let mut term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let buffer_row = row as i32 - display_offset;
+        let point = Point::new(Line(buffer_row), Column(col));
+        let selection = Selection::new(SelectionType::Semantic, point, Side::Left);
+        term.selection = Some(selection);
+    }
+
+    /// Extend the current selection to the given visual col/row.
+    pub fn update_selection(&self, col: usize, row: usize) {
+        let mut term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let buffer_row = row as i32 - display_offset;
+        if let Some(ref mut selection) = term.selection {
+            let point = Point::new(Line(buffer_row), Column(col));
+            selection.update(point, Side::Right);
+        }
+    }
+
+    /// Clear the current selection.
+    pub fn clear_selection(&self) {
+        let mut term = self.term.lock();
+        term.selection = None;
+    }
+
+    /// Get the selected text, if any.
+    pub fn get_selected_text(&self) -> Option<String> {
+        let term = self.term.lock();
+        term.selection_to_string()
+    }
+
+    /// Get selection bounds as ((start_col, start_row), (end_col, end_row))
+    /// where rows are buffer coordinates (adjusted for display_offset for rendering).
+    pub fn selection_bounds(&self) -> Option<((usize, i32), (usize, i32))> {
+        let term = self.term.lock();
+        if let Some(ref selection) = term.selection {
+            if let Some(range) = selection.to_range(&*term) {
+                let start = (range.start.column.0, range.start.line.0);
+                let end = (range.end.column.0, range.end.line.0);
+                return Some((start, end));
+            }
+        }
+        None
     }
 
     /// Check if the terminal has unprocessed changes.

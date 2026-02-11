@@ -35,6 +35,11 @@ void disconnect({required String connId}) =>
 ConnectionStatus connectionStatus({required String connId}) =>
     RustLib.instance.api.crateApiConnectionConnectionStatus(connId: connId);
 
+/// Get seconds since last WS activity (terminal output).
+/// Returns a large value if the connection doesn't exist.
+double secondsSinceActivity({required String connId}) =>
+    RustLib.instance.api.crateApiConnectionSecondsSinceActivity(connId: connId);
+
 @freezed
 sealed class ConnectionStatus with _$ConnectionStatus {
   const ConnectionStatus._();

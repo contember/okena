@@ -71,3 +71,10 @@ pub fn disconnect(conn_id: String) {
 pub fn connection_status(conn_id: String) -> ConnectionStatus {
     ConnectionManager::get().get_status(&conn_id).into()
 }
+
+/// Get seconds since last WS activity (terminal output).
+/// Returns a large value if the connection doesn't exist.
+#[flutter_rust_bridge::frb(sync)]
+pub fn seconds_since_activity(conn_id: String) -> f64 {
+    ConnectionManager::get().seconds_since_activity(&conn_id)
+}

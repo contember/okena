@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 678777699;
+  int get rustContentHash => -1973712882;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -79,6 +79,17 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  void crateApiTerminalClearSelection({
+    required String connId,
+    required String terminalId,
+  });
+
+  Future<void> crateApiStateCloseTerminal({
+    required String connId,
+    required String projectId,
+    required String terminalId,
+  });
+
   String crateApiConnectionConnect({
     required String host,
     required int port,
@@ -104,6 +115,21 @@ abstract class RustLibApi extends BaseApi {
   String? crateApiStateGetFocusedProjectId({required String connId});
 
   List<ProjectInfo> crateApiStateGetProjects({required String connId});
+
+  ScrollInfo crateApiTerminalGetScrollInfo({
+    required String connId,
+    required String terminalId,
+  });
+
+  String? crateApiTerminalGetSelectedText({
+    required String connId,
+    required String terminalId,
+  });
+
+  SelectionBounds? crateApiTerminalGetSelectionBounds({
+    required String connId,
+    required String terminalId,
+  });
 
   String? crateApiConnectionGetToken({required String connId});
 
@@ -131,6 +157,14 @@ abstract class RustLibApi extends BaseApi {
     required int rows,
   });
 
+  void crateApiTerminalScroll({
+    required String connId,
+    required String terminalId,
+    required int delta,
+  });
+
+  double crateApiConnectionSecondsSinceActivity({required String connId});
+
   Future<void> crateApiStateSendSpecialKey({
     required String connId,
     required String terminalId,
@@ -142,6 +176,27 @@ abstract class RustLibApi extends BaseApi {
     required String terminalId,
     required String text,
   });
+
+  void crateApiTerminalStartSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  });
+
+  void crateApiTerminalStartWordSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  });
+
+  void crateApiTerminalUpdateSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -151,6 +206,72 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required super.generalizedFrbRustBinding,
     required super.portManager,
   });
+
+  @override
+  void crateApiTerminalClearSelection({
+    required String connId,
+    required String terminalId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalClearSelectionConstMeta,
+        argValues: [connId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalClearSelectionConstMeta =>
+      const TaskConstMeta(
+        debugName: "clear_selection",
+        argNames: ["connId", "terminalId"],
+      );
+
+  @override
+  Future<void> crateApiStateCloseTerminal({
+    required String connId,
+    required String projectId,
+    required String terminalId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(projectId, serializer);
+          sse_encode_String(terminalId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiStateCloseTerminalConstMeta,
+        argValues: [connId, projectId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiStateCloseTerminalConstMeta => const TaskConstMeta(
+    debugName: "close_terminal",
+    argNames: ["connId", "projectId", "terminalId"],
+  );
 
   @override
   String crateApiConnectionConnect({
@@ -165,7 +286,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(host, serializer);
           sse_encode_u_16(port, serializer);
           sse_encode_opt_String(savedToken, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -192,7 +313,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_connection_status,
@@ -222,7 +343,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 5,
             port: port_,
           );
         },
@@ -250,7 +371,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -273,7 +394,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -303,7 +424,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_cursor_state,
@@ -328,7 +449,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -354,7 +475,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_project_info,
@@ -371,13 +492,103 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "get_projects", argNames: ["connId"]);
 
   @override
+  ScrollInfo crateApiTerminalGetScrollInfo({
+    required String connId,
+    required String terminalId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_scroll_info,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalGetScrollInfoConstMeta,
+        argValues: [connId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalGetScrollInfoConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_scroll_info",
+        argNames: ["connId", "terminalId"],
+      );
+
+  @override
+  String? crateApiTerminalGetSelectedText({
+    required String connId,
+    required String terminalId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalGetSelectedTextConstMeta,
+        argValues: [connId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalGetSelectedTextConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_selected_text",
+        argNames: ["connId", "terminalId"],
+      );
+
+  @override
+  SelectionBounds? crateApiTerminalGetSelectionBounds({
+    required String connId,
+    required String terminalId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_selection_bounds,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalGetSelectionBoundsConstMeta,
+        argValues: [connId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalGetSelectionBoundsConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_selection_bounds",
+        argNames: ["connId", "terminalId"],
+      );
+
+  @override
   String? crateApiConnectionGetToken({required String connId}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -404,7 +615,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_cell_data,
@@ -432,7 +643,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 16,
             port: port_,
           );
         },
@@ -461,7 +672,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -493,7 +704,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 18,
             port: port_,
           );
         },
@@ -529,7 +740,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 19,
             port: port_,
           );
         },
@@ -551,6 +762,63 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiTerminalScroll({
+    required String connId,
+    required String terminalId,
+    required int delta,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          sse_encode_i_32(delta, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalScrollConstMeta,
+        argValues: [connId, terminalId, delta],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalScrollConstMeta => const TaskConstMeta(
+    debugName: "scroll",
+    argNames: ["connId", "terminalId", "delta"],
+  );
+
+  @override
+  double crateApiConnectionSecondsSinceActivity({required String connId}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_f_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiConnectionSecondsSinceActivityConstMeta,
+        argValues: [connId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiConnectionSecondsSinceActivityConstMeta =>
+      const TaskConstMeta(
+        debugName: "seconds_since_activity",
+        argNames: ["connId"],
+      );
+
+  @override
   Future<void> crateApiStateSendSpecialKey({
     required String connId,
     required String terminalId,
@@ -566,7 +834,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 22,
             port: port_,
           );
         },
@@ -603,7 +871,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 23,
             port: port_,
           );
         },
@@ -622,6 +890,108 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "send_text",
     argNames: ["connId", "terminalId", "text"],
   );
+
+  @override
+  void crateApiTerminalStartSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          sse_encode_u_16(col, serializer);
+          sse_encode_u_16(row, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalStartSelectionConstMeta,
+        argValues: [connId, terminalId, col, row],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalStartSelectionConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_selection",
+        argNames: ["connId", "terminalId", "col", "row"],
+      );
+
+  @override
+  void crateApiTerminalStartWordSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          sse_encode_u_16(col, serializer);
+          sse_encode_u_16(row, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalStartWordSelectionConstMeta,
+        argValues: [connId, terminalId, col, row],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalStartWordSelectionConstMeta =>
+      const TaskConstMeta(
+        debugName: "start_word_selection",
+        argNames: ["connId", "terminalId", "col", "row"],
+      );
+
+  @override
+  void crateApiTerminalUpdateSelection({
+    required String connId,
+    required String terminalId,
+    required int col,
+    required int row,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          sse_encode_u_16(col, serializer);
+          sse_encode_u_16(row, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalUpdateSelectionConstMeta,
+        argValues: [connId, terminalId, col, row],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalUpdateSelectionConstMeta =>
+      const TaskConstMeta(
+        debugName: "update_selection",
+        argNames: ["connId", "terminalId", "col", "row"],
+      );
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -649,6 +1019,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  SelectionBounds dco_decode_box_autoadd_selection_bounds(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_selection_bounds(raw);
   }
 
   @protected
@@ -705,6 +1081,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  double dco_decode_f_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
   int dco_decode_i_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
@@ -747,6 +1129,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SelectionBounds? dco_decode_opt_box_autoadd_selection_bounds(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_selection_bounds(raw);
+  }
+
+  @protected
   ProjectInfo dco_decode_project_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -770,6 +1158,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       throw Exception('Expected 2 elements, got ${arr.length}');
     }
     return (dco_decode_String(arr[0]), dco_decode_String(arr[1]));
+  }
+
+  @protected
+  ScrollInfo dco_decode_scroll_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return ScrollInfo(
+      totalLines: dco_decode_u_32(arr[0]),
+      visibleLines: dco_decode_u_32(arr[1]),
+      displayOffset: dco_decode_u_32(arr[2]),
+    );
+  }
+
+  @protected
+  SelectionBounds dco_decode_selection_bounds(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return SelectionBounds(
+      startCol: dco_decode_u_16(arr[0]),
+      startRow: dco_decode_i_32(arr[1]),
+      endCol: dco_decode_u_16(arr[2]),
+      endRow: dco_decode_i_32(arr[3]),
+    );
   }
 
   @protected
@@ -823,6 +1238,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  SelectionBounds sse_decode_box_autoadd_selection_bounds(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_selection_bounds(deserializer));
   }
 
   @protected
@@ -882,6 +1305,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       shape: var_shape,
       visible: var_visible,
     );
+  }
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat64();
   }
 
   @protected
@@ -959,6 +1388,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SelectionBounds? sse_decode_opt_box_autoadd_selection_bounds(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_selection_bounds(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
@@ -985,6 +1427,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_field0 = sse_decode_String(deserializer);
     var var_field1 = sse_decode_String(deserializer);
     return (var_field0, var_field1);
+  }
+
+  @protected
+  ScrollInfo sse_decode_scroll_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_totalLines = sse_decode_u_32(deserializer);
+    var var_visibleLines = sse_decode_u_32(deserializer);
+    var var_displayOffset = sse_decode_u_32(deserializer);
+    return ScrollInfo(
+      totalLines: var_totalLines,
+      visibleLines: var_visibleLines,
+      displayOffset: var_displayOffset,
+    );
+  }
+
+  @protected
+  SelectionBounds sse_decode_selection_bounds(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_startCol = sse_decode_u_16(deserializer);
+    var var_startRow = sse_decode_i_32(deserializer);
+    var var_endCol = sse_decode_u_16(deserializer);
+    var var_endRow = sse_decode_i_32(deserializer);
+    return SelectionBounds(
+      startCol: var_startCol,
+      startRow: var_startRow,
+      endCol: var_endCol,
+      endRow: var_endRow,
+    );
   }
 
   @protected
@@ -1044,6 +1514,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_selection_bounds(
+    SelectionBounds self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_selection_bounds(self, serializer);
+  }
+
+  @protected
   void sse_encode_cell_data(CellData self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.character, serializer);
@@ -1086,6 +1565,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_16(self.row, serializer);
     sse_encode_cursor_shape(self.shape, serializer);
     sse_encode_bool(self.visible, serializer);
+  }
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat64(self);
   }
 
   @protected
@@ -1160,6 +1645,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_selection_bounds(
+    SelectionBounds? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_selection_bounds(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
@@ -1178,6 +1676,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.$1, serializer);
     sse_encode_String(self.$2, serializer);
+  }
+
+  @protected
+  void sse_encode_scroll_info(ScrollInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.totalLines, serializer);
+    sse_encode_u_32(self.visibleLines, serializer);
+    sse_encode_u_32(self.displayOffset, serializer);
+  }
+
+  @protected
+  void sse_encode_selection_bounds(
+    SelectionBounds self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_16(self.startCol, serializer);
+    sse_encode_i_32(self.startRow, serializer);
+    sse_encode_u_16(self.endCol, serializer);
+    sse_encode_i_32(self.endRow, serializer);
   }
 
   @protected
