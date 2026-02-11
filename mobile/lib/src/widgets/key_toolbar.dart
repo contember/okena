@@ -71,6 +71,61 @@ class _KeyToolbarState extends State<KeyToolbar> {
     }
   }
 
+  void _showComposeSheet() {
+    final controller = TextEditingController();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF2A2A3E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        void submit() {
+          final text = controller.text;
+          if (text.isEmpty) return;
+          _sendText(text);
+          _sendSpecialKey('Enter');
+          Navigator.of(ctx).pop();
+        }
+
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+          ),
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLines: null,
+            minLines: 3,
+            style: const TextStyle(
+              color: Colors.white,
+              fontFamily: 'JetBrainsMono',
+              fontSize: 14,
+            ),
+            decoration: InputDecoration(
+              hintText: 'Type your message...',
+              hintStyle: const TextStyle(color: Colors.white38),
+              filled: true,
+              fillColor: const Color(0xFF363650),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.send, color: Colors.blue),
+                onPressed: submit,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -81,6 +136,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
           scrollDirection: Axis.horizontal,
           child: Row(
             children: [
+              _buildIconKey(Icons.edit_note, _showComposeSheet),
               _buildKey('ESC', () => _sendSpecialKey('Escape')),
               _buildKey('TAB', () => _sendSpecialKey('Tab')),
               _buildToggleKey('CTRL', _ctrlActive, _onCtrlTap),
@@ -118,6 +174,26 @@ class _KeyToolbarState extends State<KeyToolbar> {
                 fontFamily: 'JetBrainsMono',
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIconKey(IconData icon, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 6),
+      child: Material(
+        color: const Color(0xFF363650),
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(6),
+          onTap: onTap,
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 44),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            alignment: Alignment.center,
+            child: Icon(icon, color: Colors.white70, size: 18),
           ),
         ),
       ),
