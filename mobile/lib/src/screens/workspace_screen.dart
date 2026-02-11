@@ -5,7 +5,7 @@ import '../providers/connection_provider.dart';
 import '../providers/workspace_provider.dart';
 import '../widgets/project_drawer.dart';
 import '../widgets/key_toolbar.dart';
-import '../widgets/layout_renderer.dart';
+import '../widgets/terminal_view.dart';
 
 class WorkspaceScreen extends StatelessWidget {
   const WorkspaceScreen({super.key});
@@ -16,6 +16,7 @@ class WorkspaceScreen extends StatelessWidget {
     final connection = context.watch<ConnectionProvider>();
     final project = workspace.selectedProject;
     final connId = connection.connId;
+    final selectedTerminalId = workspace.selectedTerminalId;
 
     return Scaffold(
       appBar: AppBar(
@@ -30,23 +31,27 @@ class WorkspaceScreen extends StatelessWidget {
       drawer: const ProjectDrawer(),
       body: connId == null || project == null
           ? const Center(child: Text('No project selected'))
-          : Column(
-              children: [
-                Expanded(
-                  child: LayoutRenderer(
-                    connId: connId,
-                    projectId: project.id,
-                    terminalIds: project.terminalIds,
+          : selectedTerminalId == null
+              ? const Center(
+                  child: Text(
+                    'No terminals',
+                    style: TextStyle(color: Colors.grey),
                   ),
+                )
+              : Column(
+                  children: [
+                    Expanded(
+                      child: TerminalView(
+                        connId: connId,
+                        terminalId: selectedTerminalId,
+                      ),
+                    ),
+                    KeyToolbar(
+                      connId: connId,
+                      terminalId: selectedTerminalId,
+                    ),
+                  ],
                 ),
-                KeyToolbar(
-                  connId: connId,
-                  terminalId: project.terminalIds.isNotEmpty
-                      ? project.terminalIds.first
-                      : null,
-                ),
-              ],
-            ),
     );
   }
 }

@@ -9,10 +9,12 @@ class WorkspaceProvider extends ChangeNotifier {
   final ConnectionProvider _connection;
   List<ffi.ProjectInfo> _projects = [];
   String? _selectedProjectId;
+  String? _selectedTerminalId;
   Timer? _pollTimer;
 
   List<ffi.ProjectInfo> get projects => _projects;
   String? get selectedProjectId => _selectedProjectId;
+  String? get selectedTerminalId => _selectedTerminalId;
 
   ffi.ProjectInfo? get selectedProject {
     if (_selectedProjectId == null) return _projects.firstOrNull;
@@ -30,6 +32,12 @@ class WorkspaceProvider extends ChangeNotifier {
 
   void selectProject(String projectId) {
     _selectedProjectId = projectId;
+    _selectedTerminalId = null;
+    notifyListeners();
+  }
+
+  void selectTerminal(String terminalId) {
+    _selectedTerminalId = terminalId;
     notifyListeners();
   }
 
@@ -40,6 +48,7 @@ class WorkspaceProvider extends ChangeNotifier {
       _stopPolling();
       _projects = [];
       _selectedProjectId = null;
+      _selectedTerminalId = null;
       notifyListeners();
     }
   }
@@ -79,6 +88,19 @@ class WorkspaceProvider extends ChangeNotifier {
       changed = true;
     }
 
+    // Auto-select first terminal if none selected or current selection is gone
+    final project = selectedProject;
+    if (project != null && project.terminalIds.isNotEmpty) {
+      if (_selectedTerminalId == null ||
+          !project.terminalIds.contains(_selectedTerminalId)) {
+        _selectedTerminalId = project.terminalIds.first;
+        changed = true;
+      }
+    } else if (_selectedTerminalId != null) {
+      _selectedTerminalId = null;
+      changed = true;
+    }
+
     if (changed) {
       notifyListeners();
     }
@@ -89,6 +111,7 @@ class WorkspaceProvider extends ChangeNotifier {
     if (a.length != b.length) return false;
     for (int i = 0; i < a.length; i++) {
       if (a[i].id != b[i].id || a[i].name != b[i].name) return false;
+      if (!listEquals(a[i].terminalIds, b[i].terminalIds)) return false;
     }
     return true;
   }

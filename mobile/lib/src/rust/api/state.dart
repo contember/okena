@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `collect_layout_ids`
+// These functions are ignored because they are not marked as `pub`: `collect_layout_ids_vec`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 /// Get all projects from the cached remote state.
@@ -36,18 +36,6 @@ Future<void> sendSpecialKey({
   key: key,
 );
 
-/// Get a project's layout tree as JSON.
-///
-/// Returns the `ApiLayoutNode` serialized as JSON, or `None` if the project
-/// has no layout. Using JSON avoids complex recursive enum FRB codegen.
-String? getProjectLayoutJson({
-  required String connId,
-  required String projectId,
-}) => RustLib.instance.api.crateApiStateGetProjectLayoutJson(
-  connId: connId,
-  projectId: projectId,
-);
-
 /// Get all terminal IDs from the cached remote state (flat list).
 List<String> getAllTerminalIds({required String connId}) =>
     RustLib.instance.api.crateApiStateGetAllTerminalIds(connId: connId);
@@ -59,6 +47,7 @@ class ProjectInfo {
   final String path;
   final bool isVisible;
   final List<String> terminalIds;
+  final Map<String, String> terminalNames;
 
   const ProjectInfo({
     required this.id,
@@ -66,6 +55,7 @@ class ProjectInfo {
     required this.path,
     required this.isVisible,
     required this.terminalIds,
+    required this.terminalNames,
   });
 
   @override
@@ -74,7 +64,8 @@ class ProjectInfo {
       name.hashCode ^
       path.hashCode ^
       isVisible.hashCode ^
-      terminalIds.hashCode;
+      terminalIds.hashCode ^
+      terminalNames.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -85,5 +76,6 @@ class ProjectInfo {
           name == other.name &&
           path == other.path &&
           isVisible == other.isVisible &&
-          terminalIds == other.terminalIds;
+          terminalIds == other.terminalIds &&
+          terminalNames == other.terminalNames;
 }

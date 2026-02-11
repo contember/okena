@@ -44,25 +44,62 @@ class ProjectDrawer extends StatelessWidget {
               itemBuilder: (context, index) {
                 final project = workspace.projects[index];
                 final isSelected = project.id == workspace.selectedProjectId;
-                return ListTile(
-                  leading: Icon(
-                    Icons.folder,
-                    color: isSelected
-                        ? Theme.of(context).colorScheme.primary
-                        : null,
-                  ),
-                  title: Text(project.name),
-                  subtitle: Text(
-                    project.path,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  selected: isSelected,
-                  onTap: () {
-                    workspace.selectProject(project.id);
-                    Navigator.of(context).pop();
-                  },
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ListTile(
+                      leading: Icon(
+                        Icons.folder,
+                        color: isSelected
+                            ? Theme.of(context).colorScheme.primary
+                            : null,
+                      ),
+                      title: Text(project.name),
+                      subtitle: Text(
+                        project.path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      selected: isSelected,
+                      onTap: () {
+                        workspace.selectProject(project.id);
+                      },
+                    ),
+                    if (isSelected)
+                      ...project.terminalIds.map((tid) {
+                        final isTerminalSelected =
+                            tid == workspace.selectedTerminalId;
+                        final name =
+                            project.terminalNames[tid] ?? 'Terminal';
+                        return ListTile(
+                          contentPadding:
+                              const EdgeInsets.only(left: 56, right: 16),
+                          leading: Icon(
+                            Icons.terminal,
+                            size: 20,
+                            color: isTerminalSelected
+                                ? Theme.of(context).colorScheme.primary
+                                : null,
+                          ),
+                          title: Text(
+                            name,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: isTerminalSelected
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                            ),
+                          ),
+                          selected: isTerminalSelected,
+                          dense: true,
+                          onTap: () {
+                            workspace.selectTerminal(tid);
+                            Navigator.of(context).pop();
+                          },
+                        );
+                      }),
+                  ],
                 );
               },
             ),

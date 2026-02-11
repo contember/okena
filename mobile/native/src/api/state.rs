@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::client::manager::ConnectionManager;
 use okena_core::client::{collect_state_terminal_ids, WsClientMessage};
 use okena_core::keys::SpecialKey;
@@ -10,6 +12,7 @@ pub struct ProjectInfo {
     pub path: String,
     pub is_visible: bool,
     pub terminal_ids: Vec<String>,
+    pub terminal_names: HashMap<String, String>,
 }
 
 /// Get all projects from the cached remote state.
@@ -27,7 +30,7 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
         .map(|p| {
             let terminal_ids = if let Some(ref layout) = p.layout {
                 let mut ids = Vec::new();
-                collect_layout_ids(layout, &mut ids);
+                collect_layout_ids_vec(layout, &mut ids);
                 ids
             } else {
                 Vec::new()
@@ -38,6 +41,7 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                 path: p.path.clone(),
                 is_visible: p.is_visible,
                 terminal_ids,
+                terminal_names: p.terminal_names.clone(),
             }
         })
         .collect()
@@ -81,17 +85,20 @@ pub async fn send_special_key(
     Ok(())
 }
 
-/// Get a project's layout tree as JSON.
-///
-/// Returns the `ApiLayoutNode` serialized as JSON, or `None` if the project
-/// has no layout. Using JSON avoids complex recursive enum FRB codegen.
-#[flutter_rust_bridge::frb(sync)]
-pub fn get_project_layout_json(conn_id: String, project_id: String) -> Option<String> {
-    let mgr = ConnectionManager::get();
-    let state = mgr.get_state(&conn_id)?;
-    let project = state.projects.iter().find(|p| p.id == project_id)?;
-    let layout = project.layout.as_ref()?;
-    serde_json::to_string(layout).ok()
+fn collect_layout_ids_vec(node: &okena_core::api::ApiLayoutNode, ids: &mut Vec<String>) {
+    match node {
+        okena_core::api::ApiLayoutNode::Terminal { terminal_id, .. } => {
+            if let Some(id) = terminal_id {
+                ids.push(id.clone());
+            }
+        }
+        okena_core::api::ApiLayoutNode::Split { children, .. }
+        | okena_core::api::ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_layout_ids_vec(child, ids);
+            }
+        }
+    }
 }
 
 /// Get all terminal IDs from the cached remote state (flat list).
@@ -104,18 +111,3 @@ pub fn get_all_terminal_ids(conn_id: String) -> Vec<String> {
     }
 }
 
-fn collect_layout_ids(node: &okena_core::api::ApiLayoutNode, ids: &mut Vec<String>) {
-    match node {
-        okena_core::api::ApiLayoutNode::Terminal { terminal_id, .. } => {
-            if let Some(id) = terminal_id {
-                ids.push(id.clone());
-            }
-        }
-        okena_core::api::ApiLayoutNode::Split { children, .. }
-        | okena_core::api::ApiLayoutNode::Tabs { children, .. } => {
-            for child in children {
-                collect_layout_ids(child, ids);
-            }
-        }
-    }
-}
