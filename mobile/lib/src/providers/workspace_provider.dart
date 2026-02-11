@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'connection_provider.dart';
 import '../../src/rust/api/state.dart' as ffi;
+import '../../src/rust/api/connection.dart' as conn_ffi;
 
 class WorkspaceProvider extends ChangeNotifier {
   final ConnectionProvider _connection;
@@ -12,10 +13,12 @@ class WorkspaceProvider extends ChangeNotifier {
   String? _selectedTerminalId;
   Set<String>? _previousTerminalIds;
   Timer? _pollTimer;
+  double _secondsSinceActivity = 0;
 
   List<ffi.ProjectInfo> get projects => _projects;
   String? get selectedProjectId => _selectedProjectId;
   String? get selectedTerminalId => _selectedTerminalId;
+  double get secondsSinceActivity => _secondsSinceActivity;
 
   ffi.ProjectInfo? get selectedProject {
     if (_selectedProjectId == null) return _projects.firstOrNull;
@@ -115,6 +118,14 @@ class WorkspaceProvider extends ChangeNotifier {
         changed = true;
       }
     }
+
+    // Poll connection health
+    final newActivity = conn_ffi.secondsSinceActivity(connId: connId);
+    if ((_secondsSinceActivity < 3) != (newActivity < 3) ||
+        (_secondsSinceActivity < 10) != (newActivity < 10)) {
+      changed = true;
+    }
+    _secondsSinceActivity = newActivity;
 
     if (changed) {
       notifyListeners();

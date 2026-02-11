@@ -68,11 +68,13 @@ class ProjectDrawer extends StatelessWidget {
                       },
                     ),
                     if (isSelected) ...[
-                      ...project.terminalIds.map((tid) {
+                      ...project.terminalIds.asMap().entries.map((entry) {
+                        final idx = entry.key;
+                        final tid = entry.value;
                         final isTerminalSelected =
                             tid == workspace.selectedTerminalId;
                         final name =
-                            project.terminalNames[tid] ?? 'Terminal';
+                            project.terminalNames[tid] ?? 'Terminal ${idx + 1}';
                         return ListTile(
                           contentPadding:
                               const EdgeInsets.only(left: 56, right: 16),
@@ -97,6 +99,15 @@ class ProjectDrawer extends StatelessWidget {
                           onTap: () {
                             workspace.selectTerminal(tid);
                             Navigator.of(context).pop();
+                          },
+                          onLongPress: () {
+                            _showCloseDialog(
+                              context,
+                              connId: connection.connId!,
+                              projectId: project.id,
+                              terminalId: tid,
+                              name: name,
+                            );
                           },
                         );
                       }),
@@ -142,6 +153,41 @@ class ProjectDrawer extends StatelessWidget {
               Navigator.of(context).pop();
               connection.disconnect();
             },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showCloseDialog(
+    BuildContext context, {
+    required String connId,
+    required String projectId,
+    required String terminalId,
+    required String name,
+  }) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Close terminal'),
+        content: Text('Close "$name"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop(); // dialog
+              Navigator.of(context).pop(); // drawer
+              state_ffi.closeTerminal(
+                connId: connId,
+                projectId: projectId,
+                terminalId: terminalId,
+              );
+            },
+            child: const Text('Close',
+                style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),

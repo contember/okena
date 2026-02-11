@@ -37,6 +37,8 @@ class TerminalPainter extends CustomPainter {
   final double cellHeight;
   final double fontSize;
   final String fontFamily;
+  final SelectionBounds? selection;
+  final ScrollInfo? scrollInfo;
 
   TerminalPainter({
     required this.cells,
@@ -47,13 +49,36 @@ class TerminalPainter extends CustomPainter {
     required this.cellHeight,
     required this.fontSize,
     required this.fontFamily,
+    this.selection,
+    this.scrollInfo,
   });
+
+  bool _isCellInSelection(int col, int row, SelectionBounds sel) {
+    // Selection bounds are in buffer coordinates; convert visual row
+    // to buffer row for comparison: buffer_row = visual_row - display_offset
+    final offset = scrollInfo?.displayOffset.toInt() ?? 0;
+    final bufferRow = row - offset;
+
+    final sr = sel.startRow;
+    final er = sel.endRow;
+    final sc = sel.startCol;
+    final ec = sel.endCol;
+
+    if (bufferRow < sr || bufferRow > er) return false;
+    if (sr == er) {
+      // Single line selection
+      return col >= sc && col <= ec;
+    }
+    if (bufferRow == sr) return col >= sc;
+    if (bufferRow == er) return col <= ec;
+    return true; // Middle line — fully selected
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
     final bgPaint = Paint();
 
-    // Pass 1: Background rectangles
+    // Pass 1: Background rectangles + selection highlight
     for (int i = 0; i < cells.length && i < cols * rows; i++) {
       final cell = cells[i];
       final col = i % cols;
@@ -73,6 +98,12 @@ class TerminalPainter extends CustomPainter {
       // Only draw non-default backgrounds
       if (bgColor != TerminalTheme.bgColor && bgColor.a > 0) {
         bgPaint.color = bgColor;
+        canvas.drawRect(Rect.fromLTWH(x, y, cellWidth, cellHeight), bgPaint);
+      }
+
+      // Selection highlight
+      if (selection != null && _isCellInSelection(col, row, selection!)) {
+        bgPaint.color = const Color(0x40585B70);
         canvas.drawRect(Rect.fromLTWH(x, y, cellWidth, cellHeight), bgPaint);
       }
     }
@@ -150,6 +181,34 @@ class TerminalPainter extends CustomPainter {
             Offset(cx + cellWidth, cy + cellHeight - 1),
             cursorPaint,
           );
+      }
+    }
+
+    // Pass 4: Scroll indicator
+    if (scrollInfo != null && scrollInfo!.totalLines > scrollInfo!.visibleLines) {
+      final total = scrollInfo!.totalLines;
+      final visible = scrollInfo!.visibleLines;
+      final offset = scrollInfo!.displayOffset;
+
+      if (total > 0 && visible > 0) {
+        final trackHeight = size.height;
+        final thumbHeight = (visible / total * trackHeight).clamp(20.0, trackHeight);
+        // offset=0 means at bottom, max offset = total - visible
+        final maxOffset = total - visible;
+        final thumbTop = maxOffset > 0
+            ? (1.0 - offset / maxOffset) * (trackHeight - thumbHeight)
+            : 0.0;
+
+        final scrollPaint = Paint()
+          ..color = const Color(0x40FFFFFF)
+          ..style = PaintingStyle.fill;
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(size.width - 4, thumbTop, 3, thumbHeight),
+            const Radius.circular(1.5),
+          ),
+          scrollPaint,
+        );
       }
     }
   }
