@@ -63,6 +63,15 @@ class _TerminalViewState extends State<TerminalView> {
     if (oldWidget.connId != widget.connId ||
         oldWidget.terminalId != widget.terminalId) {
       _fetchCells();
+      // Force resize so the new terminal matches the mobile viewport
+      if (_cols > 0 && _rows > 0) {
+        ffi.resizeTerminal(
+          connId: widget.connId,
+          terminalId: widget.terminalId,
+          cols: _cols,
+          rows: _rows,
+        );
+      }
     }
   }
 
