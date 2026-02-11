@@ -10,6 +10,7 @@ class WorkspaceProvider extends ChangeNotifier {
   List<ffi.ProjectInfo> _projects = [];
   String? _selectedProjectId;
   String? _selectedTerminalId;
+  Set<String>? _previousTerminalIds;
   Timer? _pollTimer;
 
   List<ffi.ProjectInfo> get projects => _projects;
@@ -33,6 +34,7 @@ class WorkspaceProvider extends ChangeNotifier {
   void selectProject(String projectId) {
     _selectedProjectId = projectId;
     _selectedTerminalId = null;
+    _previousTerminalIds = null;
     notifyListeners();
   }
 
@@ -88,17 +90,30 @@ class WorkspaceProvider extends ChangeNotifier {
       changed = true;
     }
 
-    // Auto-select first terminal if none selected or current selection is gone
+    // Auto-select terminal: pick newly added terminal, or first if current gone
     final project = selectedProject;
     if (project != null && project.terminalIds.isNotEmpty) {
       if (_selectedTerminalId == null ||
           !project.terminalIds.contains(_selectedTerminalId)) {
         _selectedTerminalId = project.terminalIds.first;
         changed = true;
+      } else if (_previousTerminalIds != null) {
+        // Find newly added terminals
+        final newIds = project.terminalIds
+            .where((id) => !_previousTerminalIds!.contains(id))
+            .toList();
+        if (newIds.isNotEmpty) {
+          _selectedTerminalId = newIds.last;
+          changed = true;
+        }
       }
-    } else if (_selectedTerminalId != null) {
-      _selectedTerminalId = null;
-      changed = true;
+      _previousTerminalIds = Set.of(project.terminalIds);
+    } else {
+      _previousTerminalIds = null;
+      if (_selectedTerminalId != null) {
+        _selectedTerminalId = null;
+        changed = true;
+      }
     }
 
     if (changed) {
