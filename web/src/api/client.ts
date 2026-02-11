@@ -1,6 +1,13 @@
 import type { StateResponse, PairResponse, ActionRequest } from "./types";
 import { loadToken, saveToken } from "../auth/token";
 
+export class AuthError extends Error {
+  constructor(status: number) {
+    super(`HTTP ${status}`);
+    this.name = "AuthError";
+  }
+}
+
 function baseUrl(): string {
   return window.location.origin;
 }
@@ -30,9 +37,8 @@ export async function getState(): Promise<StateResponse> {
   const res = await fetch(`${baseUrl()}/v1/state`, {
     headers: authHeaders(),
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
+  if (res.status === 401) throw new AuthError(res.status);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
@@ -42,6 +48,7 @@ export async function postAction(action: ActionRequest): Promise<Record<string, 
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(action),
   });
+  if (res.status === 401) throw new AuthError(res.status);
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: "Action failed" }));
     throw new Error(body.error || `HTTP ${res.status}`);

@@ -2,7 +2,7 @@ import { useReducer, useEffect, useRef, useCallback, useState } from "react";
 import { appReducer, initialState, AppContext, TerminalRegistry } from "./state/store";
 import { WsManager, type WsStatus } from "./api/websocket";
 import type { WsOutbound } from "./api/types";
-import { getState, refresh } from "./api/client";
+import { getState, refresh, AuthError } from "./api/client";
 import { loadToken, clearToken, tokenTtlSecs } from "./auth/token";
 import { PairingScreen } from "./components/PairingScreen";
 import { WorkspaceLayout } from "./components/WorkspaceLayout";
@@ -25,10 +25,11 @@ export function App() {
         const projectId = ws.focused_project_id ?? ws.projects[0]?.id ?? null;
         if (projectId) dispatch({ type: "select_project", projectId });
       }
-    } catch {
-      // 401 → clear token and go to pairing
-      clearToken();
-      setAuthed(false);
+    } catch (e) {
+      if (e instanceof AuthError) {
+        clearToken();
+        setAuthed(false);
+      }
     }
   }, [state.selectedProjectId]);
 
@@ -70,8 +71,10 @@ export function App() {
         if (projectId) dispatch({ type: "select_project", projectId });
         setAuthed(true);
       })
-      .catch(() => {
-        clearToken();
+      .catch((e) => {
+        if (e instanceof AuthError) {
+          clearToken();
+        }
         setAuthed(false);
       });
   }, []);
@@ -91,6 +94,7 @@ export function App() {
   }, [authed]);
 
   // Token refresh scheduler
+  const [refreshCounter, setRefreshCounter] = useState(0);
   useEffect(() => {
     if (!authed) return;
     const ttl = tokenTtlSecs();
@@ -104,9 +108,10 @@ export function App() {
       } catch {
         // Will try again on next cycle
       }
+      setRefreshCounter((c) => c + 1);
     }, refreshIn);
     return () => clearTimeout(timer);
-  }, [authed]);
+  }, [authed, refreshCounter]);
 
   const handlePaired = useCallback(() => {
     setAuthed(true);
