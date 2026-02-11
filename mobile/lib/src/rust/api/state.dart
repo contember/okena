@@ -40,6 +40,15 @@ Future<void> sendSpecialKey({
 List<String> getAllTerminalIds({required String connId}) =>
     RustLib.instance.api.crateApiStateGetAllTerminalIds(connId: connId);
 
+/// Create a new terminal in the given project via POST /v1/actions.
+Future<void> createTerminal({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateCreateTerminal(
+  connId: connId,
+  projectId: projectId,
+);
+
 /// Flat FFI-friendly project info.
 class ProjectInfo {
   final String id;
