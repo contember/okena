@@ -1,7 +1,7 @@
 use crate::client::handler::MobileConnectionHandler;
 use crate::client::terminal_holder::TerminalHolder;
 
-use okena_core::api::StateResponse;
+use okena_core::api::{ActionRequest, StateResponse};
 use okena_core::client::{
     make_prefixed_id, ConnectionEvent, ConnectionStatus, RemoteClient, RemoteConnectionConfig,
     WsClientMessage,
@@ -197,6 +197,43 @@ impl ConnectionManager {
                 rows,
             },
         );
+    }
+
+    /// Send an action to the remote server via POST /v1/actions.
+    pub async fn send_action(
+        &self,
+        conn_id: &str,
+        action: ActionRequest,
+    ) -> anyhow::Result<()> {
+        let (host, port, token) = {
+            let connections = self.connections.read();
+            let conn = connections
+                .get(conn_id)
+                .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
+            let config = conn.client.read().config().clone();
+            let token = config
+                .saved_token
+                .ok_or_else(|| anyhow::anyhow!("No auth token for connection: {}", conn_id))?;
+            (config.host, config.port, token)
+        };
+
+        let url = format!("http://{}:{}/v1/actions", host, port);
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&action)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Action failed ({}): {}", status, body);
+        }
+
+        Ok(())
     }
 
     /// Background task that drains the event channel and updates connection state.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::client::manager::ConnectionManager;
+use okena_core::api::ActionRequest;
 use okena_core::client::{collect_state_terminal_ids, WsClientMessage};
 use okena_core::keys::SpecialKey;
 
@@ -109,5 +110,15 @@ pub fn get_all_terminal_ids(conn_id: String) -> Vec<String> {
         Some(state) => collect_state_terminal_ids(&state),
         None => Vec::new(),
     }
+}
+
+/// Create a new terminal in the given project via POST /v1/actions.
+pub async fn create_terminal(conn_id: String, project_id: String) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::CreateTerminal { project_id },
+    )
+    .await
 }
 
