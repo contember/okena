@@ -221,6 +221,7 @@ impl ConnectionManager {
                     );
                 }
                 ConnectionEvent::TokenRefreshed { token, .. } => {
+                    conn.client.read().update_shared_token(&token);
                     conn.client.write().config_mut().saved_token = Some(token.clone());
                     conn.client.write().config_mut().token_obtained_at = Some(
                         std::time::SystemTime::now()

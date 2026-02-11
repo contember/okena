@@ -130,6 +130,10 @@ impl RemoteConnection {
         self.client.update_stream_mappings(mappings);
     }
 
+    pub fn update_shared_token(&self, token: &str) {
+        self.client.update_shared_token(token);
+    }
+
     /// Get a TerminalBackend for this connection.
     pub fn backend(&self) -> Arc<dyn TerminalBackend> {
         let ws_tx = self.client.ws_sender().cloned().unwrap_or_else(|| {

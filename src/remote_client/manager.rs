@@ -294,6 +294,7 @@ impl RemoteConnectionManager {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.config_mut().saved_token = Some(token.clone());
                     conn.config_mut().token_obtained_at = Some(now);
+                    conn.update_shared_token(&token);
                 }
                 let cid = connection_id.clone();
                 let tok = token.clone();

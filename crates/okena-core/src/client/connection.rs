@@ -44,6 +44,8 @@ pub struct RemoteClient<H: ConnectionHandler> {
     handler: Arc<H>,
     event_tx: async_channel::Sender<ConnectionEvent>,
     ws_abort_handle: Option<tokio::task::AbortHandle>,
+    /// Shared token reference so WS reconnect loop can pick up refreshed tokens.
+    shared_token: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl<H: ConnectionHandler> RemoteClient<H> {
@@ -53,6 +55,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         handler: Arc<H>,
         event_tx: async_channel::Sender<ConnectionEvent>,
     ) -> Self {
+        let shared_token = Arc::new(std::sync::RwLock::new(config.saved_token.clone()));
         Self {
             config,
             status: ConnectionStatus::Disconnected,
@@ -64,6 +67,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             handler,
             event_tx,
             ws_abort_handle: None,
+            shared_token,
         }
     }
 
@@ -95,6 +99,13 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.remote_state = state;
     }
 
+    /// Update the shared token so WS reconnect loop uses the latest token.
+    pub fn update_shared_token(&self, token: &str) {
+        if let Ok(mut guard) = self.shared_token.write() {
+            *guard = Some(token.to_string());
+        }
+    }
+
     pub fn ws_sender(&self) -> Option<&async_channel::Sender<WsClientMessage>> {
         self.ws_tx.as_ref()
     }
@@ -121,6 +132,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let config = self.config.clone();
         let event_tx = self.event_tx.clone();
         let handler = self.handler.clone();
+        let shared_token = self.shared_token.clone();
+
+        // Update shared token from config
+        if let Ok(mut guard) = self.shared_token.write() {
+            *guard = config.saved_token.clone();
+        }
 
         // Create fresh WS message channel
         let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
@@ -180,7 +197,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                     Ok(resp) if resp.status().is_success() => {
                         log::info!("Token valid for {}:{}", config.host, config.port);
                         // Token is valid - start WebSocket
-                        Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler).await;
+                        Self::run_ws_loop(config, token, event_tx, ws_tx, ws_rx, handler, shared_token).await;
                         return;
                     }
                     Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
@@ -221,6 +238,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let code = code.to_string();
         let event_tx = self.event_tx.clone();
         let handler = self.handler.clone();
+        let shared_token = self.shared_token.clone();
 
         // Create fresh WS message channel
         let (ws_tx, ws_rx) = async_channel::bounded::<WsClientMessage>(256);
@@ -252,6 +270,11 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         Ok(pair_resp) => {
                             log::info!("Paired with {}:{}", config.host, config.port);
 
+                            // Update shared token
+                            if let Ok(mut guard) = shared_token.write() {
+                                *guard = Some(pair_resp.token.clone());
+                            }
+
                             // Notify manager to save the token
                             let _ = event_tx
                                 .send(ConnectionEvent::TokenObtained {
@@ -268,6 +291,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                 ws_tx,
                                 ws_rx,
                                 handler,
+                                shared_token,
                             )
                             .await;
                         }
@@ -340,13 +364,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         ws_tx: async_channel::Sender<WsClientMessage>,
         ws_rx: async_channel::Receiver<WsClientMessage>,
         handler: Arc<H>,
+        shared_token: Arc<std::sync::RwLock<Option<String>>>,
     ) {
         let mut reconnect_attempt: u32 = 0;
         let max_backoff_secs: u64 = 30;
         let max_reconnect_attempts: u32 = 10;
+        let mut current_token = token;
 
         loop {
-            match Self::ws_session(&config, &token, &event_tx, &ws_tx, &ws_rx, &handler).await {
+            match Self::ws_session(&config, &current_token, &event_tx, &ws_tx, &ws_rx, &handler).await {
                 Ok(()) => {
                     // Clean disconnect requested
                     log::info!(
@@ -416,6 +442,13 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         .await;
 
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+
+                    // Read the latest token (may have been refreshed since last attempt)
+                    if let Ok(guard) = shared_token.read() {
+                        if let Some(ref latest) = *guard {
+                            current_token = latest.clone();
+                        }
+                    }
                 }
             }
         }
