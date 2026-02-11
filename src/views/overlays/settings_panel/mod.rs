@@ -11,6 +11,7 @@ mod header;
 mod render_font;
 mod render_general;
 mod render_hooks;
+mod render_paired_devices;
 mod render_terminal;
 mod sidebar;
 
@@ -18,6 +19,8 @@ use categories::SettingsCategory;
 use components::opt_string;
 
 use crate::keybindings::Cancel;
+use crate::remote::auth::{AuthStore, TokenInfo};
+use crate::remote::GlobalRemoteInfo;
 use crate::settings::settings_entity;
 use crate::terminal::shell_config::{available_shells, AvailableShell};
 use crate::theme::theme;
@@ -26,6 +29,7 @@ use crate::views::components::simple_input::{InputChangedEvent, SimpleInputState
 use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
+use std::sync::Arc;
 
 // ============================================================================
 // Settings Panel
@@ -61,6 +65,9 @@ pub struct SettingsPanel {
     pub(super) file_opener_input: Entity<SimpleInputState>,
     // Remote listen address input
     pub(super) listen_address_input: Entity<SimpleInputState>,
+    // Paired devices
+    pub(super) paired_devices: Vec<TokenInfo>,
+    pub(super) auth_store: Option<Arc<AuthStore>>,
 }
 
 impl SettingsPanel {
@@ -224,6 +231,15 @@ impl SettingsPanel {
             settings_entity(cx).update(cx, |state, cx| state.set_remote_listen_address(val, cx));
         }).detach();
 
+        let (auth_store, paired_devices) = cx
+            .try_global::<GlobalRemoteInfo>()
+            .and_then(|info| info.0.auth_store())
+            .map(|store| {
+                let tokens = store.list_tokens();
+                (Some(store), tokens)
+            })
+            .unwrap_or((None, Vec::new()));
+
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
@@ -248,6 +264,8 @@ impl SettingsPanel {
             project_hook_worktree_close,
             file_opener_input,
             listen_address_input,
+            paired_devices,
+            auth_store,
         }
     }
 
@@ -338,6 +356,7 @@ impl SettingsPanel {
                 SettingsCategory::Font => self.render_font(cx).into_any_element(),
                 SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
                 SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
+                SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),
             })
     }
 }

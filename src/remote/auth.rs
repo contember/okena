@@ -258,6 +258,55 @@ impl AuthStore {
         false
     }
 
+    /// List all non-expired tokens with metadata.
+    pub fn list_tokens(&self) -> Vec<TokenInfo> {
+        let inner = self.inner.lock();
+        let now = SystemTime::now();
+        inner
+            .tokens
+            .iter()
+            .filter_map(|record| {
+                let age = now
+                    .duration_since(record.created_at)
+                    .unwrap_or(Duration::MAX);
+                if age >= Duration::from_secs(TOKEN_TTL_SECS) {
+                    return None;
+                }
+                let created_unix = record
+                    .created_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let last_used_unix = record
+                    .last_used_at
+                    .lock()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let expires_at = created_unix + TOKEN_TTL_SECS;
+                Some(TokenInfo {
+                    id: record.id.clone(),
+                    created_at: created_unix,
+                    last_used_at: last_used_unix,
+                    expires_at,
+                    name: record.name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Revoke a token by ID. Returns true if the token was found and removed.
+    pub fn revoke_token(&self, id: &str) -> bool {
+        let mut inner = self.inner.lock();
+        let before = inner.tokens.len();
+        inner.tokens.retain(|r| r.id != id);
+        let removed = inner.tokens.len() < before;
+        if removed {
+            save_tokens(&inner.tokens);
+        }
+        removed
+    }
+
     /// Refresh a valid token: validate the current token, generate a new one,
     /// and keep both valid until their respective expiry times.
     pub fn refresh_token(&self, current_token: &str) -> Result<String, &'static str> {
@@ -306,6 +355,16 @@ impl AuthStore {
 
         Ok(new_token)
     }
+}
+
+/// Information about a stored token, safe to expose to clients.
+#[derive(Serialize, Clone)]
+pub struct TokenInfo {
+    pub id: String,
+    pub created_at: u64,
+    pub last_used_at: u64,
+    pub expires_at: u64,
+    pub name: Option<String>,
 }
 
 /// Pairing errors.
@@ -636,6 +695,65 @@ mod tests {
             store2.validate_token(&token),
             "token should validate against reloaded store"
         );
+    }
+
+    #[test]
+    fn list_tokens_returns_non_expired() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = test_store();
+        let _token1 = pair_token(&store);
+        // Generate a fresh code for second pairing
+        let code2 = store.generate_fresh_code();
+        let _token2 = store.try_pair(&code2, test_ip()).expect("second pairing should succeed");
+
+        let tokens = store.list_tokens();
+        assert_eq!(tokens.len(), 2, "should list 2 paired tokens");
+
+        // Each token should have valid metadata
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for info in &tokens {
+            assert!(!info.id.is_empty());
+            assert!(info.created_at <= now);
+            assert!(info.last_used_at <= now);
+            assert!(info.expires_at > now);
+        }
+    }
+
+    #[test]
+    fn revoke_token_removes_by_id() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = test_store();
+        let token1 = pair_token(&store);
+        let code2 = store.generate_fresh_code();
+        let token2 = store.try_pair(&code2, test_ip()).expect("second pairing should succeed");
+
+        let tokens = store.list_tokens();
+        assert_eq!(tokens.len(), 2);
+
+        // Revoke the first token by ID
+        let id_to_revoke = tokens[0].id.clone();
+        assert!(store.revoke_token(&id_to_revoke), "revoke should return true");
+
+        let remaining = store.list_tokens();
+        assert_eq!(remaining.len(), 1, "should have 1 token after revoke");
+        assert_ne!(remaining[0].id, id_to_revoke, "revoked token should be gone");
+
+        // The revoked token should fail validation, the other should pass
+        // (We don't know which token maps to which ID, so just verify counts)
+        let valid_count = [&token1, &token2]
+            .iter()
+            .filter(|t| store.validate_token(t))
+            .count();
+        assert_eq!(valid_count, 1, "exactly one token should still be valid");
+    }
+
+    #[test]
+    fn revoke_nonexistent_returns_false() {
+        let store = test_store();
+        assert!(!store.revoke_token("nonexistent-id"), "revoking nonexistent token should return false");
     }
 
     #[test]

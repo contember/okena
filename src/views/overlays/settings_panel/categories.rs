@@ -4,6 +4,7 @@ pub(in crate::views::overlays) enum SettingsCategory {
     Font,
     Terminal,
     Hooks,
+    PairedDevices,
 }
 
 impl SettingsCategory {
@@ -13,11 +14,12 @@ impl SettingsCategory {
             Self::Font => "Font",
             Self::Terminal => "Terminal",
             Self::Hooks => "Hooks",
+            Self::PairedDevices => "Devices",
         }
     }
 
     pub(super) fn all() -> &'static [SettingsCategory] {
-        &[Self::General, Self::Font, Self::Terminal, Self::Hooks]
+        &[Self::General, Self::Font, Self::Terminal, Self::Hooks, Self::PairedDevices]
     }
 
     /// Categories available in project mode (only hooks for now)
