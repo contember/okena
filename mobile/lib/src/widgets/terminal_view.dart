@@ -18,10 +18,15 @@ class TerminalView extends StatefulWidget {
   final String connId;
   final String terminalId;
 
+  /// Called when the user swipes horizontally to switch terminals.
+  /// direction: -1 = swipe right (prev), 1 = swipe left (next).
+  final ValueChanged<int>? onTerminalSwipe;
+
   const TerminalView({
     super.key,
     required this.connId,
     required this.terminalId,
+    this.onTerminalSwipe,
   });
 
   @override
@@ -49,6 +54,21 @@ class _TerminalViewState extends State<TerminalView> {
   final _textController = TextEditingController(text: _kSentinel);
   String _lastInputText = _kSentinel;
 
+  // Scroll state
+  ffi.ScrollInfo _scrollInfo = const ffi.ScrollInfo(
+    totalLines: 0,
+    visibleLines: 0,
+    displayOffset: 0,
+  );
+  double _scrollAccumulator = 0;
+
+  // Selection state
+  bool _isSelecting = false;
+  ffi.SelectionBounds? _selection;
+
+  // Gesture tracking for scroll vs swipe disambiguation
+  Offset? _dragStart;
+
   @override
   void initState() {
     super.initState();
@@ -62,6 +82,8 @@ class _TerminalViewState extends State<TerminalView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.connId != widget.connId ||
         oldWidget.terminalId != widget.terminalId) {
+      _isSelecting = false;
+      _selection = null;
       _fetchCells();
       // Force resize so the new terminal matches the mobile viewport
       if (_cols > 0 && _rows > 0) {
@@ -127,6 +149,16 @@ class _TerminalViewState extends State<TerminalView> {
         connId: widget.connId,
         terminalId: widget.terminalId,
       );
+      _scrollInfo = ffi.getScrollInfo(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+      );
+      if (_isSelecting) {
+        _selection = ffi.getSelectionBounds(
+          connId: widget.connId,
+          terminalId: widget.terminalId,
+        );
+      }
     });
   }
 
@@ -149,6 +181,156 @@ class _TerminalViewState extends State<TerminalView> {
         );
       });
     }
+  }
+
+  // --- Touch to cell conversion ---
+  (int col, int row) _touchToCell(Offset pos) {
+    final col = (pos.dx / _cellWidth).floor().clamp(0, _cols - 1);
+    final row = (pos.dy / _cellHeight).floor().clamp(0, _rows - 1);
+    return (col, row);
+  }
+
+  // --- Scroll handling ---
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (_cellHeight <= 0) return;
+    _scrollAccumulator += -details.delta.dy;
+    final lines = (_scrollAccumulator / _cellHeight).truncate();
+    if (lines != 0) {
+      _scrollAccumulator -= lines * _cellHeight;
+      ffi.scroll(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+        delta: lines,
+      );
+      _fetchCells();
+    }
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    _scrollAccumulator = 0;
+  }
+
+  // --- Selection handling ---
+  void _onLongPressStart(LongPressStartDetails details) {
+    final (col, row) = _touchToCell(details.localPosition);
+    ffi.startSelection(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+      col: col,
+      row: row,
+    );
+    setState(() {
+      _isSelecting = true;
+      _selection = ffi.getSelectionBounds(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+      );
+    });
+  }
+
+  void _onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    if (!_isSelecting) return;
+    final (col, row) = _touchToCell(details.localPosition);
+    ffi.updateSelection(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+      col: col,
+      row: row,
+    );
+    setState(() {
+      _selection = ffi.getSelectionBounds(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+      );
+    });
+  }
+
+  void _onLongPressEnd(LongPressEndDetails details) {
+    if (!_isSelecting) return;
+    _copySelectionAndClear();
+  }
+
+  void _onDoubleTap() {
+    // Use the last known tap position for word selection
+    if (_lastTapPosition != null) {
+      final (col, row) = _touchToCell(_lastTapPosition!);
+      ffi.startWordSelection(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+        col: col,
+        row: row,
+      );
+      setState(() {
+        _isSelecting = true;
+        _selection = ffi.getSelectionBounds(
+          connId: widget.connId,
+          terminalId: widget.terminalId,
+        );
+      });
+      _copySelectionAndClear();
+    }
+  }
+
+  Offset? _lastTapPosition;
+
+  void _onTapDown(TapDownDetails details) {
+    _lastTapPosition = details.localPosition;
+  }
+
+  void _onTap() {
+    // Clear selection on single tap if one exists
+    if (_isSelecting) {
+      ffi.clearSelection(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+      );
+      setState(() {
+        _isSelecting = false;
+        _selection = null;
+      });
+      return;
+    }
+    _inputFocusNode.requestFocus();
+  }
+
+  void _copySelectionAndClear() {
+    final text = ffi.getSelectedText(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+    );
+    if (text != null && text.isNotEmpty) {
+      Clipboard.setData(ClipboardData(text: text));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Copied to clipboard'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+    }
+    ffi.clearSelection(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+    );
+    setState(() {
+      _isSelecting = false;
+      _selection = null;
+    });
+  }
+
+  // --- Horizontal swipe handling ---
+  void _onHorizontalDragStart(DragStartDetails details) {
+    _dragStart = details.localPosition;
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    final velocity = details.velocity.pixelsPerSecond;
+    if (velocity.dx.abs() > 300 && _dragStart != null) {
+      final direction = velocity.dx > 0 ? -1 : 1; // right swipe = prev, left = next
+      widget.onTerminalSwipe?.call(direction);
+    }
+    _dragStart = null;
   }
 
   void _resetSentinel() {
@@ -246,7 +428,19 @@ class _TerminalViewState extends State<TerminalView> {
         _onLayout(constraints);
 
         return GestureDetector(
-          onTap: () => _inputFocusNode.requestFocus(),
+          onTapDown: _onTapDown,
+          onTap: _onTap,
+          onDoubleTap: _onDoubleTap,
+          // Vertical drag for scrollback
+          onVerticalDragUpdate: _onVerticalDragUpdate,
+          onVerticalDragEnd: _onVerticalDragEnd,
+          // Long press for selection
+          onLongPressStart: _onLongPressStart,
+          onLongPressMoveUpdate: _onLongPressMoveUpdate,
+          onLongPressEnd: _onLongPressEnd,
+          // Horizontal drag for terminal switching
+          onHorizontalDragStart: _onHorizontalDragStart,
+          onHorizontalDragEnd: _onHorizontalDragEnd,
           behavior: HitTestBehavior.opaque,
           child: Container(
             color: TerminalTheme.bgColor,
@@ -266,6 +460,8 @@ class _TerminalViewState extends State<TerminalView> {
                     cellHeight: _cellHeight,
                     fontSize: _fontSize,
                     fontFamily: TerminalTheme.fontFamily,
+                    selection: _selection,
+                    scrollInfo: _scrollInfo,
                   ),
                 ),
                 // Transparent text field for soft keyboard input.
