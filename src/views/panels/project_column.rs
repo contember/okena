@@ -595,7 +595,7 @@ impl ProjectColumn {
         div()
             .id("project-header")
             .group("project-header")
-            .h(px(30.0))
+            .h(px(35.0))
             .px(px(12.0))
             .flex()
             .items_center()
