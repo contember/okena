@@ -62,6 +62,101 @@ jobs:
       - name: Run tests
         run: cargo test
 
+  # Mobile builds: Android APK + iOS
+  build-mobile:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: android
+            artifact: okena-android
+          - os: macos-latest
+            platform: ios
+            artifact: okena-ios
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+
+      - name: Add Android Rust targets
+        if: matrix.platform == 'android'
+        run: |
+          rustup target add armv7-linux-androideabi
+          rustup target add aarch64-linux-android
+          rustup target add x86_64-linux-android
+          rustup target add i686-linux-android
+
+      - name: Add iOS Rust targets
+        if: matrix.platform == 'ios'
+        run: |
+          rustup target add aarch64-apple-ios
+          rustup target add x86_64-apple-ios
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mobile-${{ matrix.platform }}
+          workspaces: mobile/native
+
+      - name: Setup Java (Android)
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter pub get
+        working-directory: mobile
+        run: flutter pub get
+
+      - name: Build Android APKs
+        if: matrix.platform == 'android'
+        working-directory: mobile
+        run: |
+          flutter build apk --release --split-per-abi
+          flutter build apk --release
+
+      - name: Prepare Android artifact
+        if: matrix.platform == 'android'
+        run: |
+          mkdir -p dist
+          cp mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk dist/okena-arm64-v8a.apk
+          cp mobile/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk dist/okena-armeabi-v7a.apk
+          cp mobile/build/app/outputs/flutter-apk/app-x86_64-release.apk dist/okena-x86_64.apk
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk dist/okena-universal.apk
+
+      - name: Build iOS (no codesign)
+        if: matrix.platform == 'ios'
+        working-directory: mobile
+        run: flutter build ios --release --no-codesign
+
+      - name: Prepare iOS artifact
+        if: matrix.platform == 'ios'
+        run: |
+          mkdir -p dist
+          cd mobile/build/ios/iphoneos
+          zip -r ../../../../dist/okena-ios.zip Runner.app
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          retention-days: 7
+
   # Full multi-platform build: tags + manual trigger
   build:
     if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
@@ -159,7 +254,7 @@ jobs:
 
   # Create release when a tag is pushed
   release:
-    needs: [build]
+    needs: [build, build-mobile]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -179,7 +274,13 @@ jobs:
           cd artifacts
           for dir in */; do
             name="${dir%/}"
-            if [[ "$name" == *windows* ]]; then
+            if [[ "$name" == *android* ]]; then
+              # Move APKs to release root
+              mv "$dir"/*.apk ../
+            elif [[ "$name" == *ios* ]]; then
+              # Move iOS zip to release root
+              mv "$dir"/*.zip ../
+            elif [[ "$name" == *windows* ]]; then
               zip -r "../${name}.zip" "$dir"
             elif [[ "$name" == *macos* ]]; then
               # macOS: DMG is already created, just move it
@@ -235,4 +336,5 @@ jobs:
             *.tar.gz
             *.zip
             *.dmg
+            *.apk
           generate_release_notes: true
