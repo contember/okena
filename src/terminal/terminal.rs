@@ -224,7 +224,9 @@ impl Terminal {
             terminal_id,
             resize_state: Mutex::new(ResizeState {
                 size,
-                last_pty_resize: std::time::Instant::now(),
+                // Use a time in the past so the first resize from paint() always
+                // passes the debounce check and sends SIGWINCH to the PTY immediately
+                last_pty_resize: std::time::Instant::now() - std::time::Duration::from_secs(1),
                 pending_pty_resize: None,
             }),
             transport,
