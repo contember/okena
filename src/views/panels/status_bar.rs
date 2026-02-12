@@ -133,22 +133,20 @@ impl Render for StatusBar {
             0
         };
 
-        // CPU color based on usage
         let cpu_color = if stats.cpu_usage > 80.0 {
-            t.term_red
+            t.metric_critical
         } else if stats.cpu_usage > 50.0 {
-            t.term_yellow
+            t.metric_warning
         } else {
-            t.term_green
+            t.metric_normal
         };
 
-        // Memory color based on usage
         let mem_color = if memory_percent > 80 {
-            t.term_red
+            t.metric_critical
         } else if memory_percent > 60 {
-            t.term_yellow
+            t.metric_warning
         } else {
-            t.term_green
+            t.metric_normal
         };
 
         div()

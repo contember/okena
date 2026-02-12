@@ -145,6 +145,14 @@ pub struct CustomThemeColors {
     #[serde(default = "default_folder_pink")]
     pub folder_pink: String,
 
+    // Status bar metric colors
+    #[serde(default = "default_metric_normal")]
+    pub metric_normal: String,
+    #[serde(default = "default_metric_warning")]
+    pub metric_warning: String,
+    #[serde(default = "default_metric_critical")]
+    pub metric_critical: String,
+
     // Diff colors
     #[serde(default = "default_diff_added_bg")]
     pub diff_added_bg: String,
@@ -213,6 +221,9 @@ fn default_folder_green() -> String { "#98c379".to_string() }
 fn default_folder_blue() -> String { "#61afef".to_string() }
 fn default_folder_purple() -> String { "#c678dd".to_string() }
 fn default_folder_pink() -> String { "#e06c9f".to_string() }
+fn default_metric_normal() -> String { "#0dbc79".to_string() }
+fn default_metric_warning() -> String { "#e5e510".to_string() }
+fn default_metric_critical() -> String { "#cd3131".to_string() }
 fn default_diff_added_bg() -> String { "#1e3a1e".to_string() }
 fn default_diff_removed_bg() -> String { "#3a1e1e".to_string() }
 fn default_diff_added_fg() -> String { "#4ec9b0".to_string() }
@@ -282,6 +293,9 @@ impl CustomThemeColors {
             folder_blue: Self::parse_hex(&self.folder_blue),
             folder_purple: Self::parse_hex(&self.folder_purple),
             folder_pink: Self::parse_hex(&self.folder_pink),
+            metric_normal: Self::parse_hex(&self.metric_normal),
+            metric_warning: Self::parse_hex(&self.metric_warning),
+            metric_critical: Self::parse_hex(&self.metric_critical),
             diff_added_bg: Self::parse_hex(&self.diff_added_bg),
             diff_removed_bg: Self::parse_hex(&self.diff_removed_bg),
             diff_added_fg: Self::parse_hex(&self.diff_added_fg),
@@ -370,6 +384,9 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 folder_blue: "#7dcfff".to_string(),
                 folder_purple: "#bb9af7".to_string(),
                 folder_pink: "#f472b6".to_string(),
+                metric_normal: "#999999".to_string(),
+                metric_warning: "#eeeeee".to_string(),
+                metric_critical: "#ff6c60".to_string(),
                 diff_added_bg: "#1a2e1a".to_string(),
                 diff_removed_bg: "#2e1a1a".to_string(),
                 diff_added_fg: "#a8ff60".to_string(),

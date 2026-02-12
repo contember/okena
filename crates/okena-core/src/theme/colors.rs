@@ -80,6 +80,11 @@ pub struct ThemeColors {
     pub folder_purple: u32,
     pub folder_pink: u32,
 
+    // Status bar metric colors (CPU/MEM severity)
+    pub metric_normal: u32,
+    pub metric_warning: u32,
+    pub metric_critical: u32,
+
     // Diff colors
     pub diff_added_bg: u32,
     pub diff_removed_bg: u32,
@@ -143,6 +148,9 @@ pub const DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x61afef,
     folder_purple: 0xc678dd,
     folder_pink: 0xe06c9f,
+    metric_normal: 0x0dbc79,   // term_green
+    metric_warning: 0xe5e510,  // term_yellow
+    metric_critical: 0xcd3131, // term_red
     diff_added_bg: 0x2ea043,
     diff_removed_bg: 0xf85149,
     diff_added_fg: 0x3fb950,
@@ -205,6 +213,9 @@ pub const LIGHT_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x0366d6,
     folder_purple: 0x6f42c1,
     folder_pink: 0xdb2777,
+    metric_normal: 0x00bc00,   // term_green
+    metric_warning: 0x949800,  // term_yellow
+    metric_critical: 0xcd3131, // term_red
     diff_added_bg: 0xdafbe1,
     diff_removed_bg: 0xffebe9,
     diff_added_fg: 0x22863a,
@@ -267,6 +278,9 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x7dcfff,
     folder_purple: 0xbb9af7,
     folder_pink: 0xf472b6,
+    metric_normal: 0x999999,   // text_secondary (subtle)
+    metric_warning: 0xeeeeee,  // text_primary
+    metric_critical: 0xff6c60, // term_red
     diff_added_bg: 0x2ea043,
     diff_removed_bg: 0xf85149,
     diff_added_fg: 0x56d364,
@@ -329,6 +343,9 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     folder_blue: 0x55aaff,
     folder_purple: 0xff55ff,
     folder_pink: 0xff77aa,
+    metric_normal: 0x00ff00,   // term_green
+    metric_warning: 0xffff00,  // term_yellow
+    metric_critical: 0xff0000, // term_red
     diff_added_bg: 0x003300,
     diff_removed_bg: 0x330000,
     diff_added_fg: 0x00ff00,
