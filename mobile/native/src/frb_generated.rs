@@ -655,16 +655,15 @@ fn wire__crate__api__connection__pair_impl(
     )
 }
 fn wire__crate__api__terminal__resize_terminal_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "resize_terminal",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let message = unsafe {
@@ -681,21 +680,17 @@ fn wire__crate__api__terminal__resize_terminal_impl(
             let api_cols = <u16>::sse_decode(&mut deserializer);
             let api_rows = <u16>::sse_decode(&mut deserializer);
             deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
-                    (move || async move {
-                        let output_ok = crate::api::terminal::resize_terminal(
-                            api_conn_id,
-                            api_terminal_id,
-                            api_cols,
-                            api_rows,
-                        )
-                        .await?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok({
+                    crate::api::terminal::resize_terminal(
+                        api_conn_id,
+                        api_terminal_id,
+                        api_cols,
+                        api_rows,
+                    );
+                })?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -1274,7 +1269,6 @@ fn pde_ffi_dispatcher_primary_impl(
         5 => wire__crate__api__state__create_terminal_impl(port, ptr, rust_vec_len, data_len),
         16 => wire__crate__api__connection__init_app_impl(port, ptr, rust_vec_len, data_len),
         18 => wire__crate__api__connection__pair_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__terminal__resize_terminal_impl(port, ptr, rust_vec_len, data_len),
         22 => wire__crate__api__state__send_special_key_impl(port, ptr, rust_vec_len, data_len),
         23 => wire__crate__api__terminal__send_text_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
@@ -1303,6 +1297,7 @@ fn pde_ffi_dispatcher_sync_impl(
         14 => wire__crate__api__connection__get_token_impl(ptr, rust_vec_len, data_len),
         15 => wire__crate__api__terminal__get_visible_cells_impl(ptr, rust_vec_len, data_len),
         17 => wire__crate__api__state__is_dirty_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__terminal__resize_terminal_impl(ptr, rust_vec_len, data_len),
         20 => wire__crate__api__terminal__scroll_impl(ptr, rust_vec_len, data_len),
         21 => {
             wire__crate__api__connection__seconds_since_activity_impl(ptr, rust_vec_len, data_len)
