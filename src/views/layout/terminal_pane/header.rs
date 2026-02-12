@@ -257,6 +257,18 @@ impl Render for TerminalHeader {
         let terminal_name = self.get_terminal_name(cx);
         let terminal_name_for_rename = terminal_name.clone();
 
+        // Check if this terminal is the focused one
+        let is_focused = {
+            let ws = self.workspace.read(cx);
+            ws.focus_manager
+                .focused_terminal_state()
+                .map(|f| f.project_id == self.project_id && f.layout_path == self.layout_path)
+                .unwrap_or(false)
+        };
+
+        let header_bg = if is_focused { t.bg_header } else { t.bg_secondary };
+        let icon_color = if is_focused { t.success } else { t.text_muted };
+
         // Check if this terminal can be dragged (must have an ID and not be the only terminal)
         let can_drag = self.terminal_id.is_some() && {
             let ws = self.workspace.read(cx);
@@ -287,7 +299,7 @@ impl Render for TerminalHeader {
                     .gap(px(4.0))
                     .min_w_0()
                     .overflow_hidden()
-                    .bg(rgb(t.bg_header))
+                    .bg(rgb(header_bg))
                     .when_some(drag_payload, |el, payload| {
                         el.on_drag(payload, |drag, _position, _window, cx| {
                             cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
@@ -334,17 +346,18 @@ impl Render for TerminalHeader {
                                 .text_size(px(12.0))
                                 .text_ellipsis()
                                 .child(
-                                    div()
+                                    svg()
                                         .flex_shrink_0()
-                                        .text_color(rgb(t.success))
-                                        .child(">")
+                                        .path("icons/terminal.svg")
+                                        .size(px(12.0))
+                                        .text_color(rgb(icon_color))
                                 )
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .overflow_hidden()
-                                        .text_color(rgb(t.text_primary))
+                                        .text_color(if is_focused { rgb(t.text_primary) } else { rgb(t.text_secondary) })
                                         .text_ellipsis()
                                         .child(terminal_name)
                                 )
