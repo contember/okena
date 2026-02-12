@@ -20,6 +20,7 @@ pub struct TitleBar {
     title: SharedString,
     workspace: Entity<Workspace>,
     menu_open: bool,
+    sidebar_open: bool,
     /// HWND cached for Win32 drag operations (Windows only)
     #[cfg(target_os = "windows")]
     hwnd: Option<isize>,
@@ -34,8 +35,16 @@ impl TitleBar {
             title: title.into(),
             workspace,
             menu_open: false,
+            sidebar_open: true,
             #[cfg(target_os = "windows")]
             hwnd: None,
+        }
+    }
+
+    pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.sidebar_open != open {
+            self.sidebar_open = open;
+            cx.notify();
         }
     }
 
@@ -444,27 +453,34 @@ impl Render for TitleBar {
                 h_flex()
                     .gap(px(8.0))
                     .pl(traffic_light_padding)
-                    .child(
-                        // Sidebar toggle
-                        div()
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("☰")
-                            .id("sidebar-toggle")
-                            // Stop propagation to prevent title bar drag from capturing the click
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(|_, window, cx| {
-                                cx.stop_propagation();
-                                window.dispatch_action(Box::new(ToggleSidebar), cx);
-                            }),
-                    )
+                    // On macOS, sidebar toggle lives in the sidebar footer instead
+                    .when(!cfg!(target_os = "macos"), |d| {
+                        d.child(
+                            // Sidebar toggle
+                            div()
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .text_size(px(14.0))
+                                .text_color(if self.sidebar_open {
+                                    rgb(t.term_blue)
+                                } else {
+                                    rgb(t.text_secondary)
+                                })
+                                .child("☰")
+                                .id("sidebar-toggle")
+                                // Stop propagation to prevent title bar drag from capturing the click
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(|_, window, cx| {
+                                    cx.stop_propagation();
+                                    window.dispatch_action(Box::new(ToggleSidebar), cx);
+                                }),
+                        )
+                    })
                     // On macOS, app menu items live in the native menu bar
                     .when(!cfg!(target_os = "macos"), |d| {
                         d.child({

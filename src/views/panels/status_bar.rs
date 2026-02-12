@@ -1,3 +1,4 @@
+use crate::keybindings::ToggleSidebar;
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -64,6 +65,7 @@ impl SystemInfoCache {
 /// Status bar component showing system info and time
 pub struct StatusBar {
     cache: Arc<Mutex<SystemInfoCache>>,
+    sidebar_open: bool,
 }
 
 impl StatusBar {
@@ -93,7 +95,14 @@ impl StatusBar {
             }
         }).detach();
 
-        Self { cache }
+        Self { cache, sidebar_open: true }
+    }
+
+    pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.sidebar_open != open {
+            self.sidebar_open = open;
+            cx.notify();
+        }
     }
 
     fn format_time() -> String {
@@ -153,9 +162,31 @@ impl Render for StatusBar {
             .border_t_1()
             .border_color(rgb(t.border))
             .text_size(px(11.0))
-            // Left side - system stats
+            // Left side - sidebar toggle (macOS only) + system stats
             .child({
                 h_flex().gap(px(16.0))
+                    // On macOS, sidebar toggle lives in the status bar footer
+                    .when(cfg!(target_os = "macos"), |d| {
+                        d.child(
+                            div()
+                                .id("sidebar-toggle")
+                                .cursor_pointer()
+                                .px(px(4.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .text_size(px(14.0))
+                                .text_color(if self.sidebar_open {
+                                    rgb(t.term_blue)
+                                } else {
+                                    rgb(t.text_secondary)
+                                })
+                                .child("☰")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleSidebar), cx);
+                                }),
+                        )
+                    })
                     // CPU
                     .child(
                         h_flex()

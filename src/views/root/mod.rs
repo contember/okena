@@ -73,12 +73,21 @@ impl RootView {
         // Create sidebar entity once to preserve state
         let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), request_broker.clone(), terminals.clone(), cx));
 
-        // Create title bar entity
+        // Create title bar entity (sync initial sidebar state)
+        let sidebar_initially_open = sidebar_ctrl.is_open();
         let workspace_for_title = workspace.clone();
-        let title_bar = cx.new(|_cx| TitleBar::new("Okena", workspace_for_title));
+        let title_bar = cx.new(|cx| {
+            let mut tb = TitleBar::new("Okena", workspace_for_title);
+            tb.set_sidebar_open(sidebar_initially_open, cx);
+            tb
+        });
 
-        // Create status bar entity
-        let status_bar = cx.new(StatusBar::new);
+        // Create status bar entity (sync initial sidebar state)
+        let status_bar = cx.new(|cx| {
+            let mut sb = StatusBar::new(cx);
+            sb.set_sidebar_open(sidebar_initially_open, cx);
+            sb
+        });
 
         // Create overlay manager
         let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));

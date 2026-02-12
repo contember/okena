@@ -7,7 +7,19 @@ impl RootView {
     /// Toggle sidebar visibility with animation
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let target = self.sidebar_ctrl.toggle(&mut self.app_settings);
+        self.sync_status_bar_sidebar_state(cx);
         self.animate_sidebar_to(target, cx);
+    }
+
+    /// Sync sidebar open state to the status bar and title bar for icon highlighting
+    fn sync_status_bar_sidebar_state(&self, cx: &mut Context<Self>) {
+        let open = self.sidebar_ctrl.is_open();
+        self.status_bar.update(cx, |sb, cx| {
+            sb.set_sidebar_open(open, cx);
+        });
+        self.title_bar.update(cx, |tb, cx| {
+            tb.set_sidebar_open(open, cx);
+        });
     }
 
     /// Toggle auto-hide mode
