@@ -218,7 +218,7 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     bg_primary: 0x1a1a1a,
     bg_secondary: 0x222222,
     bg_header: 0x282828,
-    bg_selection: 0x363983,
+    bg_selection: 0x3a3a3a,
     bg_hover: 0x303030,
     border: 0x404040,
     border_active: 0x96cbfe,

@@ -18,11 +18,6 @@ impl Sidebar {
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
-        let is_focused = {
-            let ws = self.workspace.read(cx);
-            ws.focused_project_id() == Some(&project.id)
-        };
-
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
         let terminal_count = project.terminal_ids.len();
@@ -38,8 +33,7 @@ impl Sidebar {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
-            .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source
             .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
@@ -177,11 +171,6 @@ impl Sidebar {
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
-        let is_focused = {
-            let ws = self.workspace.read(cx);
-            ws.focused_project_id() == Some(&project.id)
-        };
-
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
         let terminal_count = project.terminal_ids.len();
@@ -197,8 +186,7 @@ impl Sidebar {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
-            .when(!is_focused, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();
