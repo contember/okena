@@ -31,11 +31,14 @@ class OkenaApp extends StatelessWidget {
       child: MaterialApp(
         title: 'Okena',
         theme: ThemeData.dark(useMaterial3: true).copyWith(
-          colorScheme: ColorScheme.dark(
-            primary: Colors.blue.shade300,
-            surface: const Color(0xFF1E1E2E),
+          colorScheme: const ColorScheme.dark(
+            primary: Color(0xFF007ACC),
+            surface: Color(0xFF1E1E1E),
           ),
-          scaffoldBackgroundColor: const Color(0xFF1E1E2E),
+          scaffoldBackgroundColor: const Color(0xFF1E1E1E),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Color(0xFF323233),
+          ),
         ),
         home: const AppRouter(),
       ),

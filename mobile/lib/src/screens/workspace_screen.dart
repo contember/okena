@@ -233,7 +233,7 @@ class _TerminalTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       height: 36,
-      color: const Color(0xFF252536),
+      color: const Color(0xFF252526),
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         itemCount: terminalIds.length,
@@ -251,7 +251,7 @@ class _TerminalTabBar extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
                 color: isSelected
-                    ? const Color(0xFF363650)
+                    ? const Color(0xFF3C3C3C)
                     : Colors.transparent,
                 borderRadius: BorderRadius.circular(4),
               ),
