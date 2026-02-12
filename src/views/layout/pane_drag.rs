@@ -47,7 +47,7 @@ impl Render for PaneDragView {
                     .gap(px(6.0))
                     .child(
                         svg()
-                            .path("icons/shell.svg")
+                            .path("icons/terminal.svg")
                             .size(px(12.0))
                             .text_color(rgb(t.success)),
                     )

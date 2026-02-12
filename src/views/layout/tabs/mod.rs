@@ -350,7 +350,7 @@ impl LayoutContainer {
                         // Shell icon
                         .child(
                             svg()
-                                .path("icons/shell.svg")
+                                .path("icons/terminal.svg")
                                 .size(px(12.0))
                                 .text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) })
                         )

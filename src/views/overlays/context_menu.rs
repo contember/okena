@@ -163,7 +163,7 @@ impl Render for ContextMenu {
                     )
                     // Configure Hooks option
                     .child(
-                        menu_item("context-menu-configure-hooks", "icons/shell.svg", "Configure Hooks...", &t)
+                        menu_item("context-menu-configure-hooks", "icons/terminal.svg", "Configure Hooks...", &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.configure_hooks(cx);
                             })),
