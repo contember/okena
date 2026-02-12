@@ -84,8 +84,7 @@ class _TerminalViewState extends State<TerminalView> {
         oldWidget.terminalId != widget.terminalId) {
       _isSelecting = false;
       _selection = null;
-      _fetchCells();
-      // Force resize so the new terminal matches the mobile viewport
+      // Resize first so the grid matches the mobile viewport before fetching cells
       if (_cols > 0 && _rows > 0) {
         ffi.resizeTerminal(
           connId: widget.connId,
@@ -94,6 +93,7 @@ class _TerminalViewState extends State<TerminalView> {
           rows: _rows,
         );
       }
+      _fetchCells();
     }
   }
 
@@ -172,15 +172,27 @@ class _TerminalViewState extends State<TerminalView> {
       _cols = newCols;
       _rows = newRows;
       _resizeDebounce?.cancel();
-      _resizeDebounce = Timer(const Duration(milliseconds: 200), () {
-        ffi.resizeTerminal(
-          connId: widget.connId,
-          terminalId: widget.terminalId,
-          cols: _cols,
-          rows: _rows,
-        );
+      _resizeDebounce = Timer(const Duration(milliseconds: 100), () {
+        _doResize();
       });
+      // First resize is immediate so the terminal doesn't flash at wrong size
+      if (!_hasResized) {
+        _doResize();
+      }
     }
+  }
+
+  bool _hasResized = false;
+
+  void _doResize() {
+    _hasResized = true;
+    ffi.resizeTerminal(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+      cols: _cols,
+      rows: _rows,
+    );
+    _fetchCells();
   }
 
   // --- Touch to cell conversion ---
@@ -193,7 +205,7 @@ class _TerminalViewState extends State<TerminalView> {
   // --- Scroll handling ---
   void _onVerticalDragUpdate(DragUpdateDetails details) {
     if (_cellHeight <= 0) return;
-    _scrollAccumulator += -details.delta.dy;
+    _scrollAccumulator += details.delta.dy;
     final lines = (_scrollAccumulator / _cellHeight).truncate();
     if (lines != 0) {
       _scrollAccumulator -= lines * _cellHeight;

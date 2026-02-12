@@ -175,13 +175,13 @@ pub async fn send_text(conn_id: String, terminal_id: String, text: String) -> an
 }
 
 /// Resize a terminal.
-pub async fn resize_terminal(
+#[flutter_rust_bridge::frb(sync)]
+pub fn resize_terminal(
     conn_id: String,
     terminal_id: String,
     cols: u16,
     rows: u16,
-) -> anyhow::Result<()> {
+) {
     let mgr = ConnectionManager::get();
     mgr.resize_terminal(&conn_id, &terminal_id, cols, rows);
-    Ok(())
 }

@@ -118,7 +118,7 @@ Future<void> sendText({
 );
 
 /// Resize a terminal.
-Future<void> resizeTerminal({
+void resizeTerminal({
   required String connId,
   required String terminalId,
   required int cols,

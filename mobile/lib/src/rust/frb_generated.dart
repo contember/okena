@@ -150,7 +150,7 @@ abstract class RustLibApi extends BaseApi {
     required String code,
   });
 
-  Future<void> crateApiTerminalResizeTerminal({
+  void crateApiTerminalResizeTerminal({
     required String connId,
     required String terminalId,
     required int cols,
@@ -723,30 +723,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "pair", argNames: ["connId", "code"]);
 
   @override
-  Future<void> crateApiTerminalResizeTerminal({
+  void crateApiTerminalResizeTerminal({
     required String connId,
     required String terminalId,
     required int cols,
     required int rows,
   }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
           sse_encode_u_16(cols, serializer);
           sse_encode_u_16(rows, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 19,
-            port: port_,
-          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_AnyhowException,
+          decodeErrorData: null,
         ),
         constMeta: kCrateApiTerminalResizeTerminalConstMeta,
         argValues: [connId, terminalId, cols, rows],

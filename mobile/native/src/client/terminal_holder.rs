@@ -73,8 +73,16 @@ impl TerminalHolder {
                 };
                 let cell = &grid[cell_point];
 
-                // Skip wide char spacers — they're the second cell of a double-width character
+                // Wide char spacers are the second cell of a double-width character.
+                // Push an empty cell to keep the cell count at cols*rows so the
+                // Dart painter's index-to-position mapping stays correct.
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    cells.push(CellData {
+                        character: String::new(),
+                        fg: theme_colors.ansi_to_argb(&cell.fg),
+                        bg: theme_colors.ansi_to_argb(&cell.bg),
+                        flags: 0,
+                    });
                     continue;
                 }
 
@@ -123,6 +131,7 @@ impl TerminalHolder {
     pub fn get_cursor(&self) -> CursorState {
         let term = self.term.lock();
         let cursor = term.grid().cursor.point;
+        let display_offset = term.grid().display_offset() as i32;
         let cursor_shape = term.cursor_style().shape;
         let shape = match cursor_shape {
             alacritty_terminal::vte::ansi::CursorShape::Block
@@ -131,12 +140,17 @@ impl TerminalHolder {
             alacritty_terminal::vte::ansi::CursorShape::Beam => CursorShape::Beam,
             alacritty_terminal::vte::ansi::CursorShape::Hidden => CursorShape::Block,
         };
+        // Hide cursor when scrolled into history (cursor would be off-screen)
+        let cursor_visual_line = cursor.line.0 + display_offset;
+        let screen_lines = term.grid().screen_lines() as i32;
         let visible = term.mode().contains(alacritty_terminal::term::TermMode::SHOW_CURSOR)
-            && !matches!(cursor_shape, alacritty_terminal::vte::ansi::CursorShape::Hidden);
+            && !matches!(cursor_shape, alacritty_terminal::vte::ansi::CursorShape::Hidden)
+            && cursor_visual_line >= 0
+            && cursor_visual_line < screen_lines;
 
         CursorState {
             col: cursor.column.0 as u16,
-            row: cursor.line.0 as u16,
+            row: cursor_visual_line.max(0) as u16,
             shape,
             visible,
         }
@@ -149,6 +163,7 @@ impl TerminalHolder {
         term.resize(size);
         *self.cols.lock() = cols;
         *self.rows.lock() = rows;
+        self.dirty.store(true, Ordering::Relaxed);
     }
 
     /// Scroll the terminal display by delta lines (positive = up, negative = down).
