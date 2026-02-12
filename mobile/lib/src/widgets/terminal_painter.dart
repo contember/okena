@@ -103,7 +103,7 @@ class TerminalPainter extends CustomPainter {
 
       // Selection highlight
       if (selection != null && _isCellInSelection(col, row, selection!)) {
-        bgPaint.color = const Color(0x40585B70);
+        bgPaint.color = const Color(0x40264F78);
         canvas.drawRect(Rect.fromLTWH(x, y, cellWidth, cellHeight), bgPaint);
       }
     }

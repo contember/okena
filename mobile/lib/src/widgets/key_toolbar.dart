@@ -139,7 +139,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF2A2A3E),
+      backgroundColor: const Color(0xFF252526),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -171,7 +171,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
                 children: shortcuts.map((s) {
                   final (letter, label) = s;
                   return Material(
-                    color: const Color(0xFF363650),
+                    color: const Color(0xFF3C3C3C),
                     borderRadius: BorderRadius.circular(8),
                     child: InkWell(
                       borderRadius: BorderRadius.circular(8),
@@ -222,7 +222,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF2A2A3E),
+      backgroundColor: const Color(0xFF252526),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -313,8 +313,8 @@ class _KeyToolbarState extends State<KeyToolbar> {
                           ),
                           decoration: BoxDecoration(
                             color: sendEnter
-                                ? Colors.blue.shade700
-                                : const Color(0xFF363650),
+                                ? const Color(0xFF007ACC)
+                                : const Color(0xFF3C3C3C),
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Row(
@@ -358,13 +358,13 @@ class _KeyToolbarState extends State<KeyToolbar> {
                       hintText: 'Enter command...',
                       hintStyle: const TextStyle(color: Colors.white38),
                       filled: true,
-                      fillColor: const Color(0xFF363650),
+                      fillColor: const Color(0xFF3C3C3C),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide.none,
                       ),
                       suffixIcon: IconButton(
-                        icon: const Icon(Icons.send, color: Colors.blue),
+                        icon: const Icon(Icons.send, color: Color(0xFF007ACC)),
                         onPressed: submit,
                       ),
                     ),
@@ -387,7 +387,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
   void _showMoreKeys() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF2A2A3E),
+      backgroundColor: const Color(0xFF252526),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -440,7 +440,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
   Widget _buildGridKey(BuildContext ctx, String label, VoidCallback onTap,
       {bool toggle = false}) {
     return Material(
-      color: toggle ? Colors.blue.shade700 : const Color(0xFF363650),
+      color: toggle ? const Color(0xFF007ACC) : const Color(0xFF3C3C3C),
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
@@ -468,14 +468,14 @@ class _KeyToolbarState extends State<KeyToolbar> {
   Widget build(BuildContext context) {
     final modifierActive = _ctrlActive || _altActive;
     return Container(
-      color: const Color(0xFF2A2A3E),
+      color: const Color(0xFF252526),
       child: SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (modifierActive)
-              Container(height: 2, color: Colors.blue),
+              Container(height: 2, color: const Color(0xFF007ACC)),
             Padding(
               padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
               child: IntrinsicHeight(
@@ -560,7 +560,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
     return Padding(
       padding: const EdgeInsets.all(1),
       child: Material(
-        color: const Color(0xFF363650),
+        color: const Color(0xFF3C3C3C),
         borderRadius: BorderRadius.circular(6),
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
@@ -590,7 +590,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
         child: Material(
-          color: const Color(0xFF363650),
+          color: const Color(0xFF3C3C3C),
           borderRadius: BorderRadius.circular(6),
           child: InkWell(
             borderRadius: BorderRadius.circular(6),
@@ -621,7 +621,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
         child: Material(
-          color: const Color(0xFF363650),
+          color: const Color(0xFF3C3C3C),
           borderRadius: BorderRadius.circular(6),
           child: InkWell(
             borderRadius: BorderRadius.circular(6),
@@ -650,7 +650,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
         child: Material(
-          color: active ? Colors.blue.shade700 : const Color(0xFF363650),
+          color: active ? const Color(0xFF007ACC) : const Color(0xFF3C3C3C),
           borderRadius: BorderRadius.circular(6),
           child: InkWell(
             borderRadius: BorderRadius.circular(6),
