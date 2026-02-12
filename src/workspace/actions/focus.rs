@@ -133,6 +133,13 @@ impl Workspace {
         if let Some(project) = self.project(project_id) {
             if let Some(ref layout) = project.layout {
                 if let Some(path) = layout.find_terminal_path(terminal_id) {
+                    // Activate any tabs along the path so the terminal becomes visible
+                    if let Some(project_mut) = self.project_mut(project_id) {
+                        if let Some(ref mut layout) = project_mut.layout {
+                            layout.activate_tabs_along_path(&path);
+                        }
+                    }
+                    self.notify_data(cx);
                     // Switch to the terminal's project so it becomes visible
                     self.set_focused_project(Some(project_id.to_string()), cx);
                     // Use the unified focus method for consistent propagation

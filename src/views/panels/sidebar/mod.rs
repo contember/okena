@@ -766,18 +766,29 @@ pub(super) struct SidebarProjectInfo {
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
+    /// Terminal IDs that are behind a non-active tab (not currently visible)
+    pub inactive_tab_terminals: HashSet<String>,
+    /// Terminal IDs that belong to a tab group (Tabs node with 2+ children)
+    pub tab_group_terminals: HashSet<String>,
 }
 
 impl SidebarProjectInfo {
     fn from_project(project: &ProjectData) -> Self {
+        let layout = project.layout.as_ref();
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
             is_visible: project.is_visible,
             folder_color: project.folder_color,
-            has_layout: project.layout.is_some(),
-            terminal_ids: project.layout.as_ref()
+            has_layout: layout.is_some(),
+            terminal_ids: layout
                 .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default(),
+            inactive_tab_terminals: layout
+                .map(|l| l.collect_inactive_tab_terminal_ids())
+                .unwrap_or_default(),
+            tab_group_terminals: layout
+                .map(|l| l.collect_tab_group_terminal_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
         }
@@ -921,8 +932,10 @@ impl Render for Sidebar {
                         };
                         for (tid, is_minimized) in &minimized_states {
                             let is_cursor = cursor_index == Some(flat_idx);
+                            let is_inactive_tab = project.inactive_tab_terminals.contains(tid.as_str());
+                            let is_in_tab_group = project.tab_group_terminals.contains(tid.as_str());
                             flat_elements.push(
-                                self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                                self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 28.0, "", is_cursor, cx).into_any_element()
                             );
                             flat_idx += 1;
                         }
@@ -945,8 +958,10 @@ impl Render for Sidebar {
                             };
                             for (tid, is_minimized) in &minimized_states {
                                 let is_cursor = cursor_index == Some(flat_idx);
+                                let is_inactive_tab = child.inactive_tab_terminals.contains(tid.as_str());
+                                let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                 flat_elements.push(
-                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "wt-", is_cursor, cx).into_any_element()
                                 );
                                 flat_idx += 1;
                             }
@@ -979,8 +994,10 @@ impl Render for Sidebar {
                                 };
                                 for (tid, is_minimized) in &minimized_states {
                                     let is_cursor = cursor_index == Some(flat_idx);
+                                    let is_inactive_tab = fp.inactive_tab_terminals.contains(tid.as_str());
+                                    let is_in_tab_group = fp.tab_group_terminals.contains(tid.as_str());
                                     flat_elements.push(
-                                        self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, 28.0, "", is_cursor, cx).into_any_element()
+                                        self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 28.0, "", is_cursor, cx).into_any_element()
                                     );
                                     flat_idx += 1;
                                 }
@@ -1004,8 +1021,10 @@ impl Render for Sidebar {
                                         };
                                         for (tid, is_minimized) in &minimized_states {
                                             let is_cursor = cursor_index == Some(flat_idx);
+                                            let is_inactive_tab = child.inactive_tab_terminals.contains(tid.as_str());
+                                            let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                             flat_elements.push(
-                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "wt-", is_cursor, cx).into_any_element()
                                             );
                                             flat_idx += 1;
                                         }

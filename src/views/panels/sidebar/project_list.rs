@@ -306,6 +306,8 @@ impl Sidebar {
         terminal_id: &str,
         terminal_names: &HashMap<String, String>,
         is_minimized: bool,
+        is_inactive_tab: bool,
+        is_in_tab_group: bool,
         left_padding: f32,
         id_prefix: &str,
         is_cursor: bool,
@@ -355,7 +357,13 @@ impl Sidebar {
             .id(ElementId::Name(format!("{}terminal-item-{}", id_prefix, terminal_id).into()))
             .group("terminal-item")
             .h(px(22.0))
-            .pl(px(left_padding))
+            .when(is_in_tab_group, |d| {
+                d.ml(px(left_padding - 6.0))
+                    .pl(px(4.0))
+                    .border_l_2()
+                    .border_color(rgb(t.border))
+            })
+            .when(!is_in_tab_group, |d| d.pl(px(left_padding)))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -363,8 +371,9 @@ impl Sidebar {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_minimized, |d| d.opacity(0.5))
+            .when(is_inactive_tab && !is_minimized, |d| d.opacity(0.5))
             .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
-            .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(is_cursor && !is_in_tab_group, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Click to focus this terminal
             .on_click(cx.listener({
                 let project_id = project_id.clone();
@@ -398,6 +407,8 @@ impl Sidebar {
                             .text_color(if has_bell {
                                 rgb(t.border_bell)
                             } else if is_minimized {
+                                rgb(t.text_muted)
+                            } else if is_inactive_tab {
                                 rgb(t.text_muted)
                             } else {
                                 rgb(t.success)

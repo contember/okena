@@ -2,7 +2,7 @@ use crate::theme::FolderColor;
 use crate::workspace::focus::FocusManager;
 use gpui::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A folder that groups projects in the sidebar
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -419,6 +419,91 @@ impl LayoutNode {
                     }
                 }
                 None
+            }
+        }
+    }
+
+    /// Collect terminal IDs that are behind a non-active tab.
+    /// A terminal is "inactive" if any ancestor Tabs node has it in a non-active child.
+    pub fn collect_inactive_tab_terminal_ids(&self) -> HashSet<String> {
+        let mut result = HashSet::new();
+        self.collect_inactive_tabs_recursive(&mut result, false);
+        result
+    }
+
+    fn collect_inactive_tabs_recursive(&self, result: &mut HashSet<String>, is_behind_inactive_tab: bool) {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if is_behind_inactive_tab {
+                    if let Some(id) = terminal_id {
+                        result.insert(id.clone());
+                    }
+                }
+            }
+            LayoutNode::Split { children, .. } => {
+                for child in children {
+                    child.collect_inactive_tabs_recursive(result, is_behind_inactive_tab);
+                }
+            }
+            LayoutNode::Tabs { children, active_tab } => {
+                for (i, child) in children.iter().enumerate() {
+                    let inactive = is_behind_inactive_tab || i != *active_tab;
+                    child.collect_inactive_tabs_recursive(result, inactive);
+                }
+            }
+        }
+    }
+
+    /// Collect terminal IDs that belong to a Tabs node with 2+ children.
+    /// These terminals are visually grouped in the sidebar with a vertical line.
+    pub fn collect_tab_group_terminal_ids(&self) -> HashSet<String> {
+        let mut result = HashSet::new();
+        self.collect_tab_group_recursive(&mut result, false);
+        result
+    }
+
+    fn collect_tab_group_recursive(&self, result: &mut HashSet<String>, inside_tab_group: bool) {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if inside_tab_group {
+                    if let Some(id) = terminal_id {
+                        result.insert(id.clone());
+                    }
+                }
+            }
+            LayoutNode::Split { children, .. } => {
+                for child in children {
+                    child.collect_tab_group_recursive(result, inside_tab_group);
+                }
+            }
+            LayoutNode::Tabs { children, .. } => {
+                let is_group = children.len() >= 2;
+                for child in children {
+                    child.collect_tab_group_recursive(result, is_group || inside_tab_group);
+                }
+            }
+        }
+    }
+
+    /// Activate tabs along the given path so the target terminal becomes visible.
+    /// For each Tabs node encountered along the path, sets its active_tab to the
+    /// path index that leads toward the target.
+    pub fn activate_tabs_along_path(&mut self, path: &[usize]) {
+        if path.is_empty() {
+            return;
+        }
+        match self {
+            LayoutNode::Terminal { .. } => {}
+            LayoutNode::Split { children, .. } => {
+                if let Some(child) = children.get_mut(path[0]) {
+                    child.activate_tabs_along_path(&path[1..]);
+                }
+            }
+            LayoutNode::Tabs { children, active_tab } => {
+                *active_tab = path[0];
+                if let Some(child) = children.get_mut(path[0]) {
+                    child.activate_tabs_along_path(&path[1..]);
+                }
             }
         }
     }
