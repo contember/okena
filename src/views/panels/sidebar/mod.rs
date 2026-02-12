@@ -771,6 +771,38 @@ impl Render for Sidebar {
             }
         }
 
+        // Auto-expand project/folder when the focused terminal is inside a collapsed one
+        if let Some(focused_project_id) = {
+            let ws = self.workspace.read(cx);
+            ws.focus_manager.focused_terminal_state().map(|ft| ft.project_id.clone())
+        } {
+            // Expand the project so its terminals are visible
+            self.expanded_projects.insert(focused_project_id.clone());
+
+            // Find the effective project ID for folder lookup
+            // (worktree children are rendered under their parent, not directly in folders)
+            let lookup_project_id = {
+                let ws = self.workspace.read(cx);
+                ws.project(&focused_project_id)
+                    .and_then(|p| p.worktree_info.as_ref())
+                    .map(|wt| wt.parent_project_id.clone())
+                    .unwrap_or(focused_project_id)
+            };
+
+            // Uncollapse folder containing this project
+            let folder_to_uncollapse = {
+                let ws = self.workspace.read(cx);
+                ws.data().folders.iter()
+                    .find(|f| f.collapsed && f.project_ids.contains(&lookup_project_id))
+                    .map(|f| f.id.clone())
+            };
+            if let Some(folder_id) = folder_to_uncollapse {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.toggle_folder_collapsed(&folder_id, cx);
+                });
+            }
+        }
+
         // Clear cursor when sidebar loses focus
         if self.cursor_index.is_some() && !self.focus_handle.is_focused(window) {
             self.cursor_index = None;
