@@ -137,6 +137,75 @@ pub fn execute_action(
             ws.update_split_sizes(&project_id, &path, sizes, cx);
             ActionResult::Ok(None)
         }
+        ActionRequest::CreateGrid {
+            project_id,
+            path,
+            rows,
+            cols,
+        } => {
+            ws.create_grid(&project_id, &path, rows, cols, cx);
+            spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+        }
+        ActionRequest::AddGridRow {
+            project_id,
+            path,
+            row,
+        } => {
+            match row {
+                Some(idx) => ws.add_grid_row_at(&project_id, &path, idx, cx),
+                None => ws.add_grid_row(&project_id, &path, cx),
+            }
+            spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+        }
+        ActionRequest::AddGridColumn {
+            project_id,
+            path,
+            col,
+        } => {
+            match col {
+                Some(idx) => ws.add_grid_column_at(&project_id, &path, idx, cx),
+                None => ws.add_grid_column(&project_id, &path, cx),
+            }
+            spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+        }
+        ActionRequest::RemoveGridRow {
+            project_id,
+            path,
+            row,
+        } => {
+            match row {
+                Some(idx) => { ws.remove_grid_row_at(&project_id, &path, idx, cx); }
+                None => { ws.remove_grid_row(&project_id, &path, cx); }
+            }
+            ActionResult::Ok(None)
+        }
+        ActionRequest::RemoveGridColumn {
+            project_id,
+            path,
+            col,
+        } => {
+            match col {
+                Some(idx) => { ws.remove_grid_column_at(&project_id, &path, idx, cx); }
+                None => { ws.remove_grid_column(&project_id, &path, cx); }
+            }
+            ActionResult::Ok(None)
+        }
+        ActionRequest::UpdateGridRowSizes {
+            project_id,
+            path,
+            sizes,
+        } => {
+            ws.update_grid_row_sizes(&project_id, &path, sizes, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::UpdateGridColSizes {
+            project_id,
+            path,
+            sizes,
+        } => {
+            ws.update_grid_col_sizes(&project_id, &path, sizes, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {
@@ -290,7 +359,9 @@ pub fn collect_uninitialized_terminals(
             result.push(current_path);
         }
         LayoutNode::Terminal { .. } => {}
-        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+        LayoutNode::Split { children, .. }
+        | LayoutNode::Tabs { children, .. }
+        | LayoutNode::Grid { children, .. } => {
             for (i, child) in children.iter().enumerate() {
                 let mut child_path = current_path.clone();
                 child_path.push(i);

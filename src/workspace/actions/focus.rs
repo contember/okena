@@ -36,7 +36,9 @@ impl Workspace {
         use crate::workspace::state::LayoutNode;
         match node {
             LayoutNode::Terminal { .. } => Some(vec![]),
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     if let Some(mut path) = Self::find_first_terminal_path(child) {
                         path.insert(0, i);

@@ -185,6 +185,7 @@ impl TerminalPane {
     ) {
         match event {
             HeaderEvent::Split(dir) => self.handle_split(*dir, cx),
+            HeaderEvent::Grid => self.handle_create_grid(cx),
             HeaderEvent::AddTab => self.handle_add_tab(cx),
             HeaderEvent::Close => self.handle_close(cx),
             HeaderEvent::Minimize => self.handle_minimize(cx),
@@ -192,6 +193,10 @@ impl TerminalPane {
             HeaderEvent::Detach => self.handle_detach(cx),
             HeaderEvent::ExportBuffer => self.handle_export_buffer(cx),
             HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
+            HeaderEvent::AddGridRow(row) => self.handle_add_grid_row_at(*row, cx),
+            HeaderEvent::RemoveGridRow(row) => self.handle_remove_grid_row_at(*row, cx),
+            HeaderEvent::AddGridColumn(col) => self.handle_add_grid_column_at(*col, cx),
+            HeaderEvent::RemoveGridColumn(col) => self.handle_remove_grid_column_at(*col, cx),
             HeaderEvent::OpenShellSelector(current_shell) => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {

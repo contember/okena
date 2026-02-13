@@ -106,6 +106,13 @@ pub enum LayoutNode {
         #[serde(default)]
         active_tab: usize,
     },
+    Grid {
+        rows: usize,
+        cols: usize,
+        row_sizes: Vec<f32>,
+        col_sizes: Vec<f32>,
+        children: Vec<LayoutNode>, // len == rows * cols, row-major
+    },
 }
 
 pub use okena_core::types::SplitDirection;
@@ -312,7 +319,9 @@ impl LayoutNode {
     pub fn is_all_hidden(&self) -> bool {
         match self {
             LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 children.iter().all(|c| c.is_all_hidden())
             }
         }
@@ -337,7 +346,9 @@ impl LayoutNode {
 
         match self {
             LayoutNode::Terminal { .. } => None,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 children.get(path[0])?.get_at_path(&path[1..])
             }
         }
@@ -351,7 +362,9 @@ impl LayoutNode {
 
         match self {
             LayoutNode::Terminal { .. } => None,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 children.get_mut(path[0])?.get_at_path_mut(&path[1..])
             }
         }
@@ -371,7 +384,9 @@ impl LayoutNode {
                     ids.push(id.clone());
                 }
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for child in children {
                     child.collect_terminal_ids_recursive(ids);
                 }
@@ -388,7 +403,9 @@ impl LayoutNode {
                 *minimized = false;
                 *detached = false;
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for child in children {
                     child.clear_terminal_ids();
                 }
@@ -410,7 +427,9 @@ impl LayoutNode {
                     None
                 }
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
@@ -439,7 +458,9 @@ impl LayoutNode {
                     }
                 }
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
@@ -465,7 +486,9 @@ impl LayoutNode {
                     }
                 }
             }
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
@@ -484,7 +507,9 @@ impl LayoutNode {
         match self {
             LayoutNode::Terminal { terminal_id: None, .. } => Some(current_path),
             LayoutNode::Terminal { .. } => None,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
@@ -505,7 +530,9 @@ impl LayoutNode {
     fn find_first_terminal_path_recursive(&self, current_path: Vec<usize>) -> Vec<usize> {
         match self {
             LayoutNode::Terminal { .. } => current_path,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 if let Some(first_child) = children.first() {
                     let mut child_path = current_path;
                     child_path.push(0);
@@ -563,6 +590,19 @@ impl LayoutNode {
                 }
                 Some(removed)
             }
+            LayoutNode::Grid { children, rows, cols, .. } => {
+                if child_index >= children.len() {
+                    return None;
+                }
+                // Replace with empty terminal instead of removing (grid keeps dimensions)
+                let removed = std::mem::replace(&mut children[child_index], LayoutNode::new_terminal());
+                // Collapse if 1×1
+                if *rows == 1 && *cols == 1 {
+                    let remaining = children.remove(0);
+                    *parent = remaining;
+                }
+                Some(removed)
+            }
         }
     }
 
@@ -570,11 +610,14 @@ impl LayoutNode {
     /// - Flatten nested splits with the same direction (merging sizes proportionally)
     /// - Unwrap splits/tabs with a single child
     /// - Remove empty containers
+    /// - Fix grid children/sizes count mismatches
     pub fn normalize(&mut self) {
         // First, recursively normalize children
         match self {
             LayoutNode::Terminal { .. } => return,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. }
+            | LayoutNode::Tabs { children, .. }
+            | LayoutNode::Grid { children, .. } => {
                 for child in children.iter_mut() {
                     child.normalize();
                 }
@@ -591,17 +634,44 @@ impl LayoutNode {
             }
         }
 
+        // Fix Grid invariants
+        if let LayoutNode::Grid { rows, cols, row_sizes, col_sizes, children } = self {
+            // Ensure rows/cols are at least 1
+            if *rows == 0 { *rows = 1; }
+            if *cols == 0 { *cols = 1; }
+
+            let expected = *rows * *cols;
+            // Fix children count
+            children.truncate(expected);
+            while children.len() < expected {
+                children.push(LayoutNode::new_terminal());
+            }
+            // Fix row_sizes
+            row_sizes.truncate(*rows);
+            while row_sizes.len() < *rows {
+                row_sizes.push(100.0 / *rows as f32);
+            }
+            // Fix col_sizes
+            col_sizes.truncate(*cols);
+            while col_sizes.len() < *cols {
+                col_sizes.push(100.0 / *cols as f32);
+            }
+        }
+
         // Unwrap single-child or empty containers
         let should_unwrap = match self {
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
+            LayoutNode::Grid { rows, cols, .. } => *rows <= 1 && *cols <= 1,
             _ => false,
         };
         if should_unwrap {
             match self {
-                LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                LayoutNode::Split { children, .. }
+                | LayoutNode::Tabs { children, .. }
+                | LayoutNode::Grid { children, .. } => {
                     if children.len() == 1 {
                         *self = children.remove(0);
-                    } else {
+                    } else if children.is_empty() {
                         // Empty container - replace with a default terminal
                         *self = LayoutNode::new_terminal();
                     }
@@ -661,6 +731,13 @@ impl LayoutNode {
             LayoutNode::Tabs { children, active_tab } => LayoutNode::Tabs {
                 children: children.iter().map(|c| c.clone_structure()).collect(),
                 active_tab: *active_tab,
+            },
+            LayoutNode::Grid { rows, cols, row_sizes, col_sizes, children } => LayoutNode::Grid {
+                rows: *rows,
+                cols: *cols,
+                row_sizes: row_sizes.clone(),
+                col_sizes: col_sizes.clone(),
+                children: children.iter().map(|c| c.clone_structure()).collect(),
             },
         }
     }
@@ -1153,6 +1230,180 @@ mod tests {
         }
     }
 
+    // === Grid ===
+
+    fn grid(rows: usize, cols: usize, children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode::Grid {
+            rows,
+            cols,
+            row_sizes: vec![100.0 / rows as f32; rows],
+            col_sizes: vec![100.0 / cols as f32; cols],
+            children,
+        }
+    }
+
+    #[test]
+    fn get_at_path_grid_flat_index() {
+        // 2×3 grid: children indexed [0..5]
+        let node = grid(2, 3, vec![
+            terminal("t0"), terminal("t1"), terminal("t2"),
+            terminal("t3"), terminal("t4"), terminal("t5"),
+        ]);
+        // path [4] → row 1, col 1
+        let child = node.get_at_path(&[4]).unwrap();
+        match child {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                assert_eq!(terminal_id.as_deref(), Some("t4"));
+            }
+            _ => panic!("Expected terminal"),
+        }
+    }
+
+    #[test]
+    fn collect_terminal_ids_grid() {
+        let node = grid(2, 2, vec![
+            terminal("t1"), terminal("t2"),
+            terminal("t3"), terminal("t4"),
+        ]);
+        assert_eq!(node.collect_terminal_ids(), vec!["t1", "t2", "t3", "t4"]);
+    }
+
+    #[test]
+    fn find_terminal_path_in_grid() {
+        let node = grid(2, 2, vec![
+            terminal("t1"), terminal("t2"),
+            terminal("t3"), terminal("t4"),
+        ]);
+        assert_eq!(node.find_terminal_path("t3"), Some(vec![2]));
+        assert_eq!(node.find_terminal_path("t1"), Some(vec![0]));
+        assert_eq!(node.find_terminal_path("missing"), None);
+    }
+
+    #[test]
+    fn normalize_grid_1x1_unwraps() {
+        let mut node = grid(1, 1, vec![terminal("t1")]);
+        node.normalize();
+        match node {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                assert_eq!(terminal_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected 1×1 grid to unwrap to terminal"),
+        }
+    }
+
+    #[test]
+    fn normalize_grid_fixes_children_count() {
+        // Grid says 2×2 but only has 2 children — normalize should pad
+        let mut node = LayoutNode::Grid {
+            rows: 2,
+            cols: 2,
+            row_sizes: vec![50.0, 50.0],
+            col_sizes: vec![50.0, 50.0],
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        node.normalize();
+        match &node {
+            LayoutNode::Grid { children, .. } => {
+                assert_eq!(children.len(), 4);
+                assert_eq!(children[0].collect_terminal_ids(), vec!["t1"]);
+                assert_eq!(children[1].collect_terminal_ids(), vec!["t2"]);
+                // children[2] and [3] should be new (no id)
+                assert!(children[2].collect_terminal_ids().is_empty());
+                assert!(children[3].collect_terminal_ids().is_empty());
+            }
+            _ => panic!("Expected grid"),
+        }
+    }
+
+    #[test]
+    fn normalize_grid_fixes_sizes() {
+        // Grid with wrong row_sizes/col_sizes lengths
+        let mut node = LayoutNode::Grid {
+            rows: 2,
+            cols: 3,
+            row_sizes: vec![100.0],  // too few
+            col_sizes: vec![25.0, 25.0, 25.0, 25.0],  // too many
+            children: vec![
+                terminal("t0"), terminal("t1"), terminal("t2"),
+                terminal("t3"), terminal("t4"), terminal("t5"),
+            ],
+        };
+        node.normalize();
+        match &node {
+            LayoutNode::Grid { row_sizes, col_sizes, .. } => {
+                assert_eq!(row_sizes.len(), 2);
+                assert_eq!(col_sizes.len(), 3);
+            }
+            _ => panic!("Expected grid"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_grid_replaces_with_empty() {
+        let mut node = grid(2, 2, vec![
+            terminal("t1"), terminal("t2"),
+            terminal("t3"), terminal("t4"),
+        ]);
+        let removed = node.remove_at_path(&[1]).unwrap();
+        assert_eq!(removed.collect_terminal_ids(), vec!["t2"]);
+        // Grid still has 4 children — cell replaced with empty terminal
+        match &node {
+            LayoutNode::Grid { children, .. } => {
+                assert_eq!(children.len(), 4);
+                assert!(children[1].collect_terminal_ids().is_empty());
+            }
+            _ => panic!("Expected grid"),
+        }
+    }
+
+    #[test]
+    fn remove_at_path_grid_1x1_collapses() {
+        let mut node = grid(1, 1, vec![terminal("t1")]);
+        let removed = node.remove_at_path(&[0]).unwrap();
+        assert_eq!(removed.collect_terminal_ids(), vec!["t1"]);
+        // 1×1 grid collapses — replaced with new empty terminal
+        match &node {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                assert!(terminal_id.is_none());
+            }
+            _ => panic!("Expected terminal after 1×1 collapse"),
+        }
+    }
+
+    #[test]
+    fn clone_structure_grid() {
+        let node = grid(2, 2, vec![
+            terminal("t1"), terminal("t2"),
+            terminal("t3"), terminal("t4"),
+        ]);
+        let cloned = node.clone_structure();
+        match &cloned {
+            LayoutNode::Grid { rows, cols, children, .. } => {
+                assert_eq!(*rows, 2);
+                assert_eq!(*cols, 2);
+                assert_eq!(children.len(), 4);
+                // All IDs should be cleared
+                for child in children {
+                    assert!(child.collect_terminal_ids().is_empty());
+                }
+            }
+            _ => panic!("Expected grid"),
+        }
+    }
+
+    #[test]
+    fn is_all_hidden_grid() {
+        let node = grid(1, 2, vec![
+            terminal_minimized("t1"), terminal_minimized("t2"),
+        ]);
+        assert!(node.is_all_hidden());
+
+        let mixed = grid(1, 2, vec![
+            terminal_minimized("t1"), terminal("t2"),
+        ]);
+        assert!(!mixed.is_all_hidden());
+    }
+
     // === Serialization round-trip ===
 
     #[test]
@@ -1176,6 +1427,27 @@ mod tests {
             deserialized.collect_terminal_ids(),
             vec!["t1", "t2", "t3", "t4", "t5"]
         );
+    }
+
+    #[test]
+    fn serde_round_trip_grid() {
+        let node = grid(2, 3, vec![
+            terminal("t1"), terminal("t2"), terminal("t3"),
+            terminal("t4"), terminal("t5"), terminal("t6"),
+        ]);
+        let json = serde_json::to_string(&node).unwrap();
+        let deserialized: LayoutNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.collect_terminal_ids(),
+            vec!["t1", "t2", "t3", "t4", "t5", "t6"]
+        );
+        match &deserialized {
+            LayoutNode::Grid { rows, cols, .. } => {
+                assert_eq!(*rows, 2);
+                assert_eq!(*cols, 3);
+            }
+            _ => panic!("Expected grid"),
+        }
     }
 }
 
@@ -1498,6 +1770,367 @@ mod gpui_tests {
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "p1");
             assert_eq!(visible[1].id, "p2");
+        });
+    }
+
+    // === Grid workspace actions ===
+
+    #[gpui::test]
+    fn test_create_grid(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, row_sizes, col_sizes } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 4);
+                    assert_eq!(row_sizes.len(), 2);
+                    assert_eq!(col_sizes.len(), 2);
+                    // First child should be the original terminal
+                    assert_eq!(children[0].collect_terminal_ids(), vec![format!("term_p1")]);
+                    // Rest should be empty (no terminal_id)
+                    assert!(children[1].collect_terminal_ids().is_empty());
+                    assert!(children[2].collect_terminal_ids().is_empty());
+                    assert!(children[3].collect_terminal_ids().is_empty());
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_grid_row(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            ws.add_grid_row("p1", &[], cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 3);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 6);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_grid_column(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            ws.add_grid_column("p1", &[], cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 3);
+                    assert_eq!(children.len(), 6);
+                    // Original terminal should still be at [0] (first row, first col)
+                    assert_eq!(children[0].collect_terminal_ids(), vec![format!("term_p1")]);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_grid_row(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 3, 2, cx);
+        });
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_grid_row("p1", &[], cx)
+        });
+
+        // Last row had 2 empty terminals (no IDs)
+        assert!(removed.is_empty());
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 4);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_grid_column(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 3, cx);
+        });
+
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_grid_column("p1", &[], cx)
+        });
+
+        assert!(removed.is_empty());
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 4);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_grid_collapses_1x1(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 1, cx);
+            ws.remove_grid_row("p1", &[], cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            // 2×1 → remove row → 1×1 → collapses to terminal
+            match layout {
+                LayoutNode::Terminal { .. } => {}
+                _ => panic!("Expected terminal after 1×1 collapse, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_update_grid_row_sizes(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            ws.update_grid_row_sizes("p1", &[], vec![70.0, 30.0], cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { row_sizes, .. } => {
+                    assert_eq!(*row_sizes, vec![70.0, 30.0]);
+                }
+                _ => panic!("Expected grid"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_update_grid_col_sizes(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            ws.update_grid_col_sizes("p1", &[], vec![60.0, 40.0], cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { col_sizes, .. } => {
+                    assert_eq!(*col_sizes, vec![60.0, 40.0]);
+                }
+                _ => panic!("Expected grid"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_grid_row_at_middle(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Create 3×2 grid, then assign terminal IDs to all cells
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 3, 2, cx);
+            // Grid children: [term_p1, _, _, _, _, _] (flat indices 0..6)
+            // Assign IDs to all cells so we can verify which were removed
+            for i in 1..6 {
+                ws.set_terminal_id("p1", &[i], format!("t{}", i), cx);
+            }
+        });
+
+        // Remove middle row (row index 1 = children[2], children[3])
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_grid_row_at("p1", &[], 1, cx)
+        });
+
+        assert_eq!(removed, vec!["t2", "t3"]);
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 4);
+                    // Row 0 kept: term_p1, t1
+                    assert_eq!(children[0].collect_terminal_ids(), vec!["term_p1"]);
+                    assert_eq!(children[1].collect_terminal_ids(), vec!["t1"]);
+                    // Row 2 (now row 1): t4, t5
+                    assert_eq!(children[2].collect_terminal_ids(), vec!["t4"]);
+                    assert_eq!(children[3].collect_terminal_ids(), vec!["t5"]);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_grid_column_at_middle(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Create 2×3 grid, then assign terminal IDs
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 3, cx);
+            // Grid children: [term_p1, _, _, _, _, _] (flat indices 0..6)
+            for i in 1..6 {
+                ws.set_terminal_id("p1", &[i], format!("t{}", i), cx);
+            }
+        });
+
+        // Remove middle column (col index 1 = children[1] and children[4])
+        // Removed in reverse row order: row 1 first (t4), then row 0 (t1)
+        let removed = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_grid_column_at("p1", &[], 1, cx)
+        });
+
+        assert_eq!(removed, vec!["t4", "t1"]);
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 4);
+                    // Row 0: term_p1 (col 0), t2 (col 2, now col 1)
+                    assert_eq!(children[0].collect_terminal_ids(), vec!["term_p1"]);
+                    assert_eq!(children[1].collect_terminal_ids(), vec!["t2"]);
+                    // Row 1: t3 (col 0), t5 (col 2, now col 1)
+                    assert_eq!(children[2].collect_terminal_ids(), vec!["t3"]);
+                    assert_eq!(children[3].collect_terminal_ids(), vec!["t5"]);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_grid_row_at_middle(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Create 2×2 grid and assign terminal IDs
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            // children: [term_p1, _, _, _]
+            for i in 1..4 {
+                ws.set_terminal_id("p1", &[i], format!("t{}", i), cx);
+            }
+        });
+
+        // Insert a row after row 0 (between row 0 and row 1)
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_grid_row_at("p1", &[], 0, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 3);
+                    assert_eq!(*cols, 2);
+                    assert_eq!(children.len(), 6);
+                    // Row 0 (original): term_p1, t1
+                    assert_eq!(children[0].collect_terminal_ids(), vec!["term_p1"]);
+                    assert_eq!(children[1].collect_terminal_ids(), vec!["t1"]);
+                    // Row 1 (inserted): empty, empty
+                    assert!(children[2].collect_terminal_ids().is_empty());
+                    assert!(children[3].collect_terminal_ids().is_empty());
+                    // Row 2 (was row 1): t2, t3
+                    assert_eq!(children[4].collect_terminal_ids(), vec!["t2"]);
+                    assert_eq!(children[5].collect_terminal_ids(), vec!["t3"]);
+                }
+                _ => panic!("Expected grid layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_add_grid_column_at_middle(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Create 2×2 grid and assign terminal IDs
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.create_grid("p1", &[], 2, 2, cx);
+            for i in 1..4 {
+                ws.set_terminal_id("p1", &[i], format!("t{}", i), cx);
+            }
+        });
+
+        // Insert a column after col 0 (between col 0 and col 1)
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.add_grid_column_at("p1", &[], 0, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Grid { rows, cols, children, .. } => {
+                    assert_eq!(*rows, 2);
+                    assert_eq!(*cols, 3);
+                    assert_eq!(children.len(), 6);
+                    // Row 0: term_p1, (new empty), t1
+                    assert_eq!(children[0].collect_terminal_ids(), vec!["term_p1"]);
+                    assert!(children[1].collect_terminal_ids().is_empty());
+                    assert_eq!(children[2].collect_terminal_ids(), vec!["t1"]);
+                    // Row 1: t2, (new empty), t3
+                    assert_eq!(children[3].collect_terminal_ids(), vec!["t2"]);
+                    assert!(children[4].collect_terminal_ids().is_empty());
+                    assert_eq!(children[5].collect_terminal_ids(), vec!["t3"]);
+                }
+                _ => panic!("Expected grid layout"),
+            }
         });
     }
 }

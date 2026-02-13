@@ -44,6 +44,19 @@ impl LayoutNode {
                 children: children.iter().map(LayoutNode::from_api).collect(),
                 active_tab: *active_tab,
             },
+            ApiLayoutNode::Grid {
+                rows,
+                cols,
+                row_sizes,
+                col_sizes,
+                children,
+            } => LayoutNode::Grid {
+                rows: *rows,
+                cols: *cols,
+                row_sizes: row_sizes.clone(),
+                col_sizes: col_sizes.clone(),
+                children: children.iter().map(LayoutNode::from_api).collect(),
+            },
         }
     }
 
@@ -84,6 +97,22 @@ impl LayoutNode {
                     .collect(),
                 active_tab: *active_tab,
             },
+            ApiLayoutNode::Grid {
+                rows,
+                cols,
+                row_sizes,
+                col_sizes,
+                children,
+            } => LayoutNode::Grid {
+                rows: *rows,
+                cols: *cols,
+                row_sizes: row_sizes.clone(),
+                col_sizes: col_sizes.clone(),
+                children: children
+                    .iter()
+                    .map(|c| LayoutNode::from_api_prefixed(c, prefix))
+                    .collect(),
+            },
         }
     }
 
@@ -114,6 +143,19 @@ impl LayoutNode {
             } => ApiLayoutNode::Tabs {
                 children: children.iter().map(LayoutNode::to_api).collect(),
                 active_tab: *active_tab,
+            },
+            LayoutNode::Grid {
+                rows,
+                cols,
+                row_sizes,
+                col_sizes,
+                children,
+            } => ApiLayoutNode::Grid {
+                rows: *rows,
+                cols: *cols,
+                row_sizes: row_sizes.clone(),
+                col_sizes: col_sizes.clone(),
+                children: children.iter().map(LayoutNode::to_api).collect(),
             },
         }
     }

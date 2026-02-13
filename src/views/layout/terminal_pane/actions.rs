@@ -4,6 +4,7 @@
 //! copy, paste, clear, select all, rename, export buffer, and file drop.
 
 use crate::remote::types::ActionRequest;
+use crate::views::layout::tabs::kill_terminals;
 use crate::workspace::actions::execute::execute_action;
 use crate::workspace::state::SplitDirection;
 use gpui::*;
@@ -21,6 +22,50 @@ impl TerminalPane {
         let terminals = self.terminals.clone();
         self.workspace.update(cx, |ws, cx| {
             execute_action(action, ws, &*backend, &terminals, cx);
+        });
+    }
+
+    pub(super) fn handle_create_grid(&mut self, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.create_grid(&self.project_id, &self.layout_path, 2, 2, cx);
+        });
+    }
+
+    pub(super) fn handle_add_grid_row_at(&mut self, after_row: usize, cx: &mut Context<Self>) {
+        if self.layout_path.is_empty() { return; }
+        let grid_path = self.layout_path[..self.layout_path.len() - 1].to_vec();
+        self.workspace.update(cx, |ws, cx| {
+            ws.add_grid_row_at(&self.project_id, &grid_path, after_row, cx);
+        });
+    }
+
+    pub(super) fn handle_remove_grid_row_at(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.layout_path.is_empty() { return; }
+        let grid_path = self.layout_path[..self.layout_path.len() - 1].to_vec();
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        self.workspace.update(cx, |ws, cx| {
+            let removed = ws.remove_grid_row_at(&self.project_id, &grid_path, row, cx);
+            kill_terminals(&removed, &*backend, &terminals);
+        });
+    }
+
+    pub(super) fn handle_add_grid_column_at(&mut self, after_col: usize, cx: &mut Context<Self>) {
+        if self.layout_path.is_empty() { return; }
+        let grid_path = self.layout_path[..self.layout_path.len() - 1].to_vec();
+        self.workspace.update(cx, |ws, cx| {
+            ws.add_grid_column_at(&self.project_id, &grid_path, after_col, cx);
+        });
+    }
+
+    pub(super) fn handle_remove_grid_column_at(&mut self, col: usize, cx: &mut Context<Self>) {
+        if self.layout_path.is_empty() { return; }
+        let grid_path = self.layout_path[..self.layout_path.len() - 1].to_vec();
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        self.workspace.update(cx, |ws, cx| {
+            let removed = ws.remove_grid_column_at(&self.project_id, &grid_path, col, cx);
+            kill_terminals(&removed, &*backend, &terminals);
         });
     }
 

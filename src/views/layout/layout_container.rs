@@ -10,7 +10,7 @@ use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::views::root::TerminalsRegistry;
 use crate::views::layout::pane_drag::{PaneDrag, DropZone};
-use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
+use crate::views::layout::split_pane::{ActiveDrag, render_split_divider, render_grid_row_divider, render_grid_col_divider};
 use crate::views::layout::terminal_pane::TerminalPane;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
@@ -290,6 +290,200 @@ impl LayoutContainer {
             )
     }
 
+    fn render_grid(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        row_sizes: &[f32],
+        col_sizes: &[f32],
+        children: &[LayoutNode],
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+
+        // If a zoomed terminal exists in any grid cell, render only that cell
+        if let Some(zoomed_idx) = self.find_zoomed_child_index(children, cx) {
+            let mut child_path = self.layout_path.clone();
+            child_path.push(zoomed_idx);
+
+            let container = self
+                .child_containers
+                .entry(child_path.clone())
+                .or_insert_with(|| {
+                    cx.new(|_cx| {
+                        LayoutContainer::new(
+                            self.workspace.clone(),
+                            self.request_broker.clone(),
+                            self.project_id.clone(),
+                            self.project_path.clone(),
+                            child_path.clone(),
+                            self.backend.clone(),
+                            self.terminals.clone(),
+                            self.active_drag.clone(),
+                        )
+                    })
+                })
+                .clone();
+
+            if self.external_layout.is_some() {
+                container.update(cx, |c, _| {
+                    c.external_layout = Some(children[zoomed_idx].clone());
+                });
+            }
+
+            return div()
+                .id(ElementId::Name(format!("grid-container-{}-{:?}", project_id, layout_path).into()))
+                .size_full()
+                .min_h_0()
+                .min_w_0()
+                .child(container);
+        }
+
+        // Clean up stale child containers
+        let valid_paths: std::collections::HashSet<Vec<usize>> = (0..children.len())
+            .map(|i| {
+                let mut path = self.layout_path.clone();
+                path.push(i);
+                path
+            })
+            .collect();
+        self.child_containers.retain(|path, _| valid_paths.contains(path));
+
+        let container_bounds_ref = self.container_bounds_ref.clone();
+
+        // Normalize row sizes
+        let total_row: f32 = row_sizes.iter().sum();
+        let norm_row_sizes: Vec<f32> = if total_row > 0.0 {
+            row_sizes.iter().map(|s| s / total_row * 100.0).collect()
+        } else {
+            vec![100.0 / rows.max(1) as f32; rows]
+        };
+
+        // Normalize col sizes
+        let total_col: f32 = col_sizes.iter().sum();
+        let norm_col_sizes: Vec<f32> = if total_col > 0.0 {
+            col_sizes.iter().map(|s| s / total_col * 100.0).collect()
+        } else {
+            vec![100.0 / cols.max(1) as f32; cols]
+        };
+
+        // Build rows interleaved with horizontal dividers
+        let mut row_elements: Vec<AnyElement> = Vec::new();
+
+        for row in 0..rows {
+            // Horizontal divider between rows
+            if row > 0 {
+                let divider = render_grid_row_divider(
+                    self.workspace.clone(),
+                    self.project_id.clone(),
+                    row - 1,
+                    row,
+                    self.layout_path.clone(),
+                    container_bounds_ref.clone(),
+                    &self.active_drag,
+                    cx,
+                );
+                row_elements.push(divider.into_any_element());
+            }
+
+            // Build columns for this row
+            let mut col_elements: Vec<AnyElement> = Vec::new();
+
+            for col in 0..cols {
+                // Vertical divider between columns
+                if col > 0 {
+                    let divider = render_grid_col_divider(
+                        self.workspace.clone(),
+                        self.project_id.clone(),
+                        col - 1,
+                        col,
+                        self.layout_path.clone(),
+                        container_bounds_ref.clone(),
+                        &self.active_drag,
+                        cx,
+                    );
+                    col_elements.push(divider.into_any_element());
+                }
+
+                let flat_index = row * cols + col;
+                let mut child_path = self.layout_path.clone();
+                child_path.push(flat_index);
+
+                let container = self
+                    .child_containers
+                    .entry(child_path.clone())
+                    .or_insert_with(|| {
+                        cx.new(|_cx| {
+                            LayoutContainer::new(
+                                self.workspace.clone(),
+                                self.request_broker.clone(),
+                                self.project_id.clone(),
+                                self.project_path.clone(),
+                                child_path.clone(),
+                                self.backend.clone(),
+                                self.terminals.clone(),
+                                self.active_drag.clone(),
+                            )
+                        })
+                    })
+                    .clone();
+
+                if self.external_layout.is_some() {
+                    if let Some(child_layout) = children.get(flat_index) {
+                        container.update(cx, |c, _| {
+                            c.external_layout = Some(child_layout.clone());
+                        });
+                    }
+                }
+
+                let size_percent = norm_col_sizes.get(col).copied().unwrap_or(100.0 / cols as f32);
+                col_elements.push(
+                    div()
+                        .flex_basis(relative(size_percent / 100.0))
+                        .min_w_0()
+                        .min_h_0()
+                        .child(container)
+                        .into_any_element(),
+                );
+            }
+
+            let row_size_percent = norm_row_sizes.get(row).copied().unwrap_or(100.0 / rows as f32);
+            row_elements.push(
+                div()
+                    .flex_basis(relative(row_size_percent / 100.0))
+                    .min_h_0()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .flex_nowrap()
+                    .children(col_elements)
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .id(ElementId::Name(format!("grid-container-{}-{:?}", project_id, layout_path).into()))
+            .child(canvas(
+                {
+                    let container_bounds_ref = container_bounds_ref.clone();
+                    move |bounds, _window, _cx| {
+                        *container_bounds_ref.borrow_mut() = bounds;
+                    }
+                },
+                |_bounds, _prepaint, _window, _cx| {},
+            ).absolute().size_full())
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_nowrap()
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .children(row_elements)
+    }
+
     fn render_split(
         &mut self,
         direction: SplitDirection,
@@ -476,8 +670,8 @@ impl Render for LayoutContainer {
                     self.child_containers.clear();
                 }
             }
-            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
-                // When rendering split/tabs, clear any cached terminal_pane from previous terminal
+            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) | Some(LayoutNode::Grid { .. }) => {
+                // When rendering split/tabs/grid, clear any cached terminal_pane from previous terminal
                 if self.terminal_pane.is_some() {
                     self.terminal_pane = None;
                 }
@@ -512,6 +706,16 @@ impl Render for LayoutContainer {
                 active_tab,
             }) => self
                 .render_tabs(children, active_tab, window, cx)
+                .into_any_element(),
+
+            Some(LayoutNode::Grid {
+                rows,
+                cols,
+                ref row_sizes,
+                ref col_sizes,
+                ref children,
+            }) => self
+                .render_grid(rows, cols, row_sizes, col_sizes, children, window, cx)
                 .into_any_element(),
 
             None => div()

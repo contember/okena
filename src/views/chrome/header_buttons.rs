@@ -13,6 +13,7 @@ use gpui_component::tooltip::Tooltip;
 pub enum HeaderAction {
     SplitVertical,
     SplitHorizontal,
+    Grid,
     AddTab,
     Minimize,
     ExportBuffer,
@@ -27,6 +28,7 @@ impl HeaderAction {
         match self {
             HeaderAction::SplitVertical => "icons/split-vertical.svg",
             HeaderAction::SplitHorizontal => "icons/split-horizontal.svg",
+            HeaderAction::Grid => "icons/grid.svg",
             HeaderAction::AddTab => "icons/tabs.svg",
             HeaderAction::Minimize => "icons/minimize.svg",
             HeaderAction::ExportBuffer => "icons/copy.svg",
@@ -41,6 +43,7 @@ impl HeaderAction {
         match self {
             HeaderAction::SplitVertical => "Split Vertical",
             HeaderAction::SplitHorizontal => "Split Horizontal",
+            HeaderAction::Grid => "Grid Layout",
             HeaderAction::AddTab => "Add Tab",
             HeaderAction::Minimize => "Minimize",
             HeaderAction::ExportBuffer => "Export Buffer to File",
@@ -55,11 +58,12 @@ impl HeaderAction {
         match self {
             HeaderAction::SplitVertical => Some(Box::new(keybindings::SplitVertical)),
             HeaderAction::SplitHorizontal => Some(Box::new(keybindings::SplitHorizontal)),
+            HeaderAction::Grid => Some(Box::new(keybindings::CreateGrid)),
             HeaderAction::AddTab => Some(Box::new(keybindings::AddTab)),
             HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
             HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
             HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
-            HeaderAction::ExportBuffer | HeaderAction::Detach => None,
+            HeaderAction::ExportBuffer | HeaderAction::Detach  => None,
         }
     }
 
@@ -73,6 +77,7 @@ impl HeaderAction {
         match self {
             HeaderAction::SplitVertical => "split-vertical-btn",
             HeaderAction::SplitHorizontal => "split-horizontal-btn",
+            HeaderAction::Grid => "grid-btn",
             HeaderAction::AddTab => "add-tab-btn",
             HeaderAction::Minimize => "minimize-btn",
             HeaderAction::ExportBuffer => "export-buffer-btn",

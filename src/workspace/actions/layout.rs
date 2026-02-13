@@ -170,6 +170,19 @@ impl Workspace {
                             self.notify_data(cx);
                             return self.cleanup_orphaned_metadata(project_id);
                         }
+                        LayoutNode::Grid { children, rows, cols, .. } => {
+                            if child_index < children.len() {
+                                // Replace with empty terminal (grid keeps dimensions)
+                                children[child_index] = LayoutNode::new_terminal();
+                                // Collapse if 1×1
+                                if *rows == 1 && *cols == 1 {
+                                    let remaining = children.remove(0);
+                                    *parent = remaining;
+                                }
+                            }
+                            self.notify_data(cx);
+                            return self.cleanup_orphaned_metadata(project_id);
+                        }
                         _ => {}
                     }
                 }
@@ -227,6 +240,31 @@ impl Workspace {
                                 } else {
                                     None
                                 }
+                            }
+                        }
+                        LayoutNode::Grid { children, cols, .. } => {
+                            // Grid: cell gets replaced with empty terminal, focus neighbor
+                            // Prefer same-row neighbor, else adjacent row
+                            let c = *cols;
+                            let row = child_index / c;
+                            let col = child_index % c;
+                            // Try right neighbor in same row, then left, then next row, then prev row
+                            let candidates = [
+                                if col + 1 < c { Some(row * c + col + 1) } else { None },
+                                if col > 0 { Some(row * c + col - 1) } else { None },
+                                if child_index + c < children.len() { Some(child_index + c) } else { None },
+                                if child_index >= c { Some(child_index - c) } else { None },
+                            ];
+                            let sibling_idx = candidates.iter().flatten().next().copied()
+                                .unwrap_or(0);
+                            if let Some(sibling) = children.get(sibling_idx) {
+                                let relative_path = sibling.find_first_terminal_path();
+                                let mut full_path = parent_path.to_vec();
+                                full_path.push(sibling_idx);
+                                full_path.extend(relative_path);
+                                Some(full_path)
+                            } else {
+                                None
                             }
                         }
                         _ => None,
@@ -758,6 +796,16 @@ mod tests {
                         }
                     } else {
                         children.remove(child_index);
+                        return true;
+                    }
+                }
+                LayoutNode::Grid { children, rows, cols, .. } => {
+                    if child_index < children.len() {
+                        children[child_index] = LayoutNode::new_terminal();
+                        if *rows == 1 && *cols == 1 {
+                            let remaining = children.remove(0);
+                            *parent = remaining;
+                        }
                         return true;
                     }
                 }

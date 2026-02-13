@@ -48,6 +48,13 @@ pub enum ApiLayoutNode {
         children: Vec<ApiLayoutNode>,
         active_tab: usize,
     },
+    Grid {
+        rows: usize,
+        cols: usize,
+        row_sizes: Vec<f32>,
+        col_sizes: Vec<f32>,
+        children: Vec<ApiLayoutNode>,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -101,6 +108,46 @@ pub enum ActionRequest {
         path: Vec<usize>,
         sizes: Vec<f32>,
     },
+    CreateGrid {
+        project_id: String,
+        path: Vec<usize>,
+        rows: usize,
+        cols: usize,
+    },
+    AddGridRow {
+        project_id: String,
+        path: Vec<usize>,
+        #[serde(default)]
+        row: Option<usize>,
+    },
+    AddGridColumn {
+        project_id: String,
+        path: Vec<usize>,
+        #[serde(default)]
+        col: Option<usize>,
+    },
+    RemoveGridRow {
+        project_id: String,
+        path: Vec<usize>,
+        #[serde(default)]
+        row: Option<usize>,
+    },
+    RemoveGridColumn {
+        project_id: String,
+        path: Vec<usize>,
+        #[serde(default)]
+        col: Option<usize>,
+    },
+    UpdateGridRowSizes {
+        project_id: String,
+        path: Vec<usize>,
+        sizes: Vec<f32>,
+    },
+    UpdateGridColSizes {
+        project_id: String,
+        path: Vec<usize>,
+        sizes: Vec<f32>,
+    },
 }
 
 /// POST /v1/pair request
@@ -140,7 +187,9 @@ impl ApiLayoutNode {
                     ids.push(id.clone());
                 }
             }
-            ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            ApiLayoutNode::Split { children, .. }
+            | ApiLayoutNode::Tabs { children, .. }
+            | ApiLayoutNode::Grid { children, .. } => {
                 for child in children {
                     child.collect_terminal_ids_into(ids);
                 }
@@ -280,5 +329,53 @@ mod tests {
         };
         let ids = layout.collect_terminal_ids();
         assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn api_layout_node_grid_round_trip() {
+        let layout = ApiLayoutNode::Grid {
+            rows: 2,
+            cols: 3,
+            row_sizes: vec![50.0, 50.0],
+            col_sizes: vec![33.3, 33.3, 33.4],
+            children: vec![
+                ApiLayoutNode::Terminal { terminal_id: Some("t1".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t2".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t3".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t4".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t5".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t6".into()), minimized: false, detached: false },
+            ],
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let parsed: ApiLayoutNode = serde_json::from_str(&json).unwrap();
+        match &parsed {
+            ApiLayoutNode::Grid { rows, cols, row_sizes, col_sizes, children } => {
+                assert_eq!(*rows, 2);
+                assert_eq!(*cols, 3);
+                assert_eq!(row_sizes.len(), 2);
+                assert_eq!(col_sizes.len(), 3);
+                assert_eq!(children.len(), 6);
+            }
+            _ => panic!("Expected grid"),
+        }
+    }
+
+    #[test]
+    fn api_layout_node_grid_collect_terminal_ids() {
+        let layout = ApiLayoutNode::Grid {
+            rows: 2,
+            cols: 2,
+            row_sizes: vec![50.0, 50.0],
+            col_sizes: vec![50.0, 50.0],
+            children: vec![
+                ApiLayoutNode::Terminal { terminal_id: Some("t1".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: None, minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t3".into()), minimized: false, detached: false },
+                ApiLayoutNode::Terminal { terminal_id: Some("t4".into()), minimized: false, detached: false },
+            ],
+        };
+        let ids = layout.collect_terminal_ids();
+        assert_eq!(ids, vec!["t1", "t3", "t4"]);
     }
 }

@@ -26,6 +26,26 @@ pub enum DragState {
         /// Sum of visible children's sizes (for correct delta scaling)
         visible_sizes_sum: f32,
     },
+    /// Resizing a grid row divider
+    GridRow {
+        project_id: String,
+        layout_path: Vec<usize>,
+        top_row: usize,
+        bottom_row: usize,
+        container_bounds: Bounds<Pixels>,
+        initial_mouse_pos: Point<Pixels>,
+        initial_row_sizes: Vec<f32>,
+    },
+    /// Resizing a grid column divider
+    GridCol {
+        project_id: String,
+        layout_path: Vec<usize>,
+        left_col: usize,
+        right_col: usize,
+        container_bounds: Bounds<Pixels>,
+        initial_mouse_pos: Point<Pixels>,
+        initial_col_sizes: Vec<f32>,
+    },
     /// Resizing project columns
     ProjectColumn {
         divider_index: usize,
@@ -98,6 +118,52 @@ pub fn compute_resize(
 
             workspace.update(cx, |ws, cx| {
                 ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
+            });
+        }
+        DragState::GridRow { project_id, layout_path, top_row, bottom_row, container_bounds, initial_mouse_pos, initial_row_sizes } => {
+            let bounds = *container_bounds;
+            let container_height = f32::from(bounds.size.height);
+            if container_height <= 0.0 { return; }
+            let top = *top_row;
+            let bottom = *bottom_row;
+            if top >= initial_row_sizes.len() || bottom >= initial_row_sizes.len() { return; }
+            let combined = initial_row_sizes[top] + initial_row_sizes[bottom];
+            let total: f32 = initial_row_sizes.iter().sum();
+            let scale = if total > 0.0 { total } else { 100.0 };
+            let delta = f32::from(mouse_pos.y) - f32::from(initial_mouse_pos.y);
+            let delta_percent = delta / container_height * scale;
+            let top_size = (initial_row_sizes[top] + delta_percent).clamp(5.0, combined - 5.0);
+            let bottom_size = combined - top_size;
+            let mut new_sizes = initial_row_sizes.clone();
+            new_sizes[top] = top_size;
+            new_sizes[bottom] = bottom_size;
+            let project_id = project_id.clone();
+            let layout_path = layout_path.clone();
+            workspace.update(cx, |ws, cx| {
+                ws.update_grid_row_sizes(&project_id, &layout_path, new_sizes, cx);
+            });
+        }
+        DragState::GridCol { project_id, layout_path, left_col, right_col, container_bounds, initial_mouse_pos, initial_col_sizes } => {
+            let bounds = *container_bounds;
+            let container_width = f32::from(bounds.size.width);
+            if container_width <= 0.0 { return; }
+            let left = *left_col;
+            let right = *right_col;
+            if left >= initial_col_sizes.len() || right >= initial_col_sizes.len() { return; }
+            let combined = initial_col_sizes[left] + initial_col_sizes[right];
+            let total: f32 = initial_col_sizes.iter().sum();
+            let scale = if total > 0.0 { total } else { 100.0 };
+            let delta = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
+            let delta_percent = delta / container_width * scale;
+            let left_size = (initial_col_sizes[left] + delta_percent).clamp(5.0, combined - 5.0);
+            let right_size = combined - left_size;
+            let mut new_sizes = initial_col_sizes.clone();
+            new_sizes[left] = left_size;
+            new_sizes[right] = right_size;
+            let project_id = project_id.clone();
+            let layout_path = layout_path.clone();
+            workspace.update(cx, |ws, cx| {
+                ws.update_grid_col_sizes(&project_id, &layout_path, new_sizes, cx);
             });
         }
         DragState::ProjectColumn { divider_index, project_ids, container_bounds } => {
@@ -216,6 +282,94 @@ pub fn render_project_divider(
                 divider_index,
                 project_ids: project_ids.clone(),
                 container_bounds: bounds,
+            });
+        },
+    )
+}
+
+/// Render a grid row (horizontal) divider handle
+pub fn render_grid_row_divider(
+    workspace: Entity<Workspace>,
+    project_id: String,
+    top_row: usize,
+    bottom_row: usize,
+    layout_path: Vec<usize>,
+    container_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    active_drag: &ActiveDrag,
+    cx: &App,
+) -> impl IntoElement {
+    let t = theme(cx);
+    let active_drag = active_drag.clone();
+
+    ResizeHandle::new(
+        true, // horizontal divider
+        t.border,
+        t.border_active,
+        move |mouse_pos, cx| {
+            let bounds = *container_bounds.borrow();
+
+            let initial_row_sizes = workspace.read(cx).project(&project_id).and_then(|p| {
+                p.layout.as_ref()?.get_at_path(&layout_path)
+            }).and_then(|node| {
+                if let crate::workspace::state::LayoutNode::Grid { row_sizes, .. } = node {
+                    Some(row_sizes.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default();
+
+            *active_drag.borrow_mut() = Some(DragState::GridRow {
+                project_id: project_id.clone(),
+                layout_path: layout_path.clone(),
+                top_row,
+                bottom_row,
+                container_bounds: bounds,
+                initial_mouse_pos: mouse_pos,
+                initial_row_sizes,
+            });
+        },
+    )
+}
+
+/// Render a grid column (vertical) divider handle
+pub fn render_grid_col_divider(
+    workspace: Entity<Workspace>,
+    project_id: String,
+    left_col: usize,
+    right_col: usize,
+    layout_path: Vec<usize>,
+    container_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    active_drag: &ActiveDrag,
+    cx: &App,
+) -> impl IntoElement {
+    let t = theme(cx);
+    let active_drag = active_drag.clone();
+
+    ResizeHandle::new(
+        false, // vertical divider
+        t.border,
+        t.border_active,
+        move |mouse_pos, cx| {
+            let bounds = *container_bounds.borrow();
+
+            let initial_col_sizes = workspace.read(cx).project(&project_id).and_then(|p| {
+                p.layout.as_ref()?.get_at_path(&layout_path)
+            }).and_then(|node| {
+                if let crate::workspace::state::LayoutNode::Grid { col_sizes, .. } = node {
+                    Some(col_sizes.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default();
+
+            *active_drag.borrow_mut() = Some(DragState::GridCol {
+                project_id: project_id.clone(),
+                layout_path: layout_path.clone(),
+                left_col,
+                right_col,
+                container_bounds: bounds,
+                initial_mouse_pos: mouse_pos,
+                initial_col_sizes,
             });
         },
     )

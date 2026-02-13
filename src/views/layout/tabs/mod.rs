@@ -103,6 +103,7 @@ impl LayoutContainer {
         // Clone context for each action - much cleaner than individual clones
         let ctx_split_v = ctx.clone();
         let ctx_split_h = ctx.clone();
+        let ctx_grid = ctx.clone();
         let ctx_add_tab = ctx.clone();
         let ctx_minimize = ctx.clone();
         let ctx_fullscreen = ctx.clone();
@@ -134,6 +135,17 @@ impl LayoutContainer {
                         child_path.push(ctx_split_h.active_tab);
                         ctx_split_h.workspace.update(cx, |ws, cx| {
                             ws.split_terminal(&ctx_split_h.project_id, &child_path, SplitDirection::Horizontal, cx);
+                        });
+                    }),
+            )
+            // Grid
+            .child(
+                header_button_base(HeaderAction::Grid, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let mut child_path = ctx_grid.layout_path.clone();
+                        child_path.push(ctx_grid.active_tab);
+                        ctx_grid.workspace.update(cx, |ws, cx| {
+                            ws.create_grid(&ctx_grid.project_id, &child_path, 2, 2, cx);
                         });
                     }),
             )

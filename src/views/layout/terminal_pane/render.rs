@@ -4,7 +4,7 @@
 //! the header, content, search bar, and zoom header into the final view.
 
 use crate::keybindings::{
-    AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
+    AddTab, CloseSearch, CloseTerminal, Copy, CreateGrid, FocusDown, FocusLeft, FocusNextTerminal,
     FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
     MinimizeTerminal, Paste, ResetZoom, Search, SearchNext, SearchPrev, SendBacktab, SendEscape,
     SendTab, SplitHorizontal, SplitVertical, ToggleFullscreen, ZoomIn, ZoomOut,
@@ -102,6 +102,7 @@ impl Render for TerminalPane {
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
                     this.header.update(cx, |header, cx| {
                         header.close_shell_dropdown(cx);
+                        header.close_grid_dropdown(cx);
                     });
                     window.focus(&this.focus_handle, cx);
                     this.workspace.update(cx, |ws, cx| {
@@ -119,6 +120,9 @@ impl Render for TerminalPane {
             }))
             .on_action(cx.listener(|this, _: &SplitHorizontal, _window, cx| {
                 this.handle_split(SplitDirection::Horizontal, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CreateGrid, _window, cx| {
+                this.handle_create_grid(cx);
             }))
             .on_action(cx.listener(|this, _: &AddTab, _window, cx| {
                 this.handle_add_tab(cx);

@@ -10,10 +10,13 @@ use crate::theme::theme;
 use crate::ui::ClickDetector;
 use crate::views::components::{cancel_rename, finish_rename, start_rename, rename_input, RenameState, SimpleInput};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::components::{dropdown_anchored_below, dropdown_overlay, dropdown_option};
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
-use crate::workspace::state::{SplitDirection, Workspace};
+use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::shell_selector::{ShellSelector, ShellSelectorEvent};
@@ -22,6 +25,7 @@ use super::shell_selector::{ShellSelector, ShellSelectorEvent};
 #[derive(Clone)]
 pub enum HeaderEvent {
     Split(SplitDirection),
+    Grid,
     AddTab,
     Close,
     Minimize,
@@ -31,6 +35,11 @@ pub enum HeaderEvent {
     Renamed(String),
     /// Request to open shell selector overlay
     OpenShellSelector(ShellType),
+    /// Grid row/column controls (index is relative to current terminal's position)
+    AddGridRow(usize),
+    RemoveGridRow(usize),
+    AddGridColumn(usize),
+    RemoveGridColumn(usize),
 }
 
 impl EventEmitter<HeaderEvent> for TerminalHeader {}
@@ -59,6 +68,12 @@ pub struct TerminalHeader {
     is_remote: bool,
     /// Unique ID suffix
     id_suffix: String,
+    /// Whether the grid dropdown is open
+    grid_dropdown_open: bool,
+    /// Bounds of the grid button for anchoring the dropdown
+    grid_dropdown_bounds: Bounds<Pixels>,
+    /// Shared cell for canvas bounds tracking
+    grid_bounds_cell: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl TerminalHeader {
@@ -98,6 +113,9 @@ impl TerminalHeader {
             supports_export,
             is_remote,
             id_suffix,
+            grid_dropdown_open: false,
+            grid_dropdown_bounds: Bounds::default(),
+            grid_bounds_cell: Rc::new(Cell::new(Bounds::default())),
         }
     }
 
@@ -175,12 +193,115 @@ impl TerminalHeader {
         cx.notify();
     }
 
+    /// Close grid dropdown if open.
+    pub fn close_grid_dropdown(&mut self, cx: &mut Context<Self>) {
+        if self.grid_dropdown_open {
+            self.grid_dropdown_open = false;
+            cx.notify();
+        }
+    }
+
+    /// Returns (row, col, rows, cols) if this terminal is inside a grid.
+    fn grid_context(&self, cx: &Context<Self>) -> Option<(usize, usize, usize, usize)> {
+        if self.layout_path.is_empty() {
+            return None;
+        }
+        let parent_path = &self.layout_path[..self.layout_path.len() - 1];
+        let child_index = *self.layout_path.last()?;
+        let ws = self.workspace.read(cx);
+        let project = ws.project(&self.project_id)?;
+        let node = project.layout.as_ref()?.get_at_path(parent_path)?;
+        if let LayoutNode::Grid { rows, cols, .. } = node {
+            let row = child_index / cols;
+            let col = child_index % cols;
+            Some((row, col, *rows, *cols))
+        } else {
+            None
+        }
+    }
+
+    /// Render the grid dropdown menu.
+    fn render_grid_dropdown(&self, row: usize, col: usize, rows: usize, cols: usize, cx: &Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let id = &self.id_suffix;
+
+        let can_remove_row = rows > 1;
+        let can_remove_col = cols > 1;
+
+        let menu = dropdown_overlay(format!("grid-dropdown-overlay-{}", id), &t)
+            .min_w(px(120.0))
+            .child(
+                dropdown_option(format!("grid-add-row-{}", id), "+ Row", false, &t)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.grid_dropdown_open = false;
+                        cx.emit(HeaderEvent::AddGridRow(row));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                dropdown_option(format!("grid-rem-row-{}", id), "- Row", false, &t)
+                    .when(!can_remove_row, |el| el.opacity(0.4).cursor_default())
+                    .when(can_remove_row, |el| {
+                        el.on_click(cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.grid_dropdown_open = false;
+                            cx.emit(HeaderEvent::RemoveGridRow(row));
+                            cx.notify();
+                        }))
+                    }),
+            )
+            .child(
+                dropdown_option(format!("grid-add-col-{}", id), "+ Column", false, &t)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        cx.stop_propagation();
+                        this.grid_dropdown_open = false;
+                        cx.emit(HeaderEvent::AddGridColumn(col));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                dropdown_option(format!("grid-rem-col-{}", id), "- Column", false, &t)
+                    .when(!can_remove_col, |el| el.opacity(0.4).cursor_default())
+                    .when(can_remove_col, |el| {
+                        el.on_click(cx.listener(move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.grid_dropdown_open = false;
+                            cx.emit(HeaderEvent::RemoveGridColumn(col));
+                            cx.notify();
+                        }))
+                    }),
+            );
+
+        // Backdrop + anchored dropdown
+        div()
+            .child(
+                // Full-screen backdrop to close on outside click
+                deferred(
+                    div()
+                        .id(format!("grid-dropdown-backdrop-{}", id))
+                        .absolute()
+                        .top(px(-10000.0))
+                        .left(px(-10000.0))
+                        .w(px(30000.0))
+                        .h(px(30000.0))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                            this.grid_dropdown_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(dropdown_anchored_below(self.grid_dropdown_bounds, menu))
+    }
+
     /// Render the controls buttons.
     fn render_controls(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let id = &self.id_suffix;
         let supports_export = self.supports_export;
         let is_remote = self.is_remote;
+        let in_grid = self.grid_context(cx);
 
         div()
             .flex()
@@ -188,6 +309,7 @@ impl TerminalHeader {
             .gap(px(2.0))
             .opacity(0.0)
             .group_hover("terminal-header", |s| s.opacity(1.0))
+            .when(self.grid_dropdown_open, |el| el.opacity(1.0))
             .child(
                 header_button_base(HeaderAction::SplitVertical, id, ButtonSize::REGULAR, &t, None)
                     .on_click(cx.listener(|_this, _, _window, cx| {
@@ -201,6 +323,33 @@ impl TerminalHeader {
                         cx.stop_propagation();
                         cx.emit(HeaderEvent::Split(SplitDirection::Horizontal));
                     })),
+            )
+            .child(
+                // Grid button: simple click when not in grid, dropdown toggle when in grid
+                div()
+                    .relative()
+                    .child(
+                        header_button_base(HeaderAction::Grid, id, ButtonSize::REGULAR, &t, None)
+                            .child(canvas(
+                                {
+                                    let grid_bounds = self.grid_bounds_cell.clone();
+                                    move |bounds, _window, _cx| {
+                                        grid_bounds.set(bounds);
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            ).absolute().size_full())
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                cx.stop_propagation();
+                                if in_grid.is_some() {
+                                    this.grid_dropdown_bounds = this.grid_bounds_cell.get();
+                                    this.grid_dropdown_open = !this.grid_dropdown_open;
+                                    cx.notify();
+                                } else {
+                                    cx.emit(HeaderEvent::Grid);
+                                }
+                            })),
+                    )
             )
             .child(
                 header_button_base(HeaderAction::AddTab, id, ButtonSize::REGULAR, &t, None)
@@ -368,6 +517,12 @@ impl Render for TerminalHeader {
                         )
                     })
                     .child(self.render_controls(cx)),
+            )
+            .when_some(
+                if self.grid_dropdown_open { self.grid_context(cx) } else { None },
+                |el, (row, col, rows, cols)| {
+                    el.child(self.render_grid_dropdown(row, col, rows, cols, cx))
+                },
             )
     }
 }

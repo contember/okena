@@ -9,6 +9,7 @@
 pub mod execute;
 mod focus;
 mod folder;
+mod grid;
 mod layout;
 mod project;
 mod terminal;
