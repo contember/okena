@@ -326,6 +326,7 @@ pub fn get_diff_with_options(
     mode: DiffMode,
     ignore_whitespace: bool,
 ) -> Result<DiffResult, String> {
+    let t_total = std::time::Instant::now();
     let path_str = path.to_str().ok_or("Invalid path")?;
 
     // Build git diff command based on mode
@@ -341,10 +342,12 @@ pub fn get_diff_with_options(
         args.push("-w");
     }
 
+    let t0 = std::time::Instant::now();
     let output = command("git")
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
+    log::debug!("[get_diff_with_options] git diff command: {:?}, stdout: {} bytes", t0.elapsed(), output.stdout.len());
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -354,12 +357,16 @@ pub fn get_diff_with_options(
         }
     }
 
+    let t1 = std::time::Instant::now();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut result = parse_unified_diff(&stdout);
+    log::debug!("[get_diff_with_options] parse_unified_diff: {:?}, files: {}", t1.elapsed(), result.files.len());
 
     // For unstaged mode, also include untracked files
     if mode == DiffMode::WorkingTree {
+        let t2 = std::time::Instant::now();
         let untracked = get_untracked_files(path);
+        log::debug!("[get_diff_with_options] get_untracked_files: {:?}, count: {}", t2.elapsed(), untracked.len());
         for file_path in untracked {
             if let Some(file_diff) = create_untracked_file_diff(path, &file_path) {
                 result.files.push(file_diff);
@@ -367,6 +374,7 @@ pub fn get_diff_with_options(
         }
     }
 
+    log::debug!("[get_diff_with_options] total: {:?}", t_total.elapsed());
     Ok(result)
 }
 
@@ -513,7 +521,8 @@ pub fn get_file_contents_for_diff(
     file_path: &str,
     mode: DiffMode,
 ) -> (Option<String>, Option<String>) {
-    match mode {
+    let t0 = std::time::Instant::now();
+    let result = match mode {
         DiffMode::WorkingTree => {
             // Unstaged: comparing index vs working tree
             // Try index first, fall back to HEAD (they're equal if nothing staged)
@@ -529,7 +538,9 @@ pub fn get_file_contents_for_diff(
                 .or_else(|| get_file_from_working_tree(repo_path, file_path));
             (old, new)
         }
-    }
+    };
+    log::debug!("[get_file_contents_for_diff] {:?}, file: {}", t0.elapsed(), file_path);
+    result
 }
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ pub fn process_file(
     diff_mode: DiffMode,
     is_dark: bool,
 ) -> DiffDisplayFile {
+    let t_total = std::time::Instant::now();
     let mut lines = Vec::new();
     let path = file.display_name();
 
@@ -64,17 +65,28 @@ pub fn process_file(
 
     // Fetch and pre-highlight the full file content for both old and new versions.
     // This ensures correct syntax state for all hunks, even those starting mid-file.
+    let t0 = std::time::Instant::now();
     let (old_content, new_content) = get_file_contents_for_diff(repo_path, path, diff_mode);
+    log::debug!("[process_file] get_file_contents_for_diff: {:?}, old: {} bytes, new: {} bytes, file: {}",
+        t0.elapsed(),
+        old_content.as_ref().map(|c| c.len()).unwrap_or(0),
+        new_content.as_ref().map(|c| c.len()).unwrap_or(0),
+        path,
+    );
 
+    let t1 = std::time::Instant::now();
     let old_highlighted = match old_content.as_ref() {
         Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
         None => HashMap::new(),
     };
+    log::debug!("[process_file] highlight old: {:?}, lines: {}", t1.elapsed(), old_highlighted.len());
 
+    let t2 = std::time::Instant::now();
     let new_highlighted = match new_content.as_ref() {
         Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
         None => HashMap::new(),
     };
+    log::debug!("[process_file] highlight new: {:?}, lines: {}", t2.elapsed(), new_highlighted.len());
 
     for hunk in &file.hunks {
         for line in &hunk.lines {
@@ -142,5 +154,6 @@ pub fn process_file(
         }
     }
 
+    log::debug!("[process_file] total: {:?}, display lines: {}, file: {}", t_total.elapsed(), lines.len(), path);
     DiffDisplayFile { lines }
 }

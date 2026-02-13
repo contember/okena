@@ -79,6 +79,7 @@ pub struct DiffViewer {
 impl DiffViewer {
     /// Create a new diff viewer for the given project path, optionally selecting a specific file.
     pub fn new(project_path: String, select_file: Option<String>, cx: &mut Context<Self>) -> Self {
+        let t_new = std::time::Instant::now();
         let focus_handle = cx.focus_handle();
         let settings = settings_entity(cx).read(cx);
         let file_font_size = settings.settings.file_font_size;
@@ -143,10 +144,12 @@ impl DiffViewer {
             }
         }
 
+        log::debug!("[DiffViewer::new] total: {:?}, files: {}", t_new.elapsed(), viewer.file_stats.len());
         viewer
     }
 
     fn load_diff(&mut self, mode: DiffMode) {
+        let t_load = std::time::Instant::now();
         self.diff_mode = mode;
         self.error_message = None;
         self.raw_files.clear();
@@ -161,23 +164,37 @@ impl DiffViewer {
         self.max_line_chars = 0;
 
         let path = std::path::Path::new(&self.project_path);
+        let t0 = std::time::Instant::now();
         match get_diff_with_options(path, mode, self.ignore_whitespace) {
             Ok(result) => {
+                log::debug!("[load_diff] get_diff_with_options: {:?}, files: {}", t0.elapsed(), result.files.len());
                 if result.is_empty() {
                     self.error_message =
                         Some(format!("No {} changes", mode.display_name().to_lowercase()));
                 } else {
+                    let t1 = std::time::Instant::now();
                     self.store_diff_result(result);
+                    log::debug!("[load_diff] store_diff_result: {:?}", t1.elapsed());
+
+                    let t2 = std::time::Instant::now();
                     self.build_file_tree();
-                    // Process the first file for display
+                    log::debug!("[load_diff] build_file_tree: {:?}", t2.elapsed());
+
+                    let t3 = std::time::Instant::now();
                     self.process_current_file();
+                    log::debug!("[load_diff] process_current_file: {:?}", t3.elapsed());
+
+                    let t4 = std::time::Instant::now();
                     self.update_side_by_side_cache();
+                    log::debug!("[load_diff] update_side_by_side_cache: {:?}", t4.elapsed());
                 }
             }
             Err(e) => {
+                log::debug!("[load_diff] get_diff_with_options error: {:?}", t0.elapsed());
                 self.error_message = Some(e);
             }
         }
+        log::debug!("[load_diff] total: {:?}", t_load.elapsed());
     }
 
     /// Store raw diff data and extract lightweight stats (no syntax highlighting).
@@ -264,12 +281,22 @@ impl DiffViewer {
 
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.file_stats.len() {
+            let t_select = std::time::Instant::now();
+            let file_path = self.file_stats.get(index).map(|f| f.path.clone()).unwrap_or_else(|| "?".into());
             self.selected_file_index = index;
             self.selection.clear();
             self.selection_side = None;
             self.scroll_x = 0.0;
+
+            let t0 = std::time::Instant::now();
             self.process_current_file();
+            log::debug!("[select_file] process_current_file: {:?}", t0.elapsed());
+
+            let t1 = std::time::Instant::now();
             self.update_side_by_side_cache();
+            log::debug!("[select_file] update_side_by_side_cache: {:?}", t1.elapsed());
+
+            log::debug!("[select_file] total: {:?}, file: {}", t_select.elapsed(), file_path);
             cx.notify();
         }
     }
