@@ -555,7 +555,12 @@ impl Render for RootView {
                 }
             }))
             // Title bar at the top (with window controls)
-            .child(self.title_bar.clone())
+            // On macOS fullscreen: hide title bar completely (traffic lights auto-hide)
+            // On macOS non-fullscreen: show minimal title bar for traffic lights
+            // On other platforms: show full title bar
+            .when(!cfg!(target_os = "macos") || !window.is_fullscreen(), |d| {
+                d.child(self.title_bar.clone())
+            })
             // Main content area
             .child(
                 // Content below title bar

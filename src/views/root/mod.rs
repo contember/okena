@@ -75,16 +75,16 @@ impl RootView {
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
-        let workspace_for_title = workspace.clone();
         let title_bar = cx.new(|cx| {
-            let mut tb = TitleBar::new("Okena", workspace_for_title);
+            let mut tb = TitleBar::new("Okena");
             tb.set_sidebar_open(sidebar_initially_open, cx);
             tb
         });
 
         // Create status bar entity (sync initial sidebar state)
+        let workspace_for_status = workspace.clone();
         let status_bar = cx.new(|cx| {
-            let mut sb = StatusBar::new(cx);
+            let mut sb = StatusBar::new(workspace_for_status, cx);
             sb.set_sidebar_open(sidebar_initially_open, cx);
             sb
         });

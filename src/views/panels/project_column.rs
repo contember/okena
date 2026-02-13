@@ -591,11 +591,21 @@ impl ProjectColumn {
         let workspace_for_hide = self.workspace.clone();
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
+        let folder_color = t.get_folder_color(project.folder_color);
 
-        div()
+        v_flex()
+            // Colored accent bar
+            .child(
+                div()
+                    .h(px(1.0))
+                    .w_full()
+                    .flex_shrink_0()
+                    .bg(rgb(folder_color))
+            )
+            .child(div()
             .id("project-header")
             .group("project-header")
-            .h(px(35.0))
+            .h(px(34.0))
             .px(px(12.0))
             .flex()
             .items_center()
@@ -607,6 +617,14 @@ impl ProjectColumn {
                 h_flex()
                     .gap(px(6.0))
                     .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(folder_color))
+                    )
                     .child(
                         div()
                             .flex_shrink_0()
@@ -700,7 +718,7 @@ impl ProjectColumn {
                                     .tooltip(|_window, cx| Tooltip::new("Focus Project").build(_window, cx)),
                             ),
                     ),
-            )
+            ))
     }
 
     /// Render empty state for bookmark projects (no terminal)
