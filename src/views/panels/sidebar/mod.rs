@@ -70,6 +70,8 @@ pub struct Sidebar {
     folder_click_detector: ClickDetector<String>,
     /// Folder ID for which color picker is shown
     color_picker_folder_id: Option<String>,
+    /// Y position (window coords) where the color picker was triggered
+    color_picker_click_y: f32,
     /// Sidebar requests drained from Workspace by observer, applied in render() (needs Window)
     pending_sidebar_requests: Vec<SidebarRequest>,
     /// Focus handle for keyboard event capture
@@ -115,6 +117,7 @@ impl Sidebar {
             folder_rename: None,
             folder_click_detector: ClickDetector::new(),
             color_picker_folder_id: None,
+            color_picker_click_y: 0.0,
             pending_sidebar_requests: Vec::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -201,15 +204,17 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn show_color_picker(&mut self, project_id: String, cx: &mut Context<Self>) {
+    pub(super) fn show_color_picker(&mut self, project_id: String, click_y: f32, cx: &mut Context<Self>) {
         self.color_picker_project_id = Some(project_id);
         self.color_picker_folder_id = None;
+        self.color_picker_click_y = click_y;
         cx.notify();
     }
 
-    pub(super) fn show_folder_color_picker(&mut self, folder_id: String, cx: &mut Context<Self>) {
+    pub(super) fn show_folder_color_picker(&mut self, folder_id: String, click_y: f32, cx: &mut Context<Self>) {
         self.color_picker_folder_id = Some(folder_id);
         self.color_picker_project_id = None;
+        self.color_picker_click_y = click_y;
         cx.notify();
     }
 

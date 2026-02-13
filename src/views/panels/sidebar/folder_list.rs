@@ -122,8 +122,8 @@ impl Sidebar {
                         .size(px(14.0))
                         .text_color(rgb(folder_color)),
                 )
-                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                    this.show_folder_color_picker(folder_id.clone(), cx);
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.show_folder_color_picker(folder_id.clone(), f32::from(event.position.y), cx);
                     cx.stop_propagation();
                 }))
             })
@@ -316,8 +316,8 @@ impl Sidebar {
                         .rounded(px(4.0))
                         .bg(rgb(folder_color)),
                 )
-                .on_click(cx.listener(move |this, _event: &ClickEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), cx);
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
                     cx.stop_propagation();
                 }))
             })

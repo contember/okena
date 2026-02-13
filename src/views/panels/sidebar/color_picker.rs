@@ -7,6 +7,17 @@ use gpui::prelude::*;
 use super::Sidebar;
 
 impl Sidebar {
+    /// Compute the top position for the color picker relative to the sidebar container.
+    /// Converts the stored window-Y click coordinate to sidebar-relative Y,
+    /// then clamps so the picker stays visible.
+    fn color_picker_top(&self) -> f32 {
+        let title_bar_offset = if cfg!(target_os = "macos") { 28.0 } else { 32.0 };
+        // Position the picker so its top aligns near the clicked item
+        let y = self.color_picker_click_y - title_bar_offset - 4.0;
+        // Clamp: minimum below sidebar headers (35 + 28 = 63), no less than 8
+        y.max(8.0)
+    }
+
     pub(super) fn render_color_picker(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
@@ -24,10 +35,12 @@ impl Sidebar {
             .map(|&color| (color, t.get_folder_color(color)))
             .collect();
 
+        let picker_top = self.color_picker_top();
+
         div()
             .absolute()
             .occlude()
-            .top(px(60.0))
+            .top(px(picker_top))
             .left(px(30.0))
             .bg(rgb(t.bg_primary))
             .border_1()
@@ -42,7 +55,7 @@ impl Sidebar {
                 cx.stop_propagation();
             })
             .child(
-                // Grid of color swatches (2 rows x 4 columns)
+                // Grid of color swatches (3 rows x 4 columns = 12 colors)
                 div()
                     .flex()
                     .flex_wrap()
@@ -90,10 +103,12 @@ impl Sidebar {
             .map(|&color| (color, t.get_folder_color(color)))
             .collect();
 
+        let picker_top = self.color_picker_top();
+
         div()
             .absolute()
             .occlude()
-            .top(px(60.0))
+            .top(px(picker_top))
             .left(px(30.0))
             .bg(rgb(t.bg_primary))
             .border_1()
