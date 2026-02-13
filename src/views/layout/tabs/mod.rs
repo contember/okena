@@ -7,15 +7,19 @@
 
 mod shell_selector;
 
+use crate::keybindings::Cancel;
 use crate::terminal::backend::TerminalBackend;
+use crate::terminal::shell_config::ShellType;
 use crate::theme::{theme, with_alpha};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::views::components::{is_renaming, rename_input, shell_indicator_chip, SimpleInput};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use gpui_component::tooltip::Tooltip;
 use gpui::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -32,6 +36,9 @@ pub(super) struct TabActionContext {
     pub active_tab: usize,
     pub backend: Arc<dyn TerminalBackend>,
     pub terminals: TerminalsRegistry,
+    /// When true, this is a standalone terminal (not in a Tabs container).
+    /// Actions use layout_path directly instead of layout_path + [active_tab].
+    pub standalone: bool,
 }
 
 /// Kill PTY processes and remove from registry for the given terminal IDs.
@@ -109,6 +116,8 @@ impl LayoutContainer {
         let ctx_detach = ctx.clone();
         let ctx_close = ctx.clone();
 
+        let standalone = ctx.standalone;
+
         div()
             .flex()
             .flex_none()
@@ -119,8 +128,13 @@ impl LayoutContainer {
             .child(
                 header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
-                        let mut child_path = ctx_split_v.layout_path.clone();
-                        child_path.push(ctx_split_v.active_tab);
+                        let child_path = if ctx_split_v.standalone {
+                            ctx_split_v.layout_path.clone()
+                        } else {
+                            let mut p = ctx_split_v.layout_path.clone();
+                            p.push(ctx_split_v.active_tab);
+                            p
+                        };
                         ctx_split_v.workspace.update(cx, |ws, cx| {
                             ws.split_terminal(&ctx_split_v.project_id, &child_path, SplitDirection::Vertical, cx);
                         });
@@ -130,8 +144,13 @@ impl LayoutContainer {
             .child(
                 header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
-                        let mut child_path = ctx_split_h.layout_path.clone();
-                        child_path.push(ctx_split_h.active_tab);
+                        let child_path = if ctx_split_h.standalone {
+                            ctx_split_h.layout_path.clone()
+                        } else {
+                            let mut p = ctx_split_h.layout_path.clone();
+                            p.push(ctx_split_h.active_tab);
+                            p
+                        };
                         ctx_split_h.workspace.update(cx, |ws, cx| {
                             ws.split_terminal(&ctx_split_h.project_id, &child_path, SplitDirection::Horizontal, cx);
                         });
@@ -141,17 +160,28 @@ impl LayoutContainer {
             .child(
                 header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
-                        ctx_add_tab.workspace.update(cx, |ws, cx| {
-                            ws.add_tab_to_group(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
-                        });
+                        if ctx_add_tab.standalone {
+                            ctx_add_tab.workspace.update(cx, |ws, cx| {
+                                ws.add_tab(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
+                            });
+                        } else {
+                            ctx_add_tab.workspace.update(cx, |ws, cx| {
+                                ws.add_tab_to_group(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
+                            });
+                        }
                     }),
             )
             // Minimize
             .child(
                 header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
-                        let mut full_path = ctx_minimize.layout_path.clone();
-                        full_path.push(ctx_minimize.active_tab);
+                        let full_path = if ctx_minimize.standalone {
+                            ctx_minimize.layout_path.clone()
+                        } else {
+                            let mut p = ctx_minimize.layout_path.clone();
+                            p.push(ctx_minimize.active_tab);
+                            p
+                        };
                         ctx_minimize.workspace.update(cx, |ws, cx| {
                             ws.toggle_terminal_minimized(&ctx_minimize.project_id, &full_path, cx);
                         });
@@ -183,24 +213,39 @@ impl LayoutContainer {
                     }),
             )
             // Detach
-            .child(
-                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let mut full_path = ctx_detach.layout_path.clone();
-                        full_path.push(ctx_detach.active_tab);
-                        ctx_detach.workspace.update(cx, |ws, cx| {
-                            ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
-                        });
-                    }),
-            )
+            .when(!standalone, |el| {
+                el.child(
+                    header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
+                        .on_click(move |_, _window, cx| {
+                            let full_path = if ctx_detach.standalone {
+                                ctx_detach.layout_path.clone()
+                            } else {
+                                let mut p = ctx_detach.layout_path.clone();
+                                p.push(ctx_detach.active_tab);
+                                p
+                            };
+                            ctx_detach.workspace.update(cx, |ws, cx| {
+                                ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
+                            });
+                        }),
+                )
+            })
             // Close Tab
             .child(
-                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some("Close Tab"))
+                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }))
                     .on_click(move |_, _window, cx| {
-                        let removed = ctx_close.workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx)
-                        });
-                        kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
+                        if ctx_close.standalone {
+                            // Standalone: close the terminal directly
+                            let removed = ctx_close.workspace.update(cx, |ws, cx| {
+                                ws.close_terminal_and_focus_sibling(&ctx_close.project_id, &ctx_close.layout_path, cx)
+                            });
+                            kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
+                        } else {
+                            let removed = ctx_close.workspace.update(cx, |ws, cx| {
+                                ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx)
+                            });
+                            kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
+                        }
                     }),
             )
     }
@@ -327,7 +372,7 @@ impl LayoutContainer {
                 .border_color(rgb(t.border))
                 .text_size(px(12.0))
                 .when(is_active, |d| {
-                    d.bg(rgb(t.bg_hover))
+                    d.bg(rgb(t.bg_primary))
                         .text_color(rgb(t.text_primary))
                 })
                 .when(!is_active, |d| {
@@ -343,19 +388,54 @@ impl LayoutContainer {
                         .border_color(with_alpha(t.border_active, animation_progress * 0.9))
                         .rounded(px(4.0))
                 })
-                // Tab content with icon and label
-                .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        // Shell icon
-                        .child(
-                            svg()
-                                .path("icons/terminal.svg")
-                                .size(px(12.0))
-                                .text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) })
-                        )
-                        .child(tab_label.clone())
-                )
+                // Tab content with icon and label (or rename input)
+                .child({
+                    let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
+                        is_renaming(&self.tab_rename_state, tid)
+                    });
+                    if is_renaming_this {
+                        if let Some(input) = rename_input(&self.tab_rename_state) {
+                            div()
+                                .id(format!("tab-rename-{}", i))
+                                .key_context("TerminalRename")
+                                .flex_1()
+                                .min_w(px(80.0))
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border_active))
+                                .rounded(px(4.0))
+                                .child(SimpleInput::new(input).text_size(px(12.0)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(|_, _window, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_tab_rename(cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    if event.keystroke.key.as_str() == "enter" {
+                                        this.finish_tab_rename(cx);
+                                    }
+                                }))
+                                .into_any_element()
+                        } else {
+                            h_flex()
+                                .gap(px(6.0))
+                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) }))
+                                .child(tab_label.clone())
+                                .into_any_element()
+                        }
+                    } else {
+                        h_flex()
+                            .gap(px(6.0))
+                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) }))
+                            .child(tab_label.clone())
+                            .into_any_element()
+                    }
+                })
                 // Right-click for context menu
                 .on_mouse_down(MouseButton::Right, {
                     let project_id = project_id.clone();
@@ -453,10 +533,37 @@ impl LayoutContainer {
                         }
                     }
                 }))
-                .on_click(move |_, _window, cx| {
-                    workspace.update(cx, |ws, cx| {
-                        ws.set_active_tab(&project_id, &layout_path, i, cx);
-                    });
+                .on_click({
+                    let workspace = workspace.clone();
+                    let project_id = project_id.clone();
+                    let layout_path = layout_path.clone();
+                    let terminal_id = terminal_id.clone();
+                    let tab_label = tab_label.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        let is_double_click = this.tab_click_detector.check(i);
+
+                        // Cancel any active rename if clicking a different tab
+                        if this.tab_rename_state.is_some() && !is_double_click {
+                            let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
+                                is_renaming(&this.tab_rename_state, tid)
+                            });
+                            if !is_renaming_this {
+                                this.cancel_tab_rename(cx);
+                            }
+                        }
+
+                        // Switch to clicked tab
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_active_tab(&project_id, &layout_path, i, cx);
+                        });
+
+                        // Double-click → start rename
+                        if is_double_click {
+                            if let Some(ref tid) = terminal_id {
+                                this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
+                            }
+                        }
+                    })
                 })
         }).collect();
 
@@ -466,11 +573,23 @@ impl LayoutContainer {
         let layout_path_for_end = self.layout_path.clone();
         let active_drag_for_end_hover = self.active_drag.clone();
         let active_drag_for_end_drop = self.active_drag.clone();
+        // Double-click on empty area creates new tab
+        let workspace_for_new = self.workspace.clone();
+        let project_id_for_new = self.project_id.clone();
+        let layout_path_for_new = self.layout_path.clone();
+
         let end_drop_zone = div()
             .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
             .flex_1()
             .h_full()
             .min_w(px(20.0))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                if this.empty_area_click_detector.check(()) {
+                    workspace_for_new.update(cx, |ws, cx| {
+                        ws.add_tab_to_group(&project_id_for_new, &layout_path_for_new, cx);
+                    });
+                }
+            }))
             // Enhanced drop zone indicator
             .drag_over::<PaneDrag>(move |style, _, _, _| {
                 if active_drag_for_end_hover.borrow().is_some() {
@@ -522,6 +641,7 @@ impl LayoutContainer {
             active_tab,
             backend: self.backend.clone(),
             terminals: self.terminals.clone(),
+            standalone: false,
         };
 
         // Get terminal_id for actions that need it
@@ -602,6 +722,226 @@ impl LayoutContainer {
 
                     container
                 }),
+            )
+    }
+
+    /// Render a tab bar for a standalone terminal (not inside a Tabs container).
+    /// This gives every terminal a consistent tab bar UI.
+    pub(super) fn render_standalone_tab_bar(
+        &mut self,
+        terminal_id: Option<String>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+
+        // Get terminal name
+        let terminals = self.terminals.clone();
+        let workspace_reader = self.workspace.read(cx);
+        let project = workspace_reader.project(&self.project_id);
+        let terminal_names_map = project.map(|p| p.terminal_names.clone());
+
+        let tab_label = if let Some(ref tid) = terminal_id {
+            let custom_name = terminal_names_map.as_ref().and_then(|m| m.get(tid).cloned());
+            if let Some(name) = custom_name {
+                name
+            } else {
+                let terminals_guard = terminals.lock();
+                if let Some(terminal) = terminals_guard.get(tid) {
+                    terminal.title().unwrap_or_else(|| "Terminal".to_string())
+                } else {
+                    "Terminal".to_string()
+                }
+            }
+        } else {
+            "Terminal".to_string()
+        };
+
+        // Check if drag is possible (more than one terminal in project)
+        let can_drag = terminal_id.is_some() && {
+            project
+                .and_then(|p| p.layout.as_ref())
+                .map(|l| l.collect_terminal_ids().len() > 1)
+                .unwrap_or(false)
+        };
+
+        // Check for active rename
+        let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
+            is_renaming(&self.tab_rename_state, tid)
+        });
+
+        // Build the single tab element
+        let tab_element = {
+            let terminal_id_for_drag = terminal_id.clone();
+            let tab_label_for_drag = tab_label.clone();
+            let layout_path_for_drag = layout_path.clone();
+            let project_id_for_drag = project_id.clone();
+
+            let mut tab = div()
+                .id(ElementId::Name(format!("standalone-tab-{:?}", layout_path).into()))
+                .cursor_pointer()
+                .relative()
+                .px(px(8.0))
+                .py(px(4.0))
+                .border_r_1()
+                .border_color(rgb(t.border))
+                .text_size(px(12.0))
+                .bg(rgb(t.bg_primary))
+                .text_color(rgb(t.text_primary))
+                .child({
+                    if is_renaming_this {
+                        if let Some(input) = rename_input(&self.tab_rename_state) {
+                            div()
+                                .id("standalone-tab-rename")
+                                .key_context("TerminalRename")
+                                .flex_1()
+                                .min_w(px(80.0))
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border_active))
+                                .rounded(px(4.0))
+                                .child(SimpleInput::new(input).text_size(px(12.0)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(|_, _window, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_tab_rename(cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    if event.keystroke.key.as_str() == "enter" {
+                                        this.finish_tab_rename(cx);
+                                    }
+                                }))
+                                .into_any_element()
+                        } else {
+                            h_flex()
+                                .gap(px(6.0))
+                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(rgb(t.success)))
+                                .child(tab_label.clone())
+                                .into_any_element()
+                        }
+                    } else {
+                        h_flex()
+                            .gap(px(6.0))
+                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(rgb(t.success)))
+                            .child(tab_label.clone())
+                            .into_any_element()
+                    }
+                })
+                .on_click({
+                    let terminal_id = terminal_id.clone();
+                    let tab_label = tab_label.clone();
+                    cx.listener(move |this, _, window, cx| {
+                        let is_double_click = this.tab_click_detector.check(0);
+                        if is_double_click {
+                            if let Some(ref tid) = terminal_id {
+                                this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
+                            }
+                        }
+                    })
+                });
+
+            // Add drag support
+            if can_drag {
+                if let Some(ref tid) = terminal_id_for_drag {
+                    tab = tab.on_drag(
+                        PaneDrag {
+                            project_id: project_id_for_drag,
+                            layout_path: layout_path_for_drag,
+                            terminal_id: tid.clone(),
+                            terminal_name: tab_label_for_drag,
+                        },
+                        move |drag, _position, _window, cx| {
+                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
+                        },
+                    );
+                }
+            }
+
+            tab
+        };
+
+        // Empty area: double-click creates new tab
+        let workspace_for_new = self.workspace.clone();
+        let project_id_for_new = self.project_id.clone();
+        let layout_path_for_new = self.layout_path.clone();
+
+        let empty_area = div()
+            .id(ElementId::Name(format!("standalone-tab-empty-{:?}", self.layout_path).into()))
+            .flex_1()
+            .h_full()
+            .min_w(px(20.0))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                if this.empty_area_click_detector.check(()) {
+                    workspace_for_new.update(cx, |ws, cx| {
+                        ws.add_tab(&project_id_for_new, &layout_path_for_new, cx);
+                    });
+                }
+            }));
+
+        // Build action context for buttons
+        let action_ctx = TabActionContext {
+            workspace: self.workspace.clone(),
+            project_id: self.project_id.clone(),
+            layout_path: self.layout_path.clone(),
+            active_tab: 0,
+            backend: self.backend.clone(),
+            terminals: self.terminals.clone(),
+            standalone: true,
+        };
+
+        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id.clone(), cx);
+
+        // Shell indicator
+        let shell_type = self.workspace.read(cx)
+            .get_terminal_shell(&self.project_id, &self.layout_path)
+            .unwrap_or(ShellType::Default);
+        let shell_name = shell_type.short_display_name();
+        let id_suffix = format!("standalone-{:?}", self.layout_path);
+
+        let shell_indicator = shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
+            .when_some(terminal_id.clone(), {
+                let request_broker = self.request_broker.clone();
+                let project_id = self.project_id.clone();
+                let shell_type = shell_type.clone();
+                move |el, tid| {
+                    el.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        cx.stop_propagation();
+                        request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                                project_id: project_id.clone(),
+                                terminal_id: tid.clone(),
+                                current_shell: shell_type.clone(),
+                            }, cx);
+                        });
+                    })
+                    .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
+                }
+            });
+
+        // Tab bar
+        div()
+            .group("tab-bar-row")
+            .h(px(28.0))
+            .px(px(0.0))
+            .flex()
+            .items_center()
+            .gap(px(0.0))
+            .bg(rgb(t.bg_header))
+            .child(tab_element)
+            .child(empty_area)
+            .child(
+                h_flex()
+                    .opacity(0.0)
+                    .group_hover("tab-bar-row", |s| s.opacity(1.0))
+                    .child(shell_indicator)
+                    .child(action_buttons),
             )
     }
 }

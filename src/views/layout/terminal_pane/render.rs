@@ -1,7 +1,7 @@
 //! Render implementation for TerminalPane.
 //!
 //! Contains the GPUI Render trait implementation which composes
-//! the header, content, search bar, and zoom header into the final view.
+//! the content, search bar, and zoom header into the final view.
 
 use crate::keybindings::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
@@ -29,10 +29,9 @@ impl Render for TerminalPane {
         let is_modal = {
             let ws = self.workspace.read(cx);
             let is_modal = ws.focus_manager.is_modal();
-            let header_renaming = self.header.read(cx).is_renaming();
             let search_active = self.search_bar.read(cx).is_active();
 
-            if !header_renaming && !search_active && !is_modal {
+            if !search_active && !is_modal {
                 if let Some(focused) = ws.focus_manager.focused_terminal_state() {
                     if focused.project_id == self.project_id
                         && focused.layout_path == self.layout_path
@@ -55,11 +54,9 @@ impl Render for TerminalPane {
         };
 
         // Handle pending focus
-        let header_renaming = self.header.read(cx).is_renaming();
         let search_active = self.search_bar.read(cx).is_active();
         if self.pending_focus
             && self.terminal.is_some()
-            && !header_renaming
             && !search_active
             && !is_modal
         {
@@ -85,7 +82,6 @@ impl Render for TerminalPane {
             rgb(t.border_bell)
         };
 
-        let in_tab_group = self.is_in_tab_group(cx);
         let is_zoomed = self.is_zoomed(cx);
         let zoom_header = if is_zoomed {
             Some(self.render_zoom_header(cx))
@@ -100,9 +96,6 @@ impl Render for TerminalPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                    this.header.update(cx, |header, cx| {
-                        header.close_shell_dropdown(cx);
-                    });
                     window.focus(&this.focus_handle, cx);
                     this.workspace.update(cx, |ws, cx| {
                         ws.set_focused_terminal(
@@ -247,10 +240,7 @@ impl Render for TerminalPane {
             .relative()
             // Zoom header (shown when zoomed)
             .children(zoom_header)
-            // Regular header (hidden in tab groups and when zoomed)
-            .when(!in_tab_group && !self.minimized && !is_zoomed, |el| {
-                el.child(self.header.clone())
-            })
+            // Regular header is replaced by the tab bar rendered by LayoutContainer
             // Content (hidden when minimized or detached)
             .when(!self.minimized && !self.detached, |el| {
                 el.child(

@@ -91,12 +91,6 @@ pub struct ButtonSize {
 }
 
 impl ButtonSize {
-    /// Regular size for terminal pane headers (22px button, 14px icon).
-    pub const REGULAR: Self = Self {
-        button: 22.0,
-        icon: 14.0,
-    };
-
     /// Compact size for tab group headers (20px button, 12px icon).
     pub const COMPACT: Self = Self {
         button: 20.0,

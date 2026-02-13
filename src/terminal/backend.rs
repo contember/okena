@@ -14,8 +14,6 @@ pub trait TerminalBackend: Send + Sync {
     fn kill(&self, terminal_id: &str);
     fn capture_buffer(&self, terminal_id: &str) -> Option<PathBuf>;
     fn supports_buffer_capture(&self) -> bool;
-    /// Whether this backend connects to a remote server (hides local-only UI).
-    fn is_remote(&self) -> bool { false }
 }
 
 /// Local backend wrapping PtyManager for local terminal processes.

@@ -1,7 +1,7 @@
 //! Terminal pane action handlers.
 //!
-//! Contains handlers for split, close, minimize, fullscreen, detach,
-//! copy, paste, clear, select all, rename, export buffer, and file drop.
+//! Contains handlers for split, close, minimize, fullscreen,
+//! copy, paste, and file drop.
 
 use crate::remote::types::ActionRequest;
 use crate::workspace::actions::execute::execute_action;
@@ -54,32 +54,6 @@ impl TerminalPane {
         if let Some(ref id) = self.terminal_id {
             self.workspace.update(cx, |ws, cx| {
                 ws.set_fullscreen_terminal(self.project_id.clone(), id.clone(), cx);
-            });
-        }
-    }
-
-    pub(super) fn handle_detach(&mut self, cx: &mut Context<Self>) {
-        if self.terminal_id.is_some() {
-            self.workspace.update(cx, |ws, cx| {
-                ws.detach_terminal(&self.project_id, &self.layout_path, cx);
-            });
-        }
-    }
-
-    pub(super) fn handle_export_buffer(&mut self, cx: &mut Context<Self>) {
-        if let Some(ref terminal_id) = self.terminal_id {
-            if let Some(path) = self.backend.capture_buffer(terminal_id) {
-                cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
-            }
-        }
-    }
-
-    pub(super) fn handle_rename(&mut self, new_name: String, cx: &mut Context<Self>) {
-        if let Some(ref terminal_id) = self.terminal_id {
-            let project_id = self.project_id.clone();
-            let terminal_id = terminal_id.clone();
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
             });
         }
     }

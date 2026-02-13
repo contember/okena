@@ -1,17 +1,17 @@
 //! Terminal pane view - composition of child entity views.
 //!
 //! This is the main TerminalPane that composes:
-//! - TerminalHeader: header with name, shell selector, and controls
 //! - TerminalContent: terminal display with scrollbar
 //! - SearchBar: search functionality
+//!
+//! The tab bar (name, shell selector, action buttons) is rendered by
+//! LayoutContainer, not by TerminalPane.
 //!
 //! Each component is a proper GPUI Entity implementing Render.
 
 mod url_detector;
 mod scrollbar;
-mod shell_selector;
 mod search_bar;
-mod header;
 mod content;
 mod actions;
 mod zoom;
@@ -21,7 +21,6 @@ mod render;
 // Internal imports
 use content::TerminalContentEvent;
 use search_bar::{SearchBar, SearchBarEvent};
-use header::{TerminalHeader, HeaderEvent};
 
 // Re-export TerminalContent (used by tests/internal consumers)
 pub use content::TerminalContent;
@@ -53,7 +52,6 @@ pub struct TerminalPane {
     terminals: TerminalsRegistry,
 
     // Child views
-    header: Entity<TerminalHeader>,
     content: Entity<TerminalContent>,
     search_bar: Entity<SearchBar>,
 
@@ -90,33 +88,7 @@ impl TerminalPane {
             .get_terminal_shell(&project_id, &layout_path)
             .unwrap_or(ShellType::Default);
 
-        let id_suffix = terminal_id.clone().unwrap_or_else(|| {
-            format!(
-                "{}-{}",
-                project_id,
-                layout_path
-                    .iter()
-                    .map(|i| i.to_string())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            )
-        });
-
         // Create child entities
-        let header = cx.new(|cx| {
-            TerminalHeader::new(
-                workspace.clone(),
-                project_id.clone(),
-                layout_path.clone(),
-                terminal_id.clone(),
-                shell_type.clone(),
-                backend.supports_buffer_capture(),
-                backend.is_remote(),
-                id_suffix.clone(),
-                cx,
-            )
-        });
-
         let content = cx.new(|cx| {
             TerminalContent::new(
                 focus_handle.clone(),
@@ -128,9 +100,6 @@ impl TerminalPane {
         });
 
         let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), cx));
-
-        // Subscribe to header events
-        cx.subscribe(&header, Self::handle_header_event).detach();
 
         // Subscribe to search bar events
         cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
@@ -148,7 +117,6 @@ impl TerminalPane {
             terminal_id,
             backend,
             terminals,
-            header,
             content,
             search_bar,
             focus_handle,
@@ -175,36 +143,6 @@ impl TerminalPane {
     }
 
     // === Event handlers ===
-
-    /// Handle events from header.
-    fn handle_header_event(
-        &mut self,
-        _: Entity<TerminalHeader>,
-        event: &HeaderEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            HeaderEvent::Split(dir) => self.handle_split(*dir, cx),
-            HeaderEvent::AddTab => self.handle_add_tab(cx),
-            HeaderEvent::Close => self.handle_close(cx),
-            HeaderEvent::Minimize => self.handle_minimize(cx),
-            HeaderEvent::Fullscreen => self.handle_fullscreen(cx),
-            HeaderEvent::Detach => self.handle_detach(cx),
-            HeaderEvent::ExportBuffer => self.handle_export_buffer(cx),
-            HeaderEvent::Renamed(name) => self.handle_rename(name.clone(), cx),
-            HeaderEvent::OpenShellSelector(current_shell) => {
-                if let Some(ref terminal_id) = self.terminal_id {
-                    self.request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
-                            project_id: self.project_id.clone(),
-                            terminal_id: terminal_id.clone(),
-                            current_shell: current_shell.clone(),
-                        }, cx);
-                    });
-                }
-            }
-        }
-    }
 
     /// Handle events from search bar.
     fn handle_search_bar_event(
@@ -381,9 +319,6 @@ impl TerminalPane {
 
                 // Update child entities
                 self.update_child_terminals(terminal, cx);
-                self.header.update(cx, |header, _| {
-                    header.set_terminal_id(Some(terminal_id));
-                });
 
                 self.pending_focus = true;
                 cx.notify();
@@ -401,10 +336,7 @@ impl TerminalPane {
             content.set_terminal(Some(terminal.clone()), cx);
         });
         self.search_bar.update(cx, |search_bar, _| {
-            search_bar.set_terminal(Some(terminal.clone()));
-        });
-        self.header.update(cx, |header, _| {
-            header.set_terminal(Some(terminal));
+            search_bar.set_terminal(Some(terminal));
         });
     }
 
@@ -448,22 +380,6 @@ impl TerminalPane {
         })
     }
 
-    /// Check if terminal is in a tab group.
-    fn is_in_tab_group(&self, cx: &Context<Self>) -> bool {
-        if self.layout_path.is_empty() {
-            return false;
-        }
-        let parent_path = &self.layout_path[..self.layout_path.len() - 1];
-        let ws = self.workspace.read(cx);
-        if let Some(project) = ws.project(&self.project_id) {
-            if let Some(crate::workspace::state::LayoutNode::Tabs { .. }) =
-                project.layout.as_ref().and_then(|l| l.get_at_path(parent_path))
-            {
-                return true;
-            }
-        }
-        false
-    }
 }
 
 impl_focusable!(TerminalPane);

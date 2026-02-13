@@ -8,6 +8,10 @@
 
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
+use crate::ui::ClickDetector;
+use crate::views::components::{
+    cancel_rename, finish_rename, start_rename_with_blur, RenameState,
+};
 use crate::views::root::TerminalsRegistry;
 use crate::views::layout::pane_drag::{PaneDrag, DropZone};
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
@@ -44,6 +48,12 @@ pub struct LayoutContainer {
     pub(super) active_drag: ActiveDrag,
     /// External layout override (for remote projects not in workspace)
     pub(super) external_layout: Option<LayoutNode>,
+    /// Double-click detector for tab rename (keyed by tab index)
+    pub(super) tab_click_detector: ClickDetector<usize>,
+    /// Double-click detector for empty tab bar area (new tab)
+    pub(super) empty_area_click_detector: ClickDetector<()>,
+    /// Rename state for tab bar (keyed by terminal_id)
+    pub(super) tab_rename_state: Option<RenameState<String>>,
 }
 
 impl LayoutContainer {
@@ -74,6 +84,9 @@ impl LayoutContainer {
             drop_animation: None,
             active_drag,
             external_layout: None,
+            tab_click_detector: ClickDetector::new(),
+            empty_area_click_detector: ClickDetector::new(),
+            tab_rename_state: None,
         }
     }
 
@@ -159,23 +172,96 @@ impl LayoutContainer {
         None
     }
 
+    /// Check if this layout container is a terminal inside a Tabs container.
+    fn is_in_tab_group(&self, cx: &Context<Self>) -> bool {
+        if self.layout_path.is_empty() {
+            return false;
+        }
+        let parent_path = &self.layout_path[..self.layout_path.len() - 1];
+        let ws = self.workspace.read(cx);
+        if let Some(project) = ws.project(&self.project_id) {
+            if let Some(LayoutNode::Tabs { .. }) = project.layout.as_ref().and_then(|l| l.get_at_path(parent_path)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Start renaming a tab.
+    pub(super) fn start_tab_rename(
+        &mut self,
+        terminal_id: String,
+        current_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_rename_state = Some(start_rename_with_blur(
+            terminal_id,
+            &current_name,
+            "Tab name...",
+            |this: &mut LayoutContainer, _window, cx| {
+                this.finish_tab_rename(cx);
+            },
+            window,
+            cx,
+        ));
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
+    }
+
+    /// Finish renaming a tab.
+    pub(super) fn finish_tab_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some((terminal_id, new_name)) = finish_rename(&mut self.tab_rename_state, cx) {
+            let project_id = self.project_id.clone();
+            self.workspace.update(cx, |ws, cx| {
+                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
+            });
+        }
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        cx.notify();
+    }
+
+    /// Cancel renaming a tab.
+    pub(super) fn cancel_tab_rename(&mut self, cx: &mut Context<Self>) {
+        cancel_rename(&mut self.tab_rename_state);
+        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        cx.notify();
+    }
+
     fn render_terminal(
         &mut self,
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         // Ensure terminal pane exists (created once, not every render)
         self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
 
-        div()
+        let in_tab_group = self.is_in_tab_group(cx);
+
+        let mut container = div()
             .size_full()
             .min_h_0()
-            .relative()
-            .child(self.terminal_pane.clone().unwrap())
-            .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone()))
+            .flex()
+            .flex_col()
+            .relative();
+
+        // Show standalone tab bar if not already inside a Tabs container
+        if !in_tab_group {
+            container = container.child(self.render_standalone_tab_bar(terminal_id.clone(), window, cx));
+        }
+
+        container
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(self.terminal_pane.clone().unwrap())
+                    .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
+            )
     }
 
     /// Render the 5-zone drop overlay for pane drag-and-drop.

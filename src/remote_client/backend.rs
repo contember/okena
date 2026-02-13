@@ -92,8 +92,4 @@ impl TerminalBackend for RemoteBackend {
     fn supports_buffer_capture(&self) -> bool {
         false
     }
-
-    fn is_remote(&self) -> bool {
-        true
-    }
 }

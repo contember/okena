@@ -18,63 +18,16 @@ pub struct RenameState<Id> {
 }
 
 impl<Id> RenameState<Id> {
-    /// Create a new rename state.
-    pub fn new(target: Id, input: Entity<SimpleInputState>) -> Self {
-        Self { target, input, _blur_subscription: None }
-    }
-
     /// Get the current input value.
     pub fn value(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }
 }
 
-/// Start a rename operation.
-///
-/// Creates a new `RenameState` with a configured `SimpleInputState`.
-/// The input will be focused and a blur handler will be set up to call `on_blur`.
-///
-/// # Arguments
-/// * `target` - The ID of the item being renamed
-/// * `current_name` - The current name to pre-fill
-/// * `placeholder` - Placeholder text for the input
-/// * `window` - Window reference for focus management
-/// * `cx` - Context for the parent view
-///
-/// # Example
-/// ```rust
-/// self.rename_state = Some(start_rename(
-///     terminal_id.clone(),
-///     &current_name,
-///     "Terminal name...",
-///     window,
-///     cx,
-/// ));
-/// ```
-pub fn start_rename<Id: Clone + 'static, V: 'static>(
-    target: Id,
-    current_name: &str,
-    placeholder: &str,
-    window: &mut Window,
-    cx: &mut Context<V>,
-) -> RenameState<Id> {
-    let input = cx.new(|cx| {
-        SimpleInputState::new(cx)
-            .placeholder(placeholder)
-            .default_value(current_name)
-    });
-
-    // Focus the input
-    let focus_handle = input.read(cx).focus_handle(cx);
-    window.focus(&focus_handle, cx);
-
-    RenameState::new(target, input)
-}
-
 /// Start a rename operation with a blur handler.
 ///
-/// Same as `start_rename` but also sets up a blur handler that will be called
-/// when the input loses focus.
+/// Creates a new `RenameState` with a configured `SimpleInputState`.
+/// Sets up a blur handler that will be called when the input loses focus.
 ///
 /// # Arguments
 /// * `target` - The ID of the item being renamed
