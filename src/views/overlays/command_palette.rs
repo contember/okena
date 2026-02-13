@@ -96,7 +96,7 @@ impl CommandPalette {
         self.state.set_filtered(filtered);
     }
 
-    fn render_command_row(&self, filtered_index: usize, cmd_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_command_row(&self, filtered_index: usize, cmd_index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
         let command = &self.state.items[cmd_index];
         let is_selected = filtered_index == self.state.selected_index;

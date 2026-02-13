@@ -376,7 +376,7 @@ impl FileSearchDialog {
         file_index: usize,
         match_positions: &[usize],
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let file = &self.files[file_index];
         let is_selected = filtered_index == self.selected_index;
@@ -574,8 +574,8 @@ impl Render for FileSearchDialog {
                                 view.update(cx, |this, cx| {
                                     range
                                         .map(|i| {
-                                            let (file_index, ref positions) = filtered[i];
-                                            this.render_file_row(i, file_index, positions, cx)
+                                            let (file_index, positions) = &filtered[i];
+                                            this.render_file_row(i, *file_index, positions, cx)
                                         })
                                         .collect()
                                 })

@@ -71,7 +71,7 @@ impl UrlDetector {
 
     /// Update URL matches from terminal content.
     pub fn update_matches(&mut self, terminal: &Option<Arc<Terminal>>) {
-        if let Some(ref terminal) = terminal {
+        if let Some(terminal) = terminal {
             let detected = terminal.detect_urls();
             let cwd = terminal.initial_cwd();
 

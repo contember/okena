@@ -187,7 +187,7 @@ impl SearchBar {
 
     /// Scroll terminal to show current match.
     fn scroll_to_current_match(&self) {
-        if let (Some(idx), Some(ref terminal)) = (self.current_match_index, &self.terminal) {
+        if let (Some(idx), Some(terminal)) = (self.current_match_index, &self.terminal) {
             if let Some(search_match) = self.matches.get(idx) {
                 let screen_lines = terminal.screen_lines() as i32;
                 let match_line = search_match.line;

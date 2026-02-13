@@ -13,7 +13,7 @@ impl SessionManager {
         &self,
         session: &SessionInfo,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let name = session.name.clone();
         let is_renaming = self.renaming_session.as_ref() == Some(&name);

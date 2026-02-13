@@ -59,7 +59,7 @@ impl TitleBar {
     }
 
     /// Render the app dropdown menu overlay (must be called from a parent with full window coverage).
-    pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
 
         let traffic_light_padding = if cfg!(target_os = "macos") {
@@ -239,7 +239,7 @@ fn get_hwnd(window: &Window) -> Option<isize> {
 // The timer fires every ~16ms (60fps) while the mouse button is held.
 
 #[cfg(target_os = "windows")]
-extern "system" {
+unsafe extern "system" {
     fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn ShowWindow(hwnd: isize, cmd: i32) -> i32;

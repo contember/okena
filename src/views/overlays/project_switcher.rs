@@ -83,7 +83,7 @@ impl ProjectSwitcher {
         display_index: usize,
         project_index: usize,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let project = &self.state.items[project_index];
         let is_selected = display_index == self.state.selected_index;

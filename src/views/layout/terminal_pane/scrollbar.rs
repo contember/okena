@@ -105,7 +105,7 @@ impl Scrollbar {
             return;
         }
 
-        if let (Some(start_y), Some(start_offset), Some(ref terminal)) =
+        if let (Some(start_y), Some(start_offset), Some(terminal)) =
             (self.drag_start_y, self.drag_start_offset, &self.terminal)
         {
             let (total_lines, visible_lines, _) = terminal.scroll_info();

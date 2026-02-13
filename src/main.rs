@@ -66,7 +66,7 @@ fn about(_: &About, _cx: &mut App) {
     // Non-variadic objc_msgSend trampolines — ARM64 requires the standard
     // (non-variadic) calling convention; declaring `...` misplaces arguments.
     #[allow(clashing_extern_declarations)]
-    extern "C" {
+    unsafe extern "C" {
         fn objc_getClass(name: *const u8) -> *mut c_void;
         fn sel_registerName(name: *const u8) -> *mut c_void;
 

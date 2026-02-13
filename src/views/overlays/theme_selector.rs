@@ -265,7 +265,7 @@ impl ThemeSelector {
             )
     }
 
-    fn render_theme_row(&self, index: usize, entry: &ThemeEntry, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_theme_row(&self, index: usize, entry: &ThemeEntry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
         let is_selected = index == self.state.selected_index;
         let colors = entry.colors;

@@ -52,7 +52,7 @@ impl KeybindingsHelp {
         category: &str,
         bindings: &[(String, String, bool)], // (action_name, keystroke, is_customized)
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let descriptions = get_action_descriptions();
         let category_string = category.to_string();
