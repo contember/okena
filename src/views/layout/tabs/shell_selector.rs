@@ -40,25 +40,50 @@ impl LayoutContainer {
     pub(super) fn render_shell_indicator(&self, active_tab: usize, cx: &Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let shell_type = self.get_active_shell_type(active_tab, cx);
-        let shell_name = shell_type.short_display_name();
+        let shell_name = shell_type.short_display_name().to_string();
         let id_suffix = format!("tabs-{:?}", self.layout_path);
         let terminal_id = self.get_active_terminal_id(active_tab, cx);
         let project_id = self.project_id.clone();
+        let request_broker = self.request_broker.clone();
 
-        shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
+        shell_indicator_chip(format!("shell-indicator-{}", id_suffix), &shell_name, &t)
             .when_some(terminal_id, |el, tid| {
-                el.on_mouse_down(MouseButton::Left, {
-                    let request_broker = self.request_broker.clone();
-                    move |_, _window, cx| {
-                        cx.stop_propagation();
-                        request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
-                                project_id: project_id.clone(),
-                                terminal_id: tid.clone(),
-                                current_shell: shell_type.clone(),
-                            }, cx);
-                        });
-                    }
+                el.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                    cx.stop_propagation();
+                    request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                            project_id: project_id.clone(),
+                            terminal_id: tid.clone(),
+                            current_shell: shell_type.clone(),
+                        }, cx);
+                    });
+                })
+            })
+            .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
+    }
+
+    /// Render the shell indicator button for standalone terminals.
+    pub(super) fn render_standalone_shell_indicator(&self, terminal_id: Option<String>, cx: &Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let shell_type = self.workspace.read(cx)
+            .get_terminal_shell(&self.project_id, &self.layout_path)
+            .unwrap_or(ShellType::Default);
+        let shell_name = shell_type.short_display_name().to_string();
+        let id_suffix = format!("standalone-{:?}", self.layout_path);
+        let project_id = self.project_id.clone();
+        let request_broker = self.request_broker.clone();
+
+        shell_indicator_chip(format!("shell-indicator-{}", id_suffix), &shell_name, &t)
+            .when_some(terminal_id, |el, tid| {
+                el.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                    cx.stop_propagation();
+                    request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
+                            project_id: project_id.clone(),
+                            terminal_id: tid.clone(),
+                            current_shell: shell_type.clone(),
+                        }, cx);
+                    });
                 })
             })
             .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))

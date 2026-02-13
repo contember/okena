@@ -8,18 +8,17 @@
 mod shell_selector;
 
 use crate::keybindings::Cancel;
+use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
 use crate::theme::{theme, with_alpha};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
-use crate::views::components::{is_renaming, rename_input, shell_indicator_chip, SimpleInput};
+use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
-use gpui_component::tooltip::Tooltip;
 use gpui::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -117,6 +116,7 @@ impl LayoutContainer {
         let ctx_close = ctx.clone();
 
         let standalone = ctx.standalone;
+        let is_remote = self.backend.is_remote();
 
         div()
             .flex()
@@ -213,7 +213,7 @@ impl LayoutContainer {
                     }),
             )
             // Detach
-            .when(!standalone, |el| {
+            .when(!is_remote, |el| {
                 el.child(
                     header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
                         .on_click(move |_, _window, cx| {
@@ -650,8 +650,8 @@ impl LayoutContainer {
         // Render action buttons using helper method
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions, cx);
 
-        // Render shell indicator (dropdown is handled by overlay)
-        let shell_indicator = self.render_shell_indicator(active_tab, cx);
+        // Check shell selector visibility
+        let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();
 
         // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
@@ -685,7 +685,9 @@ impl LayoutContainer {
                         h_flex()
                             .opacity(0.0)
                             .group_hover("tab-bar-row", |s| s.opacity(1.0))
-                            .child(shell_indicator)
+                            .when(show_shell, |el| {
+                                el.child(self.render_shell_indicator(active_tab, cx))
+                            })
                             .child(action_buttons),
                     ),
             )
@@ -898,32 +900,8 @@ impl LayoutContainer {
 
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id.clone(), cx);
 
-        // Shell indicator
-        let shell_type = self.workspace.read(cx)
-            .get_terminal_shell(&self.project_id, &self.layout_path)
-            .unwrap_or(ShellType::Default);
-        let shell_name = shell_type.short_display_name();
-        let id_suffix = format!("standalone-{:?}", self.layout_path);
-
-        let shell_indicator = shell_indicator_chip(format!("shell-indicator-{}", id_suffix), shell_name, &t)
-            .when_some(terminal_id.clone(), {
-                let request_broker = self.request_broker.clone();
-                let project_id = self.project_id.clone();
-                let shell_type = shell_type.clone();
-                move |el, tid| {
-                    el.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
-                        cx.stop_propagation();
-                        request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(crate::workspace::requests::OverlayRequest::ShellSelector {
-                                project_id: project_id.clone(),
-                                terminal_id: tid.clone(),
-                                current_shell: shell_type.clone(),
-                            }, cx);
-                        });
-                    })
-                    .tooltip(|_window, cx| Tooltip::new("Switch Shell").build(_window, cx))
-                }
-            });
+        // Check shell selector visibility
+        let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();
 
         // Tab bar
         div()
@@ -940,7 +918,9 @@ impl LayoutContainer {
                 h_flex()
                     .opacity(0.0)
                     .group_hover("tab-bar-row", |s| s.opacity(1.0))
-                    .child(shell_indicator)
+                    .when(show_shell, |el| {
+                        el.child(self.render_standalone_shell_indicator(terminal_id.clone(), cx))
+                    })
                     .child(action_buttons),
             )
     }
