@@ -107,6 +107,7 @@ impl Sidebar {
                         this.workspace.update(cx, |ws, cx| {
                             ws.toggle_folder_collapsed(&folder_id, cx);
                         });
+                        cx.stop_propagation();
                     }
                 })),
             )
@@ -298,6 +299,7 @@ impl Sidebar {
                     move |this, _, _window, cx| {
                         this.toggle_expanded(&project_id);
                         cx.notify();
+                        cx.stop_propagation();
                     }
                 })),
             )
