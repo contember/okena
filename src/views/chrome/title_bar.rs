@@ -1,7 +1,6 @@
 use crate::keybindings::{Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector, ToggleSidebar};
 use crate::theme::theme;
 use crate::views::components::menu_item;
-use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -15,10 +14,9 @@ pub enum WindowControlType {
     Close,
 }
 
-/// Title bar with window controls, sidebar toggle, and focused project indicator
+/// Title bar with window controls and sidebar toggle
 pub struct TitleBar {
     title: SharedString,
-    workspace: Entity<Workspace>,
     menu_open: bool,
     sidebar_open: bool,
     /// HWND cached for Win32 drag operations (Windows only)
@@ -29,11 +27,9 @@ pub struct TitleBar {
 impl TitleBar {
     pub fn new(
         title: impl Into<SharedString>,
-        workspace: Entity<Workspace>,
     ) -> Self {
         Self {
             title: title.into(),
-            workspace,
             menu_open: false,
             sidebar_open: true,
             #[cfg(target_os = "windows")]
@@ -387,19 +383,16 @@ impl Render for TitleBar {
             px(8.0)
         };
 
-        // Get focused project info
-        let focused_project = {
-            let ws = self.workspace.read(cx);
-            ws.focused_project_id()
-                .and_then(|id| ws.project(id))
-                .map(|p| p.name.clone())
+        // On macOS, the title bar only provides space for traffic lights (no content)
+        let title_bar_height = if cfg!(target_os = "macos") {
+            px(28.0)
+        } else {
+            px(32.0)
         };
-
-        let workspace = self.workspace.clone();
 
         div()
             .id("title-bar")
-            .h(px(32.0))
+            .h(title_bar_height)
             .w_full()
             .flex_shrink_0()
             .flex()
@@ -525,54 +518,10 @@ impl Render for TitleBar {
                 div().flex_1()
             )
             .child(
-                // Right side - focused project indicator + theme toggle + window controls
+                // Right side - window controls
                 h_flex()
                     .gap(px(8.0))
                     .pr(px(4.0))
-                    // Focused project indicator
-                    .children(focused_project.map(|name| {
-                        h_flex()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("Focused:"),
-                            )
-                            .child(
-                                div()
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .border_1()
-                                    .border_color(rgb(t.border_focused))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(t.text_primary))
-                                    .child(name),
-                            )
-                            .child(
-                                div()
-                                    .cursor_pointer()
-                                    .px(px(4.0))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .hover(|s| s.text_color(rgb(t.text_primary)))
-                                    .child("✕")
-                                    .id("clear-focus-btn")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation();
-                                    })
-                                    .on_click({
-                                        let workspace = workspace.clone();
-                                        move |_, _window, cx| {
-                                            cx.stop_propagation();
-                                            workspace.update(cx, |ws, cx| {
-                                                ws.set_focused_project(None, cx);
-                                            });
-                                        }
-                                    }),
-                            )
-                    }))
                     .when(needs_controls, |d| {
                         d.child(
                             h_flex()

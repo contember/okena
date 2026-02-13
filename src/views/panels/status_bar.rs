@@ -1,5 +1,6 @@
 use crate::keybindings::ToggleSidebar;
 use crate::theme::theme;
+use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
@@ -64,12 +65,13 @@ impl SystemInfoCache {
 
 /// Status bar component showing system info and time
 pub struct StatusBar {
+    workspace: Entity<Workspace>,
     cache: Arc<Mutex<SystemInfoCache>>,
     sidebar_open: bool,
 }
 
 impl StatusBar {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
 
         // Initial refresh
@@ -95,7 +97,10 @@ impl StatusBar {
             }
         }).detach();
 
-        Self { cache, sidebar_open: true }
+        // Re-render when workspace changes (for focused project updates)
+        cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
+
+        Self { workspace, cache, sidebar_open: true }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -389,6 +394,54 @@ impl Render for StatusBar {
                             _ => {}
                         }
                     }
+                }
+
+                // Focused project indicator
+                let focused_project = {
+                    let ws = self.workspace.read(cx);
+                    ws.focused_project_id()
+                        .and_then(|id| ws.project(id))
+                        .map(|p| p.name.clone())
+                };
+
+                if let Some(name) = focused_project {
+                    let workspace = self.workspace.clone();
+                    right = right.child(
+                        h_flex()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child("Focused:"),
+                            )
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .border_1()
+                                    .border_color(rgb(t.border_focused))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(t.text_primary))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .cursor_pointer()
+                                    .px(px(4.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .hover(|s| s.text_color(rgb(t.text_primary)))
+                                    .child("✕")
+                                    .id("clear-focus-btn")
+                                    .on_click(move |_, _window, cx| {
+                                        workspace.update(cx, |ws, cx| {
+                                            ws.set_focused_project(None, cx);
+                                        });
+                                    }),
+                            )
+                    );
                 }
 
                 right
