@@ -85,6 +85,7 @@ impl RootView {
                 // Add divider after each column except the last
                 if i < num_projects - 1 {
                     let divider = render_project_divider(
+                        self.workspace.clone(),
                         i,
                         visible_projects.clone(),
                         container_bounds.clone(),

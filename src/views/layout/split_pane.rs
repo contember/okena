@@ -31,6 +31,10 @@ pub enum DragState {
         divider_index: usize,
         project_ids: Vec<String>,
         container_bounds: Bounds<Pixels>,
+        /// Mouse position at drag start (for delta-based resize)
+        initial_mouse_pos: Point<Pixels>,
+        /// Width snapshots at drag start (project_id -> width %)
+        initial_widths: HashMap<String, f32>,
     },
     /// Resizing sidebar width
     Sidebar,
@@ -100,39 +104,33 @@ pub fn compute_resize(
                 ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
             });
         }
-        DragState::ProjectColumn { divider_index, project_ids, container_bounds } => {
+        DragState::ProjectColumn { divider_index, project_ids, container_bounds, initial_mouse_pos, initial_widths } => {
             let bounds = *container_bounds;
             let container_width = f32::from(bounds.size.width);
             if container_width <= 0.0 {
                 return;
             }
 
-            let relative_x = f32::from(mouse_pos.x) - f32::from(bounds.origin.x);
-            let divider_pos_percent = (relative_x / container_width * 100.0).clamp(10.0, 90.0);
+            let divider_index = *divider_index;
+            let left_id = &project_ids[divider_index];
+            let right_id = &project_ids[divider_index + 1];
 
             let num_projects = project_ids.len();
-            let divider_index = *divider_index;
+            let default_width = 100.0 / num_projects as f32;
+            let left_initial = initial_widths.get(left_id).copied().unwrap_or(default_width);
+            let right_initial = initial_widths.get(right_id).copied().unwrap_or(default_width);
+            let combined = left_initial + right_initial;
 
-            let mut new_widths: HashMap<String, f32> = HashMap::new();
+            // Delta-based: only adjust the two adjacent projects
+            let delta_px = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
+            let delta_percent = delta_px / container_width * 100.0;
 
-            if num_projects == 2 {
-                new_widths.insert(project_ids[0].clone(), divider_pos_percent);
-                new_widths.insert(project_ids[1].clone(), 100.0 - divider_pos_percent);
-            } else {
-                let before_count = divider_index + 1;
-                let after_count = num_projects - before_count;
+            let left_new = (left_initial + delta_percent).clamp(5.0, combined - 5.0);
+            let right_new = combined - left_new;
 
-                let before_width = divider_pos_percent / before_count as f32;
-                let after_width = (100.0 - divider_pos_percent) / after_count as f32;
-
-                for (i, project_id) in project_ids.iter().enumerate() {
-                    if i <= divider_index {
-                        new_widths.insert(project_id.clone(), before_width);
-                    } else {
-                        new_widths.insert(project_id.clone(), after_width);
-                    }
-                }
-            }
+            let mut new_widths = initial_widths.clone();
+            new_widths.insert(left_id.clone(), left_new);
+            new_widths.insert(right_id.clone(), right_new);
 
             workspace.update(cx, |ws, cx| {
                 ws.update_project_widths(new_widths, cx);
@@ -197,6 +195,7 @@ pub fn render_split_divider(
 
 /// Render a project column divider
 pub fn render_project_divider(
+    workspace: Entity<Workspace>,
     divider_index: usize,
     project_ids: Vec<String>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
@@ -210,12 +209,22 @@ pub fn render_project_divider(
         false,
         t.border,
         t.border_active,
-        move |_, _| {
+        move |mouse_pos, cx| {
             let bounds = *container_bounds.borrow();
+            let num_projects = project_ids.len();
+
+            // Snapshot current widths at drag start
+            let ws = workspace.read(cx);
+            let initial_widths: HashMap<String, f32> = project_ids.iter()
+                .map(|id| (id.clone(), ws.get_project_width(id, num_projects)))
+                .collect();
+
             *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
                 divider_index,
                 project_ids: project_ids.clone(),
                 container_bounds: bounds,
+                initial_mouse_pos: mouse_pos,
+                initial_widths,
             });
         },
     )
