@@ -598,6 +598,7 @@ mod tests {
 
     #[test]
     fn no_in_memory_code_and_no_file_returns_invalid() {
+        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         // No in-memory code, no file
         let _ = std::fs::remove_file(pair_code_path());
