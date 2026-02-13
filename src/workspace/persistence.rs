@@ -99,13 +99,26 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
     }
 }
 
-/// Load workspace from disk
+/// Load workspace from disk.
+/// If the file is corrupted, backs it up as `workspace.json.bak` and returns an error.
 pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     if path.exists() {
         let content = std::fs::read_to_string(&path)?;
-        let mut data: WorkspaceData = serde_json::from_str(&content)?;
+        let mut data: WorkspaceData = match serde_json::from_str(&content) {
+            Ok(data) => data,
+            Err(e) => {
+                // Back up the corrupted file so the user can recover manually
+                let backup_path = path.with_extension("json.bak");
+                if let Err(backup_err) = std::fs::copy(&path, &backup_path) {
+                    log::error!("Failed to back up corrupted workspace to {:?}: {}", backup_path, backup_err);
+                } else {
+                    log::error!("Workspace file is corrupted, backed up to {:?}", backup_path);
+                }
+                return Err(e.into());
+            }
+        };
 
         data = migrate_workspace(data);
 
@@ -119,7 +132,8 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     }
 }
 
-/// Save workspace to disk
+/// Save workspace to disk using atomic write (write to temp file + rename)
+/// to prevent data loss if the app crashes mid-write.
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     let path = get_workspace_path();
 
@@ -128,7 +142,12 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     }
 
     let content = serde_json::to_string_pretty(data)?;
-    std::fs::write(&path, content)?;
+
+    // Atomic write: write to a temp file first, then rename over the target.
+    // This ensures the file is either fully old or fully new, never partial.
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)?;
+    std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }

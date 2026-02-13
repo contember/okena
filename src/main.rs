@@ -37,7 +37,7 @@ use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThem
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme};
-use crate::views::panels::toast::ToastManager;
+use crate::views::panels::toast::{Toast, ToastManager};
 use crate::workspace::persistence;
 use crate::workspace::state::GlobalWorkspace;
 
@@ -261,7 +261,7 @@ fn run_headless(listen_addr: IpAddr) {
 
         // Load or create workspace
         let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::warn!("Failed to load workspace: {}, using default", e);
+            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
             persistence::default_workspace()
         });
 
@@ -370,7 +370,13 @@ fn main() {
 
         // Load or create workspace
         let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
-            log::warn!("Failed to load workspace: {}, using default", e);
+            log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
+            let backup_path = persistence::get_workspace_path().with_extension("json.bak");
+            ToastManager::post(
+                Toast::warning(format!("Workspace file was corrupted. A backup was saved to {}. Starting with default workspace.", backup_path.display()))
+                    .with_ttl(std::time::Duration::from_secs(15)),
+                cx,
+            );
             persistence::default_workspace()
         });
 

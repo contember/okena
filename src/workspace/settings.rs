@@ -465,12 +465,16 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let content = serde_json::to_string_pretty(settings)?;
-    std::fs::write(&path, content)?;
+
+    // Atomic write: write to temp file, set permissions, then rename
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &content)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
