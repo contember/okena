@@ -14,8 +14,10 @@ use syntect::util::LinesWithEndings;
 /// Global cached syntax set with extended syntaxes (including TypeScript/TSX).
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 
-/// Global cached syntax highlighting theme.
-static SYNTAX_THEME: OnceLock<Theme> = OnceLock::new();
+/// Global cached dark syntax highlighting theme.
+static SYNTAX_THEME_DARK: OnceLock<Theme> = OnceLock::new();
+/// Global cached light syntax highlighting theme.
+static SYNTAX_THEME_LIGHT: OnceLock<Theme> = OnceLock::new();
 
 /// Load a SyntaxSet with extended syntaxes including TypeScript/TSX.
 /// Uses the two-face crate which provides many additional syntaxes.
@@ -26,14 +28,23 @@ pub fn load_syntax_set() -> SyntaxSet {
 }
 
 /// Load the syntax highlighting theme (cached).
-/// Uses Dracula theme from two-face for vibrant, modern syntax colors.
-pub fn load_syntax_theme() -> &'static Theme {
-    SYNTAX_THEME.get_or_init(|| {
-        let theme_set = two_face::theme::extra();
-        theme_set
-            .get(two_face::theme::EmbeddedThemeName::Dracula)
-            .clone()
-    })
+/// Returns Dracula for dark themes, GitHub for light themes.
+pub fn load_syntax_theme(is_dark: bool) -> &'static Theme {
+    if is_dark {
+        SYNTAX_THEME_DARK.get_or_init(|| {
+            let theme_set = two_face::theme::extra();
+            theme_set
+                .get(two_face::theme::EmbeddedThemeName::Dracula)
+                .clone()
+        })
+    } else {
+        SYNTAX_THEME_LIGHT.get_or_init(|| {
+            let theme_set = two_face::theme::extra();
+            theme_set
+                .get(two_face::theme::EmbeddedThemeName::Github)
+                .clone()
+        })
+    }
 }
 
 /// A pre-processed span with color and text ready for display.
@@ -52,12 +63,21 @@ pub struct HighlightedLine {
 }
 
 /// Default text color for fallback.
-pub fn default_text_color() -> Rgba {
-    Rgba {
-        r: 0.8,
-        g: 0.8,
-        b: 0.8,
-        a: 1.0,
+pub fn default_text_color(is_dark: bool) -> Rgba {
+    if is_dark {
+        Rgba {
+            r: 0.8,
+            g: 0.8,
+            b: 0.8,
+            a: 1.0,
+        }
+    } else {
+        Rgba {
+            r: 0.2,
+            g: 0.2,
+            b: 0.2,
+            a: 1.0,
+        }
     }
 }
 
@@ -150,8 +170,9 @@ pub fn highlight_line(
     content: &str,
     highlighter: &mut HighlightLines,
     syntax_set: &SyntaxSet,
+    is_dark: bool,
 ) -> Vec<HighlightedSpan> {
-    let default_color = default_text_color();
+    let default_color = default_text_color(is_dark);
 
     match highlighter.highlight_line(content, syntax_set) {
         Ok(spans) => {
@@ -191,16 +212,18 @@ pub fn highlight_line(
 /// * `path` - Path to the file (used for syntax detection)
 /// * `syntax_set` - Syntect syntax set
 /// * `max_lines` - Maximum number of lines to process (0 = unlimited)
+/// * `is_dark` - Whether to use dark or light syntax theme
 pub fn highlight_content(
     content: &str,
     path: &Path,
     syntax_set: &SyntaxSet,
     max_lines: usize,
+    is_dark: bool,
 ) -> Vec<HighlightedLine> {
     let syntax = get_syntax_for_path(path, syntax_set);
-    let theme = load_syntax_theme();
+    let theme = load_syntax_theme(is_dark);
     let mut highlighter = HighlightLines::new(syntax, theme);
-    let default_color = default_text_color();
+    let default_color = default_text_color(is_dark);
 
     let mut lines = Vec::new();
     let mut line_count = 0;

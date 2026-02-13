@@ -8,6 +8,7 @@ mod render;
 mod selection;
 
 use crate::settings::settings_entity;
+use crate::theme::{theme, theme_entity};
 use crate::ui::SelectionState;
 use crate::views::components::{build_file_tree, load_syntax_set, FileTreeNode, HighlightedLine, ScrollbarDrag};
 use crate::views::overlays::file_search::{FileSearchDialog, FileEntry};
@@ -81,6 +82,8 @@ pub struct FileViewer {
     tree_scroll_handle: ScrollHandle,
     /// Whether the sidebar is visible
     sidebar_visible: bool,
+    /// Whether the current theme is dark (for syntax highlighting)
+    is_dark: bool,
 }
 
 impl FileViewer {
@@ -89,6 +92,18 @@ impl FileViewer {
         let focus_handle = cx.focus_handle();
         let is_markdown = Self::is_markdown_file(&file_path);
         let file_font_size = settings_entity(cx).read(cx).settings.file_font_size;
+        let is_dark = theme(cx).is_dark();
+
+        // Re-highlight when theme changes
+        let theme_entity = theme_entity(cx);
+        cx.observe(&theme_entity, |this: &mut Self, _, cx| {
+            let new_is_dark = theme(cx).is_dark();
+            if new_is_dark != this.is_dark {
+                this.is_dark = new_is_dark;
+                this.do_highlight_content(&this.file_path.clone());
+                cx.notify();
+            }
+        }).detach();
 
         // Scan project files and build tree
         let files = FileSearchDialog::scan_files(&project_path);
@@ -124,6 +139,7 @@ impl FileViewer {
             selected_file_index,
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: false,
+            is_dark,
         };
 
         // Load and highlight the file

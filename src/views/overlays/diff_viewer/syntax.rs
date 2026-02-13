@@ -19,6 +19,7 @@ fn highlight_full_file(
     syntax: &syntect::parsing::SyntaxReference,
     theme: &syntect::highlighting::Theme,
     syntax_set: &SyntaxSet,
+    is_dark: bool,
 ) -> HashMap<usize, Vec<HighlightedSpan>> {
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut result = HashMap::new();
@@ -26,7 +27,7 @@ fn highlight_full_file(
     // Use LinesWithEndings to preserve newlines - syntect needs them for proper state tracking
     for (idx, line) in LinesWithEndings::from(content).enumerate() {
         let line_num = idx + 1; // 1-based line numbers
-        let spans = highlight_line(line, &mut highlighter, syntax_set);
+        let spans = highlight_line(line, &mut highlighter, syntax_set, is_dark);
         result.insert(line_num, spans);
     }
 
@@ -34,9 +35,9 @@ fn highlight_full_file(
 }
 
 /// Create a fallback span for content without highlighting.
-fn fallback_spans(content: &str) -> Vec<HighlightedSpan> {
+fn fallback_spans(content: &str, is_dark: bool) -> Vec<HighlightedSpan> {
     vec![HighlightedSpan {
-        color: default_text_color(),
+        color: default_text_color(is_dark),
         text: content.replace('\t', "    "),
     }]
 }
@@ -52,25 +53,26 @@ pub fn process_file(
     syntax_set: &SyntaxSet,
     repo_path: &Path,
     diff_mode: DiffMode,
+    is_dark: bool,
 ) -> DiffDisplayFile {
     let mut lines = Vec::new();
     let path = file.display_name();
 
     // Get syntax highlighter for this file
     let syntax = get_syntax_for_path(Path::new(path), syntax_set);
-    let theme = load_syntax_theme();
+    let theme = load_syntax_theme(is_dark);
 
     // Fetch and pre-highlight the full file content for both old and new versions.
     // This ensures correct syntax state for all hunks, even those starting mid-file.
     let (old_content, new_content) = get_file_contents_for_diff(repo_path, path, diff_mode);
 
     let old_highlighted = match old_content.as_ref() {
-        Some(content) => highlight_full_file(content, syntax, theme, syntax_set),
+        Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
         None => HashMap::new(),
     };
 
     let new_highlighted = match new_content.as_ref() {
-        Some(content) => highlight_full_file(content, syntax, theme, syntax_set),
+        Some(content) => highlight_full_file(content, syntax, theme, syntax_set, is_dark),
         None => HashMap::new(),
     };
 
@@ -106,13 +108,13 @@ pub fn process_file(
                         // Removed lines come from the old version
                         line.old_line_num
                             .and_then(|num| old_highlighted.get(&num).cloned())
-                            .unwrap_or_else(|| fallback_spans(&line.content))
+                            .unwrap_or_else(|| fallback_spans(&line.content, is_dark))
                     }
                     DiffLineType::Added => {
                         // Added lines come from the new version
                         line.new_line_num
                             .and_then(|num| new_highlighted.get(&num).cloned())
-                            .unwrap_or_else(|| fallback_spans(&line.content))
+                            .unwrap_or_else(|| fallback_spans(&line.content, is_dark))
                     }
                     DiffLineType::Context => {
                         // Context lines exist in both - prefer new version
@@ -122,7 +124,7 @@ pub fn process_file(
                                 line.old_line_num
                                     .and_then(|num| old_highlighted.get(&num).cloned())
                             })
-                            .unwrap_or_else(|| fallback_spans(&line.content))
+                            .unwrap_or_else(|| fallback_spans(&line.content, is_dark))
                     }
                     DiffLineType::Header => unreachable!(), // Handled above
                 };

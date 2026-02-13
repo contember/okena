@@ -375,6 +375,14 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
 };
 
 impl ThemeColors {
+    /// Determine if this is a dark theme based on background luminance.
+    pub fn is_dark(&self) -> bool {
+        let (r, g, b) = Self::hex_to_rgb(self.bg_primary);
+        // Relative luminance approximation
+        let luminance = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        luminance < 128.0
+    }
+
     /// Get RGB tuple from a hex color
     pub fn hex_to_rgb(hex: u32) -> (u8, u8, u8) {
         (

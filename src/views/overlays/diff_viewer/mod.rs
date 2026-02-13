@@ -12,7 +12,7 @@ mod types;
 use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileDiff};
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
-use crate::theme::theme;
+use crate::theme::{theme, theme_entity};
 use crate::ui::{copy_to_clipboard, Selection2DNonEmpty, SelectionState};
 use crate::views::components::{build_file_tree, extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
 use gpui::prelude::*;
@@ -72,6 +72,8 @@ pub struct DiffViewer {
     selection_side: Option<SideBySideSide>,
     /// Measured monospace character width (from font metrics).
     measured_char_width: f32,
+    /// Whether the current theme is dark (for syntax highlighting).
+    is_dark: bool,
 }
 
 impl DiffViewer {
@@ -82,6 +84,19 @@ impl DiffViewer {
         let file_font_size = settings.settings.file_font_size;
         let view_mode = settings.settings.diff_view_mode;
         let ignore_whitespace = settings.settings.diff_ignore_whitespace;
+        let is_dark = theme(cx).is_dark();
+
+        // Re-highlight when theme changes
+        let te = theme_entity(cx);
+        cx.observe(&te, |this: &mut Self, _, cx| {
+            let new_is_dark = theme(cx).is_dark();
+            if new_is_dark != this.is_dark {
+                this.is_dark = new_is_dark;
+                this.process_current_file();
+                this.update_side_by_side_cache();
+                cx.notify();
+            }
+        }).detach();
 
         let mut viewer = Self {
             focus_handle,
@@ -109,6 +124,7 @@ impl DiffViewer {
             h_scrollbar_drag: None,
             selection_side: None,
             measured_char_width: file_font_size * 0.6,
+            is_dark,
         };
 
         if !is_git_repo(std::path::Path::new(&project_path)) {
@@ -184,6 +200,7 @@ impl DiffViewer {
                 &self.syntax_set,
                 repo_path,
                 self.diff_mode,
+                self.is_dark,
             );
 
             self.line_num_width = max_line_num.to_string().len().max(3);

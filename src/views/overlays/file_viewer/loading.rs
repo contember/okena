@@ -71,6 +71,7 @@ impl FileViewer {
             path,
             &self.syntax_set,
             MAX_LINES,
+            self.is_dark,
         );
         self.line_count = self.highlighted_lines.len();
         self.line_num_width = self.line_count.to_string().len().max(3);
