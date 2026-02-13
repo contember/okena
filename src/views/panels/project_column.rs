@@ -420,9 +420,21 @@ impl ProjectColumn {
                         .border_l_1()
                         .border_color(rgb(t.border))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
                         .text_size(px(10.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child(terminal_name)
+                        .child(
+                            svg()
+                                .path("icons/terminal-minimized.svg")
+                                .size(px(10.0))
+                                .text_color(rgb(t.text_muted))
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(t.text_primary))
+                                .child(terminal_name)
+                        )
                         .on_click(move |_, _window, cx| {
                             workspace.update(cx, |ws, cx| {
                                 ws.restore_terminal(&project_id, &layout_path, cx);
