@@ -136,10 +136,18 @@ pub struct CustomThemeColors {
     pub folder_orange: String,
     #[serde(default = "default_folder_yellow")]
     pub folder_yellow: String,
+    #[serde(default = "default_folder_lime")]
+    pub folder_lime: String,
     #[serde(default = "default_folder_green")]
     pub folder_green: String,
+    #[serde(default = "default_folder_teal")]
+    pub folder_teal: String,
+    #[serde(default = "default_folder_cyan")]
+    pub folder_cyan: String,
     #[serde(default = "default_folder_blue")]
     pub folder_blue: String,
+    #[serde(default = "default_folder_indigo")]
+    pub folder_indigo: String,
     #[serde(default = "default_folder_purple")]
     pub folder_purple: String,
     #[serde(default = "default_folder_pink")]
@@ -217,8 +225,12 @@ fn default_folder_default() -> String { "#8a9199".to_string() }
 fn default_folder_red() -> String { "#e06c75".to_string() }
 fn default_folder_orange() -> String { "#d19a66".to_string() }
 fn default_folder_yellow() -> String { "#e5c07b".to_string() }
+fn default_folder_lime() -> String { "#a3d955".to_string() }
 fn default_folder_green() -> String { "#98c379".to_string() }
+fn default_folder_teal() -> String { "#2fbda0".to_string() }
+fn default_folder_cyan() -> String { "#56d7e5".to_string() }
 fn default_folder_blue() -> String { "#61afef".to_string() }
+fn default_folder_indigo() -> String { "#818cf8".to_string() }
 fn default_folder_purple() -> String { "#c678dd".to_string() }
 fn default_folder_pink() -> String { "#e06c9f".to_string() }
 fn default_metric_normal() -> String { "#0dbc79".to_string() }
@@ -289,8 +301,12 @@ impl CustomThemeColors {
             folder_red: Self::parse_hex(&self.folder_red),
             folder_orange: Self::parse_hex(&self.folder_orange),
             folder_yellow: Self::parse_hex(&self.folder_yellow),
+            folder_lime: Self::parse_hex(&self.folder_lime),
             folder_green: Self::parse_hex(&self.folder_green),
+            folder_teal: Self::parse_hex(&self.folder_teal),
+            folder_cyan: Self::parse_hex(&self.folder_cyan),
             folder_blue: Self::parse_hex(&self.folder_blue),
+            folder_indigo: Self::parse_hex(&self.folder_indigo),
             folder_purple: Self::parse_hex(&self.folder_purple),
             folder_pink: Self::parse_hex(&self.folder_pink),
             metric_normal: Self::parse_hex(&self.metric_normal),
@@ -380,8 +396,12 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 folder_red: "#f7768e".to_string(),
                 folder_orange: "#ff9e64".to_string(),
                 folder_yellow: "#e0af68".to_string(),
+                folder_lime: "#b8e655".to_string(),
                 folder_green: "#9ece6a".to_string(),
+                folder_teal: "#2ac3a2".to_string(),
+                folder_cyan: "#67e8f9".to_string(),
                 folder_blue: "#7dcfff".to_string(),
+                folder_indigo: "#7f7ff5".to_string(),
                 folder_purple: "#bb9af7".to_string(),
                 folder_pink: "#f472b6".to_string(),
                 metric_normal: "#999999".to_string(),
