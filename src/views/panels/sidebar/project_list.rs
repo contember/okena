@@ -12,7 +12,7 @@ use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDra
 use std::collections::HashMap;
 
 impl Sidebar {
-    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
@@ -34,6 +34,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source
             .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
@@ -166,7 +167,7 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, is_cursor: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
@@ -188,6 +189,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();

@@ -859,6 +859,11 @@ impl Render for Sidebar {
         self.validate_cursor(cursor_items.len());
         let cursor_index = self.cursor_index;
 
+        // Determine which project has the focused terminal
+        let focused_project_id = self.workspace.read(cx).focus_manager
+            .focused_terminal_state()
+            .map(|ft| ft.project_id);
+
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
         let mut flat_idx: usize = 0;
@@ -867,8 +872,9 @@ impl Render for Sidebar {
             match item {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
+                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
                     flat_elements.push(
-                        self.render_project_item(&project, index, is_cursor, window, cx).into_any_element()
+                        self.render_project_item(&project, index, is_cursor, is_focused_project, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
@@ -894,8 +900,9 @@ impl Render for Sidebar {
                     // Worktree children
                     for child in &worktree_children {
                         let is_cursor = cursor_index == Some(flat_idx);
+                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                         flat_elements.push(
-                            self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                            self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
@@ -929,8 +936,9 @@ impl Render for Sidebar {
                     if !folder.collapsed {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
+                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
                             flat_elements.push(
-                                self.render_folder_project_item(fp, &folder.id, is_cursor, window, cx).into_any_element()
+                                self.render_folder_project_item(fp, &folder.id, is_cursor, is_focused_project, window, cx).into_any_element()
                             );
                             flat_idx += 1;
 
@@ -957,8 +965,9 @@ impl Render for Sidebar {
                             if let Some(wt_children) = worktree_children.get(&fp.id) {
                                 for child in wt_children {
                                     let is_cursor = cursor_index == Some(flat_idx);
+                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
-                                        self.render_worktree_item(child, is_cursor, window, cx).into_any_element()
+                                        self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 

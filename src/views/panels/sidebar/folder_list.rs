@@ -215,6 +215,7 @@ impl Sidebar {
         project: &SidebarProjectInfo,
         folder_id: &str,
         is_cursor: bool,
+        is_focused_project: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -239,6 +240,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source
             .on_drag(super::ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
