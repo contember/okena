@@ -109,6 +109,15 @@ fn about(_: &About, _cx: &mut App) {
             nsstring(version_cstr.as_bytes()),
             nsstring(b"ApplicationVersion\0"),
         );
+        // Set build number to empty to hide the "(x.y.z)" parenthetical
+        msg_id2(dict, set_obj, nsstring(b"\0"), nsstring(b"Version\0"));
+        // Override copyright from Info.plist to ensure it's always current
+        msg_id2(
+            dict,
+            set_obj,
+            nsstring(b"Copyright \xC2\xA9 2026 Contember. All rights reserved.\0"),
+            nsstring(b"Copyright\0"),
+        );
 
         // Load embedded app icon as NSImage
         let icon_png = include_bytes!("../assets/logo.png");
