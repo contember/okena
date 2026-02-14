@@ -71,6 +71,29 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
             }
         }
+        ActionRequest::CloseTerminals {
+            project_id,
+            terminal_ids,
+        } => {
+            let mut last_err = None;
+            for terminal_id in &terminal_ids {
+                let path = find_terminal_path(ws, &project_id, terminal_id);
+                match path {
+                    Some(path) => {
+                        backend.kill(terminal_id);
+                        terminals.lock().remove(terminal_id);
+                        ws.close_terminal_and_focus_sibling(&project_id, &path, cx);
+                    }
+                    None => {
+                        last_err = Some(format!("terminal not found: {}", terminal_id));
+                    }
+                }
+            }
+            match last_err {
+                Some(e) => ActionResult::Err(e),
+                None => ActionResult::Ok(None),
+            }
+        }
         ActionRequest::FocusTerminal {
             project_id,
             terminal_id,

@@ -81,6 +81,10 @@ pub enum ActionRequest {
         project_id: String,
         terminal_id: String,
     },
+    CloseTerminals {
+        project_id: String,
+        terminal_ids: Vec<String>,
+    },
     FocusTerminal {
         project_id: String,
         terminal_id: String,
@@ -217,6 +221,10 @@ mod tests {
             ActionRequest::CloseTerminal {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
+            },
+            ActionRequest::CloseTerminals {
+                project_id: "p1".into(),
+                terminal_ids: vec!["t1".into(), "t2".into()],
             },
             ActionRequest::FocusTerminal {
                 project_id: "p1".into(),

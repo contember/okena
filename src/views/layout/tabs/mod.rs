@@ -8,20 +8,18 @@
 mod shell_selector;
 
 use crate::keybindings::Cancel;
+use crate::action_dispatch::ActionDispatcher;
 use crate::settings::settings;
-use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
-use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Context for tab action button closures.
 ///
@@ -33,20 +31,13 @@ pub(super) struct TabActionContext {
     pub project_id: String,
     pub layout_path: Vec<usize>,
     pub active_tab: usize,
-    pub backend: Arc<dyn TerminalBackend>,
-    pub terminals: TerminalsRegistry,
     /// When true, this is a standalone terminal (not in a Tabs container).
     /// Actions use layout_path directly instead of layout_path + [active_tab].
     pub standalone: bool,
+    /// Action dispatcher for routing terminal actions (local or remote).
+    pub action_dispatcher: Option<ActionDispatcher>,
 }
 
-/// Kill PTY processes and remove from registry for the given terminal IDs.
-pub(super) fn kill_terminals(ids: &[String], backend: &dyn TerminalBackend, terminals: &TerminalsRegistry) {
-    for id in ids {
-        backend.kill(id);
-        terminals.lock().remove(id);
-    }
-}
 
 impl LayoutContainer {
     /// Start drop animation for a tab at the given index
@@ -104,6 +95,7 @@ impl LayoutContainer {
         let supports_buffer_capture = self.backend.supports_buffer_capture();
         let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
+        let terminal_id_for_close = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id;
 
         // Clone context for each action - much cleaner than individual clones
@@ -135,9 +127,13 @@ impl LayoutContainer {
                             p.push(ctx_split_v.active_tab);
                             p
                         };
-                        ctx_split_v.workspace.update(cx, |ws, cx| {
-                            ws.split_terminal(&ctx_split_v.project_id, &child_path, SplitDirection::Vertical, cx);
-                        });
+                        if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
+                            dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
+                                project_id: ctx_split_v.project_id.clone(),
+                                path: child_path,
+                                direction: SplitDirection::Vertical,
+                            }, cx);
+                        }
                     }),
             )
             // Split Horizontal
@@ -151,23 +147,26 @@ impl LayoutContainer {
                             p.push(ctx_split_h.active_tab);
                             p
                         };
-                        ctx_split_h.workspace.update(cx, |ws, cx| {
-                            ws.split_terminal(&ctx_split_h.project_id, &child_path, SplitDirection::Horizontal, cx);
-                        });
+                        if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
+                            dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
+                                project_id: ctx_split_h.project_id.clone(),
+                                path: child_path,
+                                direction: SplitDirection::Horizontal,
+                            }, cx);
+                        }
                     }),
             )
             // Add Tab
             .child(
                 header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
-                        if ctx_add_tab.standalone {
-                            ctx_add_tab.workspace.update(cx, |ws, cx| {
-                                ws.add_tab(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
-                            });
-                        } else {
-                            ctx_add_tab.workspace.update(cx, |ws, cx| {
-                                ws.add_tab_to_group(&ctx_add_tab.project_id, &ctx_add_tab.layout_path, cx);
-                            });
+                        if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
+                            dispatcher.add_tab(
+                                &ctx_add_tab.project_id,
+                                &ctx_add_tab.layout_path,
+                                !ctx_add_tab.standalone,
+                                cx,
+                            );
                         }
                     }),
             )
@@ -231,23 +230,19 @@ impl LayoutContainer {
                 )
             })
             // Close Tab
-            .child(
+            .child({
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }))
                     .on_click(move |_, _window, cx| {
-                        if ctx_close.standalone {
-                            // Standalone: close the terminal directly
-                            let removed = ctx_close.workspace.update(cx, |ws, cx| {
-                                ws.close_terminal_and_focus_sibling(&ctx_close.project_id, &ctx_close.layout_path, cx)
-                            });
-                            kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
-                        } else {
-                            let removed = ctx_close.workspace.update(cx, |ws, cx| {
-                                ws.close_tab(&ctx_close.project_id, &ctx_close.layout_path, ctx_close.active_tab, cx)
-                            });
-                            kill_terminals(&removed, &*ctx_close.backend, &ctx_close.terminals);
+                        if let Some(ref tid) = terminal_id_for_close {
+                            if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
+                                    project_id: ctx_close.project_id.clone(),
+                                    terminal_id: tid.clone(),
+                                }, cx);
+                            }
                         }
-                    }),
-            )
+                    })
+            })
     }
 
     pub(super) fn render_tabs(
@@ -276,6 +271,7 @@ impl LayoutContainer {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.action_dispatcher.clone(),
                         )
                     })
                 })
@@ -458,14 +454,18 @@ impl LayoutContainer {
                 })
                 // Middle-click to close tab
                 .on_mouse_down(MouseButton::Middle, {
-                    let workspace = workspace.clone();
                     let project_id = project_id.clone();
-                    let layout_path = layout_path.clone();
-                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                        let removed = workspace.update(cx, |ws, cx| {
-                            ws.close_tab(&project_id, &layout_path, i, cx)
-                        });
-                        kill_terminals(&removed, &*this.backend, &this.terminals);
+                    let terminal_id = terminal_id.clone();
+                    let action_dispatcher = self.action_dispatcher.clone();
+                    cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
+                        if let Some(ref tid) = terminal_id {
+                            if let Some(ref dispatcher) = action_dispatcher {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
+                                    project_id: project_id.clone(),
+                                    terminal_id: tid.clone(),
+                                }, cx);
+                            }
+                        }
                         cx.stop_propagation();
                     })
                 })
@@ -639,9 +639,8 @@ impl LayoutContainer {
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab,
-            backend: self.backend.clone(),
-            terminals: self.terminals.clone(),
             standalone: false,
+            action_dispatcher: self.action_dispatcher.clone(),
         };
 
         // Get terminal_id for actions that need it
@@ -710,6 +709,7 @@ impl LayoutContainer {
                                     self.backend.clone(),
                                     self.terminals.clone(),
                                     self.active_drag.clone(),
+                                    self.action_dispatcher.clone(),
                                 )
                             })
                         })
@@ -893,9 +893,8 @@ impl LayoutContainer {
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab: 0,
-            backend: self.backend.clone(),
-            terminals: self.terminals.clone(),
             standalone: true,
+            action_dispatcher: self.action_dispatcher.clone(),
         };
 
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id.clone(), cx);

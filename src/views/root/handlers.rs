@@ -1,11 +1,38 @@
-use crate::remote::types::ActionRequest;
+use crate::action_dispatch::ActionDispatcher;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
-use crate::workspace::actions::execute::execute_action;
 use crate::workspace::requests::OverlayRequest;
 use crate::workspace::requests::SidebarRequest;
+use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
+use okena_core::api::ActionRequest;
+
 use super::RootView;
+
+impl RootView {
+    /// Build an ActionDispatcher for the given project.
+    /// Returns Remote variant if the project belongs to the focused remote connection,
+    /// otherwise returns Local variant.
+    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> ActionDispatcher {
+        if let Some(ref rm) = self.remote_manager {
+            if let Some((conn_id, proj_id)) = rm.read(cx).focused_remote()
+                .map(|(c, p)| (c.to_string(), p.to_string()))
+            {
+                if proj_id == project_id {
+                    return ActionDispatcher::Remote {
+                        connection_id: conn_id,
+                        manager: rm.clone(),
+                    };
+                }
+            }
+        }
+        ActionDispatcher::Local {
+            workspace: self.workspace.clone(),
+            backend: self.backend.clone(),
+            terminals: self.terminals.clone(),
+        }
+    }
+}
 
 impl RootView {
     /// Handle events from the OverlayManager that require RootView access.
@@ -26,9 +53,10 @@ impl RootView {
                 self.switch_terminal_shell(project_id, terminal_id, shell_type.clone(), cx);
             }
             OverlayManagerEvent::AddTerminal { project_id } => {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.add_terminal(project_id, cx);
-                });
+                let dispatcher = self.dispatcher_for_project(project_id, cx);
+                dispatcher.dispatch(ActionRequest::CreateTerminal {
+                    project_id: project_id.clone(),
+                }, cx);
             }
             OverlayManagerEvent::CreateWorktree { project_id, project_path } => {
                 self.overlay_manager.update(cx, |om, cx| {
@@ -63,7 +91,6 @@ impl RootView {
             }
             OverlayManagerEvent::FocusProject(project_id) => {
                 self.workspace.update(cx, |ws, cx| {
-                    // Focus the project (like clicking on it in sidebar)
                     ws.set_focused_project(Some(project_id.clone()), cx);
                 });
             }
@@ -118,53 +145,53 @@ impl RootView {
                 cx.notify();
             }
             OverlayManagerEvent::TerminalSplit { project_id, layout_path, direction } => {
-                let action = ActionRequest::SplitTerminal {
+                let dispatcher = self.dispatcher_for_project(project_id, cx);
+                dispatcher.dispatch(ActionRequest::SplitTerminal {
                     project_id: project_id.clone(),
                     path: layout_path.clone(),
                     direction: *direction,
-                };
-                let backend = self.backend.clone();
-                let terminals = self.terminals.clone();
-                self.workspace.update(cx, |ws, cx| {
-                    execute_action(action, ws, &*backend, &terminals, cx);
-                });
+                }, cx);
             }
             OverlayManagerEvent::TerminalClose { project_id, terminal_id } => {
-                let action = ActionRequest::CloseTerminal {
+                let dispatcher = self.dispatcher_for_project(project_id, cx);
+                dispatcher.dispatch(ActionRequest::CloseTerminal {
                     project_id: project_id.clone(),
                     terminal_id: terminal_id.clone(),
-                };
-                let backend = self.backend.clone();
-                let terminals = self.terminals.clone();
-                self.workspace.update(cx, |ws, cx| {
-                    execute_action(action, ws, &*backend, &terminals, cx);
-                });
+                }, cx);
             }
             OverlayManagerEvent::TabClose { project_id, layout_path, tab_index } => {
-                let removed = self.workspace.update(cx, |ws, cx| {
-                    ws.close_tab(project_id, layout_path, *tab_index, cx)
-                });
-                for id in &removed {
-                    self.backend.kill(id);
-                    self.terminals.lock().remove(id);
+                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+                if let Some(tid) = terminal_ids.get(*tab_index).cloned() {
+                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                    dispatcher.dispatch(ActionRequest::CloseTerminal {
+                        project_id: project_id.clone(),
+                        terminal_id: tid,
+                    }, cx);
                 }
             }
             OverlayManagerEvent::TabCloseOthers { project_id, layout_path, tab_index } => {
-                let removed = self.workspace.update(cx, |ws, cx| {
-                    ws.close_other_tabs(project_id, layout_path, *tab_index, cx)
-                });
-                for id in &removed {
-                    self.backend.kill(id);
-                    self.terminals.lock().remove(id);
+                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+                let to_close: Vec<String> = terminal_ids.into_iter().enumerate()
+                    .filter(|(i, _)| *i != *tab_index)
+                    .map(|(_, id)| id)
+                    .collect();
+                if !to_close.is_empty() {
+                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                    dispatcher.dispatch(ActionRequest::CloseTerminals {
+                        project_id: project_id.clone(),
+                        terminal_ids: to_close,
+                    }, cx);
                 }
             }
             OverlayManagerEvent::TabCloseToRight { project_id, layout_path, tab_index } => {
-                let removed = self.workspace.update(cx, |ws, cx| {
-                    ws.close_tabs_to_right(project_id, layout_path, *tab_index, cx)
-                });
-                for id in &removed {
-                    self.backend.kill(id);
-                    self.terminals.lock().remove(id);
+                let terminal_ids = collect_tab_terminal_ids(&self.workspace, project_id, layout_path, cx);
+                let to_close: Vec<String> = terminal_ids.into_iter().skip(tab_index + 1).collect();
+                if !to_close.is_empty() {
+                    let dispatcher = self.dispatcher_for_project(project_id, cx);
+                    dispatcher.dispatch(ActionRequest::CloseTerminals {
+                        project_id: project_id.clone(),
+                        terminal_ids: to_close,
+                    }, cx);
                 }
             }
             OverlayManagerEvent::RemoteConnected { config } => {
@@ -286,5 +313,40 @@ impl RootView {
                 }
             }
         }
+    }
+}
+
+/// Collect terminal IDs from children of a Tabs node at the given layout path.
+///
+/// Each child subtree is traversed with `collect_terminal_ids()`, so nested
+/// splits/tabs within a tab are handled correctly. Returns one entry per child.
+fn collect_tab_terminal_ids(
+    workspace: &Entity<Workspace>,
+    project_id: &str,
+    layout_path: &[usize],
+    cx: &Context<RootView>,
+) -> Vec<String> {
+    let ws = workspace.read(cx);
+    let Some(project) = ws.project(project_id) else {
+        return Vec::new();
+    };
+    let Some(ref layout) = project.layout else {
+        return Vec::new();
+    };
+    let Some(node) = layout.get_at_path(layout_path) else {
+        return Vec::new();
+    };
+    match node {
+        LayoutNode::Tabs { children, .. } => {
+            children.iter().filter_map(|child| {
+                // For simple Terminal children, get the ID directly.
+                // For nested structures, get the first terminal ID.
+                child.collect_terminal_ids().into_iter().next()
+            }).collect()
+        }
+        LayoutNode::Terminal { terminal_id, .. } => {
+            terminal_id.iter().cloned().collect()
+        }
+        _ => Vec::new(),
     }
 }
