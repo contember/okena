@@ -105,6 +105,24 @@ pub enum ActionRequest {
         path: Vec<usize>,
         sizes: Vec<f32>,
     },
+    ToggleMinimized {
+        project_id: String,
+        terminal_id: String,
+    },
+    SetFullscreen {
+        project_id: String,
+        terminal_id: Option<String>,
+    },
+    RenameTerminal {
+        project_id: String,
+        terminal_id: String,
+        name: String,
+    },
+    AddTab {
+        project_id: String,
+        path: Vec<usize>,
+        in_group: bool,
+    },
 }
 
 /// POST /v1/pair request
@@ -245,6 +263,28 @@ mod tests {
                 project_id: "p1".into(),
                 path: vec![0],
                 sizes: vec![60.0, 40.0],
+            },
+            ActionRequest::ToggleMinimized {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+            },
+            ActionRequest::SetFullscreen {
+                project_id: "p1".into(),
+                terminal_id: Some("t1".into()),
+            },
+            ActionRequest::SetFullscreen {
+                project_id: "p1".into(),
+                terminal_id: None,
+            },
+            ActionRequest::RenameTerminal {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                name: "my-term".into(),
+            },
+            ActionRequest::AddTab {
+                project_id: "p1".into(),
+                path: vec![0, 1],
+                in_group: true,
             },
         ];
         for action in actions {

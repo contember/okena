@@ -7,6 +7,7 @@
 //! - Tab groups (via the `tabs` submodule)
 
 use crate::action_dispatch::ActionDispatcher;
+use okena_core::api::ActionRequest;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::ui::ClickDetector;
@@ -219,10 +220,16 @@ impl LayoutContainer {
     /// Finish renaming a tab.
     pub(super) fn finish_tab_rename(&mut self, cx: &mut Context<Self>) {
         if let Some((terminal_id, new_name)) = finish_rename(&mut self.tab_rename_state, cx) {
-            let project_id = self.project_id.clone();
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
-            });
+            if let Some(ref dispatcher) = self.action_dispatcher {
+                dispatcher.dispatch(
+                    ActionRequest::RenameTerminal {
+                        project_id: self.project_id.clone(),
+                        terminal_id,
+                        name: new_name,
+                    },
+                    cx,
+                );
+            }
         }
         self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();

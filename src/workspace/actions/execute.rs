@@ -160,6 +160,43 @@ pub fn execute_action(
             ws.update_split_sizes(&project_id, &path, sizes, cx);
             ActionResult::Ok(None)
         }
+        ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id,
+        } => {
+            ws.toggle_terminal_minimized_by_id(&project_id, &terminal_id, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+        } => {
+            match terminal_id {
+                Some(tid) => ws.set_fullscreen_terminal(project_id, tid, cx),
+                None => ws.exit_fullscreen(cx),
+            }
+            ActionResult::Ok(None)
+        }
+        ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id,
+            name,
+        } => {
+            ws.rename_terminal(&project_id, &terminal_id, name, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::AddTab {
+            project_id,
+            path,
+            in_group,
+        } => {
+            if in_group {
+                ws.add_tab_to_group(&project_id, &path, cx);
+            } else {
+                ws.add_tab(&project_id, &path, cx);
+            }
+            spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {

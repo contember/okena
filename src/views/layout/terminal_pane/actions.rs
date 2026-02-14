@@ -40,16 +40,26 @@ impl TerminalPane {
     }
 
     pub(super) fn handle_minimize(&mut self, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.toggle_terminal_minimized(&self.project_id, &self.layout_path, cx);
-        });
+        if let Some(ref terminal_id) = self.terminal_id {
+            let action = ActionRequest::ToggleMinimized {
+                project_id: self.project_id.clone(),
+                terminal_id: terminal_id.clone(),
+            };
+            if let Some(ref dispatcher) = self.action_dispatcher {
+                dispatcher.dispatch(action, cx);
+            }
+        }
     }
 
     pub(super) fn handle_fullscreen(&mut self, cx: &mut Context<Self>) {
         if let Some(ref id) = self.terminal_id {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_fullscreen_terminal(self.project_id.clone(), id.clone(), cx);
-            });
+            let action = ActionRequest::SetFullscreen {
+                project_id: self.project_id.clone(),
+                terminal_id: Some(id.clone()),
+            };
+            if let Some(ref dispatcher) = self.action_dispatcher {
+                dispatcher.dispatch(action, cx);
+            }
         }
     }
 

@@ -90,8 +90,10 @@ impl ActionDispatcher {
             }
             Self::Remote { .. } => {
                 self.dispatch(
-                    ActionRequest::CreateTerminal {
+                    ActionRequest::AddTab {
                         project_id: project_id.to_string(),
+                        path: layout_path.to_vec(),
+                        in_group,
                     },
                     cx,
                 );
@@ -120,6 +122,29 @@ fn strip_remote_terminal_prefix(action: ActionRequest, connection_id: &str) -> A
                 .into_iter()
                 .map(|id| strip_prefix(&id, &prefix))
                 .collect(),
+        },
+        ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id,
+        } => ActionRequest::ToggleMinimized {
+            project_id,
+            terminal_id: strip_prefix(&terminal_id, &prefix),
+        },
+        ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id,
+        } => ActionRequest::SetFullscreen {
+            project_id,
+            terminal_id: terminal_id.map(|id| strip_prefix(&id, &prefix)),
+        },
+        ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id,
+            name,
+        } => ActionRequest::RenameTerminal {
+            project_id,
+            terminal_id: strip_prefix(&terminal_id, &prefix),
+            name,
         },
         other => other,
     }
