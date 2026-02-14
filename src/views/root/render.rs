@@ -1,4 +1,5 @@
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
+use crate::action_dispatch::ActionDispatcher;
 use crate::settings::open_settings_file;
 use crate::theme::theme;
 use crate::views::layout::navigation::clear_pane_map;
@@ -148,6 +149,10 @@ impl RootView {
                         let pid = proj_id.to_string();
                         let pname = api_project.name.clone();
                         let ppath = api_project.path.clone();
+                        let action_dispatcher = self.remote_manager.as_ref().map(|rm| ActionDispatcher::Remote {
+                            connection_id: conn_id.to_string(),
+                            manager: rm.clone(),
+                        });
                         let col = cx.new(move |cx| {
                             ProjectColumn::new_remote(
                                 workspace,
@@ -159,6 +164,7 @@ impl RootView {
                                 terminals,
                                 active_drag,
                                 layout,
+                                action_dispatcher,
                                 cx,
                             )
                         });

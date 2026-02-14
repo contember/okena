@@ -3,8 +3,7 @@
 //! Contains handlers for split, close, minimize, fullscreen,
 //! copy, paste, and file drop.
 
-use crate::remote::types::ActionRequest;
-use crate::workspace::actions::execute::execute_action;
+use okena_core::api::ActionRequest;
 use crate::workspace::state::SplitDirection;
 use gpui::*;
 
@@ -17,17 +16,15 @@ impl TerminalPane {
             path: self.layout_path.clone(),
             direction,
         };
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        self.workspace.update(cx, |ws, cx| {
-            execute_action(action, ws, &*backend, &terminals, cx);
-        });
+        if let Some(ref dispatcher) = self.action_dispatcher {
+            dispatcher.dispatch(action, cx);
+        }
     }
 
     pub(super) fn handle_add_tab(&mut self, cx: &mut Context<Self>) {
-        self.workspace.update(cx, |ws, cx| {
-            ws.add_tab(&self.project_id, &self.layout_path, cx);
-        });
+        if let Some(ref dispatcher) = self.action_dispatcher {
+            dispatcher.add_tab(&self.project_id, &self.layout_path, false, cx);
+        }
     }
 
     pub(super) fn handle_close(&mut self, cx: &mut Context<Self>) {
@@ -36,11 +33,9 @@ impl TerminalPane {
                 project_id: self.project_id.clone(),
                 terminal_id,
             };
-            let backend = self.backend.clone();
-            let terminals = self.terminals.clone();
-            self.workspace.update(cx, |ws, cx| {
-                execute_action(action, ws, &*backend, &terminals, cx);
-            });
+            if let Some(ref dispatcher) = self.action_dispatcher {
+                dispatcher.dispatch(action, cx);
+            }
         }
     }
 

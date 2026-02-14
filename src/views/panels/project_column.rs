@@ -1,5 +1,6 @@
 use crate::git::{self, FileDiffSummary};
 use crate::git::GitStatus;
+use crate::action_dispatch::ActionDispatcher;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
@@ -47,6 +48,8 @@ pub struct ProjectColumn {
     external_layout: Option<crate::workspace::state::LayoutNode>,
     /// Whether this is a remote project column
     is_remote: bool,
+    /// Action dispatcher for routing terminal actions (local or remote)
+    action_dispatcher: Option<ActionDispatcher>,
 }
 
 impl ProjectColumn {
@@ -81,6 +84,7 @@ impl ProjectColumn {
             active_drag,
             external_layout: None,
             is_remote: false,
+            action_dispatcher: None,
         }
     }
 
@@ -94,6 +98,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         external_layout: Option<crate::workspace::state::LayoutNode>,
+        action_dispatcher: Option<ActionDispatcher>,
         _cx: &mut Context<Self>,
     ) -> Self {
         // No git status for remote projects
@@ -113,6 +118,7 @@ impl ProjectColumn {
             active_drag,
             external_layout,
             is_remote: true,
+            action_dispatcher,
         }
     }
 
@@ -356,6 +362,7 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let external_layout = self.external_layout.clone();
+            let action_dispatcher = self.action_dispatcher.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 let mut container = LayoutContainer::new(
@@ -367,6 +374,7 @@ impl ProjectColumn {
                     backend,
                     terminals,
                     active_drag,
+                    action_dispatcher,
                 );
                 if let Some(layout) = external_layout {
                     container.set_external_layout(layout);

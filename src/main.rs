@@ -2,6 +2,7 @@
 
 #[macro_use]
 mod macros;
+mod action_dispatch;
 mod app;
 mod assets;
 mod elements;

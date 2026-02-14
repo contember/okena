@@ -6,6 +6,7 @@
 //! - Split panes (horizontal/vertical splits)
 //! - Tab groups (via the `tabs` submodule)
 
+use crate::action_dispatch::ActionDispatcher;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::ui::ClickDetector;
@@ -54,6 +55,8 @@ pub struct LayoutContainer {
     pub(super) empty_area_click_detector: ClickDetector<()>,
     /// Rename state for tab bar (keyed by terminal_id)
     pub(super) tab_rename_state: Option<RenameState<String>>,
+    /// Action dispatcher for routing terminal actions (local or remote)
+    pub(super) action_dispatcher: Option<ActionDispatcher>,
 }
 
 impl LayoutContainer {
@@ -66,6 +69,7 @@ impl LayoutContainer {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        action_dispatcher: Option<ActionDispatcher>,
     ) -> Self {
         Self {
             workspace,
@@ -87,6 +91,7 @@ impl LayoutContainer {
             tab_click_detector: ClickDetector::new(),
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
+            action_dispatcher,
         }
     }
 
@@ -120,6 +125,7 @@ impl LayoutContainer {
             let layout_path = self.layout_path.clone();
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
+            let remote_ctx = self.action_dispatcher.clone();
 
             self.terminal_pane = Some(cx.new(move |cx| {
                 TerminalPane::new(
@@ -133,6 +139,7 @@ impl LayoutContainer {
                     detached,
                     backend,
                     terminals,
+                    remote_ctx,
                     cx,
                 )
             }));
@@ -407,6 +414,7 @@ impl LayoutContainer {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.action_dispatcher.clone(),
                         )
                     })
                 })
@@ -480,6 +488,7 @@ impl LayoutContainer {
                             self.backend.clone(),
                             self.terminals.clone(),
                             self.active_drag.clone(),
+                            self.action_dispatcher.clone(),
                         )
                     })
                 })

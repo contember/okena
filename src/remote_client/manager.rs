@@ -4,7 +4,7 @@ use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::settings::{load_settings, update_remote_connections};
 
-use okena_core::api::StateResponse;
+use okena_core::api::{ActionRequest, StateResponse};
 use okena_core::client::{
     ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
 };
@@ -206,6 +206,72 @@ impl RemoteConnectionManager {
     ) {
         self.focused_remote = focus;
         cx.notify();
+    }
+
+    /// Send an action to a remote server via HTTP POST /v1/actions.
+    ///
+    /// Fire-and-forget: spawns on the tokio runtime, logs errors and shows toast on failure.
+    pub fn send_action(
+        &self,
+        connection_id: &str,
+        action: ActionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let config = match self.connections.get(connection_id) {
+            Some(conn) => conn.config().clone(),
+            None => {
+                log::error!("send_action: connection {} not found", connection_id);
+                return;
+            }
+        };
+        let token = match config.saved_token {
+            Some(ref t) => t.clone(),
+            None => {
+                log::error!("send_action: no auth token for connection {}", connection_id);
+                ToastManager::error("No auth token for remote connection".to_string(), cx);
+                return;
+            }
+        };
+
+        let host = config.host.clone();
+        let port = config.port;
+        let name = config.name.clone();
+        let event_tx = self.event_tx.clone();
+
+        self.runtime.spawn(async move {
+            let url = format!("http://{}:{}/v1/actions", host, port);
+            let client = reqwest::Client::new();
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(&action)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    log::debug!("send_action: success for {}", name);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    log::error!("send_action: failed ({}): {} for {}", status, body, name);
+                    // Send a warning event back to the GPUI thread
+                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                        connection_id: String::new(),
+                        message: format!("Action failed ({}): {}", status, body),
+                    });
+                }
+                Err(e) => {
+                    log::error!("send_action: request error for {}: {}", name, e);
+                    let _ = event_tx.try_send(ConnectionEvent::ServerWarning {
+                        connection_id: String::new(),
+                        message: format!("Action request failed: {}", e),
+                    });
+                }
+            }
+        });
     }
 
     /// Handle an event from a connection's tokio task.

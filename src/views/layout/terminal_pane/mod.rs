@@ -25,6 +25,7 @@ use search_bar::{SearchBar, SearchBarEvent};
 // Re-export TerminalContent (used by tests/internal consumers)
 pub use content::TerminalContent;
 
+use crate::action_dispatch::ActionDispatcher;
 use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
@@ -64,6 +65,9 @@ pub struct TerminalPane {
     detached: bool,
     cursor_visible: bool,
     shell_type: ShellType,
+
+    // Action dispatcher (local or remote)
+    pub(super) action_dispatcher: Option<ActionDispatcher>,
 }
 
 impl TerminalPane {
@@ -78,6 +82,7 @@ impl TerminalPane {
         detached: bool,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
+        action_dispatcher: Option<ActionDispatcher>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -125,6 +130,7 @@ impl TerminalPane {
             detached,
             cursor_visible: true,
             shell_type,
+            action_dispatcher,
         };
 
         // Create terminal: either reconnect to existing PTY or create new one
@@ -295,6 +301,11 @@ impl TerminalPane {
 
     /// Create new terminal.
     fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
+        // Remote terminals are created by the server; skip local PTY creation.
+        if self.backend.is_remote() {
+            return;
+        }
+
         let shell = if self.shell_type == ShellType::Default {
             settings(cx).default_shell.clone()
         } else {
