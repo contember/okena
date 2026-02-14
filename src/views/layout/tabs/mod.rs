@@ -277,13 +277,6 @@ impl LayoutContainer {
                 })
                 .clone();
 
-            // Propagate external layout to child
-            if self.external_layout.is_some() {
-                container.update(cx, |c, _| {
-                    c.external_layout = Some(children[zoomed_idx].clone());
-                });
-            }
-
             return v_flex()
                 .size_full()
                 .child(container);
@@ -714,13 +707,6 @@ impl LayoutContainer {
                             })
                         })
                         .clone();
-
-                    // Propagate external layout to child
-                    if self.external_layout.is_some() {
-                        container.update(cx, |c, _| {
-                            c.external_layout = Some(children[active_tab].clone());
-                        });
-                    }
 
                     container
                 }),

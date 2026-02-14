@@ -523,17 +523,11 @@ impl Sidebar {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
             }
-            SidebarCursorItem::RemoteProject { connection_id, project_id } => {
-                // Clear local focus
+            SidebarCursorItem::RemoteProject { project_id, .. } => {
+                // Remote projects are now materialized in workspace, use unified focus
                 self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(None, cx);
+                    ws.set_focused_project(Some(project_id), cx);
                 });
-                // Set remote focus
-                if let Some(ref rm) = self.remote_manager {
-                    rm.update(cx, |rm, cx| {
-                        rm.set_focused_remote(Some((connection_id, project_id)), cx);
-                    });
-                }
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
                     window.focus(saved, cx);

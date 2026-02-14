@@ -65,6 +65,12 @@ pub struct ProjectData {
     /// Per-project lifecycle hooks (overrides global settings)
     #[serde(default)]
     pub hooks: crate::workspace::persistence::HooksConfig,
+    /// Whether this is a remote project (materialized from a remote connection)
+    #[serde(default)]
+    pub is_remote: bool,
+    /// Connection ID for remote projects (links to RemoteConnectionManager)
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 use crate::terminal::shell_config::ShellType;
@@ -268,6 +274,43 @@ impl Workspace {
             }
         }
         result
+    }
+
+    /// Check if a project is remote
+    pub fn is_remote_project(&self, id: &str) -> bool {
+        self.data.projects.iter().any(|p| p.id == id && p.is_remote)
+    }
+
+    /// Remove all remote projects (and their folder) for a given connection_id.
+    pub fn remove_remote_projects(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let folder_id = format!("remote-folder:{}", connection_id);
+        let prefix = format!("remote:{}:", connection_id);
+
+        // Remove projects
+        self.data.projects.retain(|p| !p.id.starts_with(&prefix));
+
+        // Remove folder
+        self.data.folders.retain(|f| f.id != folder_id);
+
+        // Remove from project_order
+        self.data.project_order.retain(|id| *id != folder_id && !id.starts_with(&prefix));
+
+        // Remove from project_widths
+        self.data.project_widths.retain(|id, _| !id.starts_with(&prefix));
+
+        // Clear focus if it pointed to a removed project
+        if let Some(focused) = self.focus_manager.focused_project_id() {
+            if focused.starts_with(&prefix) {
+                self.focus_manager.set_focused_project_id(None);
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Notify UI without bumping data_version (for remote state changes that shouldn't trigger auto-save).
+    pub fn notify_ui_only(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
     }
 
     /// Helper to mutate a layout node at a path, with automatic notify.
@@ -1292,6 +1335,8 @@ mod workspace_tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
@@ -1456,6 +1501,8 @@ mod gpui_tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
@@ -1583,6 +1630,98 @@ mod gpui_tests {
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "p1");
             assert_eq!(visible[1].id, "p2");
+        });
+    }
+
+    fn make_remote_project(id: &str, conn_id: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.is_remote = true;
+        p.connection_id = Some(conn_id.to_string());
+        p
+    }
+
+    #[gpui::test]
+    fn test_remove_remote_projects(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::state::FolderData;
+
+        let local = make_project("local1");
+        let remote1 = make_remote_project("remote:conn1:p1", "conn1");
+        let remote2 = make_remote_project("remote:conn1:p2", "conn1");
+        let remote3 = make_remote_project("remote:conn2:p1", "conn2");
+
+        let mut data = make_workspace_data(
+            vec![local, remote1, remote2, remote3],
+            vec!["local1", "remote-folder:conn1", "remote-folder:conn2"],
+        );
+        data.folders.push(FolderData {
+            id: "remote-folder:conn1".to_string(),
+            name: "Server 1".to_string(),
+            project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        });
+        data.folders.push(FolderData {
+            id: "remote-folder:conn2".to_string(),
+            name: "Server 2".to_string(),
+            project_ids: vec!["remote:conn2:p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        });
+
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Remove conn1 projects
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_remote_projects("conn1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // local1 and remote:conn2:p1 should remain
+            assert_eq!(ws.data.projects.len(), 2);
+            assert!(ws.project("local1").is_some());
+            assert!(ws.project("remote:conn2:p1").is_some());
+            assert!(ws.project("remote:conn1:p1").is_none());
+
+            // conn1 folder removed, conn2 folder remains
+            assert_eq!(ws.data.folders.len(), 1);
+            assert_eq!(ws.data.folders[0].id, "remote-folder:conn2");
+
+            // project_order cleaned
+            assert!(!ws.data.project_order.contains(&"remote-folder:conn1".to_string()));
+            assert!(ws.data.project_order.contains(&"remote-folder:conn2".to_string()));
+        });
+    }
+
+    #[gpui::test]
+    fn test_visible_projects_includes_remote_in_folders(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::state::FolderData;
+
+        let local = make_project("local1");
+        let mut remote1 = make_remote_project("remote:conn1:p1", "conn1");
+        remote1.is_visible = true;
+        let mut remote2 = make_remote_project("remote:conn1:p2", "conn1");
+        remote2.is_visible = false; // hidden remote project
+
+        let mut data = make_workspace_data(
+            vec![local, remote1, remote2],
+            vec!["local1", "remote-folder:conn1"],
+        );
+        data.folders.push(FolderData {
+            id: "remote-folder:conn1".to_string(),
+            name: "Server 1".to_string(),
+            project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        });
+
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let visible = ws.visible_projects();
+            // local1 + remote:conn1:p1 (remote:conn1:p2 is hidden)
+            assert_eq!(visible.len(), 2);
+            assert_eq!(visible[0].id, "local1");
+            assert_eq!(visible[1].id, "remote:conn1:p1");
         });
     }
 }

@@ -134,6 +134,7 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 
 /// Save workspace to disk using atomic write (write to temp file + rename)
 /// to prevent data loss if the app crashes mid-write.
+/// Remote projects are excluded from persistence (they're materialized from remote state).
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     let path = get_workspace_path();
 
@@ -141,12 +142,42 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let content = serde_json::to_string_pretty(data)?;
+    // Filter out remote projects before saving
+    let remote_project_ids: std::collections::HashSet<&str> = data.projects.iter()
+        .filter(|p| p.is_remote)
+        .map(|p| p.id.as_str())
+        .collect();
+
+    let filtered = if remote_project_ids.is_empty() {
+        // Fast path: no remote projects, save as-is
+        serde_json::to_string_pretty(data)?
+    } else {
+        let filtered_data = WorkspaceData {
+            version: data.version,
+            projects: data.projects.iter()
+                .filter(|p| !p.is_remote)
+                .cloned()
+                .collect(),
+            project_order: data.project_order.iter()
+                .filter(|id| !id.starts_with("remote-folder:") && !remote_project_ids.contains(id.as_str()))
+                .cloned()
+                .collect(),
+            project_widths: data.project_widths.iter()
+                .filter(|(id, _)| !remote_project_ids.contains(id.as_str()))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            folders: data.folders.iter()
+                .filter(|f| !f.id.starts_with("remote-folder:"))
+                .cloned()
+                .collect(),
+        };
+        serde_json::to_string_pretty(&filtered_data)?
+    };
 
     // Atomic write: write to a temp file first, then rename over the target.
     // This ensures the file is either fully old or fully new, never partial.
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &content)?;
+    std::fs::write(&tmp_path, &filtered)?;
     std::fs::rename(&tmp_path, &path)?;
 
     Ok(())
@@ -196,6 +227,8 @@ pub fn default_workspace() -> WorkspaceData {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: super::settings::HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
@@ -220,6 +253,8 @@ mod tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: super::super::settings::HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
@@ -441,5 +476,51 @@ mod tests {
         validate_workspace_data(&mut data, false);
 
         assert!(data.projects[0].terminal_names.is_empty());
+    }
+
+    #[test]
+    fn save_filters_remote_projects() {
+        // Create mixed local + remote workspace data
+        let local = make_project("local1");
+        let mut remote1 = make_project("remote:conn1:p1");
+        remote1.is_remote = true;
+        remote1.connection_id = Some("conn1".to_string());
+        let mut remote2 = make_project("remote:conn1:p2");
+        remote2.is_remote = true;
+        remote2.connection_id = Some("conn1".to_string());
+
+        let mut data = make_workspace(
+            vec![local, remote1, remote2],
+            vec!["local1", "remote-folder:conn1"],
+            vec![FolderData {
+                id: "remote-folder:conn1".to_string(),
+                name: "Server 1".to_string(),
+                project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            }],
+        );
+        data.project_widths.insert("local1".to_string(), 50.0);
+        data.project_widths.insert("remote:conn1:p1".to_string(), 40.0);
+
+        // Save and reload
+        let result = save_workspace(&data);
+        assert!(result.is_ok());
+
+        let loaded = load_workspace(crate::terminal::session_backend::SessionBackend::None).unwrap();
+
+        // Remote projects should be filtered out
+        assert_eq!(loaded.projects.len(), 1);
+        assert_eq!(loaded.projects[0].id, "local1");
+
+        // Remote folder should be filtered out
+        assert!(loaded.folders.is_empty());
+
+        // Remote folder should be removed from project_order
+        assert_eq!(loaded.project_order, vec!["local1".to_string()]);
+
+        // Remote project widths should be filtered out
+        assert_eq!(loaded.project_widths.len(), 1);
+        assert!(loaded.project_widths.contains_key("local1"));
     }
 }

@@ -53,8 +53,6 @@ pub struct RootView {
     focus_handle: FocusHandle,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
-    /// Cached remote project column entities
-    remote_project_columns: HashMap<String, Entity<ProjectColumn>>,
 }
 
 impl RootView {
@@ -127,7 +125,6 @@ impl RootView {
             active_drag: new_active_drag(),
             focus_handle,
             remote_manager: None,
-            remote_project_columns: HashMap::new(),
         };
 
         // Initialize project columns
@@ -143,9 +140,11 @@ impl RootView {
 
     /// Set the remote connection manager (called after creation by Okena).
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {
-        // Observe remote manager for re-renders
-        cx.observe(&manager, |this, _rm, cx| {
-            this.remote_project_columns.clear();
+        // Observe remote manager and sync remote projects into workspace
+        let workspace = self.workspace.clone();
+        cx.observe(&manager, move |this, rm, cx| {
+            Self::sync_remote_projects_into_workspace(&workspace, &rm, cx);
+            this.sync_project_columns(cx);
             cx.notify();
         }).detach();
 
@@ -154,49 +153,222 @@ impl RootView {
             sidebar.set_remote_manager(manager.clone(), cx);
         });
 
-        // When local workspace focus changes, clear remote focus
-        let rm = manager.clone();
-        cx.observe(&self.workspace, move |_this, ws, cx| {
-            if ws.read(cx).focus_manager.focused_project_id().is_some() {
-                rm.update(cx, |rm, cx| {
-                    if rm.focused_remote().is_some() {
-                        rm.set_focused_remote(None, cx);
+        self.remote_manager = Some(manager);
+    }
+
+    /// Sync remote connection state into workspace as materialized ProjectData entries.
+    fn sync_remote_projects_into_workspace(
+        workspace: &Entity<Workspace>,
+        rm: &Entity<RemoteConnectionManager>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::workspace::state::{FolderData, ProjectData, LayoutNode};
+        use crate::theme::FolderColor;
+        use crate::workspace::settings::HooksConfig;
+        use okena_core::client::RemoteConnectionConfig;
+
+        // Snapshot all connection data into owned structures to release the borrow on cx
+        struct ConnSnapshot {
+            config: RemoteConnectionConfig,
+            state: Option<okena_core::api::StateResponse>,
+        }
+        let snapshots: Vec<ConnSnapshot> = {
+            let rm_read = rm.read(cx);
+            rm_read.connections().iter().map(|(config, _status, state)| {
+                ConnSnapshot {
+                    config: (*config).clone(),
+                    state: state.cloned(),
+                }
+            }).collect()
+        };
+
+        let mut expected_remote_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let active_conn_ids: std::collections::HashSet<String> = snapshots.iter()
+            .map(|s| s.config.id.clone()).collect();
+
+        for snap in &snapshots {
+            let conn_id = &snap.config.id;
+            let folder_id = format!("remote-folder:{}", conn_id);
+
+            if let Some(ref state) = snap.state {
+                let mut folder_project_ids: Vec<String> = Vec::new();
+
+                for api_project in &state.projects {
+                    let prefixed_id = format!("remote:{}:{}", conn_id, api_project.id);
+                    expected_remote_ids.insert(prefixed_id.clone());
+                    folder_project_ids.push(prefixed_id.clone());
+
+                    let layout = api_project.layout.as_ref().map(|l| {
+                        LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
+                    });
+
+                    let terminal_names: std::collections::HashMap<String, String> = api_project.terminal_names.iter()
+                        .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
+                        .collect();
+
+                    let conn_id_owned = conn_id.clone();
+                    workspace.update(cx, |ws, _cx| {
+                        if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
+                            existing.name = api_project.name.clone();
+                            existing.path = api_project.path.clone();
+                            existing.layout = layout;
+                            existing.terminal_names = terminal_names;
+                            existing.is_visible = api_project.is_visible;
+                        } else {
+                            ws.data.projects.push(ProjectData {
+                                id: prefixed_id.clone(),
+                                name: api_project.name.clone(),
+                                path: api_project.path.clone(),
+                                is_visible: api_project.is_visible,
+                                layout,
+                                terminal_names,
+                                hidden_terminals: std::collections::HashMap::new(),
+                                worktree_info: None,
+                                folder_color: FolderColor::default(),
+                                hooks: HooksConfig::default(),
+                                is_remote: true,
+                                connection_id: Some(conn_id_owned),
+                            });
+                        }
+                    });
+                }
+
+                let folder_name = snap.config.name.clone();
+                workspace.update(cx, |ws, _cx| {
+                    if let Some(folder) = ws.data.folders.iter_mut().find(|f| f.id == folder_id) {
+                        folder.name = folder_name;
+                        folder.project_ids = folder_project_ids;
+                    } else {
+                        ws.data.folders.push(FolderData {
+                            id: folder_id.clone(),
+                            name: folder_name,
+                            project_ids: folder_project_ids,
+                            collapsed: false,
+                            folder_color: FolderColor::default(),
+                        });
+                    }
+                    if !ws.data.project_order.contains(&folder_id) {
+                        ws.data.project_order.push(folder_id.clone());
+                    }
+                });
+            } else {
+                // No state (disconnected/connecting) — remove materialized projects
+                let prefix = format!("remote:{}:", conn_id);
+                workspace.update(cx, |ws, _cx| {
+                    ws.data.projects.retain(|p| !p.id.starts_with(&prefix));
+                    if let Some(folder) = ws.data.folders.iter_mut().find(|f| f.id == folder_id) {
+                        folder.project_ids.clear();
                     }
                 });
             }
-        }).detach();
+        }
 
-        self.remote_manager = Some(manager);
+        // Remove stale remote projects/folders from connections that no longer exist
+        workspace.update(cx, |ws, _cx| {
+            ws.data.projects.retain(|p| {
+                if p.is_remote {
+                    expected_remote_ids.contains(&p.id)
+                } else {
+                    true
+                }
+            });
+            ws.data.folders.retain(|f| {
+                if f.id.starts_with("remote-folder:") {
+                    let conn_id = f.id.strip_prefix("remote-folder:").unwrap_or("");
+                    active_conn_ids.contains(conn_id)
+                } else {
+                    true
+                }
+            });
+            let valid_ids: std::collections::HashSet<&str> = ws.data.projects.iter().map(|p| p.id.as_str())
+                .chain(ws.data.folders.iter().map(|f| f.id.as_str()))
+                .collect();
+            ws.data.project_order.retain(|id| valid_ids.contains(id.as_str()));
+        });
+
+        // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
+        workspace.update(cx, |ws, cx| {
+            ws.notify_ui_only(cx);
+        });
     }
 
     /// Ensure project columns exist for all visible projects
     fn sync_project_columns(&mut self, cx: &mut Context<Self>) {
-        let visible_project_ids: Vec<String> = {
+        let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
-            ws.visible_projects().iter().map(|p| p.id.clone()).collect()
+            ws.visible_projects().iter().map(|p| {
+                (p.id.clone(), p.is_remote, p.connection_id.clone())
+            }).collect()
         };
 
+        // Clean up columns for projects that no longer exist
+        let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect();
+        self.project_columns.retain(|id, _| {
+            // Keep local project columns even when not visible (they may become visible again)
+            // But remove remote project columns that are gone
+            if id.starts_with("remote:") {
+                visible_ids.contains(id.as_str())
+            } else {
+                true
+            }
+        });
+
         // Create columns for new projects
-        for project_id in &visible_project_ids {
+        for (project_id, is_remote, connection_id) in &visible_projects {
             if !self.project_columns.contains_key(project_id) {
                 let workspace_clone = self.workspace.clone();
                 let request_broker_clone = self.request_broker.clone();
-                let backend_clone = self.backend.clone();
                 let terminals_clone = self.terminals.clone();
                 let active_drag_clone = self.active_drag.clone();
                 let id = project_id.clone();
-                let entity = cx.new(move |cx| {
-                    ProjectColumn::new(
-                        workspace_clone,
-                        request_broker_clone,
-                        id,
-                        backend_clone,
-                        terminals_clone,
-                        active_drag_clone,
-                        cx,
-                    )
-                });
-                self.project_columns.insert(project_id.clone(), entity);
+
+                if *is_remote {
+                    // Remote project: use remote backend and action dispatcher
+                    if let Some(conn_id) = connection_id {
+                        let backend = self.remote_manager.as_ref()
+                            .and_then(|rm| rm.read(cx).backend_for(conn_id));
+                        let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
+                            crate::action_dispatch::ActionDispatcher::Remote {
+                                connection_id: conn_id.clone(),
+                                manager: rm.clone(),
+                            }
+                        });
+
+                        if let Some(backend) = backend {
+                            let entity = cx.new(move |cx| {
+                                let mut col = ProjectColumn::new(
+                                    workspace_clone,
+                                    request_broker_clone,
+                                    id,
+                                    backend,
+                                    terminals_clone,
+                                    active_drag_clone,
+                                    cx,
+                                );
+                                col.set_action_dispatcher(action_dispatcher);
+                                col
+                            });
+                            self.project_columns.insert(project_id.clone(), entity);
+                        }
+                    }
+                } else {
+                    // Local project: use local backend
+                    let backend_clone = self.backend.clone();
+                    let entity = cx.new(move |cx| {
+                        ProjectColumn::new(
+                            workspace_clone,
+                            request_broker_clone,
+                            id,
+                            backend_clone,
+                            terminals_clone,
+                            active_drag_clone,
+                            cx,
+                        )
+                    });
+                    self.project_columns.insert(project_id.clone(), entity);
+                }
             }
         }
     }

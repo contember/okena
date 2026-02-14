@@ -44,10 +44,6 @@ pub struct ProjectColumn {
     cached_git_status: Option<GitStatus>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
-    /// For remote projects: layout provided externally (from remote state)
-    external_layout: Option<crate::workspace::state::LayoutNode>,
-    /// Whether this is a remote project column
-    is_remote: bool,
     /// Action dispatcher for routing terminal actions (local or remote)
     action_dispatcher: Option<ActionDispatcher>,
 }
@@ -62,11 +58,13 @@ impl ProjectColumn {
         active_drag: ActiveDrag,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Spawn initial async git status fetch
-        let project_path = workspace.read(cx).project(&project_id)
-            .map(|p| p.path.clone());
-        if let Some(path) = project_path {
-            Self::spawn_git_status_refresh(path, cx);
+        // Spawn initial async git status fetch (skip for remote projects)
+        let project_info = workspace.read(cx).project(&project_id)
+            .map(|p| (p.path.clone(), p.is_remote));
+        if let Some((path, is_remote)) = project_info {
+            if !is_remote {
+                Self::spawn_git_status_refresh(path, cx);
+            }
         }
 
         Self {
@@ -82,44 +80,13 @@ impl ProjectColumn {
             hover_token: Arc::new(AtomicU64::new(0)),
             cached_git_status: None,
             active_drag,
-            external_layout: None,
-            is_remote: false,
             action_dispatcher: None,
         }
     }
 
-    pub fn new_remote(
-        workspace: Entity<Workspace>,
-        request_broker: Entity<RequestBroker>,
-        project_id: String,
-        project_name: String,
-        project_path: String,
-        backend: Arc<dyn TerminalBackend>,
-        terminals: TerminalsRegistry,
-        active_drag: ActiveDrag,
-        external_layout: Option<crate::workspace::state::LayoutNode>,
-        action_dispatcher: Option<ActionDispatcher>,
-        _cx: &mut Context<Self>,
-    ) -> Self {
-        // No git status for remote projects
-        let _ = (project_name, project_path);
-        Self {
-            workspace,
-            request_broker,
-            project_id,
-            backend,
-            terminals,
-            layout_container: None,
-            diff_popover_visible: false,
-            diff_file_summaries: Vec::new(),
-            diff_popover_project_path: String::new(),
-            hover_token: Arc::new(AtomicU64::new(0)),
-            cached_git_status: None,
-            active_drag,
-            external_layout,
-            is_remote: true,
-            action_dispatcher,
-        }
+    /// Set the action dispatcher (used for remote projects).
+    pub fn set_action_dispatcher(&mut self, dispatcher: Option<ActionDispatcher>) {
+        self.action_dispatcher = dispatcher;
     }
 
     /// Spawn an async task to fetch git status and schedule the next refresh.
@@ -361,11 +328,10 @@ impl ProjectColumn {
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
-            let external_layout = self.external_layout.clone();
             let action_dispatcher = self.action_dispatcher.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
-                let mut container = LayoutContainer::new(
+                LayoutContainer::new(
                     workspace,
                     request_broker,
                     project_id,
@@ -375,11 +341,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
-                );
-                if let Some(layout) = external_layout {
-                    container.set_external_layout(layout);
-                }
-                container
+                )
             }));
         }
     }
@@ -612,6 +574,7 @@ impl ProjectColumn {
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
         let folder_color = t.get_folder_color(project.folder_color);
+        let is_remote = project.is_remote;
 
         v_flex()
             // Colored accent bar
@@ -664,7 +627,7 @@ impl ProjectColumn {
                             .overflow_hidden()
                             .child(project.path.clone()),
                     )
-                    .child(self.render_git_status(project, t, cx)),
+                    .when(!is_remote, |d| d.child(self.render_git_status(project, t, cx))),
             )
             .child(
                 // Right side: minimized taskbar + controls
@@ -679,7 +642,7 @@ impl ProjectColumn {
                             .gap(px(2.0))
                             .opacity(0.0)
                             .group_hover("project-header", |s| s.opacity(1.0))
-                            .child(
+                            .when(!is_remote, |d| d.child(
                                 // Hide project button
                                 div()
                                     .id("hide-project-btn")
@@ -707,7 +670,7 @@ impl ProjectColumn {
                                             .text_color(rgb(t.text_secondary))
                                     )
                                     .tooltip(|_window, cx| Tooltip::new("Hide Project").build(_window, cx)),
-                            )
+                            ))
                             .child(
                                 // Fullscreen button
                                 div()
@@ -847,88 +810,6 @@ impl Render for ProjectColumn {
                     .child(self.render_header(&project, cx))
                     .child(content)
                     .child(self.render_diff_popover(&t, cx))
-                    .into_any_element()
-            }
-
-            None if self.external_layout.is_some() => {
-                // Remote project: use external layout
-                self.ensure_layout_container("/remote".to_string(), cx);
-
-                let header = div()
-                    .id("remote-project-header")
-                    .h(px(30.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .bg(rgb(t.bg_header))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_primary))
-                            .child(format!("{} (remote)", self.project_id)),
-                    );
-
-                let content = div()
-                    .id("project-column-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.layout_container.clone().unwrap())
-                    .into_any_element();
-
-                div()
-                    .id("project-column-main")
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .min_h_0()
-                    .bg(rgb(t.bg_primary))
-                    .child(header)
-                    .child(content)
-                    .into_any_element()
-            }
-
-            None if self.is_remote => {
-                // Remote bookmark project (no terminals)
-                let header = div()
-                    .id("remote-project-header")
-                    .h(px(30.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .bg(rgb(t.bg_header))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(t.text_primary))
-                            .child(format!("{} (remote)", self.project_id)),
-                    );
-
-                div()
-                    .id("project-column-main")
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .size_full()
-                    .min_h_0()
-                    .bg(rgb(t.bg_primary))
-                    .child(header)
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(t.text_muted))
-                            .child("No terminals on remote"),
-                    )
                     .into_any_element()
             }
 

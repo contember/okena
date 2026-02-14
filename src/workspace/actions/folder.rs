@@ -152,6 +152,8 @@ mod tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
@@ -256,6 +258,8 @@ mod gpui_tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 

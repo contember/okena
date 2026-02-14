@@ -11,16 +11,15 @@ use super::RootView;
 
 impl RootView {
     /// Build an ActionDispatcher for the given project.
-    /// Returns Remote variant if the project belongs to the focused remote connection,
+    /// Returns Remote variant if the project is a remote project,
     /// otherwise returns Local variant.
     fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> ActionDispatcher {
-        if let Some(ref rm) = self.remote_manager {
-            if let Some((conn_id, proj_id)) = rm.read(cx).focused_remote()
-                .map(|(c, p)| (c.to_string(), p.to_string()))
-            {
-                if proj_id == project_id {
+        let ws = self.workspace.read(cx);
+        if let Some(project) = ws.project(project_id) {
+            if project.is_remote {
+                if let (Some(conn_id), Some(rm)) = (&project.connection_id, &self.remote_manager) {
                     return ActionDispatcher::Remote {
-                        connection_id: conn_id,
+                        connection_id: conn_id.clone(),
                         manager: rm.clone(),
                     };
                 }

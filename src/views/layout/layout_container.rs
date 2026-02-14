@@ -48,8 +48,6 @@ pub struct LayoutContainer {
     pub(super) drop_animation: Option<(usize, f32)>,
     /// Shared drag state for resize operations
     pub(super) active_drag: ActiveDrag,
-    /// External layout override (for remote projects not in workspace)
-    pub(super) external_layout: Option<LayoutNode>,
     /// Double-click detector for tab rename (keyed by tab index)
     pub(super) tab_click_detector: ClickDetector<usize>,
     /// Double-click detector for empty tab bar area (new tab)
@@ -88,17 +86,11 @@ impl LayoutContainer {
             })),
             drop_animation: None,
             active_drag,
-            external_layout: None,
             tab_click_detector: ClickDetector::new(),
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
             action_dispatcher,
         }
-    }
-
-    /// Set an external layout override (for remote projects).
-    pub fn set_external_layout(&mut self, layout: LayoutNode) {
-        self.external_layout = Some(layout);
     }
 
     fn ensure_terminal_pane(
@@ -427,13 +419,6 @@ impl LayoutContainer {
                 })
                 .clone();
 
-            // Propagate external layout to child
-            if self.external_layout.is_some() {
-                container.update(cx, |c, _| {
-                    c.external_layout = Some(children[zoomed_idx].clone());
-                });
-            }
-
             return div()
                 .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
                 .size_full()
@@ -501,13 +486,6 @@ impl LayoutContainer {
                 })
                 .clone();
 
-            // Propagate external layout to child
-            if self.external_layout.is_some() {
-                container.update(cx, |c, _| {
-                    c.external_layout = Some(children[*original_idx].clone());
-                });
-            }
-
             // Add divider before this child (if not first visible child)
             if visible_idx > 0 {
                 let left_original_idx = visible_children_info[visible_idx - 1].0;
@@ -563,12 +541,7 @@ impl Render for LayoutContainer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
-        // Use external layout if set (remote projects), otherwise read from workspace
-        let layout = if let Some(ref ext) = self.external_layout {
-            Some(ext.clone())
-        } else {
-            self.get_layout(workspace).cloned()
-        };
+        let layout = self.get_layout(workspace).cloned();
 
         // Clean up stale entities when layout type changes
         match &layout {

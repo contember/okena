@@ -26,8 +26,6 @@ pub struct RemoteConnectionManager {
     /// Channel for events coming from tokio tasks
     event_tx: async_channel::Sender<ConnectionEvent>,
 
-    /// Currently focused remote project, if any: (connection_id, project_id)
-    focused_remote: Option<(String, String)>,
 }
 
 impl RemoteConnectionManager {
@@ -66,7 +64,6 @@ impl RemoteConnectionManager {
             terminals,
             runtime,
             event_tx,
-            focused_remote: None,
         }
     }
 
@@ -117,12 +114,6 @@ impl RemoteConnectionManager {
     pub fn remove_connection(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         if let Some(mut conn) = self.connections.remove(connection_id) {
             conn.disconnect();
-        }
-        // Clear focused remote if it belonged to this connection
-        if let Some((ref cid, _)) = self.focused_remote {
-            if cid == connection_id {
-                self.focused_remote = None;
-            }
         }
         // Remove from saved settings
         let id = connection_id.to_string();
@@ -188,23 +179,6 @@ impl RemoteConnectionManager {
                 self.connections.insert(id, conn);
             }
         }
-        cx.notify();
-    }
-
-    /// Get currently focused remote project.
-    pub fn focused_remote(&self) -> Option<(&str, &str)> {
-        self.focused_remote
-            .as_ref()
-            .map(|(c, p)| (c.as_str(), p.as_str()))
-    }
-
-    /// Set the focused remote project.
-    pub fn set_focused_remote(
-        &mut self,
-        focus: Option<(String, String)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.focused_remote = focus;
         cx.notify();
     }
 

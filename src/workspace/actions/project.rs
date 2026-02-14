@@ -33,6 +33,8 @@ impl Workspace {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -217,6 +219,8 @@ impl Workspace {
             }),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         };
 
         // Insert after parent project in order
@@ -292,6 +296,8 @@ mod tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
@@ -379,6 +385,8 @@ mod gpui_tests {
             worktree_info: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
         }
     }
 
