@@ -282,13 +282,8 @@ impl LayoutContainer {
                 .child(container);
         }
 
-        let t = theme(cx);
-        let workspace = self.workspace.clone();
-        let project_id = self.project_id.clone();
-        let layout_path = self.layout_path.clone();
-        let num_children = children.len();
-
         // Clean up stale child containers (e.g., when a tab was removed)
+        let num_children = children.len();
         let valid_paths: HashSet<Vec<usize>> = (0..num_children)
             .map(|i| {
                 let mut path = self.layout_path.clone();
@@ -297,6 +292,87 @@ impl LayoutContainer {
             })
             .collect();
         self.child_containers.retain(|path, _| valid_paths.contains(path));
+
+        // Shared reference to container bounds (updated by canvas during prepaint)
+        let container_bounds_ref = self.container_bounds_ref.clone();
+
+        v_flex()
+            .size_full()
+            .relative()
+            // Use a canvas to capture the container bounds during prepaint
+            .child(canvas(
+                {
+                    let container_bounds_ref = container_bounds_ref.clone();
+                    move |bounds, _window, _cx| {
+                        *container_bounds_ref.borrow_mut() = bounds;
+                    }
+                },
+                |_bounds, _prepaint, _window, _cx| {},
+            ).absolute().size_full())
+            .child(self.render_tab_bar(children, active_tab, false, cx))
+            .child(
+                // Active tab content
+                div().flex_1().child({
+                    let mut child_path = self.layout_path.clone();
+                    child_path.push(active_tab);
+
+                    let container = self.child_containers
+                        .entry(child_path.clone())
+                        .or_insert_with(|| {
+                            cx.new(|_cx| {
+                                LayoutContainer::new(
+                                    self.workspace.clone(),
+                                    self.request_broker.clone(),
+                                    self.project_id.clone(),
+                                    self.project_path.clone(),
+                                    child_path.clone(),
+                                    self.backend.clone(),
+                                    self.terminals.clone(),
+                                    self.active_drag.clone(),
+                                    self.action_dispatcher.clone(),
+                                )
+                            })
+                        })
+                        .clone();
+
+                    container
+                }),
+            )
+    }
+
+    /// Render a tab bar for a standalone terminal (not inside a Tabs container).
+    /// Delegates to the shared `render_tab_bar` with the current terminal node.
+    pub(super) fn render_standalone_tab_bar(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let node = {
+            let ws = self.workspace.read(cx);
+            self.get_layout(&ws).cloned()
+        };
+
+        let children: &[LayoutNode] = match node {
+            Some(ref n @ LayoutNode::Terminal { .. }) => std::slice::from_ref(n),
+            _ => &[],
+        };
+
+        self.render_tab_bar(children, 0, true, cx)
+    }
+
+    /// Shared tab bar rendering used by both multi-tab and standalone modes.
+    fn render_tab_bar(
+        &mut self,
+        children: &[LayoutNode],
+        active_tab: usize,
+        standalone: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = theme(cx);
+        let workspace = self.workspace.clone();
+        let project_id = self.project_id.clone();
+        let layout_path = self.layout_path.clone();
+        let num_children = children.len();
 
         // Check for active drop animation
         let drop_animation = self.drop_animation;
@@ -307,7 +383,15 @@ impl LayoutContainer {
         let project = workspace_reader.project(&self.project_id);
         let terminal_names_map = project.map(|p| p.terminal_names.clone());
 
-        // Build tab elements with right-click handlers
+        // Check if the focused terminal is within this tab group
+        let is_pane_focused = workspace_reader.focus_manager
+            .focused_terminal_state()
+            .map_or(false, |f| {
+                f.project_id == self.project_id
+                    && f.layout_path.starts_with(&self.layout_path)
+            });
+
+        // Build tab elements
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
             let is_active = i == active_tab;
             let workspace = workspace.clone();
@@ -327,12 +411,10 @@ impl LayoutContainer {
 
             // Get tab label: custom name > OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
-                // Check for custom name first
                 let custom_name = terminal_names_map.as_ref().and_then(|m| m.get(tid).cloned());
                 if let Some(name) = custom_name {
                     name
                 } else {
-                    // Check for OSC title from terminal
                     let terminals_guard = terminals.lock();
                     if let Some(terminal) = terminals_guard.get(tid) {
                         terminal.title().unwrap_or_else(|| format!("Tab {}", i + 1))
@@ -357,19 +439,27 @@ impl LayoutContainer {
                 .relative()
                 .px(px(8.0))
                 .pt(px(4.0))
+                .pb(px(4.0))
                 .border_r_1()
                 .border_color(rgb(t.border))
                 .text_size(px(12.0))
                 .items_center()
-                .when(is_active, |d| {
+                .when(is_active && is_pane_focused, |d| {
                     d.bg(rgb(t.term_background))
                         .text_color(rgb(t.text_primary))
-                        .pb(px(0.0))
                 })
-                .when(!is_active, |d| {
+                .when(is_active && !is_pane_focused, |d| {
+                    d.bg(rgb(t.term_background_unfocused))
+                        .text_color(rgb(t.text_primary))
+                })
+                .when(!is_active && is_pane_focused, |d| {
                     d.bg(rgb(t.term_background_unfocused))
                         .text_color(rgb(t.text_secondary))
-                        .pb(px(4.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                })
+                .when(!is_active && !is_pane_focused, |d| {
+                    d.bg(rgb(t.bg_header))
+                        .text_color(rgb(t.text_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                 })
                 // Drop animation effect - glow highlight
@@ -465,10 +555,15 @@ impl LayoutContainer {
                         cx.stop_propagation();
                     })
                 })
-                // Drag source — use PaneDrag so tabs can be dropped onto pane edge zones too
+                // Drag source
                 .when_some(terminal_id.clone(), |el, tid| {
-                    let mut terminal_path = layout_path_for_drag.clone();
-                    terminal_path.push(i);
+                    let terminal_path = if standalone {
+                        layout_path_for_drag.clone()
+                    } else {
+                        let mut p = layout_path_for_drag.clone();
+                        p.push(i);
+                        p
+                    };
                     el.on_drag(
                         PaneDrag {
                             project_id: project_id_for_drag.clone(),
@@ -481,54 +576,54 @@ impl LayoutContainer {
                         },
                     )
                 })
-                // Enhanced drop target - show prominent indicator with glow
-                .drag_over::<PaneDrag>({
-                    let active_drag = self.active_drag.clone();
-                    move |style, _, _, _| {
-                        if active_drag.borrow().is_some() {
-                            return style;
-                        }
-                        style
-                            .border_l(px(3.0))
-                            .border_color(rgb(t.border_active))
-                            .bg(with_alpha(t.border_active, 0.15))
-                    }
-                })
-                .on_drop(cx.listener({
-                    let active_drag = self.active_drag.clone();
-                    move |this, drag: &PaneDrag, _window, cx| {
-                        if active_drag.borrow().is_some() {
-                            return;
-                        }
-                        if drag.project_id != project_id_for_drop {
-                            return;
-                        }
-
-                        let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
-                        let drag_tab_index = drag.layout_path.last().copied();
-
-                        if drag_parent == layout_path_for_drop.as_slice() {
-                            // Same tab group → reorder
-                            if let Some(from_index) = drag_tab_index {
-                                if from_index != i {
-                                    let target_index = if from_index < i { i - 1 } else { i };
-                                    workspace_for_drop.update(cx, |ws, cx| {
-                                        ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
-                                    });
-                                    this.start_drop_animation(target_index, cx);
-                                }
+                // Drop target indicator
+                .when(!standalone, |el| {
+                    el.drag_over::<PaneDrag>({
+                        let active_drag = self.active_drag.clone();
+                        move |style, _, _, _| {
+                            if active_drag.borrow().is_some() {
+                                return style;
                             }
-                        } else {
-                            // Cross-container → insert into this tab group
-                            workspace_for_drop.update(cx, |ws, cx| {
-                                ws.move_terminal_to_tab_group(
-                                    &drag.project_id, &drag.terminal_id,
-                                    &layout_path_for_drop, Some(i), cx,
-                                );
-                            });
+                            style
+                                .border_l(px(3.0))
+                                .border_color(rgb(t.border_active))
+                                .bg(with_alpha(t.border_active, 0.15))
                         }
-                    }
-                }))
+                    })
+                    .on_drop(cx.listener({
+                        let active_drag = self.active_drag.clone();
+                        move |this, drag: &PaneDrag, _window, cx| {
+                            if active_drag.borrow().is_some() {
+                                return;
+                            }
+                            if drag.project_id != project_id_for_drop {
+                                return;
+                            }
+
+                            let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
+                            let drag_tab_index = drag.layout_path.last().copied();
+
+                            if drag_parent == layout_path_for_drop.as_slice() {
+                                if let Some(from_index) = drag_tab_index {
+                                    if from_index != i {
+                                        let target_index = if from_index < i { i - 1 } else { i };
+                                        workspace_for_drop.update(cx, |ws, cx| {
+                                            ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
+                                        });
+                                        this.start_drop_animation(target_index, cx);
+                                    }
+                                }
+                            } else {
+                                workspace_for_drop.update(cx, |ws, cx| {
+                                    ws.move_terminal_to_tab_group(
+                                        &drag.project_id, &drag.terminal_id,
+                                        &layout_path_for_drop, Some(i), cx,
+                                    );
+                                });
+                            }
+                        }
+                    }))
+                })
                 .on_click({
                     let workspace = workspace.clone();
                     let project_id = project_id.clone();
@@ -548,10 +643,26 @@ impl LayoutContainer {
                             }
                         }
 
-                        // Switch to clicked tab
-                        workspace.update(cx, |ws, cx| {
-                            ws.set_active_tab(&project_id, &layout_path, i, cx);
-                        });
+                        if !standalone {
+                            // Switch to clicked tab
+                            workspace.update(cx, |ws, cx| {
+                                ws.set_active_tab(&project_id, &layout_path, i, cx);
+                            });
+                        }
+
+                        // Focus the terminal in the clicked tab
+                        if terminal_id.is_some() {
+                            let terminal_path = if standalone {
+                                layout_path.clone()
+                            } else {
+                                let mut p = layout_path.clone();
+                                p.push(i);
+                                p
+                            };
+                            workspace.update(cx, |ws, cx| {
+                                ws.set_focused_terminal(project_id.clone(), terminal_path, cx);
+                            });
+                        }
 
                         // Double-click → start rename
                         if is_double_click {
@@ -563,18 +674,12 @@ impl LayoutContainer {
                 })
         }).collect();
 
-        // Create end drop zone for dropping after the last tab
-        let workspace_for_end = self.workspace.clone();
-        let project_id_for_end = self.project_id.clone();
-        let layout_path_for_end = self.layout_path.clone();
-        let active_drag_for_end_hover = self.active_drag.clone();
-        let active_drag_for_end_drop = self.active_drag.clone();
-        // Double-click on empty area creates new tab
+        // End drop zone / empty area
         let workspace_for_new = self.workspace.clone();
         let project_id_for_new = self.project_id.clone();
         let layout_path_for_new = self.layout_path.clone();
 
-        let end_drop_zone = div()
+        let mut end_drop_zone = div()
             .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
             .flex_1()
             .h_full()
@@ -582,52 +687,63 @@ impl LayoutContainer {
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if this.empty_area_click_detector.check(()) {
                     workspace_for_new.update(cx, |ws, cx| {
-                        ws.add_tab_to_group(&project_id_for_new, &layout_path_for_new, cx);
-                    });
-                }
-            }))
-            // Enhanced drop zone indicator
-            .drag_over::<PaneDrag>(move |style, _, _, _| {
-                if active_drag_for_end_hover.borrow().is_some() {
-                    return style;
-                }
-                style
-                    .border_l(px(3.0))
-                    .border_color(rgb(t.border_active))
-                    .bg(with_alpha(t.border_active, 0.1))
-            })
-            .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
-                if active_drag_for_end_drop.borrow().is_some() {
-                    return;
-                }
-                if drag.project_id != project_id_for_end {
-                    return;
-                }
-
-                let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
-                let drag_tab_index = drag.layout_path.last().copied();
-
-                if drag_parent == layout_path_for_end.as_slice() {
-                    // Same tab group → reorder to end
-                    if let Some(from_index) = drag_tab_index {
-                        let target_index = num_children;
-                        if from_index != target_index - 1 {
-                            workspace_for_end.update(cx, |ws, cx| {
-                                ws.move_tab(&project_id_for_end, &layout_path_for_end, from_index, target_index, cx);
-                            });
-                            this.start_drop_animation(num_children - 1, cx);
+                        if standalone {
+                            ws.add_tab(&project_id_for_new, &layout_path_for_new, cx);
+                        } else {
+                            ws.add_tab_to_group(&project_id_for_new, &layout_path_for_new, cx);
                         }
-                    }
-                } else {
-                    // Cross-container → append to this tab group
-                    workspace_for_end.update(cx, |ws, cx| {
-                        ws.move_terminal_to_tab_group(
-                            &drag.project_id, &drag.terminal_id,
-                            &layout_path_for_end, None, cx,
-                        );
                     });
                 }
             }));
+
+        if !standalone {
+            let active_drag_for_end_hover = self.active_drag.clone();
+            let active_drag_for_end_drop = self.active_drag.clone();
+            let workspace_for_end = self.workspace.clone();
+            let project_id_for_end = self.project_id.clone();
+            let layout_path_for_end = self.layout_path.clone();
+
+            end_drop_zone = end_drop_zone
+                .drag_over::<PaneDrag>(move |style, _, _, _| {
+                    if active_drag_for_end_hover.borrow().is_some() {
+                        return style;
+                    }
+                    style
+                        .border_l(px(3.0))
+                        .border_color(rgb(t.border_active))
+                        .bg(with_alpha(t.border_active, 0.1))
+                })
+                .on_drop(cx.listener(move |this, drag: &PaneDrag, _window, cx| {
+                    if active_drag_for_end_drop.borrow().is_some() {
+                        return;
+                    }
+                    if drag.project_id != project_id_for_end {
+                        return;
+                    }
+
+                    let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
+                    let drag_tab_index = drag.layout_path.last().copied();
+
+                    if drag_parent == layout_path_for_end.as_slice() {
+                        if let Some(from_index) = drag_tab_index {
+                            let target_index = num_children;
+                            if from_index != target_index - 1 {
+                                workspace_for_end.update(cx, |ws, cx| {
+                                    ws.move_tab(&project_id_for_end, &layout_path_for_end, from_index, target_index, cx);
+                                });
+                                this.start_drop_animation(num_children - 1, cx);
+                            }
+                        }
+                    } else {
+                        workspace_for_end.update(cx, |ws, cx| {
+                            ws.move_terminal_to_tab_group(
+                                &drag.project_id, &drag.terminal_id,
+                                &layout_path_for_end, None, cx,
+                            );
+                        });
+                    }
+                }));
+        }
 
         // Build action context for tab buttons
         let action_ctx = TabActionContext {
@@ -635,260 +751,21 @@ impl LayoutContainer {
             project_id: self.project_id.clone(),
             layout_path: self.layout_path.clone(),
             active_tab,
-            standalone: false,
+            standalone,
             action_dispatcher: self.action_dispatcher.clone(),
         };
 
-        // Get terminal_id for actions that need it
-        let terminal_id_for_actions = self.get_active_terminal_id(active_tab, cx);
-
-        // Render action buttons using helper method
-        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions, cx);
-
-        // Check shell selector visibility
-        let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();
-
-        // Shared reference to container bounds (updated by canvas during prepaint)
-        let container_bounds_ref = self.container_bounds_ref.clone();
-
-        v_flex()
-            .size_full()
-            .relative()
-            // Use a canvas to capture the container bounds during prepaint
-            .child(canvas(
-                {
-                    let container_bounds_ref = container_bounds_ref.clone();
-                    move |bounds, _window, _cx| {
-                        *container_bounds_ref.borrow_mut() = bounds;
-                    }
-                },
-                |_bounds, _prepaint, _window, _cx| {},
-            ).absolute().size_full())
-            .child(
-                // Tab bar
-                div()
-                    .group("tab-bar-row")
-                    .h(px(28.0))
-                    .px(px(0.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(0.0))
-                    .bg(rgb(t.term_background_unfocused))
-                    .children(tab_elements)
-                    .child(end_drop_zone)
-                    .child(
-                        h_flex()
-                            .opacity(0.0)
-                            .group_hover("tab-bar-row", |s| s.opacity(1.0))
-                            .when(show_shell, |el| {
-                                el.child(self.render_shell_indicator(active_tab, cx))
-                            })
-                            .child(action_buttons),
-                    ),
-            )
-            .child(
-                // Active tab content
-                div().flex_1().child({
-                    let mut child_path = self.layout_path.clone();
-                    child_path.push(active_tab);
-
-                    let container = self.child_containers
-                        .entry(child_path.clone())
-                        .or_insert_with(|| {
-                            cx.new(|_cx| {
-                                LayoutContainer::new(
-                                    self.workspace.clone(),
-                                    self.request_broker.clone(),
-                                    self.project_id.clone(),
-                                    self.project_path.clone(),
-                                    child_path.clone(),
-                                    self.backend.clone(),
-                                    self.terminals.clone(),
-                                    self.active_drag.clone(),
-                                    self.action_dispatcher.clone(),
-                                )
-                            })
-                        })
-                        .clone();
-
-                    container
-                }),
-            )
-    }
-
-    /// Render a tab bar for a standalone terminal (not inside a Tabs container).
-    /// This gives every terminal a consistent tab bar UI.
-    pub(super) fn render_standalone_tab_bar(
-        &mut self,
-        terminal_id: Option<String>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let t = theme(cx);
-        let project_id = self.project_id.clone();
-        let layout_path = self.layout_path.clone();
-
-        // Get terminal name
-        let terminals = self.terminals.clone();
-        let workspace_reader = self.workspace.read(cx);
-        let project = workspace_reader.project(&self.project_id);
-        let terminal_names_map = project.map(|p| p.terminal_names.clone());
-
-        let tab_label = if let Some(ref tid) = terminal_id {
-            let custom_name = terminal_names_map.as_ref().and_then(|m| m.get(tid).cloned());
-            if let Some(name) = custom_name {
-                name
-            } else {
-                let terminals_guard = terminals.lock();
-                if let Some(terminal) = terminals_guard.get(tid) {
-                    terminal.title().unwrap_or_else(|| "Terminal".to_string())
-                } else {
-                    "Terminal".to_string()
-                }
+        // Get terminal_id for actions
+        let terminal_id_for_actions = if standalone {
+            match children.first() {
+                Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
+                _ => None,
             }
         } else {
-            "Terminal".to_string()
+            self.get_active_terminal_id(active_tab, cx)
         };
 
-        // Check if drag is possible (more than one terminal in project)
-        let can_drag = terminal_id.is_some() && {
-            project
-                .and_then(|p| p.layout.as_ref())
-                .map(|l| l.collect_terminal_ids().len() > 1)
-                .unwrap_or(false)
-        };
-
-        // Check for active rename
-        let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
-            is_renaming(&self.tab_rename_state, tid)
-        });
-
-        // Build the single tab element
-        let tab_element = {
-            let terminal_id_for_drag = terminal_id.clone();
-            let tab_label_for_drag = tab_label.clone();
-            let layout_path_for_drag = layout_path.clone();
-            let project_id_for_drag = project_id.clone();
-
-            let mut tab = div()
-                .id(ElementId::Name(format!("standalone-tab-{:?}", layout_path).into()))
-                .cursor_pointer()
-                .relative()
-                .px(px(8.0))
-                .pt(px(4.0))
-                .pb(px(0.0))
-                .border_r_1()
-                .border_color(rgb(t.border))
-                .text_size(px(12.0))
-                .items_center()
-                .bg(rgb(t.term_background))
-                .text_color(rgb(t.text_primary))
-                .child({
-                    if is_renaming_this {
-                        if let Some(input) = rename_input(&self.tab_rename_state) {
-                            div()
-                                .id("standalone-tab-rename")
-                                .key_context("TerminalRename")
-                                .flex_1()
-                                .min_w(px(80.0))
-                                .bg(rgb(t.bg_secondary))
-                                .border_1()
-                                .border_color(rgb(t.border_active))
-                                .rounded(px(4.0))
-                                .child(SimpleInput::new(input).text_size(px(12.0)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(|_, _window, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                    this.cancel_tab_rename(cx);
-                                }))
-                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                    if event.keystroke.key.as_str() == "enter" {
-                                        this.finish_tab_rename(cx);
-                                    }
-                                }))
-                                .into_any_element()
-                        } else {
-                            h_flex()
-                                .gap(px(6.0))
-                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(rgb(t.success)))
-                                .child(tab_label.clone())
-                                .into_any_element()
-                        }
-                    } else {
-                        h_flex()
-                            .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(rgb(t.success)))
-                            .child(tab_label.clone())
-                            .into_any_element()
-                    }
-                })
-                .on_click({
-                    let terminal_id = terminal_id.clone();
-                    let tab_label = tab_label.clone();
-                    cx.listener(move |this, _, window, cx| {
-                        let is_double_click = this.tab_click_detector.check(0);
-                        if is_double_click {
-                            if let Some(ref tid) = terminal_id {
-                                this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
-                            }
-                        }
-                    })
-                });
-
-            // Add drag support
-            if can_drag {
-                if let Some(ref tid) = terminal_id_for_drag {
-                    tab = tab.on_drag(
-                        PaneDrag {
-                            project_id: project_id_for_drag,
-                            layout_path: layout_path_for_drag,
-                            terminal_id: tid.clone(),
-                            terminal_name: tab_label_for_drag,
-                        },
-                        move |drag, _position, _window, cx| {
-                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
-                        },
-                    );
-                }
-            }
-
-            tab
-        };
-
-        // Empty area: double-click creates new tab
-        let workspace_for_new = self.workspace.clone();
-        let project_id_for_new = self.project_id.clone();
-        let layout_path_for_new = self.layout_path.clone();
-
-        let empty_area = div()
-            .id(ElementId::Name(format!("standalone-tab-empty-{:?}", self.layout_path).into()))
-            .flex_1()
-            .h_full()
-            .min_w(px(20.0))
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                if this.empty_area_click_detector.check(()) {
-                    workspace_for_new.update(cx, |ws, cx| {
-                        ws.add_tab(&project_id_for_new, &layout_path_for_new, cx);
-                    });
-                }
-            }));
-
-        // Build action context for buttons
-        let action_ctx = TabActionContext {
-            workspace: self.workspace.clone(),
-            project_id: self.project_id.clone(),
-            layout_path: self.layout_path.clone(),
-            active_tab: 0,
-            standalone: true,
-            action_dispatcher: self.action_dispatcher.clone(),
-        };
-
-        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id.clone(), cx);
+        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
 
         // Check shell selector visibility
         let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();
@@ -901,15 +778,15 @@ impl LayoutContainer {
             .flex()
             .items_center()
             .gap(px(0.0))
-            .bg(rgb(t.term_background_unfocused))
-            .child(tab_element)
-            .child(empty_area)
+            .bg(rgb(if is_pane_focused { t.term_background_unfocused } else { t.bg_header }))
+            .children(tab_elements)
+            .child(end_drop_zone)
             .child(
                 h_flex()
                     .opacity(0.0)
                     .group_hover("tab-bar-row", |s| s.opacity(1.0))
                     .when(show_shell, |el| {
-                        el.child(self.render_standalone_shell_indicator(terminal_id.clone(), cx))
+                        el.child(self.render_shell_indicator(active_tab, cx))
                     })
                     .child(action_buttons),
             )

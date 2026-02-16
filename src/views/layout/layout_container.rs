@@ -261,7 +261,7 @@ impl LayoutContainer {
         // Show standalone tab bar if not already inside a Tabs container and not zoomed
         // (zoomed terminals show their own zoom header instead)
         if !in_tab_group && !is_zoomed {
-            container = container.child(self.render_standalone_tab_bar(terminal_id.clone(), window, cx));
+            container = container.child(self.render_standalone_tab_bar(window, cx));
         }
 
         container
