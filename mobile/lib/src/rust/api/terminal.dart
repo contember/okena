@@ -24,6 +24,24 @@ CursorState getCursor({required String connId, required String terminalId}) =>
       terminalId: terminalId,
     );
 
+/// Scroll the terminal display by delta lines (positive = up into history, negative = down).
+void scrollTerminal({
+  required String connId,
+  required String terminalId,
+  required int delta,
+}) => RustLib.instance.api.crateApiTerminalScrollTerminal(
+  connId: connId,
+  terminalId: terminalId,
+  delta: delta,
+);
+
+/// Get the current scroll display offset (0 = at bottom).
+int getDisplayOffset({required String connId, required String terminalId}) =>
+    RustLib.instance.api.crateApiTerminalGetDisplayOffset(
+      connId: connId,
+      terminalId: terminalId,
+    );
+
 /// Send text input to a terminal.
 Future<void> sendText({
   required String connId,
@@ -35,13 +53,27 @@ Future<void> sendText({
   text: text,
 );
 
-/// Resize a terminal.
+/// Resize a terminal (local + send WS message to server).
 Future<void> resizeTerminal({
   required String connId,
   required String terminalId,
   required int cols,
   required int rows,
 }) => RustLib.instance.api.crateApiTerminalResizeTerminal(
+  connId: connId,
+  terminalId: terminalId,
+  cols: cols,
+  rows: rows,
+);
+
+/// Resize only the local alacritty terminal — does NOT send a WS resize message to the server.
+/// Used when mobile adapts to the server's terminal size.
+void resizeLocal({
+  required String connId,
+  required String terminalId,
+  required int cols,
+  required int rows,
+}) => RustLib.instance.api.crateApiTerminalResizeLocal(
   connId: connId,
   terminalId: terminalId,
   cols: cols,

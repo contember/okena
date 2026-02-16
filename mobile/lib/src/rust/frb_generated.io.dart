@@ -42,6 +42,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CursorState dco_decode_cursor_state(dynamic raw);
 
   @protected
+  FolderInfo dco_decode_folder_info(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
 
   @protected
@@ -49,6 +52,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<CellData> dco_decode_list_cell_data(dynamic raw);
+
+  @protected
+  List<FolderInfo> dco_decode_list_folder_info(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -61,6 +67,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProjectInfo dco_decode_project_info(dynamic raw);
+
+  @protected
+  ServerTerminalSize dco_decode_server_terminal_size(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -96,6 +105,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CursorState sse_decode_cursor_state(SseDeserializer deserializer);
 
   @protected
+  FolderInfo sse_decode_folder_info(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -103,6 +115,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<CellData> sse_decode_list_cell_data(SseDeserializer deserializer);
+
+  @protected
+  List<FolderInfo> sse_decode_list_folder_info(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -115,6 +130,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer);
+
+  @protected
+  ServerTerminalSize sse_decode_server_terminal_size(
+    SseDeserializer deserializer,
+  );
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -156,6 +176,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_cursor_state(CursorState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_folder_info(FolderInfo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -163,6 +186,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_cell_data(List<CellData> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_folder_info(
+    List<FolderInfo> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -181,6 +210,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_terminal_size(
+    ServerTerminalSize self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);
