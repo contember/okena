@@ -185,3 +185,13 @@ pub fn resize_terminal(
     let mgr = ConnectionManager::get();
     mgr.resize_terminal(&conn_id, &terminal_id, cols, rows);
 }
+
+/// Resize only the local alacritty terminal — does NOT send a WS resize message to the server.
+/// Used when mobile adapts to the server's terminal size.
+#[flutter_rust_bridge::frb(sync)]
+pub fn resize_local(conn_id: String, terminal_id: String, cols: u16, rows: u16) {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| {
+        holder.resize(cols, rows);
+    });
+}
