@@ -8,11 +8,15 @@ export interface HealthResponse {
   uptime_secs: number;
 }
 
+export type FolderColor = "default" | "red" | "orange" | "yellow" | "lime" | "green" | "teal" | "cyan" | "blue" | "indigo" | "purple" | "pink";
+
 export interface StateResponse {
   state_version: number;
   projects: ApiProject[];
   focused_project_id: string | null;
   fullscreen_terminal: ApiFullscreen | null;
+  folders?: ApiFolder[];
+  project_order?: string[];
 }
 
 export interface ApiProject {
@@ -22,6 +26,14 @@ export interface ApiProject {
   is_visible: boolean;
   layout: ApiLayoutNode | null;
   terminal_names: Record<string, string>;
+  folder_color?: FolderColor;
+}
+
+export interface ApiFolder {
+  id: string;
+  name: string;
+  project_ids: string[];
+  folder_color?: FolderColor;
 }
 
 // serde(tag = "type", rename_all = "lowercase")
