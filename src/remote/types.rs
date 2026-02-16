@@ -24,6 +24,8 @@ mod tests {
             terminal_id: Some("abc-123".into()),
             minimized: false,
             detached: false,
+            cols: None,
+            rows: None,
         };
         let node = LayoutNode::from_api_prefixed(&api, "remote:conn1");
         match node {
@@ -40,6 +42,8 @@ mod tests {
             terminal_id: None,
             minimized: true,
             detached: false,
+            cols: None,
+            rows: None,
         };
         let node = LayoutNode::from_api_prefixed(&api, "remote:x");
         match node {
@@ -65,6 +69,8 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    cols: None,
+                    rows: None,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -73,11 +79,15 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            cols: None,
+                            rows: None,
                         },
                     ],
                 },
@@ -94,6 +104,8 @@ mod tests {
             terminal_id: Some("raw-id".into()),
             minimized: false,
             detached: false,
+            cols: None,
+            rows: None,
         };
         let node = LayoutNode::from_api(&api);
         match node {

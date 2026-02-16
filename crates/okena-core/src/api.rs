@@ -99,6 +99,10 @@ pub enum ApiLayoutNode {
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
     },
     Split {
         direction: SplitDirection,
@@ -443,6 +447,8 @@ mod tests {
                             terminal_id: Some("t1".into()),
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
@@ -450,6 +456,8 @@ mod tests {
                                 terminal_id: Some("t2".into()),
                                 minimized: true,
                                 detached: true,
+                                cols: None,
+                                rows: None,
                             }],
                         },
                     ],
@@ -718,6 +726,8 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    cols: None,
+                    rows: None,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -726,16 +736,22 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: None,
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            cols: None,
+                            rows: None,
                         },
                     ],
                 },
