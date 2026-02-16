@@ -14,6 +14,23 @@ pub struct ProjectInfo {
     pub show_in_overview: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
+    pub folder_color: String,
+}
+
+/// FFI-friendly folder info.
+#[derive(Debug, Clone)]
+pub struct FolderInfo {
+    pub id: String,
+    pub name: String,
+    pub project_ids: Vec<String>,
+    pub folder_color: String,
+}
+
+/// Server terminal size returned via FFI.
+#[derive(Debug, Clone)]
+pub struct ServerTerminalSize {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// Get all projects from the cached remote state.
@@ -43,6 +60,7 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                 show_in_overview: p.show_in_overview,
                 terminal_ids,
                 terminal_names: p.terminal_names.clone(),
+                folder_color: format!("{:?}", p.folder_color),
             }
         })
         .collect()
@@ -137,5 +155,74 @@ pub async fn close_terminal(
         },
     )
     .await
+}
+
+/// Focus a terminal in a project.
+pub async fn focus_terminal(
+    conn_id: String,
+    project_id: String,
+    terminal_id: String,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::FocusTerminal {
+            project_id,
+            terminal_id,
+        },
+    )
+    .await
+}
+
+/// Get the server-side terminal size from the cached state.
+#[flutter_rust_bridge::frb(sync)]
+pub fn get_server_terminal_size(conn_id: String, terminal_id: String) -> ServerTerminalSize {
+    let mgr = ConnectionManager::get();
+    let state = match mgr.get_state(&conn_id) {
+        Some(s) => s,
+        None => return ServerTerminalSize { cols: 0, rows: 0 },
+    };
+
+    for project in &state.projects {
+        if let Some(ref layout) = project.layout {
+            if let Some(size) = find_terminal_size(layout, &terminal_id) {
+                return size;
+            }
+        }
+    }
+
+    ServerTerminalSize { cols: 0, rows: 0 }
+}
+
+fn find_terminal_size(
+    node: &okena_core::api::ApiLayoutNode,
+    target_id: &str,
+) -> Option<ServerTerminalSize> {
+    match node {
+        okena_core::api::ApiLayoutNode::Terminal {
+            terminal_id,
+            cols,
+            rows,
+            ..
+        } => {
+            if terminal_id.as_deref() == Some(target_id) {
+                match (cols, rows) {
+                    (Some(c), Some(r)) => Some(ServerTerminalSize { cols: *c, rows: *r }),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        okena_core::api::ApiLayoutNode::Split { children, .. }
+        | okena_core::api::ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                if let Some(size) = find_terminal_size(child, target_id) {
+                    return Some(size);
+                }
+            }
+            None
+        }
+    }
 }
 

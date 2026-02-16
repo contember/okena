@@ -165,6 +165,30 @@ mod tests {
     }
 
     #[test]
+    fn create_terminal_uses_server_size() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 160, 48);
+        let terminals = handler.terminals().read();
+        let holder = terminals.get("remote:conn1:t1").unwrap();
+        let cells = holder.get_visible_cells(&okena_core::theme::DARK_THEME);
+        assert_eq!(cells.len(), 160 * 48);
+    }
+
+    #[test]
+    fn create_terminal_falls_back_to_default_on_zero_size() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
+        let terminals = handler.terminals().read();
+        let holder = terminals.get("remote:conn1:t1").unwrap();
+        let cells = holder.get_visible_cells(&okena_core::theme::DARK_THEME);
+        assert_eq!(cells.len(), 80 * 24);
+    }
+
+    #[test]
     fn on_terminal_output_routes_data() {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
