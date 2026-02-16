@@ -30,8 +30,15 @@ impl ConnectionHandler for MobileConnectionHandler {
         _terminal_id: &str,
         prefixed_id: &str,
         _ws_sender: async_channel::Sender<WsClientMessage>,
+        cols: u16,
+        rows: u16,
     ) {
-        let holder = TerminalHolder::new(80, 24);
+        let (c, r) = if cols > 0 && rows > 0 {
+            (cols, rows)
+        } else {
+            (80, 24)
+        };
+        let holder = TerminalHolder::new(c, r);
         self.terminals
             .write()
             .insert(prefixed_id.to_string(), holder);
@@ -73,7 +80,7 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 80, 24);
         assert!(handler.terminals().read().contains_key("remote:conn1:t1"));
 
         handler.remove_terminal("remote:conn1:t1");
@@ -85,9 +92,9 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone());
-        handler.create_terminal("conn1", "t2", "remote:conn1:t2", tx.clone());
-        handler.create_terminal("conn2", "t3", "remote:conn2:t3", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone(), 80, 24);
+        handler.create_terminal("conn1", "t2", "remote:conn1:t2", tx.clone(), 80, 24);
+        handler.create_terminal("conn2", "t3", "remote:conn2:t3", tx, 80, 24);
 
         handler.remove_all_terminals("conn1");
 
@@ -98,11 +105,35 @@ mod tests {
     }
 
     #[test]
+    fn create_terminal_uses_server_size() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 160, 48);
+        let terminals = handler.terminals().read();
+        let holder = terminals.get("remote:conn1:t1").unwrap();
+        let cells = holder.get_visible_cells(&okena_core::theme::DARK_THEME);
+        assert_eq!(cells.len(), 160 * 48);
+    }
+
+    #[test]
+    fn create_terminal_falls_back_to_default_on_zero_size() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
+        let terminals = handler.terminals().read();
+        let holder = terminals.get("remote:conn1:t1").unwrap();
+        let cells = holder.get_visible_cells(&okena_core::theme::DARK_THEME);
+        assert_eq!(cells.len(), 80 * 24);
+    }
+
+    #[test]
     fn on_terminal_output_routes_data() {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 80, 24);
         handler.on_terminal_output("remote:conn1:t1", b"hello");
 
         let terminals = handler.terminals().read();

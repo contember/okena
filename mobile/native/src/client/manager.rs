@@ -170,6 +170,55 @@ impl ConnectionManager {
         }
     }
 
+    /// Execute an action on the remote server via HTTP POST /v1/actions.
+    /// Returns the response body as a string.
+    pub async fn execute_action(
+        &self,
+        conn_id: &str,
+        action: okena_core::api::ActionRequest,
+    ) -> anyhow::Result<String> {
+        let (host, port, token) = {
+            let connections = self.connections.read();
+            let conn = connections
+                .get(conn_id)
+                .ok_or_else(|| anyhow::anyhow!("Connection not found: {}", conn_id))?;
+            let client = conn.client.read();
+            let config = client.config();
+            let token = config
+                .saved_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("No auth token for connection {}", conn_id))?;
+            (config.host.clone(), config.port, token)
+        };
+
+        let url = format!("http://{}:{}/v1/actions", host, port);
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&action)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Action failed: HTTP {} - {}", status, body);
+        }
+
+        Ok(resp.text().await.unwrap_or_default())
+    }
+
+    /// Spawn an async task on the connection manager's runtime.
+    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.runtime.spawn(future)
+    }
+
     /// Resize a terminal holder and send the resize message to the server.
     pub fn resize_terminal(&self, conn_id: &str, terminal_id: &str, cols: u16, rows: u16) {
         let connections = self.connections.read();
