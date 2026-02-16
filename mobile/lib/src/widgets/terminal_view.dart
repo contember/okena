@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../src/rust/api/terminal.dart' as ffi;
 import '../../src/rust/api/state.dart' as state_ffi;
 import '../theme/app_theme.dart';
+import 'key_toolbar.dart' show KeyModifiers;
 import 'terminal_painter.dart';
 
 // Sentinel buffer: keeps spaces in the TextField so backspace always has
@@ -17,11 +18,13 @@ const _kSentinel = '        '; // 8 spaces
 class TerminalView extends StatefulWidget {
   final String connId;
   final String terminalId;
+  final KeyModifiers modifiers;
 
   const TerminalView({
     super.key,
     required this.connId,
     required this.terminalId,
+    required this.modifiers,
   });
 
   @override
@@ -38,11 +41,24 @@ class _TerminalViewState extends State<TerminalView> {
   );
   int _cols = 80;
   int _rows = 24;
-  final double _fontSize = TerminalTheme.defaultFontSize;
+  double _fontSize = TerminalTheme.defaultFontSize;
+  double _baseFontSize = TerminalTheme.defaultFontSize;
   double _cellWidth = 0;
   double _cellHeight = 0;
   Timer? _refreshTimer;
-  Timer? _resizeDebounce;
+
+  // Resize debounce
+  Timer? _resizeTimer;
+
+  // Scroll state
+  double _scrollAccumulator = 0;
+
+  // Pinch-to-zoom state
+  final Map<int, Offset> _pointerPositions = {};
+  bool _isPinching = false;
+  bool _hasAutoFit = false;
+  bool _initialResizeSent = false;
+  double? _initialPinchDistance;
 
   // Keyboard input: TextField with its own FocusNode, delta-based tracking
   late final FocusNode _inputFocusNode;
@@ -62,6 +78,8 @@ class _TerminalViewState extends State<TerminalView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.connId != widget.connId ||
         oldWidget.terminalId != widget.terminalId) {
+      _hasAutoFit = false;
+      _initialResizeSent = false;
       _fetchCells();
     }
   }
@@ -69,7 +87,7 @@ class _TerminalViewState extends State<TerminalView> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
-    _resizeDebounce?.cancel();
+    _resizeTimer?.cancel();
     _inputFocusNode.dispose();
     _textController.dispose();
     super.dispose();
@@ -81,6 +99,7 @@ class _TerminalViewState extends State<TerminalView> {
         text: 'M',
         style: TextStyle(
           fontFamily: TerminalTheme.fontFamily,
+          fontFamilyFallback: TerminalTheme.fontFamilyFallback,
           fontSize: _fontSize,
         ),
       ),
@@ -124,21 +143,57 @@ class _TerminalViewState extends State<TerminalView> {
   void _onLayout(BoxConstraints constraints) {
     if (_cellWidth <= 0 || _cellHeight <= 0) return;
 
-    final newCols = (constraints.maxWidth / _cellWidth).floor().clamp(1, 500);
-    final newRows = (constraints.maxHeight / _cellHeight).floor().clamp(1, 200);
+    // Auto-fit font size once for readable ~80 column display
+    if (!_hasAutoFit) {
+      _hasAutoFit = true;
+      final charWidthRatio = _cellWidth / _fontSize;
+      _fontSize = (constraints.maxWidth /
+              (TerminalTheme.defaultColumns * charWidthRatio))
+          .clamp(TerminalTheme.minFontSize, TerminalTheme.maxFontSize);
+      _baseFontSize = _fontSize;
+      _computeCellSize();
+    }
+
+    // Compute cols/rows that fit the mobile screen at the current font size
+    final newCols =
+        (constraints.maxWidth / _cellWidth).floor().clamp(1, 500);
+    final newRows =
+        (constraints.maxHeight / _cellHeight).floor().clamp(1, 200);
 
     if (newCols != _cols || newRows != _rows) {
       _cols = newCols;
       _rows = newRows;
-      _resizeDebounce?.cancel();
-      _resizeDebounce = Timer(const Duration(milliseconds: 200), () {
+
+      // Resize local grid immediately for responsive rendering
+      ffi.resizeLocal(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+        cols: _cols,
+        rows: _rows,
+      );
+
+      if (!_initialResizeSent) {
+        // First resize fires immediately — no flash of garbled content
+        _initialResizeSent = true;
+        _resizeTimer?.cancel();
         ffi.resizeTerminal(
           connId: widget.connId,
           terminalId: widget.terminalId,
           cols: _cols,
           rows: _rows,
         );
-      });
+      } else {
+        // Debounce subsequent resizes to avoid spamming during layout transitions
+        _resizeTimer?.cancel();
+        _resizeTimer = Timer(const Duration(milliseconds: 200), () {
+          ffi.resizeTerminal(
+            connId: widget.connId,
+            terminalId: widget.terminalId,
+            cols: _cols,
+            rows: _rows,
+          );
+        });
+      }
     }
   }
 
@@ -149,10 +204,121 @@ class _TerminalViewState extends State<TerminalView> {
     _lastInputText = _kSentinel;
   }
 
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (_isPinching || _cellHeight <= 0) return;
+    _scrollAccumulator += details.delta.dy;
+    final lineDelta = (_scrollAccumulator / _cellHeight).truncate();
+    if (lineDelta != 0) {
+      _scrollAccumulator -= lineDelta * _cellHeight;
+      ffi.scrollTerminal(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+        delta: lineDelta,
+      );
+      _fetchCells();
+    }
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    _scrollAccumulator = 0;
+  }
+
+  // --- Pinch-to-zoom via raw pointer events ---
+
+  double _computePinchDistance() {
+    final points = _pointerPositions.values.toList();
+    if (points.length < 2) return 0;
+    return (points[0] - points[1]).distance;
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _pointerPositions[event.pointer] = event.localPosition;
+    if (_pointerPositions.length == 2) {
+      _isPinching = true;
+      _baseFontSize = _fontSize;
+      _initialPinchDistance = _computePinchDistance();
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    _pointerPositions[event.pointer] = event.localPosition;
+    if (_pointerPositions.length >= 2 &&
+        _initialPinchDistance != null &&
+        _initialPinchDistance! > 0) {
+      final scale = _computePinchDistance() / _initialPinchDistance!;
+      final newSize = (_baseFontSize * scale).clamp(
+        TerminalTheme.minFontSize,
+        TerminalTheme.maxFontSize,
+      );
+      if (newSize != _fontSize) {
+        setState(() {
+          _fontSize = newSize;
+          _computeCellSize();
+        });
+      }
+    }
+  }
+
+  void _onPointerUp(PointerUpEvent event) {
+    _pointerPositions.remove(event.pointer);
+    if (_pointerPositions.length < 2) {
+      _isPinching = false;
+      _initialPinchDistance = null;
+    }
+  }
+
+  void _onPointerCancel(PointerCancelEvent event) {
+    _pointerPositions.remove(event.pointer);
+    if (_pointerPositions.length < 2) {
+      _isPinching = false;
+      _initialPinchDistance = null;
+    }
+  }
+
+  void _scrollToBottom() {
+    final offset = ffi.getDisplayOffset(
+      connId: widget.connId,
+      terminalId: widget.terminalId,
+    );
+    if (offset > 0) {
+      ffi.scrollTerminal(
+        connId: widget.connId,
+        terminalId: widget.terminalId,
+        delta: -offset,
+      );
+    }
+  }
+
+  String _applyModifiers(String chars) {
+    final mod = widget.modifiers;
+    if (!mod.hasAny) return chars;
+
+    final buf = StringBuffer();
+    for (final ch in chars.codeUnits) {
+      if (mod.ctrl) {
+        // Control character: a-z → 0x01-0x1A, A-Z → 0x01-0x1A
+        if (ch >= 0x61 && ch <= 0x7A) {
+          buf.writeCharCode(ch - 0x60);
+        } else if (ch >= 0x41 && ch <= 0x5A) {
+          buf.writeCharCode(ch - 0x40);
+        }
+      } else if (mod.option || mod.cmd) {
+        // Meta/Option: ESC prefix + character
+        buf.write('\x1b');
+        buf.writeCharCode(ch);
+      }
+    }
+    mod.reset();
+    return buf.toString();
+  }
+
   void _onTextChanged(String newText) {
     if (newText.length > _lastInputText.length) {
-      // Characters added — send the delta
-      final delta = newText.substring(_lastInputText.length);
+      // Characters added — send the delta.
+      // Convert \n (from soft keyboard Return) to \r (terminal Enter).
+      var delta = newText.substring(_lastInputText.length).replaceAll('\n', '\r');
+      delta = _applyModifiers(delta);
+      _scrollToBottom();
       ffi.sendText(
         connId: widget.connId,
         terminalId: widget.terminalId,
@@ -191,8 +357,6 @@ class _TerminalViewState extends State<TerminalView> {
 
     if (key == LogicalKeyboardKey.enter) {
       specialKey = 'Enter';
-    } else if (key == LogicalKeyboardKey.backspace) {
-      specialKey = 'Backspace';
     } else if (key == LogicalKeyboardKey.arrowUp) {
       specialKey = 'ArrowUp';
     } else if (key == LogicalKeyboardKey.arrowDown) {
@@ -218,6 +382,7 @@ class _TerminalViewState extends State<TerminalView> {
     }
 
     if (specialKey != null) {
+      _scrollToBottom();
       state_ffi.sendSpecialKey(
         connId: widget.connId,
         terminalId: widget.terminalId,
@@ -236,62 +401,66 @@ class _TerminalViewState extends State<TerminalView> {
       builder: (context, constraints) {
         _onLayout(constraints);
 
-        return GestureDetector(
-          onTap: () => _inputFocusNode.requestFocus(),
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            color: TerminalTheme.bgColor,
-            width: constraints.maxWidth,
-            height: constraints.maxHeight,
-            child: Stack(
-              children: [
-                // Terminal canvas
-                CustomPaint(
-                  size: Size(constraints.maxWidth, constraints.maxHeight),
-                  painter: TerminalPainter(
-                    cells: _cells,
-                    cursor: _cursor,
-                    cols: _cols,
-                    rows: _rows,
-                    cellWidth: _cellWidth,
-                    cellHeight: _cellHeight,
-                    fontSize: _fontSize,
-                    fontFamily: TerminalTheme.fontFamily,
+        return Listener(
+          onPointerDown: _onPointerDown,
+          onPointerMove: _onPointerMove,
+          onPointerUp: _onPointerUp,
+          onPointerCancel: _onPointerCancel,
+          child: GestureDetector(
+            onVerticalDragUpdate: _onVerticalDragUpdate,
+            onVerticalDragEnd: _onVerticalDragEnd,
+            child: Container(
+              color: OkenaColors.background,
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: Stack(
+                children: [
+                  // Terminal canvas
+                  CustomPaint(
+                    size: Size(constraints.maxWidth, constraints.maxHeight),
+                    painter: TerminalPainter(
+                      cells: _cells,
+                      cursor: _cursor,
+                      cols: _cols,
+                      rows: _rows,
+                      cellWidth: _cellWidth,
+                      cellHeight: _cellHeight,
+                      fontSize: _fontSize,
+                      fontFamily: TerminalTheme.fontFamily,
+                      devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+                    ),
                   ),
-                ),
-                // Transparent text field for soft keyboard input.
-                // Sized 1x1 in-layout (not off-screen) so Android shows the
-                // keyboard. Opacity > 0 to keep IME interaction working.
-                Positioned(
-                  left: 0,
-                  bottom: 0,
-                  width: 1,
-                  height: 1,
-                  child: Opacity(
-                    opacity: 0.01,
-                    child: TextField(
-                      focusNode: _inputFocusNode,
-                      controller: _textController,
-                      autofocus: false,
-                      enableSuggestions: false,
-                      autocorrect: false,
-                      showCursor: false,
-                      enableInteractiveSelection: false,
-                      onChanged: _onTextChanged,
-                      keyboardType: TextInputType.text,
-                      textInputAction: TextInputAction.none,
-                      decoration: const InputDecoration.collapsed(
-                        hintText: '',
-                      ),
-                      style: const TextStyle(
-                        color: Colors.transparent,
-                        fontSize: 1,
-                        height: 1,
+                  // Transparent text field for soft keyboard input.
+                  // Fills the terminal area so tapping anywhere opens the
+                  // keyboard. Opacity > 0 keeps the iOS IME connected.
+                  Positioned.fill(
+                    child: Opacity(
+                      opacity: 0.01,
+                      child: TextField(
+                        focusNode: _inputFocusNode,
+                        controller: _textController,
+                        autofocus: false,
+                        enableSuggestions: false,
+                        autocorrect: false,
+                        showCursor: false,
+                        enableInteractiveSelection: false,
+                        onChanged: _onTextChanged,
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        maxLines: null,
+                        decoration: const InputDecoration.collapsed(
+                          hintText: '',
+                        ),
+                        style: const TextStyle(
+                          color: Colors.transparent,
+                          fontSize: 16,
+                          height: 1,
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         );

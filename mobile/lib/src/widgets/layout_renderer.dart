@@ -4,18 +4,22 @@ import 'package:flutter/material.dart';
 
 import '../../src/rust/api/state.dart' as state_ffi;
 import '../models/layout_node.dart';
+import '../theme/app_theme.dart';
+import 'key_toolbar.dart' show KeyModifiers;
 import 'terminal_view.dart';
 
 class LayoutRenderer extends StatelessWidget {
   final String connId;
   final String projectId;
   final List<String> terminalIds;
+  final KeyModifiers modifiers;
 
   const LayoutRenderer({
     super.key,
     required this.connId,
     required this.projectId,
     required this.terminalIds,
+    required this.modifiers,
   });
 
   @override
@@ -40,20 +44,20 @@ class LayoutRenderer extends StatelessWidget {
       return const Center(
         child: Text(
           'No terminals',
-          style: TextStyle(color: Colors.grey),
+          style: TextStyle(color: OkenaColors.textTertiary),
         ),
       );
     }
-    return TerminalView(connId: connId, terminalId: terminalIds.first);
+    return TerminalView(connId: connId, terminalId: terminalIds.first, modifiers: modifiers);
   }
 
   Widget _buildNode(BuildContext context, LayoutNode node) {
     return switch (node) {
       TerminalNode(:final terminalId) => terminalId != null
-          ? TerminalView(connId: connId, terminalId: terminalId)
+          ? TerminalView(connId: connId, terminalId: terminalId, modifiers: modifiers)
           : const Center(
               child:
-                  Text('Empty terminal', style: TextStyle(color: Colors.grey)),
+                  Text('Empty terminal', style: TextStyle(color: OkenaColors.textTertiary)),
             ),
       SplitNode(:final direction, :final sizes, :final children) =>
         _buildSplit(context, direction, sizes, children),
@@ -85,9 +89,9 @@ class LayoutRenderer extends StatelessWidget {
         flexChildren.add(
           isVertical
               ? const Divider(
-                  height: 2, thickness: 2, color: Color(0xFF363650))
+                  height: 2, thickness: 2, color: OkenaColors.borderLight)
               : const VerticalDivider(
-                  width: 2, thickness: 2, color: Color(0xFF363650)),
+                  width: 2, thickness: 2, color: OkenaColors.borderLight),
         );
       }
       flexChildren.add(
@@ -148,7 +152,7 @@ class _TabsWidgetState extends State<_TabsWidget> {
       children: [
         Container(
           height: 32,
-          color: const Color(0xFF2A2A3E),
+          color: OkenaColors.surfaceElevated,
           child: Row(
             children: [
               for (int i = 0; i < widget.children.length; i++)
@@ -161,7 +165,7 @@ class _TabsWidgetState extends State<_TabsWidget> {
                       border: Border(
                         bottom: BorderSide(
                           color: i == _activeTab
-                              ? Colors.blue.shade300
+                              ? OkenaColors.accent
                               : Colors.transparent,
                           width: 2,
                         ),
@@ -170,7 +174,7 @@ class _TabsWidgetState extends State<_TabsWidget> {
                     child: Text(
                       _tabLabel(widget.children[i], i),
                       style: TextStyle(
-                        color: i == _activeTab ? Colors.white : Colors.white54,
+                        color: i == _activeTab ? OkenaColors.textPrimary : OkenaColors.textSecondary,
                         fontSize: 12,
                       ),
                     ),

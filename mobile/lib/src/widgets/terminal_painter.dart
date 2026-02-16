@@ -13,6 +13,10 @@ const _kStrikethrough = 8;
 const _kInverse = 16;
 const _kDim = 32;
 
+// Mask for flags that affect text style (excludes _kInverse which is handled
+// separately when computing effective fg/bg).
+const _kStyleMask = _kBold | _kItalic | _kUnderline | _kStrikethrough | _kDim;
+
 TextDecoration flagsToDecoration(int flags) {
   final decorations = <TextDecoration>[];
   if (flags & _kUnderline != 0) decorations.add(TextDecoration.underline);
@@ -37,6 +41,7 @@ class TerminalPainter extends CustomPainter {
   final double cellHeight;
   final double fontSize;
   final String fontFamily;
+  final double devicePixelRatio;
 
   TerminalPainter({
     required this.cells,
@@ -47,7 +52,12 @@ class TerminalPainter extends CustomPainter {
     required this.cellHeight,
     required this.fontSize,
     required this.fontFamily,
+    required this.devicePixelRatio,
   });
+
+  /// Snap a logical coordinate to device pixel boundaries.
+  double _snap(double v) =>
+      (v * devicePixelRatio).roundToDouble() / devicePixelRatio;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -58,8 +68,8 @@ class TerminalPainter extends CustomPainter {
       final cell = cells[i];
       final col = i % cols;
       final row = i ~/ cols;
-      final x = col * cellWidth;
-      final y = row * cellHeight;
+      final x = _snap(col * cellWidth);
+      final y = _snap(row * cellHeight);
 
       var bgArgb = cell.bg;
       var fgArgb = cell.fg;
@@ -71,62 +81,90 @@ class TerminalPainter extends CustomPainter {
 
       final bgColor = argbToColor(bgArgb);
       // Only draw non-default backgrounds
-      if (bgColor != TerminalTheme.bgColor && bgColor.a > 0) {
+      if (bgColor != OkenaColors.background && bgColor.a > 0) {
         bgPaint.color = bgColor;
         canvas.drawRect(Rect.fromLTWH(x, y, cellWidth, cellHeight), bgPaint);
       }
     }
 
-    // Pass 2: Text characters
-    for (int i = 0; i < cells.length && i < cols * rows; i++) {
-      final cell = cells[i];
-      if (cell.character.isEmpty || cell.character == ' ') continue;
+    // Pass 2: Text characters — batched by style runs within each row.
+    // Consecutive non-space cells with the same effective fg + style flags
+    // are concatenated into a single TextPainter call, reducing allocations
+    // from ~cols*rows down to the number of distinct style runs.
+    for (int row = 0; row < rows; row++) {
+      int col = 0;
+      while (col < cols) {
+        final idx = row * cols + col;
+        if (idx >= cells.length) break;
 
-      final col = i % cols;
-      final row = i ~/ cols;
-      final x = col * cellWidth;
-      final y = row * cellHeight;
+        final cell = cells[idx];
+        if (cell.character.isEmpty || cell.character == ' ') {
+          col++;
+          continue;
+        }
 
-      var fgArgb = cell.fg;
-      var bgArgb = cell.bg;
-      if (cell.flags & _kInverse != 0) {
-        fgArgb = bgArgb;
-        // Don't need bgArgb here for text painting
-      }
+        // Determine effective fg for the first cell of the run.
+        var fgArgb = cell.fg;
+        if (cell.flags & _kInverse != 0) fgArgb = cell.bg;
+        final styleFlags = cell.flags & _kStyleMask;
 
-      var fgColor = argbToColor(fgArgb);
-      if (cell.flags & _kDim != 0) {
-        fgColor = fgColor.withAlpha((fgColor.a * 0.5).round());
-      }
+        final startCol = col;
+        final buffer = StringBuffer();
+        buffer.write(cell.character);
+        col++;
 
-      final tp = TextPainter(
-        text: TextSpan(
-          text: cell.character,
-          style: TextStyle(
-            fontFamily: fontFamily,
-            fontSize: fontSize,
-            color: fgColor,
-            fontWeight:
-                cell.flags & _kBold != 0 ? FontWeight.bold : FontWeight.normal,
-            fontStyle:
-                cell.flags & _kItalic != 0 ? FontStyle.italic : FontStyle.normal,
-            decoration: flagsToDecoration(cell.flags),
-            decorationColor: fgColor,
+        // Extend run with consecutive cells sharing the same style.
+        while (col < cols) {
+          final ci = row * cols + col;
+          if (ci >= cells.length) break;
+          final c = cells[ci];
+          if (c.character.isEmpty || c.character == ' ') break;
+
+          var cFg = c.fg;
+          if (c.flags & _kInverse != 0) cFg = c.bg;
+          final cStyleFlags = c.flags & _kStyleMask;
+
+          if (cFg != fgArgb || cStyleFlags != styleFlags) break;
+
+          buffer.write(c.character);
+          col++;
+        }
+
+        var fgColor = argbToColor(fgArgb);
+        if (styleFlags & _kDim != 0) {
+          fgColor = fgColor.withAlpha((fgColor.a * 0.5).round());
+        }
+
+        final tp = TextPainter(
+          text: TextSpan(
+            text: buffer.toString(),
+            style: TextStyle(
+              fontFamily: fontFamily,
+              fontFamilyFallback: TerminalTheme.fontFamilyFallback,
+              fontSize: fontSize,
+              color: fgColor,
+              fontWeight:
+                  styleFlags & _kBold != 0 ? FontWeight.bold : FontWeight.normal,
+              fontStyle:
+                  styleFlags & _kItalic != 0 ? FontStyle.italic : FontStyle.normal,
+              decoration: flagsToDecoration(styleFlags),
+              decorationColor: fgColor,
+            ),
           ),
-        ),
-        textDirection: ui.TextDirection.ltr,
-      )..layout();
+          textDirection: ui.TextDirection.ltr,
+        )..layout();
 
-      // Center the character in the cell
-      final dx = x + (cellWidth - tp.width) / 2;
-      final dy = y + (cellHeight - tp.height) / 2;
-      tp.paint(canvas, Offset(dx, dy));
+        final x = _snap(startCol * cellWidth);
+        final y = _snap(row * cellHeight);
+        final dy = y + (cellHeight - tp.height) / 2;
+        tp.paint(canvas, Offset(x, dy));
+      }
     }
 
     // Pass 3: Cursor
     if (cursor.visible && cursor.col < cols && cursor.row < rows) {
-      final cx = cursor.col * cellWidth;
-      final cy = cursor.row * cellHeight;
+      final cx = _snap(cursor.col * cellWidth);
+      final cy = _snap(cursor.row * cellHeight);
       final cursorPaint = Paint()..color = TerminalTheme.cursorColor;
 
       switch (cursor.shape) {
@@ -155,5 +193,14 @@ class TerminalPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(TerminalPainter oldDelegate) => true;
+  bool shouldRepaint(TerminalPainter oldDelegate) {
+    return !identical(cells, oldDelegate.cells) ||
+        cursor.col != oldDelegate.cursor.col ||
+        cursor.row != oldDelegate.cursor.row ||
+        cursor.shape != oldDelegate.cursor.shape ||
+        cursor.visible != oldDelegate.cursor.visible ||
+        cols != oldDelegate.cols ||
+        rows != oldDelegate.rows ||
+        fontSize != oldDelegate.fontSize;
+  }
 }
