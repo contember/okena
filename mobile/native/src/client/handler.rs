@@ -40,13 +40,16 @@ impl ConnectionHandler for MobileConnectionHandler {
         _terminal_id: &str,
         prefixed_id: &str,
         _ws_sender: async_channel::Sender<WsClientMessage>,
+        cols: u16,
+        rows: u16,
     ) {
         // Skip if terminal already exists — avoids leaking the old TerminalHolder
         // (and its alacritty grid) on reconnect when the server re-sends creates.
         if self.terminals.read().contains_key(prefixed_id) {
             return;
         }
-        let holder = TerminalHolder::new(80, 24);
+        let (c, r) = if cols > 0 && rows > 0 { (cols, rows) } else { (80, 24) };
+        let holder = TerminalHolder::new(c, r);
         self.terminals
             .write()
             .insert(prefixed_id.to_string(), holder);
@@ -115,7 +118,7 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
         assert!(handler.terminals().read().contains_key("remote:conn1:t1"));
 
         handler.remove_terminal("remote:conn1:t1");
@@ -127,14 +130,14 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone());
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone(), 0, 0);
         let ptr1 = {
             let terminals = handler.terminals().read();
             terminals.get("remote:conn1:t1").unwrap() as *const TerminalHolder
         };
 
         // Second create with same prefixed_id should be a no-op
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
         let ptr2 = {
             let terminals = handler.terminals().read();
             terminals.get("remote:conn1:t1").unwrap() as *const TerminalHolder
@@ -149,9 +152,9 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone());
-        handler.create_terminal("conn1", "t2", "remote:conn1:t2", tx.clone());
-        handler.create_terminal("conn2", "t3", "remote:conn2:t3", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone(), 0, 0);
+        handler.create_terminal("conn1", "t2", "remote:conn1:t2", tx.clone(), 0, 0);
+        handler.create_terminal("conn2", "t3", "remote:conn2:t3", tx, 0, 0);
 
         handler.remove_all_terminals("conn1");
 
@@ -166,7 +169,7 @@ mod tests {
         let handler = make_handler();
         let (tx, _rx) = async_channel::bounded(1);
 
-        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx, 0, 0);
         handler.on_terminal_output("remote:conn1:t1", b"hello");
 
         let terminals = handler.terminals().read();
