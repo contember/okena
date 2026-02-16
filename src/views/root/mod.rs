@@ -356,8 +356,11 @@ impl RootView {
                 } else {
                     // Local project: use local backend
                     let backend_clone = self.backend.clone();
+                    let workspace_for_dispatch = self.workspace.clone();
+                    let backend_for_dispatch = self.backend.clone();
+                    let terminals_for_dispatch = self.terminals.clone();
                     let entity = cx.new(move |cx| {
-                        ProjectColumn::new(
+                        let mut col = ProjectColumn::new(
                             workspace_clone,
                             request_broker_clone,
                             id,
@@ -365,7 +368,15 @@ impl RootView {
                             terminals_clone,
                             active_drag_clone,
                             cx,
-                        )
+                        );
+                        col.set_action_dispatcher(Some(
+                            crate::action_dispatch::ActionDispatcher::Local {
+                                workspace: workspace_for_dispatch,
+                                backend: backend_for_dispatch,
+                                terminals: terminals_for_dispatch,
+                            },
+                        ));
+                        col
                     });
                     self.project_columns.insert(project_id.clone(), entity);
                 }
