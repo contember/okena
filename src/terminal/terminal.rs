@@ -323,12 +323,17 @@ impl Terminal {
     pub fn resize(&self, new_size: TerminalSize) {
         const DEBOUNCE_MS: u64 = 16;
 
+        // Clamp to at least 1 col/row - alacritty_terminal panics on zero dimensions
+        let cols = new_size.cols.max(1);
+        let rows = new_size.rows.max(1);
+        let new_size = TerminalSize { cols, rows, ..new_size };
+
         // Always update local size immediately
         self.resize_state.lock().size = new_size;
 
         // Resize terminal grid (independent mutex)
         let mut term = self.term.lock();
-        let term_size = TermSize::new(new_size.cols as usize, new_size.rows as usize);
+        let term_size = TermSize::new(cols as usize, rows as usize);
         term.resize(term_size);
         drop(term);
 
