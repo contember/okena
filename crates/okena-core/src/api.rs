@@ -1,4 +1,5 @@
 use crate::keys::SpecialKey;
+use crate::theme::FolderColor;
 use crate::types::SplitDirection;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,10 @@ pub struct StateResponse {
     pub projects: Vec<ApiProject>,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<ApiFullscreen>,
+    #[serde(default)]
+    pub folders: Vec<ApiFolder>,
+    #[serde(default)]
+    pub project_order: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -29,6 +34,17 @@ pub struct ApiProject {
     pub is_visible: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub folder_color: FolderColor,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ApiFolder {
+    pub id: String,
+    pub name: String,
+    pub project_ids: Vec<String>,
+    #[serde(default)]
+    pub folder_color: FolderColor,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,6 +54,10 @@ pub enum ApiLayoutNode {
         terminal_id: Option<String>,
         minimized: bool,
         detached: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
     },
     Split {
         direction: SplitDirection,
@@ -170,6 +190,8 @@ mod tests {
                             terminal_id: Some("t1".into()),
                             minimized: false,
                             detached: false,
+                            cols: Some(120),
+                            rows: Some(40),
                         },
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
@@ -177,21 +199,46 @@ mod tests {
                                 terminal_id: Some("t2".into()),
                                 minimized: true,
                                 detached: true,
+                                cols: None,
+                                rows: None,
                             }],
                         },
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
+                folder_color: FolderColor::Blue,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
+            folders: vec![ApiFolder {
+                id: "f1".into(),
+                name: "Backend".into(),
+                project_ids: vec!["p1".into()],
+                folder_color: FolderColor::Green,
+            }],
+            project_order: vec!["f1".into()],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.state_version, 42);
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "p1");
+        assert_eq!(parsed.projects[0].folder_color, FolderColor::Blue);
         assert!(parsed.fullscreen_terminal.is_none());
+        assert_eq!(parsed.folders.len(), 1);
+        assert_eq!(parsed.folders[0].name, "Backend");
+        assert_eq!(parsed.folders[0].folder_color, FolderColor::Green);
+        assert_eq!(parsed.project_order, vec!["f1"]);
+    }
+
+    #[test]
+    fn state_response_backwards_compatible() {
+        // Old JSON without folders/project_order/folder_color should deserialize with defaults
+        let json = r#"{"state_version":1,"projects":[{"id":"p1","name":"Test","path":"/tmp","is_visible":true,"layout":null,"terminal_names":{}}],"focused_project_id":null,"fullscreen_terminal":null}"#;
+        let parsed: StateResponse = serde_json::from_str(json).unwrap();
+        assert!(parsed.folders.is_empty());
+        assert!(parsed.project_order.is_empty());
+        assert_eq!(parsed.projects[0].folder_color, FolderColor::Default);
     }
 
     #[test]
@@ -255,6 +302,8 @@ mod tests {
                     terminal_id: Some("t1".into()),
                     minimized: false,
                     detached: false,
+                    cols: Some(80),
+                    rows: Some(24),
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -263,16 +312,22 @@ mod tests {
                             terminal_id: Some("t2".into()),
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: None,
                             minimized: false,
                             detached: false,
+                            cols: None,
+                            rows: None,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
                             minimized: false,
                             detached: true,
+                            cols: None,
+                            rows: None,
                         },
                     ],
                 },
