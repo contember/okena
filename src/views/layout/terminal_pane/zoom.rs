@@ -4,6 +4,7 @@
 //! and the zoom header bar UI.
 
 use crate::theme::theme;
+use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
@@ -75,15 +76,11 @@ impl TerminalPane {
 
         // Get terminal info
         let ws = self.workspace.read(cx);
-        let project_name = ws
-            .project(&self.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Unknown".to_string());
 
         let terminal_name = if let Some(ref tid) = self.terminal_id {
             ws.project(&self.project_id)
                 .and_then(|p| p.terminal_names.get(tid).cloned())
-                .unwrap_or_else(|| format!("Terminal {}", tid.chars().take(8).collect::<String>()))
+                .unwrap_or_else(|| "Terminal".to_string())
         } else {
             "Terminal".to_string()
         };
@@ -101,33 +98,30 @@ impl TerminalPane {
             .unwrap_or(0);
         let has_multiple = terminal_count > 1;
 
+        let size = ButtonSize::COMPACT;
+        let id_suffix = "zoom";
+
         div()
-            .h(px(40.0))
-            .px(px(16.0))
+            .h(px(28.0))
+            .px(px(8.0))
             .flex()
             .items_center()
             .justify_between()
-            .bg(rgb(t.bg_header))
-            .border_b_1()
-            .border_color(rgb(t.border))
+            .bg(rgb(t.term_background_unfocused))
             .child(
-                // Left side: Terminal info
+                // Left side: terminal icon + name
                 h_flex()
-                    .gap(px(12.0))
+                    .gap(px(6.0))
+                    .items_center()
                     .child(
-                        div()
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .text_size(px(11.0))
-                            .text_color(rgb(t.text_muted))
-                            .child(project_name),
+                        svg()
+                            .path("icons/terminal.svg")
+                            .size(px(12.0))
+                            .text_color(rgb(t.success)),
                     )
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(px(12.0))
                             .text_color(rgb(t.text_primary))
                             .child(terminal_name),
                     )
@@ -141,106 +135,64 @@ impl TerminalPane {
                     }),
             )
             .child(
-                // Right side: Controls
+                // Right side: nav + exit zoom
                 h_flex()
-                    .gap(px(8.0))
+                    .gap(px(2.0))
+                    .items_center()
                     .when(has_multiple, |d| {
                         d.child(
-                            h_flex()
-                                .gap(px(4.0))
-                                .child(
-                                    div()
-                                        .id("zoom-prev-btn")
-                                        .cursor_pointer()
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("◀ Prev")
-                                        .on_click({
-                                            let workspace = workspace.clone();
-                                            let project_id = self.project_id.clone();
-                                            let terminal_id = self.terminal_id.clone();
-                                            move |_, _window, cx| {
-                                                let terminals = {
-                                                    let ws = workspace.read(cx);
-                                                    ws.project(&project_id)
-                                                        .and_then(|p| p.layout.as_ref())
-                                                        .map(|l| l.collect_terminal_ids())
-                                                        .unwrap_or_default()
-                                                };
-                                                if let Some(ref tid) = terminal_id {
-                                                    if let Some(idx) = terminals.iter().position(|id| id == tid) {
-                                                        let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
-                                                        workspace.update(cx, |ws, cx| {
-                                                            ws.set_fullscreen_terminal(project_id.clone(), terminals[prev].clone(), cx);
-                                                        });
-                                                    }
-                                                }
+                            header_button_base(HeaderAction::ZoomPrev, id_suffix, size, &t, None)
+                                .on_click({
+                                    let workspace = workspace.clone();
+                                    let project_id = self.project_id.clone();
+                                    let terminal_id = self.terminal_id.clone();
+                                    move |_, _window, cx| {
+                                        let terminals = {
+                                            let ws = workspace.read(cx);
+                                            ws.project(&project_id)
+                                                .and_then(|p| p.layout.as_ref())
+                                                .map(|l| l.collect_terminal_ids())
+                                                .unwrap_or_default()
+                                        };
+                                        if let Some(ref tid) = terminal_id {
+                                            if let Some(idx) = terminals.iter().position(|id| id == tid) {
+                                                let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
+                                                workspace.update(cx, |ws, cx| {
+                                                    ws.set_fullscreen_terminal(project_id.clone(), terminals[prev].clone(), cx);
+                                                });
                                             }
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id("zoom-next-btn")
-                                        .cursor_pointer()
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Next ▶")
-                                        .on_click({
-                                            let workspace = workspace.clone();
-                                            let project_id = self.project_id.clone();
-                                            let terminal_id = self.terminal_id.clone();
-                                            move |_, _window, cx| {
-                                                let terminals = {
-                                                    let ws = workspace.read(cx);
-                                                    ws.project(&project_id)
-                                                        .and_then(|p| p.layout.as_ref())
-                                                        .map(|l| l.collect_terminal_ids())
-                                                        .unwrap_or_default()
-                                                };
-                                                if let Some(ref tid) = terminal_id {
-                                                    if let Some(idx) = terminals.iter().position(|id| id == tid) {
-                                                        let next = (idx + 1) % terminals.len();
-                                                        workspace.update(cx, |ws, cx| {
-                                                            ws.set_fullscreen_terminal(project_id.clone(), terminals[next].clone(), cx);
-                                                        });
-                                                    }
-                                                }
+                                        }
+                                    }
+                                }),
+                        )
+                        .child(
+                            header_button_base(HeaderAction::ZoomNext, id_suffix, size, &t, None)
+                                .on_click({
+                                    let workspace = workspace.clone();
+                                    let project_id = self.project_id.clone();
+                                    let terminal_id = self.terminal_id.clone();
+                                    move |_, _window, cx| {
+                                        let terminals = {
+                                            let ws = workspace.read(cx);
+                                            ws.project(&project_id)
+                                                .and_then(|p| p.layout.as_ref())
+                                                .map(|l| l.collect_terminal_ids())
+                                                .unwrap_or_default()
+                                        };
+                                        if let Some(ref tid) = terminal_id {
+                                            if let Some(idx) = terminals.iter().position(|id| id == tid) {
+                                                let next = (idx + 1) % terminals.len();
+                                                workspace.update(cx, |ws, cx| {
+                                                    ws.set_fullscreen_terminal(project_id.clone(), terminals[next].clone(), cx);
+                                                });
                                             }
-                                        }),
-                                ),
+                                        }
+                                    }
+                                }),
                         )
                     })
                     .child(
-                        div()
-                            .w(px(1.0))
-                            .h(px(20.0))
-                            .bg(rgb(t.border)),
-                    )
-                    .child(
-                        div()
-                            .id("zoom-close-btn")
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_primary))
-                            .child("✕ Exit Zoom")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
+                        header_button_base(HeaderAction::ExitZoom, id_suffix, size, &t, None)
                             .on_click({
                                 let workspace = workspace.clone();
                                 move |_, _window, cx| {

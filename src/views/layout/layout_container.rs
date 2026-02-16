@@ -246,6 +246,10 @@ impl LayoutContainer {
         self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
 
         let in_tab_group = self.is_in_tab_group(cx);
+        let is_zoomed = terminal_id.as_ref().map_or(false, |tid| {
+            let ws = self.workspace.read(cx);
+            ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
+        });
 
         let mut container = div()
             .size_full()
@@ -254,8 +258,9 @@ impl LayoutContainer {
             .flex_col()
             .relative();
 
-        // Show standalone tab bar if not already inside a Tabs container
-        if !in_tab_group {
+        // Show standalone tab bar if not already inside a Tabs container and not zoomed
+        // (zoomed terminals show their own zoom header instead)
+        if !in_tab_group && !is_zoomed {
             container = container.child(self.render_standalone_tab_bar(terminal_id.clone(), window, cx));
         }
 

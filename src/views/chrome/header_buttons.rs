@@ -19,6 +19,9 @@ pub enum HeaderAction {
     Fullscreen,
     Detach,
     Close,
+    ZoomPrev,
+    ZoomNext,
+    ExitZoom,
 }
 
 impl HeaderAction {
@@ -33,6 +36,9 @@ impl HeaderAction {
             HeaderAction::Fullscreen => "icons/fullscreen.svg",
             HeaderAction::Detach => "icons/detach.svg",
             HeaderAction::Close => "icons/close.svg",
+            HeaderAction::ZoomPrev => "icons/chevron-left.svg",
+            HeaderAction::ZoomNext => "icons/chevron-right.svg",
+            HeaderAction::ExitZoom => "icons/close.svg",
         }
     }
 
@@ -47,6 +53,9 @@ impl HeaderAction {
             HeaderAction::Fullscreen => "Fullscreen",
             HeaderAction::Detach => "Detach to Window",
             HeaderAction::Close => "Close",
+            HeaderAction::ZoomPrev => "Previous Terminal",
+            HeaderAction::ZoomNext => "Next Terminal",
+            HeaderAction::ExitZoom => "Exit Zoom",
         }
     }
 
@@ -59,13 +68,14 @@ impl HeaderAction {
             HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
             HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
             HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
-            HeaderAction::ExportBuffer | HeaderAction::Detach => None,
+            HeaderAction::ExportBuffer | HeaderAction::Detach
+            | HeaderAction::ZoomPrev | HeaderAction::ZoomNext | HeaderAction::ExitZoom => None,
         }
     }
 
-    /// Returns true if this is the close action (for red hover styling).
+    /// Returns true if this is a close/exit action (for red hover styling).
     pub fn is_close(&self) -> bool {
-        matches!(self, HeaderAction::Close)
+        matches!(self, HeaderAction::Close | HeaderAction::ExitZoom)
     }
 
     /// Returns the element ID prefix for this action.
@@ -79,6 +89,9 @@ impl HeaderAction {
             HeaderAction::Fullscreen => "fullscreen-btn",
             HeaderAction::Detach => "detach-btn",
             HeaderAction::Close => "close-btn",
+            HeaderAction::ZoomPrev => "zoom-prev-btn",
+            HeaderAction::ZoomNext => "zoom-next-btn",
+            HeaderAction::ExitZoom => "zoom-exit-btn",
         }
     }
 }
