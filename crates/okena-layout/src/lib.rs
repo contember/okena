@@ -739,6 +739,7 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
                 minimized: *minimized,
@@ -773,6 +774,7 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
                 minimized: *minimized,
@@ -817,6 +819,8 @@ impl LayoutNode {
                 terminal_id: terminal_id.clone(),
                 minimized: *minimized,
                 detached: *detached,
+                cols: None,
+                rows: None,
             },
             LayoutNode::Split {
                 direction,
