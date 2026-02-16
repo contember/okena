@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1973712882;
+  int get rustContentHash => 2126369707;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -79,22 +79,13 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
-  void crateApiTerminalClearSelection({
-    required String connId,
-    required String terminalId,
-  });
-
   Future<void> crateApiStateCloseTerminal({
     required String connId,
     required String projectId,
     required String terminalId,
   });
 
-  String crateApiConnectionConnect({
-    required String host,
-    required int port,
-    String? savedToken,
-  });
+  String crateApiConnectionConnect({required String host, required int port});
 
   ConnectionStatus crateApiConnectionConnectionStatus({required String connId});
 
@@ -105,6 +96,12 @@ abstract class RustLibApi extends BaseApi {
 
   void crateApiConnectionDisconnect({required String connId});
 
+  Future<void> crateApiStateFocusTerminal({
+    required String connId,
+    required String projectId,
+    required String terminalId,
+  });
+
   List<String> crateApiStateGetAllTerminalIds({required String connId});
 
   CursorState crateApiTerminalGetCursor({
@@ -112,26 +109,28 @@ abstract class RustLibApi extends BaseApi {
     required String terminalId,
   });
 
+  int crateApiTerminalGetDisplayOffset({
+    required String connId,
+    required String terminalId,
+  });
+
   String? crateApiStateGetFocusedProjectId({required String connId});
+
+  List<FolderInfo> crateApiStateGetFolders({required String connId});
+
+  String? crateApiStateGetProjectLayoutJson({
+    required String connId,
+    required String projectId,
+  });
+
+  List<String> crateApiStateGetProjectOrder({required String connId});
 
   List<ProjectInfo> crateApiStateGetProjects({required String connId});
 
-  ScrollInfo crateApiTerminalGetScrollInfo({
+  ServerTerminalSize crateApiStateGetServerTerminalSize({
     required String connId,
     required String terminalId,
   });
-
-  String? crateApiTerminalGetSelectedText({
-    required String connId,
-    required String terminalId,
-  });
-
-  SelectionBounds? crateApiTerminalGetSelectionBounds({
-    required String connId,
-    required String terminalId,
-  });
-
-  String? crateApiConnectionGetToken({required String connId});
 
   List<CellData> crateApiTerminalGetVisibleCells({
     required String connId,
@@ -150,20 +149,25 @@ abstract class RustLibApi extends BaseApi {
     required String code,
   });
 
-  void crateApiTerminalResizeTerminal({
+  void crateApiTerminalResizeLocal({
     required String connId,
     required String terminalId,
     required int cols,
     required int rows,
   });
 
-  void crateApiTerminalScroll({
+  Future<void> crateApiTerminalResizeTerminal({
+    required String connId,
+    required String terminalId,
+    required int cols,
+    required int rows,
+  });
+
+  void crateApiTerminalScrollTerminal({
     required String connId,
     required String terminalId,
     required int delta,
   });
-
-  double crateApiConnectionSecondsSinceActivity({required String connId});
 
   Future<void> crateApiStateSendSpecialKey({
     required String connId,
@@ -176,27 +180,6 @@ abstract class RustLibApi extends BaseApi {
     required String terminalId,
     required String text,
   });
-
-  void crateApiTerminalStartSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  });
-
-  void crateApiTerminalStartWordSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  });
-
-  void crateApiTerminalUpdateSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  });
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -206,36 +189,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required super.generalizedFrbRustBinding,
     required super.portManager,
   });
-
-  @override
-  void crateApiTerminalClearSelection({
-    required String connId,
-    required String terminalId,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalClearSelectionConstMeta,
-        argValues: [connId, terminalId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalClearSelectionConstMeta =>
-      const TaskConstMeta(
-        debugName: "clear_selection",
-        argNames: ["connId", "terminalId"],
-      );
 
   @override
   Future<void> crateApiStateCloseTerminal({
@@ -253,7 +206,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 1,
             port: port_,
           );
         },
@@ -274,35 +227,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
-  String crateApiConnectionConnect({
-    required String host,
-    required int port,
-    String? savedToken,
-  }) {
+  String crateApiConnectionConnect({required String host, required int port}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(host, serializer);
           sse_encode_u_16(port, serializer);
-          sse_encode_opt_String(savedToken, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
           decodeErrorData: null,
         ),
         constMeta: kCrateApiConnectionConnectConstMeta,
-        argValues: [host, port, savedToken],
+        argValues: [host, port],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiConnectionConnectConstMeta => const TaskConstMeta(
-    debugName: "connect",
-    argNames: ["host", "port", "savedToken"],
-  );
+  TaskConstMeta get kCrateApiConnectionConnectConstMeta =>
+      const TaskConstMeta(debugName: "connect", argNames: ["host", "port"]);
 
   @override
   ConnectionStatus crateApiConnectionConnectionStatus({
@@ -313,7 +259,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_connection_status,
@@ -343,7 +289,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 4,
             port: port_,
           );
         },
@@ -371,7 +317,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -386,6 +332,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiConnectionDisconnectConstMeta =>
       const TaskConstMeta(debugName: "disconnect", argNames: ["connId"]);
+
+  @override
+  Future<void> crateApiStateFocusTerminal({
+    required String connId,
+    required String projectId,
+    required String terminalId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(projectId, serializer);
+          sse_encode_String(terminalId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiStateFocusTerminalConstMeta,
+        argValues: [connId, projectId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiStateFocusTerminalConstMeta => const TaskConstMeta(
+    debugName: "focus_terminal",
+    argNames: ["connId", "projectId", "terminalId"],
+  );
 
   @override
   List<String> crateApiStateGetAllTerminalIds({required String connId}) {
@@ -443,13 +425,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  int crateApiTerminalGetDisplayOffset({
+    required String connId,
+    required String terminalId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_i_32,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalGetDisplayOffsetConstMeta,
+        argValues: [connId, terminalId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalGetDisplayOffsetConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_display_offset",
+        argNames: ["connId", "terminalId"],
+      );
+
+  @override
   String? crateApiStateGetFocusedProjectId({required String connId}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -469,13 +481,89 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  List<FolderInfo> crateApiStateGetFolders({required String connId}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_folder_info,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiStateGetFoldersConstMeta,
+        argValues: [connId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiStateGetFoldersConstMeta =>
+      const TaskConstMeta(debugName: "get_folders", argNames: ["connId"]);
+
+  @override
+  String? crateApiStateGetProjectLayoutJson({
+    required String connId,
+    required String projectId,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(projectId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiStateGetProjectLayoutJsonConstMeta,
+        argValues: [connId, projectId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiStateGetProjectLayoutJsonConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_project_layout_json",
+        argNames: ["connId", "projectId"],
+      );
+
+  @override
+  List<String> crateApiStateGetProjectOrder({required String connId}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiStateGetProjectOrderConstMeta,
+        argValues: [connId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiStateGetProjectOrderConstMeta =>
+      const TaskConstMeta(debugName: "get_project_order", argNames: ["connId"]);
+
+  @override
   List<ProjectInfo> crateApiStateGetProjects({required String connId}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_project_info,
@@ -492,7 +580,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "get_projects", argNames: ["connId"]);
 
   @override
-  ScrollInfo crateApiTerminalGetScrollInfo({
+  ServerTerminalSize crateApiStateGetServerTerminalSize({
     required String connId,
     required String terminalId,
   }) {
@@ -502,107 +590,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_scroll_info,
+          decodeSuccessData: sse_decode_server_terminal_size,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiTerminalGetScrollInfoConstMeta,
+        constMeta: kCrateApiStateGetServerTerminalSizeConstMeta,
         argValues: [connId, terminalId],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiTerminalGetScrollInfoConstMeta =>
+  TaskConstMeta get kCrateApiStateGetServerTerminalSizeConstMeta =>
       const TaskConstMeta(
-        debugName: "get_scroll_info",
+        debugName: "get_server_terminal_size",
         argNames: ["connId", "terminalId"],
       );
-
-  @override
-  String? crateApiTerminalGetSelectedText({
-    required String connId,
-    required String terminalId,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalGetSelectedTextConstMeta,
-        argValues: [connId, terminalId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalGetSelectedTextConstMeta =>
-      const TaskConstMeta(
-        debugName: "get_selected_text",
-        argNames: ["connId", "terminalId"],
-      );
-
-  @override
-  SelectionBounds? crateApiTerminalGetSelectionBounds({
-    required String connId,
-    required String terminalId,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_selection_bounds,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalGetSelectionBoundsConstMeta,
-        argValues: [connId, terminalId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalGetSelectionBoundsConstMeta =>
-      const TaskConstMeta(
-        debugName: "get_selection_bounds",
-        argNames: ["connId", "terminalId"],
-      );
-
-  @override
-  String? crateApiConnectionGetToken({required String connId}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_String,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiConnectionGetTokenConstMeta,
-        argValues: [connId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiConnectionGetTokenConstMeta =>
-      const TaskConstMeta(debugName: "get_token", argNames: ["connId"]);
 
   @override
   List<CellData> crateApiTerminalGetVisibleCells({
@@ -615,7 +620,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_cell_data,
@@ -643,7 +648,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -672,7 +677,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -704,7 +709,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 19,
             port: port_,
           );
         },
@@ -723,7 +728,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "pair", argNames: ["connId", "code"]);
 
   @override
-  void crateApiTerminalResizeTerminal({
+  void crateApiTerminalResizeLocal({
     required String connId,
     required String terminalId,
     required int cols,
@@ -737,11 +742,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(terminalId, serializer);
           sse_encode_u_16(cols, serializer);
           sse_encode_u_16(rows, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: null,
+        ),
+        constMeta: kCrateApiTerminalResizeLocalConstMeta,
+        argValues: [connId, terminalId, cols, rows],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTerminalResizeLocalConstMeta =>
+      const TaskConstMeta(
+        debugName: "resize_local",
+        argNames: ["connId", "terminalId", "cols", "rows"],
+      );
+
+  @override
+  Future<void> crateApiTerminalResizeTerminal({
+    required String connId,
+    required String terminalId,
+    required int cols,
+    required int rows,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(connId, serializer);
+          sse_encode_String(terminalId, serializer);
+          sse_encode_u_16(cols, serializer);
+          sse_encode_u_16(rows, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiTerminalResizeTerminalConstMeta,
         argValues: [connId, terminalId, cols, rows],
@@ -757,7 +801,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  void crateApiTerminalScroll({
+  void crateApiTerminalScrollTerminal({
     required String connId,
     required String terminalId,
     required int delta,
@@ -769,48 +813,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(connId, serializer);
           sse_encode_String(terminalId, serializer);
           sse_encode_i_32(delta, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: null,
         ),
-        constMeta: kCrateApiTerminalScrollConstMeta,
+        constMeta: kCrateApiTerminalScrollTerminalConstMeta,
         argValues: [connId, terminalId, delta],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiTerminalScrollConstMeta => const TaskConstMeta(
-    debugName: "scroll",
-    argNames: ["connId", "terminalId", "delta"],
-  );
-
-  @override
-  double crateApiConnectionSecondsSinceActivity({required String connId}) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_f_64,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiConnectionSecondsSinceActivityConstMeta,
-        argValues: [connId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiConnectionSecondsSinceActivityConstMeta =>
+  TaskConstMeta get kCrateApiTerminalScrollTerminalConstMeta =>
       const TaskConstMeta(
-        debugName: "seconds_since_activity",
-        argNames: ["connId"],
+        debugName: "scroll_terminal",
+        argNames: ["connId", "terminalId", "delta"],
       );
 
   @override
@@ -829,7 +848,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -866,7 +885,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -886,122 +905,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     argNames: ["connId", "terminalId", "text"],
   );
 
-  @override
-  void crateApiTerminalStartSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          sse_encode_u_16(col, serializer);
-          sse_encode_u_16(row, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalStartSelectionConstMeta,
-        argValues: [connId, terminalId, col, row],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalStartSelectionConstMeta =>
-      const TaskConstMeta(
-        debugName: "start_selection",
-        argNames: ["connId", "terminalId", "col", "row"],
-      );
-
-  @override
-  void crateApiTerminalStartWordSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          sse_encode_u_16(col, serializer);
-          sse_encode_u_16(row, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalStartWordSelectionConstMeta,
-        argValues: [connId, terminalId, col, row],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalStartWordSelectionConstMeta =>
-      const TaskConstMeta(
-        debugName: "start_word_selection",
-        argNames: ["connId", "terminalId", "col", "row"],
-      );
-
-  @override
-  void crateApiTerminalUpdateSelection({
-    required String connId,
-    required String terminalId,
-    required int col,
-    required int row,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(connId, serializer);
-          sse_encode_String(terminalId, serializer);
-          sse_encode_u_16(col, serializer);
-          sse_encode_u_16(row, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiTerminalUpdateSelectionConstMeta,
-        argValues: [connId, terminalId, col, row],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiTerminalUpdateSelectionConstMeta =>
-      const TaskConstMeta(
-        debugName: "update_selection",
-        argNames: ["connId", "terminalId", "col", "row"],
-      );
-
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return AnyhowException(raw as String);
-  }
-
-  @protected
-  Map<String, String> dco_decode_Map_String_String_None(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return Map.fromEntries(
-      dco_decode_list_record_string_string(
-        raw,
-      ).map((e) => MapEntry(e.$1, e.$2)),
-    );
   }
 
   @protected
@@ -1014,12 +921,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
-  }
-
-  @protected
-  SelectionBounds dco_decode_box_autoadd_selection_bounds(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_selection_bounds(raw);
   }
 
   @protected
@@ -1076,9 +977,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  double dco_decode_f_64(dynamic raw) {
+  FolderInfo dco_decode_folder_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw as double;
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return FolderInfo(
+      id: dco_decode_String(arr[0]),
+      name: dco_decode_String(arr[1]),
+      projectIds: dco_decode_list_String(arr[2]),
+      folderColor: dco_decode_String(arr[3]),
+    );
   }
 
   @protected
@@ -1100,6 +1009,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<FolderInfo> dco_decode_list_folder_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_folder_info).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
@@ -1112,21 +1027,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<(String, String)> dco_decode_list_record_string_string(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_record_string_string).toList();
-  }
-
-  @protected
   String? dco_decode_opt_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_String(raw);
-  }
-
-  @protected
-  SelectionBounds? dco_decode_opt_box_autoadd_selection_bounds(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_selection_bounds(raw);
   }
 
   @protected
@@ -1139,46 +1042,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       path: dco_decode_String(arr[2]),
-      showInOverview: dco_decode_bool(arr[3]),
+      isVisible: dco_decode_bool(arr[3]),
       terminalIds: dco_decode_list_String(arr[4]),
-      terminalNames: dco_decode_Map_String_String_None(arr[5]),
+      folderColor: dco_decode_String(arr[5]),
     );
   }
 
   @protected
-  (String, String) dco_decode_record_string_string(dynamic raw) {
+  ServerTerminalSize dco_decode_server_terminal_size(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2) {
-      throw Exception('Expected 2 elements, got ${arr.length}');
-    }
-    return (dco_decode_String(arr[0]), dco_decode_String(arr[1]));
-  }
-
-  @protected
-  ScrollInfo dco_decode_scroll_info(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return ScrollInfo(
-      totalLines: dco_decode_u_32(arr[0]),
-      visibleLines: dco_decode_u_32(arr[1]),
-      displayOffset: dco_decode_u_32(arr[2]),
-    );
-  }
-
-  @protected
-  SelectionBounds dco_decode_selection_bounds(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return SelectionBounds(
-      startCol: dco_decode_u_16(arr[0]),
-      startRow: dco_decode_i_32(arr[1]),
-      endCol: dco_decode_u_16(arr[2]),
-      endRow: dco_decode_i_32(arr[3]),
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ServerTerminalSize(
+      cols: dco_decode_u_16(arr[0]),
+      rows: dco_decode_u_16(arr[1]),
     );
   }
 
@@ -1214,15 +1092,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  Map<String, String> sse_decode_Map_String_String_None(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_list_record_string_string(deserializer);
-    return Map.fromEntries(inner.map((e) => MapEntry(e.$1, e.$2)));
-  }
-
-  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -1233,14 +1102,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
-  }
-
-  @protected
-  SelectionBounds sse_decode_box_autoadd_selection_bounds(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_selection_bounds(deserializer));
   }
 
   @protected
@@ -1303,9 +1164,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  double sse_decode_f_64(SseDeserializer deserializer) {
+  FolderInfo sse_decode_folder_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getFloat64();
+    var var_id = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_projectIds = sse_decode_list_String(deserializer);
+    var var_folderColor = sse_decode_String(deserializer);
+    return FolderInfo(
+      id: var_id,
+      name: var_name,
+      projectIds: var_projectIds,
+      folderColor: var_folderColor,
+    );
   }
 
   @protected
@@ -1339,6 +1209,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<FolderInfo> sse_decode_list_folder_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <FolderInfo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_folder_info(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -1358,20 +1240,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<(String, String)> sse_decode_list_record_string_string(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <(String, String)>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_record_string_string(deserializer));
-    }
-    return ans_;
-  }
-
-  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1383,73 +1251,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  SelectionBounds? sse_decode_opt_box_autoadd_selection_bounds(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_selection_bounds(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
     var var_path = sse_decode_String(deserializer);
-    var var_showInOverview = sse_decode_bool(deserializer);
+    var var_isVisible = sse_decode_bool(deserializer);
     var var_terminalIds = sse_decode_list_String(deserializer);
-    var var_terminalNames = sse_decode_Map_String_String_None(deserializer);
+    var var_folderColor = sse_decode_String(deserializer);
     return ProjectInfo(
       id: var_id,
       name: var_name,
       path: var_path,
-      showInOverview: var_showInOverview,
+      isVisible: var_isVisible,
       terminalIds: var_terminalIds,
-      terminalNames: var_terminalNames,
+      folderColor: var_folderColor,
     );
   }
 
   @protected
-  (String, String) sse_decode_record_string_string(
+  ServerTerminalSize sse_decode_server_terminal_size(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_field0 = sse_decode_String(deserializer);
-    var var_field1 = sse_decode_String(deserializer);
-    return (var_field0, var_field1);
-  }
-
-  @protected
-  ScrollInfo sse_decode_scroll_info(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_totalLines = sse_decode_u_32(deserializer);
-    var var_visibleLines = sse_decode_u_32(deserializer);
-    var var_displayOffset = sse_decode_u_32(deserializer);
-    return ScrollInfo(
-      totalLines: var_totalLines,
-      visibleLines: var_visibleLines,
-      displayOffset: var_displayOffset,
-    );
-  }
-
-  @protected
-  SelectionBounds sse_decode_selection_bounds(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_startCol = sse_decode_u_16(deserializer);
-    var var_startRow = sse_decode_i_32(deserializer);
-    var var_endCol = sse_decode_u_16(deserializer);
-    var var_endRow = sse_decode_i_32(deserializer);
-    return SelectionBounds(
-      startCol: var_startCol,
-      startRow: var_startRow,
-      endCol: var_endCol,
-      endRow: var_endRow,
-    );
+    var var_cols = sse_decode_u_16(deserializer);
+    var var_rows = sse_decode_u_16(deserializer);
+    return ServerTerminalSize(cols: var_cols, rows: var_rows);
   }
 
   @protected
@@ -1485,18 +1312,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_Map_String_String_None(
-    Map<String, String> self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_list_record_string_string(
-      self.entries.map((e) => (e.key, e.value)).toList(),
-      serializer,
-    );
-  }
-
-  @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
@@ -1506,15 +1321,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_selection_bounds(
-    SelectionBounds self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_selection_bounds(self, serializer);
   }
 
   @protected
@@ -1563,9 +1369,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_f_64(double self, SseSerializer serializer) {
+  void sse_encode_folder_info(FolderInfo self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putFloat64(self);
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_list_String(self.projectIds, serializer);
+    sse_encode_String(self.folderColor, serializer);
   }
 
   @protected
@@ -1596,6 +1405,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_folder_info(
+    List<FolderInfo> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_folder_info(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1618,18 +1439,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_record_string_string(
-    List<(String, String)> self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_record_string_string(item, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1640,57 +1449,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_selection_bounds(
-    SelectionBounds? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_selection_bounds(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.path, serializer);
-    sse_encode_bool(self.showInOverview, serializer);
+    sse_encode_bool(self.isVisible, serializer);
     sse_encode_list_String(self.terminalIds, serializer);
-    sse_encode_Map_String_String_None(self.terminalNames, serializer);
+    sse_encode_String(self.folderColor, serializer);
   }
 
   @protected
-  void sse_encode_record_string_string(
-    (String, String) self,
+  void sse_encode_server_terminal_size(
+    ServerTerminalSize self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.$1, serializer);
-    sse_encode_String(self.$2, serializer);
-  }
-
-  @protected
-  void sse_encode_scroll_info(ScrollInfo self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_32(self.totalLines, serializer);
-    sse_encode_u_32(self.visibleLines, serializer);
-    sse_encode_u_32(self.displayOffset, serializer);
-  }
-
-  @protected
-  void sse_encode_selection_bounds(
-    SelectionBounds self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_16(self.startCol, serializer);
-    sse_encode_i_32(self.startRow, serializer);
-    sse_encode_u_16(self.endCol, serializer);
-    sse_encode_i_32(self.endRow, serializer);
+    sse_encode_u_16(self.cols, serializer);
+    sse_encode_u_16(self.rows, serializer);
   }
 
   @protected
