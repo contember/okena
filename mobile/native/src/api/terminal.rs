@@ -55,6 +55,23 @@ pub fn get_cursor(conn_id: String, terminal_id: String) -> CursorState {
         })
 }
 
+/// Scroll the terminal display by delta lines (positive = up into history, negative = down).
+#[flutter_rust_bridge::frb(sync)]
+pub fn scroll_terminal(conn_id: String, terminal_id: String, delta: i32) {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| {
+        holder.scroll(delta);
+    });
+}
+
+/// Get the current scroll display offset (0 = at bottom).
+#[flutter_rust_bridge::frb(sync)]
+pub fn get_display_offset(conn_id: String, terminal_id: String) -> i32 {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| holder.display_offset())
+        .unwrap_or(0)
+}
+
 /// Send text input to a terminal.
 pub async fn send_text(conn_id: String, terminal_id: String, text: String) -> anyhow::Result<()> {
     let mgr = ConnectionManager::get();
@@ -68,7 +85,7 @@ pub async fn send_text(conn_id: String, terminal_id: String, text: String) -> an
     Ok(())
 }
 
-/// Resize a terminal.
+/// Resize a terminal (local + send WS message to server).
 pub async fn resize_terminal(
     conn_id: String,
     terminal_id: String,
@@ -78,4 +95,14 @@ pub async fn resize_terminal(
     let mgr = ConnectionManager::get();
     mgr.resize_terminal(&conn_id, &terminal_id, cols, rows);
     Ok(())
+}
+
+/// Resize only the local alacritty terminal — does NOT send a WS resize message to the server.
+/// Used when mobile adapts to the server's terminal size.
+#[flutter_rust_bridge::frb(sync)]
+pub fn resize_local(conn_id: String, terminal_id: String, cols: u16, rows: u16) {
+    let mgr = ConnectionManager::get();
+    mgr.with_terminal(&conn_id, &terminal_id, |holder| {
+        holder.resize(cols, rows);
+    });
 }

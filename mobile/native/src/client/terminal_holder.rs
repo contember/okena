@@ -1,7 +1,7 @@
 use crate::api::terminal::{CellData, CursorShape, CursorState};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
@@ -72,19 +72,20 @@ impl TerminalHolder {
                 };
                 let cell = &grid[cell_point];
 
-                // Skip wide char spacers — they're the second cell of a double-width character
+                // Wide char spacers are the second cell of a double-width character.
+                // Emit an empty placeholder to keep the grid aligned (cols * rows cells).
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    cells.push(CellData {
+                        character: String::new(),
+                        fg: theme_colors.ansi_to_argb(&cell.fg),
+                        bg: theme_colors.ansi_to_argb(&cell.bg),
+                        flags: 0,
+                    });
                     continue;
                 }
 
-                let mut fg = cell.fg.clone();
-                let mut bg = cell.bg.clone();
-                if cell.flags.contains(Flags::INVERSE) {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-
-                let fg_argb = theme_colors.ansi_to_argb(&fg);
-                let bg_argb = theme_colors.ansi_to_argb(&bg);
+                let fg_argb = theme_colors.ansi_to_argb(&cell.fg);
+                let bg_argb = theme_colors.ansi_to_argb(&cell.bg);
 
                 let mut flags: u8 = 0;
                 if cell.flags.contains(Flags::BOLD) {
@@ -150,6 +151,19 @@ impl TerminalHolder {
         *self.rows.lock() = rows;
     }
 
+    /// Scroll the terminal display by delta lines (positive = up into history).
+    pub fn scroll(&self, delta: i32) {
+        let mut term = self.term.lock();
+        term.scroll_display(Scroll::Delta(delta));
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Get the current display offset (0 = at bottom, >0 = scrolled into history).
+    pub fn display_offset(&self) -> i32 {
+        let term = self.term.lock();
+        term.grid().display_offset() as i32
+    }
+
     /// Check if the terminal has unprocessed changes.
     pub fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Relaxed)
@@ -211,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn inverse_flag_swaps_colors() {
+    fn inverse_flag_passes_raw_colors() {
         let holder = TerminalHolder::new(80, 24);
         // SGR 7 = inverse, then "X", then SGR 0 = reset
         holder.process_output(b"\x1b[7mX\x1b[0m");
@@ -220,8 +234,8 @@ mod tests {
         let inverse_cell = &cells[0]; // first cell has INVERSE
         // INVERSE flag should be set
         assert!(inverse_cell.flags & 16 != 0);
-        // fg and bg should be swapped compared to a normal cell
-        assert_eq!(inverse_cell.fg, normal_cell.bg);
-        assert_eq!(inverse_cell.bg, normal_cell.fg);
+        // Raw colors should be the same as a normal cell (Dart painter handles the swap)
+        assert_eq!(inverse_cell.fg, normal_cell.fg);
+        assert_eq!(inverse_cell.bg, normal_cell.bg);
     }
 }
