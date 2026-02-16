@@ -30,6 +30,8 @@ impl ConnectionHandler for DesktopConnectionHandler {
         _terminal_id: &str,
         prefixed_id: &str,
         ws_sender: async_channel::Sender<WsClientMessage>,
+        _cols: u16,
+        _rows: u16,
     ) {
         let transport = Arc::new(RemoteTransport {
             ws_tx: ws_sender,

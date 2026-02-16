@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
 
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFullscreen, ApiProject, StateResponse};
+use crate::remote::types::{ApiFolder, ApiFullscreen, ApiProject, StateResponse};
 use crate::terminal::backend::LocalBackend;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 
@@ -249,7 +249,9 @@ impl HeadlessApp {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
                             let sv = *state_version.borrow();
-                            let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
+                            let data = ws.data();
+
+                            let projects: Vec<ApiProject> = data.projects.iter().map(|p| {
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
@@ -257,6 +259,16 @@ impl HeadlessApp {
                                     is_visible: p.is_visible,
                                     layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
+                                    folder_color: p.folder_color,
+                                }
+                            }).collect();
+
+                            let folders: Vec<ApiFolder> = data.folders.iter().map(|f| {
+                                ApiFolder {
+                                    id: f.id.clone(),
+                                    name: f.name.clone(),
+                                    project_ids: f.project_ids.clone(),
+                                    folder_color: f.folder_color,
                                 }
                             }).collect();
 
@@ -272,6 +284,8 @@ impl HeadlessApp {
                                 projects,
                                 focused_project_id: ws.focused_project_id().cloned(),
                                 fullscreen_terminal: fullscreen,
+                                folders,
+                                project_order: data.project_order.clone(),
                             };
 
                             CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
