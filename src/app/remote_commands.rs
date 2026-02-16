@@ -118,6 +118,15 @@ pub(crate) async fn remote_command_loop(
                     let git_statuses = git_status_tx.borrow().clone();
                     let data = ws.data();
 
+                    // Build terminal size map from the registry
+                    let size_map: HashMap<String, (u16, u16)> = {
+                        let registry = terminals.lock();
+                        registry.iter().map(|(id, term)| {
+                            let size = term.resize_state.lock().size;
+                            (id.clone(), (size.cols, size.rows))
+                        }).collect()
+                    };
+
                     // Build a lookup map for projects
                     let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
                         data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -158,7 +167,7 @@ pub(crate) async fn remote_command_loop(
                             name: p.name.clone(),
                             path: p.path.clone(),
                             show_in_overview: p.show_in_overview,
-                            layout: p.layout.as_ref().map(|l| l.to_api()),
+                            layout: p.layout.as_ref().map(|l| l.to_api_with_sizes(&size_map)),
                             terminal_names: p.terminal_names.clone(),
                             git_status,
                             folder_color: p.folder_color,
