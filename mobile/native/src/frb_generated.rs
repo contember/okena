@@ -1180,6 +1180,7 @@ impl SseDecode for crate::api::state::ProjectInfo {
         let mut var_terminalIds = <Vec<String>>::sse_decode(deserializer);
         let mut var_terminalNames =
             <std::collections::HashMap<String, String>>::sse_decode(deserializer);
+        let mut var_folderColor = <String>::sse_decode(deserializer);
         return crate::api::state::ProjectInfo {
             id: var_id,
             name: var_name,
@@ -1187,6 +1188,7 @@ impl SseDecode for crate::api::state::ProjectInfo {
             show_in_overview: var_isVisible,
             terminal_ids: var_terminalIds,
             terminal_names: var_terminalNames,
+            folder_color: var_folderColor,
         };
     }
 }
@@ -1417,6 +1419,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::state::ProjectInfo {
             self.show_in_overview.into_into_dart().into_dart(),
             self.terminal_ids.into_into_dart().into_dart(),
             self.terminal_names.into_into_dart().into_dart(),
+            self.folder_color.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1663,6 +1666,7 @@ impl SseEncode for crate::api::state::ProjectInfo {
         <bool>::sse_encode(self.show_in_overview, serializer);
         <Vec<String>>::sse_encode(self.terminal_ids, serializer);
         <std::collections::HashMap<String, String>>::sse_encode(self.terminal_names, serializer);
+        <String>::sse_encode(self.folder_color, serializer);
     }
 }
 
