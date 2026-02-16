@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum SpecialKey {
     Enter,
     Escape,
+    Backspace,
+    Delete,
     CtrlC,
     CtrlD,
     CtrlZ,
@@ -25,6 +27,8 @@ impl SpecialKey {
         match self {
             SpecialKey::Enter => b"\r",
             SpecialKey::Escape => b"\x1b",
+            SpecialKey::Backspace => b"\x7f",
+            SpecialKey::Delete => b"\x1b[3~",
             SpecialKey::CtrlC => b"\x03",
             SpecialKey::CtrlD => b"\x04",
             SpecialKey::CtrlZ => b"\x1a",
@@ -50,6 +54,8 @@ mod tests {
         let keys = vec![
             SpecialKey::Enter,
             SpecialKey::Escape,
+            SpecialKey::Backspace,
+            SpecialKey::Delete,
             SpecialKey::CtrlC,
             SpecialKey::CtrlD,
             SpecialKey::CtrlZ,
@@ -74,6 +80,8 @@ mod tests {
     fn special_key_to_bytes() {
         assert_eq!(SpecialKey::Enter.to_bytes(), b"\r");
         assert_eq!(SpecialKey::Escape.to_bytes(), b"\x1b");
+        assert_eq!(SpecialKey::Backspace.to_bytes(), b"\x7f");
+        assert_eq!(SpecialKey::Delete.to_bytes(), b"\x1b[3~");
         assert_eq!(SpecialKey::CtrlC.to_bytes(), b"\x03");
         assert_eq!(SpecialKey::CtrlD.to_bytes(), b"\x04");
         assert_eq!(SpecialKey::CtrlZ.to_bytes(), b"\x1a");
