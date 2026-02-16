@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `collect_layout_ids_vec`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `collect_layout_ids`, `find_terminal_size`, `folder_color_to_string`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`
 
 /// Get all projects from the cached remote state.
 List<ProjectInfo> getProjects({required String connId}) =>
@@ -16,6 +16,14 @@ List<ProjectInfo> getProjects({required String connId}) =>
 /// Get the focused project ID from the cached remote state.
 String? getFocusedProjectId({required String connId}) =>
     RustLib.instance.api.crateApiStateGetFocusedProjectId(connId: connId);
+
+/// Get all folders from the cached remote state.
+List<FolderInfo> getFolders({required String connId}) =>
+    RustLib.instance.api.crateApiStateGetFolders(connId: connId);
+
+/// Get the project order from the cached remote state.
+List<String> getProjectOrder({required String connId}) =>
+    RustLib.instance.api.crateApiStateGetProjectOrder(connId: connId);
 
 /// Check if a terminal has unprocessed output (dirty flag).
 bool isDirty({required String connId, required String terminalId}) => RustLib
@@ -36,11 +44,33 @@ Future<void> sendSpecialKey({
   key: key,
 );
 
+/// Get a project's layout tree as JSON.
+///
+/// Returns the `ApiLayoutNode` serialized as JSON, or `None` if the project
+/// has no layout. Using JSON avoids complex recursive enum FRB codegen.
+String? getProjectLayoutJson({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateGetProjectLayoutJson(
+  connId: connId,
+  projectId: projectId,
+);
+
 /// Get all terminal IDs from the cached remote state (flat list).
 List<String> getAllTerminalIds({required String connId}) =>
     RustLib.instance.api.crateApiStateGetAllTerminalIds(connId: connId);
 
-/// Create a new terminal in the given project via POST /v1/actions.
+/// Get the server-side terminal size from the cached state.
+/// Returns (0, 0) if the terminal is not found or size is not available.
+ServerTerminalSize getServerTerminalSize({
+  required String connId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateGetServerTerminalSize(
+  connId: connId,
+  terminalId: terminalId,
+);
+
+/// Create a new terminal in a project.
 Future<void> createTerminal({
   required String connId,
   required String projectId,
@@ -49,7 +79,7 @@ Future<void> createTerminal({
   projectId: projectId,
 );
 
-/// Close a terminal in the given project via POST /v1/actions.
+/// Close a terminal in a project.
 Future<void> closeTerminal({
   required String connId,
   required String projectId,
@@ -60,22 +90,62 @@ Future<void> closeTerminal({
   terminalId: terminalId,
 );
 
+/// Focus a terminal in a project.
+Future<void> focusTerminal({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateFocusTerminal(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+);
+
+/// FFI-friendly folder info.
+class FolderInfo {
+  final String id;
+  final String name;
+  final List<String> projectIds;
+  final String folderColor;
+
+  const FolderInfo({
+    required this.id,
+    required this.name,
+    required this.projectIds,
+    required this.folderColor,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ projectIds.hashCode ^ folderColor.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FolderInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          projectIds == other.projectIds &&
+          folderColor == other.folderColor;
+}
+
 /// Flat FFI-friendly project info.
 class ProjectInfo {
   final String id;
   final String name;
   final String path;
-  final bool showInOverview;
+  final bool isVisible;
   final List<String> terminalIds;
-  final Map<String, String> terminalNames;
+  final String folderColor;
 
   const ProjectInfo({
     required this.id,
     required this.name,
     required this.path,
-    required this.showInOverview,
+    required this.isVisible,
     required this.terminalIds,
-    required this.terminalNames,
+    required this.folderColor,
   });
 
   @override
@@ -83,9 +153,9 @@ class ProjectInfo {
       id.hashCode ^
       name.hashCode ^
       path.hashCode ^
-      showInOverview.hashCode ^
+      isVisible.hashCode ^
       terminalIds.hashCode ^
-      terminalNames.hashCode;
+      folderColor.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -95,7 +165,26 @@ class ProjectInfo {
           id == other.id &&
           name == other.name &&
           path == other.path &&
-          showInOverview == other.showInOverview &&
+          isVisible == other.isVisible &&
           terminalIds == other.terminalIds &&
-          terminalNames == other.terminalNames;
+          folderColor == other.folderColor;
+}
+
+/// Server terminal size returned via FFI.
+class ServerTerminalSize {
+  final int cols;
+  final int rows;
+
+  const ServerTerminalSize({required this.cols, required this.rows});
+
+  @override
+  int get hashCode => cols.hashCode ^ rows.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerTerminalSize &&
+          runtimeType == other.runtimeType &&
+          cols == other.cols &&
+          rows == other.rows;
 }
