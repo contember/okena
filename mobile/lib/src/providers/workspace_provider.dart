@@ -9,6 +9,8 @@ import '../../src/rust/api/connection.dart' as conn_ffi;
 class WorkspaceProvider extends ChangeNotifier {
   final ConnectionProvider _connection;
   List<ffi.ProjectInfo> _projects = [];
+  List<ffi.FolderInfo> _folders = [];
+  List<String> _projectOrder = [];
   String? _selectedProjectId;
   String? _selectedTerminalId;
   Set<String>? _previousTerminalIds;
@@ -16,6 +18,8 @@ class WorkspaceProvider extends ChangeNotifier {
   double _secondsSinceActivity = 0;
 
   List<ffi.ProjectInfo> get projects => _projects;
+  List<ffi.FolderInfo> get folders => _folders;
+  List<String> get projectOrder => _projectOrder;
   String? get selectedProjectId => _selectedProjectId;
   String? get selectedTerminalId => _selectedTerminalId;
   double get secondsSinceActivity => _secondsSinceActivity;
@@ -52,6 +56,8 @@ class WorkspaceProvider extends ChangeNotifier {
     } else {
       _stopPolling();
       _projects = [];
+      _folders = [];
+      _projectOrder = [];
       _selectedProjectId = null;
       _selectedTerminalId = null;
       notifyListeners();
@@ -78,12 +84,24 @@ class WorkspaceProvider extends ChangeNotifier {
     if (connId == null) return;
 
     final newProjects = ffi.getProjects(connId: connId);
+    final newFolders = ffi.getFolders(connId: connId);
+    final newProjectOrder = ffi.getProjectOrder(connId: connId);
     final focusedId = ffi.getFocusedProjectId(connId: connId);
 
     bool changed = false;
 
     if (!_projectListEquals(newProjects, _projects)) {
       _projects = newProjects;
+      changed = true;
+    }
+
+    if (!_folderListEquals(newFolders, _folders)) {
+      _folders = newFolders;
+      changed = true;
+    }
+
+    if (!_stringListEquals(newProjectOrder, _projectOrder)) {
+      _projectOrder = newProjectOrder;
       changed = true;
     }
 
@@ -136,8 +154,27 @@ class WorkspaceProvider extends ChangeNotifier {
       List<ffi.ProjectInfo> a, List<ffi.ProjectInfo> b) {
     if (a.length != b.length) return false;
     for (int i = 0; i < a.length; i++) {
+      if (a[i].id != b[i].id ||
+          a[i].name != b[i].name ||
+          a[i].folderColor != b[i].folderColor) return false;
+    }
+    return true;
+  }
+
+  bool _folderListEquals(
+      List<ffi.FolderInfo> a, List<ffi.FolderInfo> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
       if (a[i].id != b[i].id || a[i].name != b[i].name) return false;
       if (!listEquals(a[i].terminalIds, b[i].terminalIds)) return false;
+    }
+    return true;
+  }
+
+  bool _stringListEquals(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
     }
     return true;
   }

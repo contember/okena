@@ -1,15 +1,56 @@
+import 'dart:ui';
+
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/connection_provider.dart';
 import '../providers/workspace_provider.dart';
 import '../rust/api/state.dart' as state_ffi;
 import '../widgets/project_drawer.dart';
-import '../widgets/key_toolbar.dart';
+import '../widgets/key_toolbar.dart' show KeyToolbar, KeyModifiers;
 import '../widgets/terminal_view.dart';
+import '../theme/app_theme.dart';
 
-class WorkspaceScreen extends StatelessWidget {
+class WorkspaceScreen extends StatefulWidget {
   const WorkspaceScreen({super.key});
+
+  @override
+  State<WorkspaceScreen> createState() => _WorkspaceScreenState();
+}
+
+class _WorkspaceScreenState extends State<WorkspaceScreen> {
+  late PageController _pageController;
+  final _keyModifiers = KeyModifiers();
+  int _currentPage = 0;
+  String? _lastProjectId;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _keyModifiers.dispose();
+    super.dispose();
+  }
+
+  void _syncState(String projectId, List<String> terminalIds) {
+    if (projectId != _lastProjectId) {
+      _lastProjectId = projectId;
+      _currentPage = 0;
+      if (_pageController.hasClients) {
+        _pageController.jumpToPage(0);
+      }
+    }
+    if (_currentPage >= terminalIds.length && terminalIds.isNotEmpty) {
+      _currentPage = terminalIds.length - 1;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -17,315 +58,283 @@ class WorkspaceScreen extends StatelessWidget {
     final connection = context.watch<ConnectionProvider>();
     final project = workspace.selectedProject;
     final connId = connection.connId;
-    final selectedTerminalId = workspace.selectedTerminalId;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: _ProjectSwitcher(
-          projects: workspace.projects,
-          selectedProjectId: workspace.selectedProjectId,
-          onSelect: (id) => workspace.selectProject(id),
-        ),
-        leading: Builder(
-          builder: (ctx) => IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () => Scaffold.of(ctx).openDrawer(),
+    if (connId == null || project == null) {
+      return Scaffold(
+        backgroundColor: OkenaColors.background,
+        body: Center(
+          child: Text(
+            'No project selected',
+            style: OkenaTypography.callout.copyWith(color: OkenaColors.textTertiary),
           ),
         ),
-        actions: [
-          // Connection quality indicator
-          if (connId != null)
-            Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: _ConnectionDot(
-                secondsSinceActivity: workspace.secondsSinceActivity,
+      );
+    }
+
+    final terminalIds = project.terminalIds;
+    _syncState(project.id, terminalIds);
+
+    final safeCurrentPage = terminalIds.isNotEmpty
+        ? _currentPage.clamp(0, terminalIds.length - 1)
+        : 0;
+    final currentTerminalId = terminalIds.isNotEmpty
+        ? terminalIds[safeCurrentPage]
+        : null;
+
+    return Scaffold(
+      backgroundColor: OkenaColors.background,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            _Header(
+              projectName: project.name,
+              folderColor: project.folderColor,
+              terminalCount: terminalIds.length,
+              currentPage: safeCurrentPage,
+              onCreateTerminal: () {
+                HapticFeedback.mediumImpact();
+                state_ffi.createTerminal(connId: connId, projectId: project.id);
+              },
+              onCloseTerminal: currentTerminalId != null
+                  ? () {
+                      HapticFeedback.mediumImpact();
+                      state_ffi.closeTerminal(
+                        connId: connId,
+                        projectId: project.id,
+                        terminalId: currentTerminalId,
+                      );
+                    }
+                  : null,
+            ),
+            Expanded(
+              child: terminalIds.isEmpty
+                  ? _buildEmptyState(connId, project.id)
+                  : PageView.builder(
+                      controller: _pageController,
+                      itemCount: terminalIds.length,
+                      onPageChanged: (i) => setState(() => _currentPage = i),
+                      itemBuilder: (context, index) => TerminalView(
+                        connId: connId,
+                        terminalId: terminalIds[index],
+                        modifiers: _keyModifiers,
+                      ),
+                    ),
+            ),
+            KeyToolbar(
+              connId: connId,
+              terminalId: currentTerminalId,
+              modifiers: _keyModifiers,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(String connId, String projectId) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.terminal_rounded, color: OkenaColors.textTertiary.withOpacity(0.3), size: 48),
+          const SizedBox(height: 12),
+          Text(
+            'No terminals',
+            style: OkenaTypography.callout.copyWith(color: OkenaColors.textTertiary),
+          ),
+          const SizedBox(height: 16),
+          GestureDetector(
+            onTap: () {
+              HapticFeedback.mediumImpact();
+              state_ffi.createTerminal(connId: connId, projectId: projectId);
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: OkenaColors.accent.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: OkenaColors.accent.withOpacity(0.3), width: 0.5),
+              ),
+              child: Text(
+                'New Terminal',
+                style: OkenaTypography.callout.copyWith(color: OkenaColors.accent),
               ),
             ),
-          if (connId != null && project != null)
-            IconButton(
-              icon: const Icon(Icons.add),
-              tooltip: 'New Terminal',
-              onPressed: () {
-                state_ffi.createTerminal(
-                  connId: connId,
-                  projectId: project.id,
-                );
-              },
-            ),
+          ),
         ],
       ),
-      drawer: const ProjectDrawer(),
-      body: connId == null || project == null
-          ? const Center(child: Text('No project selected'))
-          : selectedTerminalId == null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
-                        'No terminals',
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                        onPressed: () {
-                          state_ffi.createTerminal(
-                            connId: connId,
-                            projectId: project.id,
-                          );
-                        },
-                        icon: const Icon(Icons.add),
-                        label: const Text('New Terminal'),
-                      ),
-                    ],
-                  ),
-                )
-              : Column(
-                  children: [
-                    if (project.terminalIds.length > 1)
-                      _TerminalTabBar(
-                        terminalIds: project.terminalIds,
-                        terminalNames: project.terminalNames,
-                        selectedTerminalId: selectedTerminalId,
-                        projectId: project.id,
-                        connId: connId,
-                        onSelect: (id) => workspace.selectTerminal(id),
-                      ),
-                    Expanded(
-                      child: TerminalView(
-                        connId: connId,
-                        terminalId: selectedTerminalId,
-                        onTerminalSwipe: (direction) {
-                          final ids = project.terminalIds;
-                          if (ids.length <= 1) return;
-                          final idx = ids.indexOf(selectedTerminalId);
-                          if (idx < 0) return;
-                          final newIdx = (idx + direction).clamp(0, ids.length - 1);
-                          if (newIdx != idx) {
-                            workspace.selectTerminal(ids[newIdx]);
-                          }
-                        },
-                      ),
-                    ),
-                    KeyToolbar(
-                      connId: connId,
-                      terminalId: selectedTerminalId,
-                    ),
-                  ],
-                ),
     );
   }
 }
 
-/// Tappable project name in AppBar that opens a dropdown to switch projects.
-class _ProjectSwitcher extends StatelessWidget {
-  final List<state_ffi.ProjectInfo> projects;
-  final String? selectedProjectId;
-  final ValueChanged<String> onSelect;
+// ── Header with frosted glass ──────────────────────────────────────────
 
-  const _ProjectSwitcher({
-    required this.projects,
-    required this.selectedProjectId,
-    required this.onSelect,
+Color _folderColorToColor(String colorName) {
+  return switch (colorName) {
+    'red' => const Color(0xFFEF4444),
+    'orange' => const Color(0xFFF97316),
+    'yellow' => const Color(0xFFEAB308),
+    'lime' => const Color(0xFF84CC16),
+    'green' => const Color(0xFF22C55E),
+    'teal' => const Color(0xFF14B8A6),
+    'cyan' => const Color(0xFF06B6D4),
+    'blue' => const Color(0xFF3B82F6),
+    'indigo' => const Color(0xFF6366F1),
+    'purple' => const Color(0xFFA855F7),
+    'pink' => const Color(0xFFEC4899),
+    _ => OkenaColors.textTertiary,
+  };
+}
+
+class _Header extends StatelessWidget {
+  final String projectName;
+  final String folderColor;
+  final int terminalCount;
+  final int currentPage;
+  final VoidCallback onCreateTerminal;
+  final VoidCallback? onCloseTerminal;
+
+  const _Header({
+    required this.projectName,
+    required this.folderColor,
+    required this.terminalCount,
+    required this.currentPage,
+    required this.onCreateTerminal,
+    this.onCloseTerminal,
   });
 
   @override
   Widget build(BuildContext context) {
-    final selected = projects
-            .where((p) => p.id == selectedProjectId)
-            .firstOrNull ??
-        projects.firstOrNull;
-    final name = selected?.name ?? 'No Project';
+    final color = _folderColorToColor(folderColor);
 
-    if (projects.length <= 1) {
-      return Text(name);
-    }
-
-    return GestureDetector(
-      onTap: () => _showProjectMenu(context),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              name,
-              overflow: TextOverflow.ellipsis,
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: const BoxDecoration(
+            color: OkenaColors.glassBg,
+            border: Border(
+              bottom: BorderSide(color: OkenaColors.glassStroke, width: 0.5),
             ),
           ),
-          const SizedBox(width: 4),
-          const Icon(Icons.arrow_drop_down, size: 20),
-        ],
-      ),
-    );
-  }
-
-  void _showProjectMenu(BuildContext context) {
-    final RenderBox button = context.findRenderObject() as RenderBox;
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox;
-    final position = RelativeRect.fromRect(
-      Rect.fromPoints(
-        button.localToGlobal(Offset(0, button.size.height), ancestor: overlay),
-        button.localToGlobal(button.size.bottomRight(Offset.zero),
-            ancestor: overlay),
-      ),
-      Offset.zero & overlay.size,
-    );
-
-    showMenu<String>(
-      context: context,
-      position: position,
-      items: projects.map((p) {
-        return PopupMenuItem<String>(
-          value: p.id,
           child: Row(
             children: [
-              Icon(
-                Icons.folder,
-                size: 18,
-                color: p.id == selectedProjectId
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
+              // Project avatar
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                alignment: Alignment.center,
                 child: Text(
-                  p.name,
-                  overflow: TextOverflow.ellipsis,
+                  projectName.isNotEmpty ? projectName[0].toUpperCase() : '?',
                   style: TextStyle(
-                    fontWeight: p.id == selectedProjectId
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    color: color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              // Project name + chevron (tappable → opens project sheet)
+              Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    ProjectSheet.show(context);
+                  },
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          projectName,
+                          style: OkenaTypography.callout.copyWith(
+                            color: OkenaColors.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(
+                        CupertinoIcons.chevron_down,
+                        color: OkenaColors.textTertiary,
+                        size: 12,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Page indicator dots (only when >1 terminal)
+              if (terminalCount > 1) ...[
+                const SizedBox(width: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: List.generate(terminalCount, (i) {
+                    final isActive = i == currentPage;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2.5),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        width: isActive ? 8 : 6,
+                        height: isActive ? 8 : 6,
+                        decoration: BoxDecoration(
+                          color: isActive ? OkenaColors.accent : OkenaColors.textTertiary,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    );
+                  }),
+                ),
+              ],
+              const SizedBox(width: 8),
+              // Close terminal button
+              if (onCloseTerminal != null)
+                GestureDetector(
+                  onTap: onCloseTerminal,
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: OkenaColors.surfaceElevated,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.close_rounded,
+                      color: OkenaColors.textTertiary,
+                      size: 14,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 4),
+              // Create terminal button
+              GestureDetector(
+                onTap: onCreateTerminal,
+                child: Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: OkenaColors.surfaceElevated,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.add_rounded,
+                    color: OkenaColors.textSecondary,
+                    size: 16,
                   ),
                 ),
               ),
             ],
           ),
-        );
-      }).toList(),
-    ).then((value) {
-      if (value != null) {
-        onSelect(value);
-      }
-    });
-  }
-}
-
-/// Horizontal tab bar showing terminals in the current project.
-class _TerminalTabBar extends StatelessWidget {
-  final List<String> terminalIds;
-  final Map<String, String> terminalNames;
-  final String selectedTerminalId;
-  final String projectId;
-  final String connId;
-  final ValueChanged<String> onSelect;
-
-  const _TerminalTabBar({
-    required this.terminalIds,
-    required this.terminalNames,
-    required this.selectedTerminalId,
-    required this.projectId,
-    required this.connId,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 36,
-      color: const Color(0xFF252526),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: terminalIds.length,
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        itemBuilder: (context, index) {
-          final tid = terminalIds[index];
-          final isSelected = tid == selectedTerminalId;
-          final name = terminalNames[tid] ?? 'Terminal ${index + 1}';
-
-          return GestureDetector(
-            onTap: () => onSelect(tid),
-            onLongPress: () => _showCloseDialog(context, tid, name),
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? const Color(0xFF3C3C3C)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                name,
-                style: TextStyle(
-                  color: isSelected ? Colors.white : Colors.white54,
-                  fontSize: 12,
-                  fontFamily: 'JetBrainsMono',
-                  fontWeight:
-                      isSelected ? FontWeight.bold : FontWeight.normal,
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _showCloseDialog(
-      BuildContext context, String terminalId, String name) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Close terminal'),
-        content: Text('Close "$name"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              state_ffi.closeTerminal(
-                connId: connId,
-                projectId: projectId,
-                terminalId: terminalId,
-              );
-            },
-            child: const Text('Close',
-                style: TextStyle(color: Colors.redAccent)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Small colored dot indicating connection quality.
-class _ConnectionDot extends StatelessWidget {
-  final double secondsSinceActivity;
-
-  const _ConnectionDot({required this.secondsSinceActivity});
-
-  @override
-  Widget build(BuildContext context) {
-    final Color color;
-    if (secondsSinceActivity < 3) {
-      color = Colors.green;
-    } else if (secondsSinceActivity < 10) {
-      color = Colors.orange;
-    } else {
-      color = Colors.red;
-    }
-
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
+        ),
       ),
     );
   }
