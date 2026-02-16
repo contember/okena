@@ -112,10 +112,48 @@ fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
     }
 }
 
+/// Collect terminal sizes from all projects in a StateResponse.
+///
+/// Returns a map of terminal_id → (cols, rows) for terminals that have
+/// size information in the layout tree.
+pub fn collect_terminal_sizes(state: &StateResponse) -> std::collections::HashMap<String, (u16, u16)> {
+    let mut sizes = std::collections::HashMap::new();
+    for project in &state.projects {
+        if let Some(ref layout) = project.layout {
+            collect_layout_terminal_sizes(layout, &mut sizes);
+        }
+    }
+    sizes
+}
+
+fn collect_layout_terminal_sizes(
+    node: &ApiLayoutNode,
+    sizes: &mut std::collections::HashMap<String, (u16, u16)>,
+) {
+    match node {
+        ApiLayoutNode::Terminal {
+            terminal_id,
+            cols,
+            rows,
+            ..
+        } => {
+            if let (Some(id), Some(c), Some(r)) = (terminal_id, cols, rows) {
+                sizes.insert(id.clone(), (*c, *r));
+            }
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_layout_terminal_sizes(child, sizes);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::{ApiLayoutNode, ApiProject, StateResponse};
+    use crate::theme::FolderColor;
     use crate::types::SplitDirection;
 
     fn make_state(projects: Vec<ApiProject>) -> StateResponse {
@@ -124,6 +162,8 @@ mod tests {
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,
+            folders: Vec::new(),
+            project_order: Vec::new(),
         }
     }
 
@@ -135,6 +175,8 @@ mod tests {
                 terminal_id: Some(terminal_ids[0].to_string()),
                 minimized: false,
                 detached: false,
+                cols: None,
+                rows: None,
             })
         } else {
             Some(ApiLayoutNode::Split {
@@ -146,6 +188,8 @@ mod tests {
                         terminal_id: Some(tid.to_string()),
                         minimized: false,
                         detached: false,
+                        cols: None,
+                        rows: None,
                     })
                     .collect(),
             })
@@ -157,6 +201,7 @@ mod tests {
             is_visible: true,
             layout,
             terminal_names: Default::default(),
+            folder_color: FolderColor::default(),
         }
     }
 
@@ -194,5 +239,40 @@ mod tests {
         assert!(diff.added_terminals.is_empty());
         assert!(diff.removed_terminals.is_empty());
         assert!(diff.changed_projects.is_empty());
+    }
+
+    #[test]
+    fn collect_terminal_sizes_extracts_from_layout() {
+        let state = make_state(vec![ApiProject {
+            id: "p1".into(),
+            name: "p1".into(),
+            path: "/tmp".into(),
+            is_visible: true,
+            layout: Some(ApiLayoutNode::Split {
+                direction: SplitDirection::Horizontal,
+                sizes: vec![50.0, 50.0],
+                children: vec![
+                    ApiLayoutNode::Terminal {
+                        terminal_id: Some("t1".into()),
+                        minimized: false,
+                        detached: false,
+                        cols: Some(120),
+                        rows: Some(40),
+                    },
+                    ApiLayoutNode::Terminal {
+                        terminal_id: Some("t2".into()),
+                        minimized: false,
+                        detached: false,
+                        cols: None,
+                        rows: None,
+                    },
+                ],
+            }),
+            terminal_names: Default::default(),
+            folder_color: FolderColor::default(),
+        }]);
+        let sizes = collect_terminal_sizes(&state);
+        assert_eq!(sizes.get("t1"), Some(&(120, 40)));
+        assert_eq!(sizes.get("t2"), None);
     }
 }

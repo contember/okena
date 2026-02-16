@@ -1,7 +1,7 @@
 use crate::api::StateResponse;
 use crate::client::config::RemoteConnectionConfig;
 use crate::client::id::make_prefixed_id;
-use crate::client::state::{collect_state_terminal_ids, diff_states};
+use crate::client::state::{collect_state_terminal_ids, collect_terminal_sizes, diff_states};
 use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, WsClientMessage, TOKEN_REFRESH_AGE_SECS,
 };
@@ -17,12 +17,15 @@ use tokio_tungstenite::tungstenite;
 pub trait ConnectionHandler: Send + Sync + 'static {
     /// Terminal discovered — create platform terminal object.
     /// `ws_sender` is for constructing a transport that sends WS commands.
+    /// `cols`/`rows` are the server's current terminal dimensions (0 if unknown).
     fn create_terminal(
         &self,
         connection_id: &str,
         terminal_id: &str,
         prefixed_id: &str,
         ws_sender: async_channel::Sender<WsClientMessage>,
+        cols: u16,
+        rows: u16,
     );
     /// Binary PTY output arrived — route to the terminal's emulator.
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]);
@@ -528,10 +531,12 @@ impl<H: ConnectionHandler> RemoteClient<H> {
 
         // Step 4: Create terminal objects for all remote terminals
         let terminal_ids = collect_state_terminal_ids(&state);
+        let size_map = collect_terminal_sizes(&state);
 
         for tid in &terminal_ids {
             let prefixed = make_prefixed_id(&config.id, tid);
-            handler.create_terminal(&config.id, tid, &prefixed, ws_tx.clone());
+            let (cols, rows) = size_map.get(tid).copied().unwrap_or((0, 0));
+            handler.create_terminal(&config.id, tid, &prefixed, ws_tx.clone(), cols, rows);
         }
 
         // Notify state received
@@ -734,16 +739,24 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             {
                                                 let diff =
                                                     diff_states(&cached_state, &new_state);
+                                                let new_size_map =
+                                                    collect_terminal_sizes(&new_state);
 
                                                 // Add new terminals via handler
                                                 for tid in &diff.added_terminals {
                                                     let prefixed =
                                                         make_prefixed_id(&config_id, tid);
+                                                    let (cols, rows) = new_size_map
+                                                        .get(tid)
+                                                        .copied()
+                                                        .unwrap_or((0, 0));
                                                     handler_clone.create_terminal(
                                                         &config_id,
                                                         tid,
                                                         &prefixed,
                                                         ws_tx_clone.clone(),
+                                                        cols,
+                                                        rows,
                                                     );
                                                 }
 
