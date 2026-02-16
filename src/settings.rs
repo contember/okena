@@ -155,6 +155,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set the theme mode
+    pub fn set_theme_mode(&mut self, value: crate::theme::ThemeMode, cx: &mut Context<Self>) {
+        self.settings.theme_mode = value;
+        self.save_and_notify(cx);
+    }
+
     /// Synchronously flush any pending settings save (called on quit)
     pub fn flush_pending_save(&self) {
         if self.save_pending.swap(false, Ordering::Relaxed) {

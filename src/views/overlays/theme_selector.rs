@@ -7,7 +7,7 @@ use crate::views::components::{
     badge, handle_list_overlay_key, modal_backdrop, modal_content, modal_header, ListOverlayAction,
     ListOverlayConfig, ListOverlayState,
 };
-use crate::workspace::persistence::{load_settings, save_settings};
+use crate::settings::settings_entity;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -149,10 +149,8 @@ impl ThemeSelector {
             cx.notify();
         });
 
-        // Save to settings
-        let mut settings = load_settings();
-        settings.theme_mode = mode;
-        let _ = save_settings(&settings);
+        // Save to settings (through SettingsState to keep in-memory state in sync)
+        settings_entity(cx).update(cx, |s, cx| s.set_theme_mode(mode, cx));
 
         self.state.selected_index = index;
         cx.notify();
