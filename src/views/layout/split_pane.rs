@@ -89,7 +89,9 @@ pub fn compute_resize(
             let scale = if *visible_sizes_sum > 0.0 { *visible_sizes_sum } else { 100.0 };
             let delta_percent = delta / container_size * scale;
 
-            let left_size = (initial_sizes[left_child] + delta_percent).clamp(5.0, combined_size - 5.0);
+            let min_size = 5.0_f32;
+            let max_size = (combined_size - min_size).max(min_size);
+            let left_size = (initial_sizes[left_child] + delta_percent).clamp(min_size, max_size);
             let right_size = combined_size - left_size;
 
             // Build new sizes: keep all others unchanged, update only the two children
@@ -125,7 +127,9 @@ pub fn compute_resize(
             let delta_px = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
             let delta_percent = delta_px / container_width * 100.0;
 
-            let left_new = (left_initial + delta_percent).clamp(5.0, combined - 5.0);
+            let min_width = 5.0_f32;
+            let max_width = (combined - min_width).max(min_width);
+            let left_new = (left_initial + delta_percent).clamp(min_width, max_width);
             let right_new = combined - left_new;
 
             let mut new_widths = initial_widths.clone();
