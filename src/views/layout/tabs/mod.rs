@@ -356,17 +356,20 @@ impl LayoutContainer {
                 .cursor_pointer()
                 .relative()
                 .px(px(8.0))
-                .py(px(4.0))
+                .pt(px(4.0))
                 .border_r_1()
                 .border_color(rgb(t.border))
                 .text_size(px(12.0))
+                .items_center()
                 .when(is_active, |d| {
-                    d.bg(rgb(t.bg_primary))
+                    d.bg(rgb(t.term_background))
                         .text_color(rgb(t.text_primary))
+                        .pb(px(0.0))
                 })
                 .when(!is_active, |d| {
-                    d.bg(rgb(t.bg_header))
+                    d.bg(rgb(t.term_background_unfocused))
                         .text_color(rgb(t.text_secondary))
+                        .pb(px(4.0))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                 })
                 // Drop animation effect - glow highlight
@@ -670,7 +673,7 @@ impl LayoutContainer {
                     .flex()
                     .items_center()
                     .gap(px(0.0))
-                    .bg(rgb(t.bg_header))
+                    .bg(rgb(t.term_background_unfocused))
                     .children(tab_elements)
                     .child(end_drop_zone)
                     .child(
@@ -772,11 +775,13 @@ impl LayoutContainer {
                 .cursor_pointer()
                 .relative()
                 .px(px(8.0))
-                .py(px(4.0))
+                .pt(px(4.0))
+                .pb(px(0.0))
                 .border_r_1()
                 .border_color(rgb(t.border))
                 .text_size(px(12.0))
-                .bg(rgb(t.bg_primary))
+                .items_center()
+                .bg(rgb(t.term_background))
                 .text_color(rgb(t.text_primary))
                 .child({
                     if is_renaming_this {
@@ -896,7 +901,7 @@ impl LayoutContainer {
             .flex()
             .items_center()
             .gap(px(0.0))
-            .bg(rgb(t.bg_header))
+            .bg(rgb(t.term_background_unfocused))
             .child(tab_element)
             .child(empty_area)
             .child(
