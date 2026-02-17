@@ -719,6 +719,17 @@ impl LayoutNode {
             }
         }
 
+        // Fix negative or zero sizes (can happen from resize bugs)
+        if let LayoutNode::Split { sizes, children, .. } = self {
+            if sizes.iter().any(|s| *s <= 0.0 || !s.is_finite()) {
+                log::warn!("Layout has invalid sizes {:?}, resetting to equal", sizes);
+                let equal = 1.0 / children.len() as f32;
+                for s in sizes.iter_mut() {
+                    *s = equal;
+                }
+            }
+        }
+
         // Unwrap single-child or empty containers
         let should_unwrap = match self {
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => children.len() <= 1,
@@ -1171,6 +1182,40 @@ mod tests {
                 assert_eq!(terminal_id.as_deref(), Some("t1"));
             }
             _ => panic!("Expected terminal after deep normalize"),
+        }
+    }
+
+    #[test]
+    fn normalize_negative_sizes_reset_to_equal() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![5.0, 2.5, 2.5, -12.0],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3"), terminal("t4")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert_eq!(sizes.len(), 4);
+            for s in sizes {
+                assert!(*s > 0.0, "all sizes should be positive, got {}", s);
+            }
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn normalize_zero_size_reset_to_equal() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![5.0, 0.0],
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert_eq!(sizes.len(), 2);
+            assert!((sizes[0] - sizes[1]).abs() < f32::EPSILON);
+        } else {
+            panic!("Expected split");
         }
     }
 

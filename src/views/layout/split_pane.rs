@@ -90,7 +90,9 @@ pub fn compute_resize(
             let delta_percent = delta / container_size * scale;
 
             let min_size = 5.0_f32;
-            let max_size = (combined_size - min_size).max(min_size);
+            // Ensure combined size is at least 2*min so both sides stay positive
+            let combined_size = combined_size.max(2.0 * min_size);
+            let max_size = combined_size - min_size;
             let left_size = (initial_sizes[left_child] + delta_percent).clamp(min_size, max_size);
             let right_size = combined_size - left_size;
 
