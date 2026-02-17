@@ -719,11 +719,15 @@ impl LayoutNode {
             }
         }
 
-        // Fix negative or zero sizes (can happen from resize bugs)
+        // Fix invalid sizes: negative, zero, non-finite, or too small to allow resize
+        // (resize needs combined_size > 2*min_size=10.0 for any adjacent pair)
         if let LayoutNode::Split { sizes, children, .. } = self {
-            if sizes.iter().any(|s| *s <= 0.0 || !s.is_finite()) {
-                log::warn!("Layout has invalid sizes {:?}, resetting to equal", sizes);
-                let equal = 1.0 / children.len() as f32;
+            let min_resize = 10.0_f32; // 2 * min_size from split_pane.rs
+            let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
+            let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
+            if has_invalid || has_tiny_pair {
+                log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
+                let equal = 100.0 / children.len() as f32;
                 for s in sizes.iter_mut() {
                     *s = equal;
                 }
@@ -1195,8 +1199,9 @@ mod tests {
         node.normalize();
         if let LayoutNode::Split { sizes, .. } = &node {
             assert_eq!(sizes.len(), 4);
+            let expected = 100.0 / 4.0;
             for s in sizes {
-                assert!(*s > 0.0, "all sizes should be positive, got {}", s);
+                assert!((*s - expected).abs() < f32::EPSILON);
             }
         } else {
             panic!("Expected split");
@@ -1213,7 +1218,45 @@ mod tests {
         node.normalize();
         if let LayoutNode::Split { sizes, .. } = &node {
             assert_eq!(sizes.len(), 2);
-            assert!((sizes[0] - sizes[1]).abs() < f32::EPSILON);
+            assert!((sizes[0] - 50.0).abs() < f32::EPSILON);
+            assert!((sizes[1] - 50.0).abs() < f32::EPSILON);
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn normalize_tiny_adjacent_sizes_reset_to_equal() {
+        // sizes [5.0, 5.0, 5.0] — adjacent pairs sum to 10.0 = 2*min_size,
+        // leaving no room for resize
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![5.0, 5.0, 5.0],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert_eq!(sizes.len(), 3);
+            let expected = 100.0 / 3.0;
+            for s in sizes {
+                assert!((*s - expected).abs() < f32::EPSILON);
+            }
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn normalize_valid_sizes_untouched() {
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![terminal("t1"), terminal("t2")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert!((sizes[0] - 50.0).abs() < f32::EPSILON);
+            assert!((sizes[1] - 50.0).abs() < f32::EPSILON);
         } else {
             panic!("Expected split");
         }
