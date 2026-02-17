@@ -105,6 +105,11 @@ impl Workspace {
             log::info!("Created new tab group");
             true
         });
+
+        // Focus the new tab
+        let mut new_path = path.to_vec();
+        new_path.push(1);
+        self.set_focused_terminal(project_id.to_string(), new_path, cx);
     }
 
     /// Add a new tab to an existing Tabs container
@@ -114,16 +119,23 @@ impl Workspace {
         tabs_path: &[usize],
         cx: &mut Context<Self>,
     ) {
+        let mut new_tab_index = 0;
         self.with_layout_node(project_id, tabs_path, cx, |node| {
             if let LayoutNode::Tabs { children, active_tab } = node {
                 children.push(LayoutNode::new_terminal());
                 *active_tab = children.len() - 1;
+                new_tab_index = *active_tab;
                 log::info!("Added new tab to existing group, now {} tabs", children.len());
                 true
             } else {
                 false
             }
         });
+
+        // Focus the new tab
+        let mut new_path = tabs_path.to_vec();
+        new_path.push(new_tab_index);
+        self.set_focused_terminal(project_id.to_string(), new_path, cx);
     }
 
     /// Close a terminal at a path.
@@ -158,7 +170,7 @@ impl Workspace {
                             self.notify_data(cx);
                             return self.cleanup_orphaned_metadata(project_id);
                         }
-                        LayoutNode::Tabs { children, .. } => {
+                        LayoutNode::Tabs { children, active_tab } => {
                             if children.len() <= 2 {
                                 let remaining_index = if child_index == 0 { 1 } else { 0 };
                                 if let Some(remaining) = children.get(remaining_index).cloned() {
@@ -166,6 +178,12 @@ impl Workspace {
                                 }
                             } else {
                                 children.remove(child_index);
+                                // Adjust active_tab to stay valid
+                                if *active_tab >= children.len() {
+                                    *active_tab = children.len() - 1;
+                                } else if *active_tab > child_index {
+                                    *active_tab -= 1;
+                                }
                             }
                             self.notify_data(cx);
                             return self.cleanup_orphaned_metadata(project_id);
