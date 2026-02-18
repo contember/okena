@@ -1,12 +1,16 @@
 //! Scrollbar component for terminal pane.
 //!
 //! An Entity with Render that handles scrollbar display and drag interactions.
+//! Top and bottom zones (~24px) act as scroll up/down buttons.
 
 use crate::terminal::terminal::Terminal;
 use crate::theme::theme;
 use gpui::*;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Height of the jump-to-start/end zones at top and bottom of the scrollbar.
+const BUTTON_ZONE_HEIGHT: f32 = 24.0;
 
 /// Scrollbar view that handles display and drag interactions.
 pub struct Scrollbar {
@@ -72,6 +76,7 @@ impl Scrollbar {
 
     /// Calculate scrollbar thumb geometry.
     fn calculate_geometry(&self, content_height: f32) -> Option<(f32, f32)> {
+        let track_height = content_height;
         let terminal = self.terminal.as_ref()?;
         let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
 
@@ -80,8 +85,8 @@ impl Scrollbar {
         }
 
         let scrollable_lines = total_lines - visible_lines;
-        let thumb_height = (visible_lines as f32 / total_lines as f32 * content_height).max(20.0);
-        let available_space = content_height - thumb_height;
+        let thumb_height = (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+        let available_space = track_height - thumb_height;
         let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
         let thumb_y = (1.0 - scroll_ratio) * available_space;
 
@@ -153,7 +158,8 @@ impl Scrollbar {
         }
     }
 
-    /// Handle mouse down on scrollbar.
+    /// Handle mouse down — thumb drag or track click.
+    /// Zone jump is deferred to mouse_up so thumb drag still works in zones.
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.last_activity = Instant::now();
@@ -164,14 +170,51 @@ impl Scrollbar {
 
             if let Some((thumb_y, thumb_height)) = self.calculate_geometry(content_height) {
                 if relative_y >= thumb_y && relative_y <= thumb_y + thumb_height {
-                    // Click on thumb - start drag
                     self.start_drag(f32::from(event.position.y), cx);
-                } else {
-                    // Click on track - jump to position
+                } else if !Self::is_in_zone(relative_y, content_height) {
                     self.handle_click(relative_y, content_height, cx);
+                }
+                // In zone but not on thumb — do nothing, mouse_up will handle jump
+            }
+        }
+    }
+
+    /// Handle mouse up — jump to start/end if released in a zone without dragging.
+    pub fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        let was_dragging = self.dragging;
+        self.end_drag(cx);
+
+        if was_dragging {
+            return;
+        }
+
+        if let Some(bounds) = self.element_bounds {
+            let relative_y = f32::from(event.position.y) - f32::from(bounds.origin.y);
+            let content_height = f32::from(bounds.size.height);
+            let zone = BUTTON_ZONE_HEIGHT.min(content_height / 4.0);
+
+            if relative_y < zone {
+                if let Some(ref terminal) = self.terminal {
+                    let (total_lines, visible_lines, _) = terminal.scroll_info();
+                    if total_lines > visible_lines {
+                        terminal.scroll_to(total_lines - visible_lines);
+                    }
+                    self.last_activity = Instant::now();
+                    cx.notify();
+                }
+            } else if relative_y > content_height - zone {
+                if let Some(ref terminal) = self.terminal {
+                    terminal.scroll_to(0);
+                    self.last_activity = Instant::now();
+                    cx.notify();
                 }
             }
         }
+    }
+
+    fn is_in_zone(relative_y: f32, content_height: f32) -> bool {
+        let zone = BUTTON_ZONE_HEIGHT.min(content_height / 4.0);
+        relative_y < zone || relative_y > content_height - zone
     }
 }
 
@@ -218,8 +261,8 @@ impl Render for Scrollbar {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.end_drag(cx);
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
                 }),
             )
             .child(
@@ -234,29 +277,62 @@ impl Render for Scrollbar {
                             }
                         }
                     },
-                    move |bounds: Bounds<Pixels>, _state: (), window: &mut Window, _cx: &mut App| {
-                        if let Some(ref terminal) = terminal_clone {
-                            let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
-                            if total_lines > visible_lines {
-                                let track_height = f32::from(bounds.size.height);
-                                let scrollable_lines = total_lines - visible_lines;
-                                let thumb_height =
-                                    (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
-                                let available_scroll_space = track_height - thumb_height;
-                                let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
-                                let thumb_y = (1.0 - scroll_ratio) * available_scroll_space;
+                    {
+                        let entity = cx.entity().downgrade();
+                        move |bounds: Bounds<Pixels>, _state: (), window: &mut Window, _cx: &mut App| {
+                            if let Some(ref terminal) = terminal_clone {
+                                let (total_lines, visible_lines, display_offset) = terminal.scroll_info();
+                                if total_lines > visible_lines {
+                                    let track_height = f32::from(bounds.size.height);
+                                    let scrollable_lines = total_lines - visible_lines;
+                                    let thumb_height =
+                                        (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+                                    let available_scroll_space = track_height - thumb_height;
+                                    let scroll_ratio = display_offset as f32 / scrollable_lines as f32;
+                                    let thumb_y = (1.0 - scroll_ratio) * available_scroll_space;
 
-                                let thumb_color = if dragging {
-                                    scrollbar_hover_color
-                                } else {
-                                    scrollbar_color
-                                };
+                                    let thumb_color = if dragging {
+                                        scrollbar_hover_color
+                                    } else {
+                                        scrollbar_color
+                                    };
 
-                                let thumb_bounds = Bounds {
-                                    origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
-                                    size: size(px(6.0), px(thumb_height)),
-                                };
-                                window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(px(3.0)));
+                                    let thumb_bounds = Bounds {
+                                        origin: point(bounds.origin.x + px(2.0), bounds.origin.y + px(thumb_y)),
+                                        size: size(px(6.0), px(thumb_height)),
+                                    };
+                                    window.paint_quad(fill(thumb_bounds, thumb_color).corner_radii(px(3.0)));
+                                }
+                            }
+
+                            // Register window-level handlers so scrollbar drag
+                            // continues even when the mouse leaves the terminal area.
+                            if dragging {
+                                let entity = entity.clone();
+                                let content_height = f32::from(bounds.size.height);
+                                window.on_mouse_event({
+                                    let entity = entity.clone();
+                                    move |event: &MouseMoveEvent, phase, _window, cx| {
+                                        if phase != DispatchPhase::Bubble {
+                                            return;
+                                        }
+                                        if let Some(entity) = entity.upgrade() {
+                                            entity.update(cx, |this, cx| {
+                                                this.update_drag(f32::from(event.position.y), content_height, cx);
+                                            });
+                                        }
+                                    }
+                                });
+                                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
+                                    if phase != DispatchPhase::Bubble {
+                                        return;
+                                    }
+                                    if let Some(entity) = entity.upgrade() {
+                                        entity.update(cx, |this, cx| {
+                                            this.end_drag(cx);
+                                        });
+                                    }
+                                });
                             }
                         }
                     },
