@@ -26,6 +26,8 @@ pub struct Scrollbar {
     last_activity: Instant,
     /// Element bounds for calculations
     element_bounds: Option<Bounds<Pixels>>,
+    /// Whether the mouse is hovering over the scrollbar area
+    hovered: bool,
 }
 
 impl Scrollbar {
@@ -37,6 +39,7 @@ impl Scrollbar {
             drag_start_offset: None,
             last_activity: Instant::now(),
             element_bounds: None,
+            hovered: false,
         }
     }
 
@@ -57,7 +60,7 @@ impl Scrollbar {
 
     /// Check if scrollbar should be visible.
     fn should_show(&self) -> bool {
-        if self.dragging {
+        if self.dragging || self.hovered {
             return true;
         }
         self.last_activity.elapsed().as_millis() < 1500
@@ -226,13 +229,19 @@ impl Render for Scrollbar {
             return div().into_any_element();
         }
 
-        let opacity = if self.should_show() { 1.0 } else { 0.0 };
+        let visible = self.should_show();
+        let opacity = if visible { 1.0 } else { 0.0 };
         let scrollbar_color = if self.dragging {
             rgb(t.scrollbar_hover)
         } else {
             rgb(t.scrollbar)
         };
         let scrollbar_hover_color = rgb(t.scrollbar_hover);
+        let track_bg = if self.hovered || self.dragging {
+            hsla(0.0, 0.0, 0.0, 0.05)
+        } else {
+            hsla(0.0, 0.0, 0.0, 0.0)
+        };
         let terminal_clone = self.terminal.clone();
         let dragging = self.dragging;
 
@@ -244,7 +253,12 @@ impl Render for Scrollbar {
             .right_0()
             .w(px(10.0))
             .opacity(opacity)
+            .bg(track_bg)
             .cursor(CursorStyle::Arrow)
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                this.hovered = *hovered;
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
