@@ -277,6 +277,14 @@ impl PtyManager {
         // COLORTERM enables 24-bit truecolor support in many applications
         cmd.env("COLORTERM", "truecolor");
 
+        // Ensure UTF-8 locale for child processes. macOS app bundles launched from
+        // Finder/Spotlight don't inherit shell environment, so LANG defaults to
+        // C/POSIX (ASCII-only). This breaks non-ASCII text in shells and CLI tools.
+        #[cfg(not(windows))]
+        if std::env::var("LANG").is_err() {
+            cmd.env("LANG", "en_US.UTF-8");
+        }
+
         // On macOS, extend PATH to include Homebrew/MacPorts paths
         // App bundles start with minimal PATH and won't find tmux/screen otherwise
         #[cfg(target_os = "macos")]
