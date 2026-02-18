@@ -202,7 +202,7 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
 
     // Get diff stats for staged + unstaged changes
     let output = safe_output(
-        command("git").args(["-C", path_str, "diff", "--numstat", "HEAD"]),
+        command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
     )
     .ok();
 

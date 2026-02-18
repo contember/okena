@@ -127,7 +127,7 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
 
     // Get tracked file changes with numstat
     let output = crate::process::safe_output(
-        crate::process::command("git").args(["-C", path_str, "diff", "--numstat", "HEAD"]),
+        crate::process::command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
     )
     .ok();
 
