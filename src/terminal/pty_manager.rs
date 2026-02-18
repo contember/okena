@@ -467,6 +467,12 @@ impl PtyManager {
         }
     }
 
+    /// Get the shell process PID for a terminal
+    pub fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        self.terminals.lock().get(terminal_id)
+            .and_then(|h| h.child.process_id())
+    }
+
     /// Check if the session backend handles mouse events (tmux with mouse on)
     pub fn uses_mouse_backend(&self) -> bool {
         matches!(self.session_backend, ResolvedBackend::Tmux)

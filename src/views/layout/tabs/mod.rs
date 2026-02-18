@@ -412,6 +412,18 @@ impl LayoutContainer {
                 _ => None,
             };
 
+            // Check cached waiting state and idle duration (cheap atomic read, no subprocess)
+            let (is_waiting, idle_label) = terminal_id.as_ref().map_or((false, None), |tid| {
+                let guard = terminals.lock();
+                guard.get(tid).map_or((false, None), |t| {
+                    if t.is_waiting_for_input() {
+                        (true, Some(t.idle_duration_display()))
+                    } else {
+                        (false, None)
+                    }
+                })
+            });
+
             // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
@@ -502,17 +514,25 @@ impl LayoutContainer {
                                 }))
                                 .into_any_element()
                         } else {
+                            let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                             h_flex()
                                 .gap(px(6.0))
-                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) }))
+                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
                                 .child(tab_label.clone())
+                                .children(idle_label.as_ref().map(|d| {
+                                    div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
+                                }))
                                 .into_any_element()
                         }
                     } else {
+                        let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                         h_flex()
                             .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(if is_active { rgb(t.success) } else { rgb(t.text_muted) }))
+                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
                             .child(tab_label.clone())
+                            .children(idle_label.as_ref().map(|d| {
+                                div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
+                            }))
                             .into_any_element()
                     }
                 })

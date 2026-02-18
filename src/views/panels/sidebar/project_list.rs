@@ -311,8 +311,8 @@ impl Sidebar {
         let terminal_id = terminal_id.to_string();
 
         // Priority: user-set custom name > non-prompt OSC title > directory fallback
-        // Also check for bell notification
-        let (terminal_name, has_bell) = {
+        // Also check for bell notification and cached idle/waiting state
+        let (terminal_name, has_bell, is_waiting, idle_label) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(&project_id);
             let terminals = self.terminals.lock();
@@ -326,7 +326,9 @@ impl Sidebar {
                 "Terminal".to_string()
             };
             let bell = terminal.map_or(false, |t| t.has_bell());
-            (name, bell)
+            let waiting = terminal.map_or(false, |t| t.is_waiting_for_input());
+            let idle = if waiting { terminal.map(|t| t.idle_duration_display()) } else { None };
+            (name, bell, waiting, idle)
         };
 
         // Check if this terminal is being renamed
@@ -399,6 +401,8 @@ impl Sidebar {
                             .size(px(12.0))
                             .text_color(if has_bell {
                                 rgb(t.border_bell)
+                            } else if is_waiting {
+                                rgb(t.border_idle)
                             } else if is_minimized {
                                 rgb(t.text_muted)
                             } else if is_inactive_tab {
@@ -446,6 +450,13 @@ impl Sidebar {
                         .into_any_element()
                 },
             )
+            .children(idle_label.map(|d| {
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.border_idle))
+                    .flex_shrink_0()
+                    .child(d)
+            }))
             .child(
                 // Action buttons - show on hover
                 div()

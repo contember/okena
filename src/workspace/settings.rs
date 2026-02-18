@@ -195,6 +195,10 @@ pub struct AppSettings {
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
 
+    /// Idle timeout in seconds for "waiting for input" detection (default: 5, 0 = disabled)
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u32,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -227,6 +231,7 @@ impl Default for AppSettings {
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            idle_timeout_secs: default_idle_timeout_secs(),
             remote_connections: Vec::new(),
         }
     }
@@ -279,6 +284,10 @@ fn default_file_opener() -> String {
 
 fn default_min_column_width() -> f32 {
     400.0
+}
+
+fn default_idle_timeout_secs() -> u32 {
+    0
 }
 
 fn default_remote_listen_address() -> String {

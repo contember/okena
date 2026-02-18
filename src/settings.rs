@@ -84,6 +84,7 @@ impl SettingsState {
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
+    setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
         self.settings.default_shell = value;

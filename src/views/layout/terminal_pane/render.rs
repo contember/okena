@@ -75,12 +75,33 @@ impl Render for TerminalPane {
             }
         }
 
+        // Clear waiting state when focused (user is looking at it)
+        if is_focused {
+            if let Some(ref terminal) = self.terminal {
+                if terminal.is_waiting_for_input() {
+                    terminal.clear_waiting();
+                }
+            }
+        }
+
+        // Mark as viewed on blur — only flag terminals with unseen output
+        if self.was_focused && !is_focused {
+            if let Some(ref terminal) = self.terminal {
+                terminal.mark_as_viewed();
+            }
+        }
+        self.was_focused = is_focused;
+
         let show_focused_border = settings(cx).show_focused_border;
-        let show_border = (is_focused && show_focused_border) || has_bell;
+        let is_waiting = !is_focused && self.terminal.as_ref()
+            .map_or(false, |t| t.is_waiting_for_input());
+        let show_border = (is_focused && show_focused_border) || has_bell || is_waiting;
         let border_color = if is_focused && show_focused_border {
             rgb(t.border_focused)
-        } else {
+        } else if has_bell {
             rgb(t.border_bell)
+        } else {
+            rgb(t.border_idle)
         };
 
         let is_zoomed = self.is_zoomed(cx);

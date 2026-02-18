@@ -100,4 +100,8 @@ impl TerminalBackend for RemoteBackend {
     fn is_remote(&self) -> bool {
         true
     }
+
+    fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+        None // Remote terminals don't expose shell PID
+    }
 }
