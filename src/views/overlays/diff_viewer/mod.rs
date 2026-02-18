@@ -135,6 +135,11 @@ impl DiffViewer {
 
         viewer.load_diff(DiffMode::WorkingTree);
 
+        // If no unstaged changes, auto-switch to staged mode
+        if viewer.file_stats.is_empty() && viewer.error_message.is_some() {
+            viewer.load_diff(DiffMode::Staged);
+        }
+
         // Select specific file if requested
         if let Some(file_path) = select_file {
             if let Some(index) = viewer.file_stats.iter().position(|f| f.path == file_path) {
