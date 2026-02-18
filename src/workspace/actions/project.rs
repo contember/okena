@@ -9,6 +9,18 @@ use crate::workspace::state::{LayoutNode, ProjectData, Workspace};
 use gpui::*;
 use std::collections::HashMap;
 
+/// Expand `~` or `~/...` at the start of a path to the user's home directory.
+/// Does not expand `~user/...` syntax (other user's home directories).
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            let rest = &path[1..]; // "" or "/..."
+            return format!("{}{}", home.display(), rest);
+        }
+    }
+    path.to_string()
+}
+
 impl Workspace {
     /// Toggle project visibility
     pub fn toggle_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
@@ -21,6 +33,7 @@ impl Workspace {
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
     pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) {
+        let path = expand_tilde(&path);
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
             id: id.clone(),
@@ -279,6 +292,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use super::expand_tilde;
     use crate::workspace::state::*;
     use crate::workspace::settings::HooksConfig;
     use crate::theme::FolderColor;
@@ -351,6 +365,38 @@ mod tests {
         data.project_widths.insert("p1".to_string(), 60.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width("p1", 2), 60.0);
+    }
+
+    #[test]
+    fn test_expand_tilde_with_subpath() {
+        let home = dirs::home_dir().unwrap();
+        let result = expand_tilde("~/Developer/project");
+        assert_eq!(result, format!("{}/Developer/project", home.display()));
+    }
+
+    #[test]
+    fn test_expand_tilde_home_only() {
+        let home = dirs::home_dir().unwrap();
+        let result = expand_tilde("~");
+        assert_eq!(result, format!("{}", home.display()));
+    }
+
+    #[test]
+    fn test_expand_tilde_absolute_path_unchanged() {
+        let result = expand_tilde("/usr/local/bin");
+        assert_eq!(result, "/usr/local/bin");
+    }
+
+    #[test]
+    fn test_expand_tilde_relative_path_unchanged() {
+        let result = expand_tilde("some/relative/path");
+        assert_eq!(result, "some/relative/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_other_user_unchanged() {
+        let result = expand_tilde("~otheruser/path");
+        assert_eq!(result, "~otheruser/path");
     }
 }
 

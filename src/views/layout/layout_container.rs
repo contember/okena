@@ -93,6 +93,11 @@ impl LayoutContainer {
         }
     }
 
+    /// Update the project path (e.g. after tilde expansion).
+    pub fn set_project_path(&mut self, path: String) {
+        self.project_path = path;
+    }
+
     fn ensure_terminal_pane(
         &mut self,
         terminal_id: Option<String>,
