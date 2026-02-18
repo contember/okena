@@ -189,6 +189,9 @@ pub struct Workspace {
     /// Monotonic counter incremented only on persistent data mutations.
     /// The auto-save observer compares this to skip saves for UI-only changes.
     data_version: u64,
+    /// Transient folder filter — when set, only projects from this folder are shown.
+    /// Not serialized; resets to None on restart.
+    pub(crate) active_folder_filter: Option<String>,
 }
 
 impl Workspace {
@@ -198,6 +201,7 @@ impl Workspace {
             focus_manager: FocusManager::new(),
             project_access_times: HashMap::new(),
             data_version: 0,
+            active_folder_filter: None,
         }
     }
 
@@ -223,6 +227,7 @@ impl Workspace {
     pub fn replace_data(&mut self, data: WorkspaceData, cx: &mut Context<Self>) {
         self.data = data;
         self.focus_manager.clear_all();
+        self.active_folder_filter = None;
         cx.notify();
     }
 
@@ -247,6 +252,15 @@ impl Workspace {
         projects
     }
 
+    pub fn active_folder_filter(&self) -> Option<&String> {
+        self.active_folder_filter.as_ref()
+    }
+
+    pub fn set_folder_filter(&mut self, folder_id: Option<String>, cx: &mut Context<Self>) {
+        self.active_folder_filter = folder_id;
+        cx.notify();
+    }
+
     pub fn projects(&self) -> &[ProjectData] {
         &self.data.projects
     }
@@ -257,12 +271,31 @@ impl Workspace {
         self.focus_manager.focused_project_id()
     }
 
-    /// Get visible projects in order, expanding folders into their contained projects
+    /// Get visible projects in order, expanding folders into their contained projects.
+    /// When a folder filter is active, only projects from that folder are shown
+    /// (top-level projects are hidden). Focused project override still takes priority.
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
         let focused = self.focused_project_id();
+        let folder_filter = self.active_folder_filter.as_ref();
         let mut result = Vec::new();
         for id in &self.data.project_order {
             if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
+                // When folder filter is active, skip folders that don't match
+                if let Some(filter_id) = folder_filter {
+                    if &folder.id != filter_id {
+                        // Still allow the focused project through even if in wrong folder
+                        if let Some(fid) = focused {
+                            for pid in &folder.project_ids {
+                                if pid == fid {
+                                    if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
+                                        result.push(p);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
                 // Folder: include its projects
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
@@ -272,6 +305,14 @@ impl Workspace {
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
+                // Top-level project: hide when folder filter is active
+                if folder_filter.is_some() {
+                    // Still allow the focused project through
+                    if focused.map_or(false, |fid| &p.id == fid) {
+                        result.push(p);
+                    }
+                    continue;
+                }
                 if focused.map_or(p.is_visible, |fid| &p.id == fid) {
                     result.push(p);
                 }
@@ -1945,12 +1986,116 @@ mod workspace_tests {
         assert_eq!(ws.folder_for_project("p1").unwrap().id, "f1");
         assert!(ws.folder_for_project("p2").is_none());
     }
+
+    #[test]
+    fn test_visible_projects_with_folder_filter() {
+        // p1, p2 in folder f1; p3, p4 in folder f2; p5 top-level
+        let mut data = make_workspace_data(
+            vec![
+                make_project("p1", true), make_project("p2", true),
+                make_project("p3", true), make_project("p4", true),
+                make_project("p5", true),
+            ],
+            vec!["f1", "f2", "p5"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string(), "p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p3".to_string(), "p4".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let mut ws = Workspace::new(data);
+
+        // No filter: all 5 visible
+        assert_eq!(ws.visible_projects().len(), 5);
+
+        // Filter to f1: only p1, p2
+        ws.active_folder_filter = Some("f1".to_string());
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "p2");
+
+        // Filter to f2: only p3, p4
+        ws.active_folder_filter = Some("f2".to_string());
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "p3");
+        assert_eq!(visible[1].id, "p4");
+    }
+
+    #[test]
+    fn test_folder_filter_hides_top_level_projects() {
+        let mut data = make_workspace_data(
+            vec![
+                make_project("p1", true), make_project("p2", true),
+                make_project("p3", true),
+            ],
+            vec!["f1", "p3"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+        ws.active_folder_filter = Some("f1".to_string());
+
+        let visible = ws.visible_projects();
+        // p3 is top-level and should be hidden
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().all(|p| p.id != "p3"));
+    }
+
+    #[test]
+    fn test_folder_filter_with_focus_override() {
+        let mut data = make_workspace_data(
+            vec![
+                make_project("p1", true), make_project("p2", true),
+                make_project("p3", true),
+            ],
+            vec!["f1", "p3"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+        ws.active_folder_filter = Some("f1".to_string());
+
+        // Focus on p3 (top-level, should be hidden by filter)
+        // But focus override takes priority
+        ws.focus_manager.set_focused_project_id(Some("p3".to_string()));
+
+        let visible = ws.visible_projects();
+        // Focus override: only p3 shown
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "p3");
+    }
 }
 
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+    use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;

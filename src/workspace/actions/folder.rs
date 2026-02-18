@@ -24,6 +24,11 @@ impl Workspace {
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
     pub fn delete_folder(&mut self, folder_id: &str, cx: &mut Context<Self>) {
+        // Clear folder filter if the deleted folder was the active filter
+        if self.active_folder_filter().map(|s| s.as_str()) == Some(folder_id) {
+            self.active_folder_filter = None;
+        }
+
         let project_ids = self.data.folders.iter()
             .find(|f| f.id == folder_id)
             .map(|f| f.project_ids.clone())
@@ -340,4 +345,85 @@ mod gpui_tests {
         });
     }
 
+    #[gpui::test]
+    fn test_folder_filter_cleared_on_delete(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Set folder filter to f1
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(Some("f1".to_string()), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.active_folder_filter(), Some(&"f1".to_string()));
+        });
+
+        // Delete f1 — filter should auto-clear
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_folder("f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.active_folder_filter().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn test_folder_filter_not_cleared_on_other_folder_delete(cx: &mut gpui::TestAppContext) {
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2")],
+            vec!["f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Set folder filter to f1
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(Some("f1".to_string()), cx);
+        });
+
+        // Delete f2 — filter should remain on f1
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_folder("f2", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.active_folder_filter(), Some(&"f1".to_string()));
+        });
+    }
 }

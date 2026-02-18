@@ -707,9 +707,42 @@ impl Sidebar {
             )
     }
 
+    fn cycle_folder_filter(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let folders: Vec<String> = workspace.data().folders.iter().map(|f| f.id.clone()).collect();
+        let current = workspace.active_folder_filter().cloned();
+        let next = match current {
+            None => folders.first().cloned(),
+            Some(ref current_id) => {
+                let pos = folders.iter().position(|id| id == current_id);
+                match pos {
+                    Some(i) if i + 1 < folders.len() => Some(folders[i + 1].clone()),
+                    _ => None, // wrap back to "All"
+                }
+            }
+        };
+
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_folder_filter(next, cx);
+        });
+    }
+
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let workspace = self.workspace.clone();
+        let workspace_entity = self.workspace.clone();
+
+        // Get current folder filter state
+        let workspace = self.workspace.read(cx);
+        let filter_label = match workspace.active_folder_filter() {
+            None => "All".to_string(),
+            Some(folder_id) => {
+                workspace.folder(folder_id)
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "All".to_string())
+            }
+        };
+        let has_filter = workspace.active_folder_filter().is_some();
+        let has_folders = !workspace.data().folders.is_empty();
 
         div()
             .h(px(28.0))
@@ -721,7 +754,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .id("projects-header")
             .on_click(move |_, _window, cx| {
-                workspace.update(cx, |ws, cx| {
+                workspace_entity.update(cx, |ws, cx| {
                     ws.set_focused_project(None, cx);
                 });
             })
@@ -732,6 +765,29 @@ impl Sidebar {
                     .text_color(rgb(t.text_secondary))
                     .child("PROJECTS"),
             )
+            .when(has_folders, |d| {
+                d.child(
+                    div()
+                        .id("folder-filter-btn")
+                        .cursor_pointer()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .text_size(px(10.0))
+                        .when(has_filter, |d| {
+                            d.bg(rgba(t.border_active.wrapping_shl(8) | 0x30))
+                                .text_color(rgb(t.border_active))
+                        })
+                        .when(!has_filter, |d| {
+                            d.text_color(rgb(t.text_secondary))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                        })
+                        .child(filter_label)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.cycle_folder_filter(cx);
+                        })),
+                )
+            })
     }
 }
 
