@@ -719,11 +719,13 @@ impl LayoutNode {
             }
         }
 
-        // Fix invalid sizes: negative, zero, non-finite, or too small to allow resize
-        // (resize needs combined_size > 2*min_size=10.0 for any adjacent pair)
+        // Fix invalid sizes: negative, zero, non-finite, or too small to allow resize.
+        // Sizes are relative weights (not percentages) — the tiny-pair threshold is
+        // 10% of the total sum so the check works regardless of overall scale.
         if let LayoutNode::Split { sizes, children, .. } = self {
-            let min_resize = 10.0_f32; // 2 * min_size from split_pane.rs
             let has_invalid = sizes.iter().any(|s| *s <= 0.0 || !s.is_finite());
+            let total: f32 = sizes.iter().sum();
+            let min_resize = total * 0.1; // 2 × 5% of total
             let has_tiny_pair = sizes.windows(2).any(|w| w[0] + w[1] <= min_resize);
             if has_invalid || has_tiny_pair {
                 log::warn!("Layout has invalid/too-small sizes {:?}, resetting to equal", sizes);
@@ -1227,11 +1229,11 @@ mod tests {
 
     #[test]
     fn normalize_tiny_adjacent_sizes_reset_to_equal() {
-        // sizes [5.0, 5.0, 5.0] — adjacent pairs sum to 10.0 = 2*min_size,
-        // leaving no room for resize
+        // sizes [90, 1, 9] — pair [1, 9] sums to 10, total = 100,
+        // threshold = 10% of 100 = 10, so pair <= threshold → reset
         let mut node = LayoutNode::Split {
             direction: SplitDirection::Horizontal,
-            sizes: vec![5.0, 5.0, 5.0],
+            sizes: vec![90.0, 1.0, 9.0],
             children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
         };
         node.normalize();
@@ -1257,6 +1259,24 @@ mod tests {
         if let LayoutNode::Split { sizes, .. } = &node {
             assert!((sizes[0] - 50.0).abs() < f32::EPSILON);
             assert!((sizes[1] - 50.0).abs() < f32::EPSILON);
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn normalize_relative_sizes_untouched() {
+        // Sizes are relative weights — don't need to sum to 100
+        let mut node = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![26.8, 9.47, 17.6],
+            children: vec![terminal("t1"), terminal("t2"), terminal("t3")],
+        };
+        node.normalize();
+        if let LayoutNode::Split { sizes, .. } = &node {
+            assert!((sizes[0] - 26.8).abs() < f32::EPSILON);
+            assert!((sizes[1] - 9.47).abs() < f32::EPSILON);
+            assert!((sizes[2] - 17.6).abs() < f32::EPSILON);
         } else {
             panic!("Expected split");
         }

@@ -89,7 +89,8 @@ pub fn compute_resize(
             let scale = if *visible_sizes_sum > 0.0 { *visible_sizes_sum } else { 100.0 };
             let delta_percent = delta / container_size * scale;
 
-            let min_size = 5.0_f32;
+            // Sizes are relative weights — min is 5% of total visible sum
+            let min_size = scale * 0.05;
             // Ensure combined size is at least 2*min so both sides stay positive
             let combined_size = combined_size.max(2.0 * min_size);
             let max_size = combined_size - min_size;
