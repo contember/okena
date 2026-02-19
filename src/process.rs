@@ -12,3 +12,27 @@ pub fn command(program: &str) -> std::process::Command {
     }
     cmd
 }
+
+/// Run `Command::output()` while catching panics from the standard library's
+/// internal `read2().unwrap()`, which can panic with EBADF under rare race
+/// conditions (e.g. FD pressure during PTY shutdown). Converts the panic
+/// into a normal `io::Error` so callers handle it gracefully.
+pub fn safe_output(cmd: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd.output())) {
+        Ok(result) => result,
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            log::error!("Command::output() panicked: {}", msg);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Command::output() panicked: {}", msg),
+            ))
+        }
+    }
+}

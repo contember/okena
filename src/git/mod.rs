@@ -125,10 +125,10 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     let mut summaries = Vec::new();
 
     // Get tracked file changes with numstat
-    let output = crate::process::command("git")
-        .args(["-C", path_str, "diff", "--numstat", "HEAD"])
-        .output()
-        .ok();
+    let output = crate::process::safe_output(
+        crate::process::command("git").args(["-C", path_str, "diff", "--numstat", "HEAD"]),
+    )
+    .ok();
 
     if let Some(output) = output {
         if output.status.success() {
@@ -151,10 +151,10 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     }
 
     // Get untracked files
-    let output = crate::process::command("git")
-        .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
-        .output()
-        .ok();
+    let output = crate::process::safe_output(
+        crate::process::command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
+    )
+    .ok();
 
     if let Some(output) = output {
         if output.status.success() {

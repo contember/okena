@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::GitStatus;
-use crate::process::command;
+use crate::process::{command, safe_output};
 
 /// Get branches that are already checked out in worktrees
 fn get_worktree_branches(path: &Path) -> Vec<String> {
@@ -10,10 +10,10 @@ fn get_worktree_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = command("git")
-        .args(["-C", path_str, "worktree", "list", "--porcelain"])
-        .output()
-        .ok();
+    let output = safe_output(
+        command("git").args(["-C", path_str, "worktree", "list", "--porcelain"]),
+    )
+    .ok();
 
     let mut branches = Vec::new();
 
@@ -53,9 +53,7 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
         args.push(branch);
     }
 
-    let output = command("git")
-        .args(&args)
-        .output()
+    let output = safe_output(command("git").args(&args))
         .map_err(|e| format!("Failed to execute git: {}", e))?;
 
     if output.status.success() {
@@ -80,9 +78,7 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 
     args.push(path_str);
 
-    let output = command("git")
-        .args(&args)
-        .output()
+    let output = safe_output(command("git").args(&args))
         .map_err(|e| format!("Failed to execute git: {}", e))?;
 
     if output.status.success() {
@@ -100,10 +96,10 @@ fn list_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = command("git")
-        .args(["-C", path_str, "branch", "-a", "--format=%(refname:short)"])
-        .output()
-        .ok();
+    let output = safe_output(
+        command("git").args(["-C", path_str, "branch", "-a", "--format=%(refname:short)"]),
+    )
+    .ok();
 
     let mut branches = Vec::new();
 
@@ -145,10 +141,10 @@ pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
 /// Returns None if not a git repository.
 pub fn get_status(path: &Path) -> Option<GitStatus> {
     // Check if we're in a git repo
-    let output = command("git")
-        .args(["-C", path.to_str()?, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .ok()?;
+    let output = safe_output(
+        command("git").args(["-C", path.to_str()?, "rev-parse", "--is-inside-work-tree"]),
+    )
+    .ok()?;
 
     if !output.status.success() {
         return None;
@@ -169,10 +165,10 @@ fn get_branch_name(path: &Path) -> Option<String> {
     let path_str = path.to_str()?;
 
     // Try to get branch name
-    let output = command("git")
-        .args(["-C", path_str, "symbolic-ref", "--short", "HEAD"])
-        .output()
-        .ok()?;
+    let output = safe_output(
+        command("git").args(["-C", path_str, "symbolic-ref", "--short", "HEAD"]),
+    )
+    .ok()?;
 
     if output.status.success() {
         let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -182,10 +178,10 @@ fn get_branch_name(path: &Path) -> Option<String> {
     }
 
     // Detached HEAD - get short commit hash
-    let output = command("git")
-        .args(["-C", path_str, "rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()?;
+    let output = safe_output(
+        command("git").args(["-C", path_str, "rev-parse", "--short", "HEAD"]),
+    )
+    .ok()?;
 
     if output.status.success() {
         let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -205,10 +201,10 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     };
 
     // Get diff stats for staged + unstaged changes
-    let output = command("git")
-        .args(["-C", path_str, "diff", "--numstat", "HEAD"])
-        .output()
-        .ok();
+    let output = safe_output(
+        command("git").args(["-C", path_str, "diff", "--numstat", "HEAD"]),
+    )
+    .ok();
 
     let (mut added, mut removed) = (0usize, 0usize);
 
@@ -231,10 +227,10 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     }
 
     // Also include untracked files (count lines)
-    let output = command("git")
-        .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
-        .output()
-        .ok();
+    let output = safe_output(
+        command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
+    )
+    .ok();
 
     if let Some(output) = output {
         if output.status.success() {

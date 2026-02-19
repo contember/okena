@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::process::command;
+use crate::process::{command, safe_output};
 
 /// Type of a diff line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,9 +343,7 @@ pub fn get_diff_with_options(
     }
 
     let t0 = std::time::Instant::now();
-    let output = command("git")
-        .args(&args)
-        .output()
+    let output = safe_output(command("git").args(&args))
         .map_err(|e| format!("Failed to execute git: {}", e))?;
     log::debug!("[get_diff_with_options] git diff command: {:?}, stdout: {} bytes", t0.elapsed(), output.stdout.len());
 
@@ -385,10 +383,10 @@ fn get_untracked_files(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = command("git")
-        .args(["-C", path_str, "ls-files", "--others", "--exclude-standard"])
-        .output()
-        .ok();
+    let output = safe_output(
+        command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
+    )
+    .ok();
 
     match output {
         Some(output) if output.status.success() => {
@@ -472,11 +470,11 @@ pub fn is_git_repo(path: &Path) -> bool {
         None => return false,
     };
 
-    command("git")
-        .args(["-C", path_str, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    safe_output(
+        command("git").args(["-C", path_str, "rev-parse", "--is-inside-work-tree"]),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Get the full content of a file from git at a specific revision.
@@ -493,10 +491,10 @@ pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> O
         format!("{}:{}", revision, file_path)
     };
 
-    let output = command("git")
-        .args(["-C", repo_str, "show", &object])
-        .output()
-        .ok()?;
+    let output = safe_output(
+        command("git").args(["-C", repo_str, "show", &object]),
+    )
+    .ok()?;
 
     if output.status.success() {
         String::from_utf8(output.stdout).ok()
