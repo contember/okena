@@ -312,9 +312,15 @@ impl TerminalPane {
             self.shell_type.clone()
         };
 
+        // Read fresh path from workspace state (handles tilde-expanded paths)
+        let project_path = self.workspace.read(cx)
+            .project(&self.project_id)
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| self.project_path.clone());
+
         match self
             .backend
-            .create_terminal(&self.project_path, Some(&shell))
+            .create_terminal(&project_path, Some(&shell))
         {
             Ok(terminal_id) => {
                 self.terminal_id = Some(terminal_id.clone());
@@ -324,7 +330,7 @@ impl TerminalPane {
 
                 let size = TerminalSize::default();
                 let terminal =
-                    Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
+                    Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), project_path));
                 self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
                 self.terminal = Some(terminal.clone());
 

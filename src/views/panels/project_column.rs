@@ -343,6 +343,11 @@ impl ProjectColumn {
                     action_dispatcher,
                 )
             }));
+        } else if let Some(container) = &self.layout_container {
+            // Update project_path if it changed
+            container.update(cx, |c, _| {
+                c.set_project_path(project_path);
+            });
         }
     }
 
