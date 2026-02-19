@@ -22,6 +22,9 @@ pub struct TitleBar {
     /// HWND cached for Win32 drag operations (Windows only)
     #[cfg(target_os = "windows")]
     hwnd: Option<isize>,
+    /// Flag for Linux compositor-driven window move (set on mouse-down, consumed on mouse-move)
+    #[cfg(target_os = "linux")]
+    should_move: bool,
 }
 
 impl TitleBar {
@@ -34,6 +37,8 @@ impl TitleBar {
             sidebar_open: true,
             #[cfg(target_os = "windows")]
             hwnd: None,
+            #[cfg(target_os = "linux")]
+            should_move: false,
         }
     }
 
@@ -440,6 +445,39 @@ impl Render for TitleBar {
             })
             .when(!cfg!(target_os = "windows"), |d| {
                 d.window_control_area(WindowControlArea::Drag)
+            })
+            // On Linux, WindowControlArea::Drag is a no-op (GPUI doesn't wire
+            // the hit-test callback), so use a mouse-down → mouse-move pattern
+            // to start a compositor-native window move. The move is deferred to
+            // mouse-move so that double-click to maximize still works.
+            .when(cfg!(target_os = "linux"), |d| {
+                d
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _cx| {
+                        #[cfg(target_os = "linux")]
+                        { this.should_move = true; }
+                        #[cfg(not(target_os = "linux"))]
+                        { let _ = this; }
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _cx| {
+                        #[cfg(target_os = "linux")]
+                        { this.should_move = false; }
+                        #[cfg(not(target_os = "linux"))]
+                        { let _ = this; }
+                    }))
+                    .on_mouse_move(cx.listener(|this, _, window, _cx| {
+                        #[cfg(target_os = "linux")]
+                        if this.should_move {
+                            this.should_move = false;
+                            window.start_window_move();
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        { let _ = (this, window); }
+                    }))
+                    .on_click(|event: &ClickEvent, window, _| {
+                        if event.click_count() == 2 {
+                            window.zoom_window();
+                        }
+                    })
             })
             .child(
                 // Left side - sidebar toggle + title
