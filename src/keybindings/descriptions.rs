@@ -8,8 +8,8 @@ use super::{
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
     ShowFileSearch, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, SplitHorizontal, SplitVertical, ToggleFullscreen, ToggleSidebar,
-    ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+    ShowThemeSelector, SplitHorizontal, SplitVertical, ToggleFullscreen, TogglePaneSwitcher,
+    ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -404,6 +404,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Move keyboard focus to the sidebar for navigation",
             category: "Navigation",
             factory: || Box::new(FocusSidebar),
+        },
+    );
+
+    map.insert(
+        "TogglePaneSwitcher",
+        ActionDescription {
+            name: "Display Panes",
+            description: "Show numbered overlays on panes, press a digit to focus",
+            category: "Navigation",
+            factory: || Box::new(TogglePaneSwitcher),
         },
     );
 

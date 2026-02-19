@@ -140,6 +140,28 @@ impl PaneMap {
         self.panes.get(next_idx)
     }
 
+    /// Get all registered panes
+    pub fn panes(&self) -> &[PaneBounds] {
+        &self.panes
+    }
+
+    /// Return panes sorted by reading order: top-to-bottom, then left-to-right.
+    ///
+    /// Sorts by Y center ascending, then X center ascending.
+    pub fn sorted_by_reading_order(&self) -> Vec<&PaneBounds> {
+        let mut sorted: Vec<&PaneBounds> = self.panes.iter().collect();
+        sorted.sort_by(|a, b| {
+            let ay = f32::from(a.center().y);
+            let by = f32::from(b.center().y);
+            let ax = f32::from(a.center().x);
+            let bx = f32::from(b.center().x);
+            ay.partial_cmp(&by)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        sorted
+    }
+
     /// Find the previous pane in sequential order (cycles through all panes)
     pub fn find_prev_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
         if self.panes.len() <= 1 {
@@ -210,5 +232,61 @@ pub fn register_pane_bounds(
     pane_map_lock().lock().register(project_id, layout_path, bounds);
 }
 
-// Tests removed due to GPUI recursion limit issues with #[test] macro
-// Navigation functionality should be tested manually
+#[cfg(test)]
+mod tests {
+    use super::{PaneBounds, PaneMap};
+    use gpui::{px, Bounds, Point, Size};
+
+    fn make_pane(id: &str, x: f32, y: f32, w: f32, h: f32) -> PaneBounds {
+        PaneBounds {
+            project_id: id.to_string(),
+            layout_path: vec![0],
+            bounds: Bounds {
+                origin: Point { x: px(x), y: px(y) },
+                size: Size { width: px(w), height: px(h) },
+            },
+        }
+    }
+
+    #[test]
+    fn sorted_by_reading_order_horizontal_row() {
+        let mut map = PaneMap::new();
+        map.register("c".into(), vec![0], make_pane("c", 600.0, 0.0, 300.0, 400.0).bounds);
+        map.register("a".into(), vec![0], make_pane("a", 0.0, 0.0, 300.0, 400.0).bounds);
+        map.register("b".into(), vec![0], make_pane("b", 300.0, 0.0, 300.0, 400.0).bounds);
+
+        let sorted = map.sorted_by_reading_order();
+        assert_eq!(sorted[0].project_id, "a");
+        assert_eq!(sorted[1].project_id, "b");
+        assert_eq!(sorted[2].project_id, "c");
+    }
+
+    #[test]
+    fn sorted_by_reading_order_2x2_grid() {
+        let mut map = PaneMap::new();
+        // Bottom-right
+        map.register("d".into(), vec![0], make_pane("d", 400.0, 300.0, 400.0, 300.0).bounds);
+        // Top-left
+        map.register("a".into(), vec![0], make_pane("a", 0.0, 0.0, 400.0, 300.0).bounds);
+        // Bottom-left
+        map.register("c".into(), vec![0], make_pane("c", 0.0, 300.0, 400.0, 300.0).bounds);
+        // Top-right
+        map.register("b".into(), vec![0], make_pane("b", 400.0, 0.0, 400.0, 300.0).bounds);
+
+        let sorted = map.sorted_by_reading_order();
+        assert_eq!(sorted[0].project_id, "a");
+        assert_eq!(sorted[1].project_id, "b");
+        assert_eq!(sorted[2].project_id, "c");
+        assert_eq!(sorted[3].project_id, "d");
+    }
+
+    #[test]
+    fn sorted_by_reading_order_single_pane() {
+        let mut map = PaneMap::new();
+        map.register("only".into(), vec![0], make_pane("only", 0.0, 0.0, 800.0, 600.0).bounds);
+
+        let sorted = map.sorted_by_reading_order();
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].project_id, "only");
+    }
+}

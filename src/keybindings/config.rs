@@ -258,6 +258,14 @@ impl KeybindingConfig {
             ],
         );
 
+        bindings.insert(
+            "TogglePaneSwitcher".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-`", None),
+                KeybindingEntry::new("ctrl-`", None),
+            ],
+        );
+
         Self {
             version: 1,
             bindings,

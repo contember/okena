@@ -71,6 +71,7 @@ actions!(
         SidebarToggleExpand,
         SidebarEscape,
         ShowPairingDialog,
+        TogglePaneSwitcher,
     ]
 );
 
@@ -222,6 +223,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SidebarToggleExpand" => Some(KeyBinding::new(keystroke, SidebarToggleExpand, context)),
         "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
         "ShowPairingDialog" => Some(KeyBinding::new(keystroke, ShowPairingDialog, context)),
+        "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

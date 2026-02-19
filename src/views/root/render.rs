@@ -1,7 +1,7 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
-use crate::views::layout::navigation::clear_pane_map;
+use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use gpui::*;
 use gpui::prelude::*;
@@ -528,6 +528,18 @@ impl Render for RootView {
                     }
                 }
             }))
+            // Handle toggle pane switcher action
+            .on_action(cx.listener(|this, _: &TogglePaneSwitcher, _window, cx| {
+                if this.pane_switch_active {
+                    this.pane_switch_active = false;
+                    this.pane_switcher_entity = None;
+                } else {
+                    this.pane_switch_active = true;
+                    let pane_map = get_pane_map();
+                    this.show_pane_switcher(pane_map, cx);
+                }
+                cx.notify();
+            }))
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
                 this.create_worktree_from_focus(cx);
@@ -702,5 +714,9 @@ impl Render for RootView {
             })
             // Toast notifications (bottom-right, on top of everything)
             .child(self.toast_overlay.clone())
+            // Pane switcher overlay (numbered pane badges)
+            .when_some(self.pane_switcher_entity.clone(), |d, entity| {
+                d.child(entity)
+            })
     }
 }

@@ -1,4 +1,5 @@
 mod handlers;
+mod pane_switcher;
 mod render;
 mod sidebar;
 mod terminal_actions;
@@ -62,6 +63,10 @@ pub struct RootView {
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
+    /// Whether the pane switcher overlay is active
+    pane_switch_active: bool,
+    /// Pane switcher overlay entity (separate entity for proper focus handling)
+    pane_switcher_entity: Option<Entity<pane_switcher::PaneSwitcher>>,
 }
 
 impl RootView {
@@ -141,6 +146,8 @@ impl RootView {
             hscroll_dragging: false,
             hscroll_bounds: Rc::new(RefCell::new(None)),
             remote_manager: None,
+            pane_switch_active: false,
+            pane_switcher_entity: None,
         };
 
         // Initialize project columns
