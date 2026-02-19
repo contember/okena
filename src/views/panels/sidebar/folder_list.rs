@@ -18,6 +18,7 @@ impl Sidebar {
         folder: &FolderData,
         index: usize,
         project_count: usize,
+        idle_terminal_count: usize,
         is_cursor: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -158,6 +159,16 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(idle_terminal_count > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(t.border_idle))
+                )
+            })
             .child(
                 // Project count badge
                 div()
@@ -229,6 +240,13 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Count idle terminals when project is collapsed (not expanded)
+        let idle_count = if !is_expanded {
+            self.count_waiting_terminals(&project.terminal_ids)
+        } else {
+            0
+        };
 
         div()
             .id(ElementId::Name(format!("folder-project-row-{}", project.id).into()))
@@ -353,6 +371,16 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(idle_count > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(t.border_idle))
+                )
+            })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .child(
                 {

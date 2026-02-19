@@ -707,6 +707,14 @@ impl Sidebar {
             )
     }
 
+    /// Count how many terminals from the given IDs are currently waiting for input
+    pub(super) fn count_waiting_terminals(&self, terminal_ids: &[String]) -> usize {
+        let terminals = self.terminals.lock();
+        terminal_ids.iter()
+            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+            .count()
+    }
+
     fn cycle_folder_filter(&mut self, cx: &mut Context<Self>) {
         let workspace = self.workspace.read(cx);
         let folders: Vec<String> = workspace.data().folders.iter().map(|f| f.id.clone()).collect();
@@ -1014,8 +1022,17 @@ impl Render for Sidebar {
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
+                    let idle_terminal_count = if folder.collapsed {
+                        let terminals = self.terminals.lock();
+                        projects.iter()
+                            .flat_map(|p| p.terminal_ids.iter())
+                            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+                            .count()
+                    } else {
+                        0
+                    };
                     flat_elements.push(
-                        self.render_folder_header(&folder, index, projects.len(), is_cursor, window, cx).into_any_element()
+                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
