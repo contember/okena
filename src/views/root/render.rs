@@ -1,5 +1,5 @@
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
-use crate::settings::open_settings_file;
+use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::clear_pane_map;
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
@@ -50,23 +50,30 @@ impl RootView {
             }
         };
 
-        // Shared bounds reference for resize calculation
-        let container_bounds = Rc::new(RefCell::new(Bounds {
-            origin: Point::default(),
-            size: Size { width: px(800.0), height: px(600.0) },
-        }));
+        // Persistent bounds reference for resize calculation (survives across renders)
+        let container_bounds = self.projects_grid_bounds.clone();
+
+        // Compute pixel widths from percentages, accounting for divider widths
+        let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
+        let num_dividers = num_projects.saturating_sub(1) as f32;
+        let container_width = f32::from(container_bounds.borrow().size.width);
+        let available_width = (container_width - num_dividers * 1.0).max(0.0);
+
+        let pixel_widths: Vec<f32> = widths.iter()
+            .map(|w| (available_width * w / 100.0).max(min_col_width))
+            .collect();
 
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 
         for (i, project_id) in visible_projects.iter().enumerate() {
-            let width_percent = widths.get(i).copied().unwrap_or(100.0 / num_projects as f32);
+            let pixel_width = pixel_widths.get(i).copied().unwrap_or(200.0);
 
             if let Some(col) = self.project_columns.get(project_id).cloned() {
                 let col_element = div()
-                    .flex_basis(relative(width_percent / 100.0))
+                    .w(px(pixel_width))
+                    .flex_shrink_0()
                     .h_full()
-                    .min_w(px(200.0))
                     .child(col)
                     .into_any_element();
 
@@ -87,24 +94,138 @@ impl RootView {
             }
         }
 
+        let t = theme(cx);
+        let scroll_handle = self.projects_scroll_handle.clone();
+        let scrollbar_color = rgb(t.scrollbar);
+
+        let scroll_handle_for_wheel = self.projects_scroll_handle.clone();
+
         div()
-            .id("projects-grid")
+            .id("projects-grid-wrapper")
             .flex_1()
             .h_full()
-            .flex()
-            .overflow_hidden()
-            // Canvas to capture container bounds
-            .child(canvas(
-                {
-                    let container_bounds = container_bounds.clone();
-                    move |bounds, _window, _cx| {
-                        *container_bounds.borrow_mut() = bounds;
-                    }
-                },
-                |_bounds, _prepaint, _window, _cx| {},
-            ).absolute().size_full())
-            // Mouse handlers are on root div - no need to duplicate here
-            .children(elements)
+            .min_w_0()
+            .overflow_x_hidden()
+            .relative()
+            // Shift+scroll for horizontal scrolling of project columns
+            .on_scroll_wheel(cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
+                if !event.modifiers.shift {
+                    return;
+                }
+                let delta = event.delta.pixel_delta(px(17.0));
+                let scroll_amount = if !delta.x.is_zero() { delta.x } else { delta.y };
+                let max_offset = scroll_handle_for_wheel.max_offset();
+                if max_offset.width <= px(2.0) {
+                    return;
+                }
+                let current = scroll_handle_for_wheel.offset();
+                let new_x = (current.x + scroll_amount).clamp(-max_offset.width, px(0.0));
+                scroll_handle_for_wheel.set_offset(point(new_x, current.y));
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("projects-grid")
+                    .size_full()
+                    .flex()
+                    .overflow_x_hidden()
+                    .track_scroll(&self.projects_scroll_handle)
+                    // Canvas to capture container bounds (updates persistent bounds for next render)
+                    .child(canvas(
+                        {
+                            let container_bounds = container_bounds.clone();
+                            move |bounds, _window, _cx| {
+                                *container_bounds.borrow_mut() = bounds;
+                            }
+                        },
+                        |_bounds, _prepaint, _window, _cx| {},
+                    ).absolute().size_full())
+                    // Mouse handlers are on root div - no need to duplicate here
+                    .children(elements)
+            )
+            // Horizontal scrollbar overlay (absolute positioned at bottom)
+            .child({
+                let hscroll_bounds = self.hscroll_bounds.clone();
+                div()
+                    .id("hscrollbar")
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(6.0))
+                    .cursor(CursorStyle::Arrow)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                            let max_offset = this.projects_scroll_handle.max_offset();
+                            if max_offset.width <= px(2.0) {
+                                return;
+                            }
+                            this.hscroll_dragging = true;
+                            // Jump to clicked position
+                            if let Some(bounds) = *this.hscroll_bounds.borrow() {
+                                let track_width = f32::from(bounds.size.width);
+                                let relative_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+                                let ratio = (relative_x / track_width).clamp(0.0, 1.0);
+                                let new_x = -ratio * f32::from(max_offset.width);
+                                this.projects_scroll_handle.set_offset(point(px(new_x), px(0.0)));
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                        if !this.hscroll_dragging {
+                            return;
+                        }
+                        let max_offset = this.projects_scroll_handle.max_offset();
+                        if max_offset.width <= px(2.0) {
+                            return;
+                        }
+                        if let Some(bounds) = *this.hscroll_bounds.borrow() {
+                            let track_width = f32::from(bounds.size.width);
+                            let relative_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
+                            let ratio = (relative_x / track_width).clamp(0.0, 1.0);
+                            let new_x = -ratio * f32::from(max_offset.width);
+                            this.projects_scroll_handle.set_offset(point(px(new_x), px(0.0)));
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseUpEvent, _window, cx| {
+                            if this.hscroll_dragging {
+                                this.hscroll_dragging = false;
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .child(canvas(
+                        {
+                            let hscroll_bounds = hscroll_bounds.clone();
+                            move |bounds, _window, _cx| {
+                                *hscroll_bounds.borrow_mut() = Some(bounds);
+                            }
+                        },
+                        move |bounds, _, window, _cx| {
+                            let max_scroll = scroll_handle.max_offset();
+                            if max_scroll.width <= px(2.0) {
+                                return;
+                            }
+                            let offset = scroll_handle.offset();
+                            let track_width = f32::from(bounds.size.width);
+                            let content_width = track_width + f32::from(max_scroll.width);
+                            let thumb_width = (track_width / content_width * track_width).max(30.0);
+                            let scroll_ratio = f32::from(-offset.x) / f32::from(max_scroll.width);
+                            let thumb_x = scroll_ratio * (track_width - thumb_width);
+
+                            let thumb_bounds = Bounds {
+                                origin: point(bounds.origin.x + px(thumb_x), bounds.origin.y + px(1.0)),
+                                size: size(px(thumb_width), px(4.0)),
+                            };
+                            window.paint_quad(fill(thumb_bounds, scrollbar_color).corner_radii(px(2.0)));
+                        },
+                    ).size_full())
+            })
             .into_any_element()
     }
 
@@ -480,6 +601,7 @@ impl Render for RootView {
                     .flex_1()
                     .flex()
                     .min_h_0()
+                    .min_w_0()
                     .relative()
                     // Auto-hide hover zone (invisible strip on the left edge)
                     .when(self.sidebar_ctrl.is_auto_hide() && !self.sidebar_ctrl.is_open() && !self.sidebar_ctrl.is_hover_shown(), |d| {
@@ -536,13 +658,14 @@ impl Render for RootView {
                             .flex()
                             .flex_col()
                             .min_h_0()
+                            .min_w_0()
                             .child(
                                 // Projects grid (zoom is handled by LayoutContainer)
                                 div()
                                     .id("projects-container")
                                     .flex_1()
                                     .min_h_0()
-                                    .size_full()
+                                    .min_w_0()
                                     .child(self.render_projects_grid(cx)),
                             ),
                     ),

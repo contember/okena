@@ -410,6 +410,10 @@ impl Render for TerminalContent {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                // Shift+scroll is reserved for horizontal project column scrolling
+                if event.modifiers.shift {
+                    return;
+                }
                 let delta = event.delta.pixel_delta(px(17.0));
                 if event.modifiers.control {
                     // Ctrl+scroll = per-terminal zoom (Linux/Windows)

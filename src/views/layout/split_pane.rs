@@ -1,4 +1,5 @@
 use crate::elements::resize_handle::ResizeHandle;
+use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::workspace::state::{SplitDirection, Workspace};
 use gpui::*;
@@ -30,11 +31,14 @@ pub enum DragState {
     ProjectColumn {
         divider_index: usize,
         project_ids: Vec<String>,
-        container_bounds: Bounds<Pixels>,
+        /// Available width for columns (viewport minus dividers) — same base used in render
+        available_width: f32,
         /// Mouse position at drag start (for delta-based resize)
         initial_mouse_pos: Point<Pixels>,
         /// Width snapshots at drag start (project_id -> width %)
         initial_widths: HashMap<String, f32>,
+        /// Minimum column width in pixels (from settings)
+        min_col_width: f32,
     },
     /// Resizing sidebar width
     Sidebar,
@@ -109,9 +113,8 @@ pub fn compute_resize(
                 ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
             });
         }
-        DragState::ProjectColumn { divider_index, project_ids, container_bounds, initial_mouse_pos, initial_widths } => {
-            let bounds = *container_bounds;
-            let container_width = f32::from(bounds.size.width);
+        DragState::ProjectColumn { divider_index, project_ids, available_width, initial_mouse_pos, initial_widths, min_col_width } => {
+            let container_width = *available_width;
             if container_width <= 0.0 {
                 return;
             }
@@ -130,10 +133,13 @@ pub fn compute_resize(
             let delta_px = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
             let delta_percent = delta_px / container_width * 100.0;
 
-            let min_width = 5.0_f32;
-            let max_width = (combined - min_width).max(min_width);
-            let left_new = (left_initial + delta_percent).clamp(min_width, max_width);
-            let right_new = combined - left_new;
+            // Min width as percentage, derived from the pixel minimum
+            let min_width = (*min_col_width / container_width * 100.0).max(5.0);
+
+            // Left and right resize independently — when one hits min, the other
+            // can still grow, causing total > 100% (overflow + scrollbar)
+            let left_new = (left_initial + delta_percent).max(min_width);
+            let right_new = (right_initial - delta_percent).max(min_width);
 
             let mut new_widths = initial_widths.clone();
             new_widths.insert(left_id.clone(), left_new);
@@ -219,19 +225,26 @@ pub fn render_project_divider(
         move |mouse_pos, cx| {
             let bounds = *container_bounds.borrow();
             let num_projects = project_ids.len();
+            let num_dividers = num_projects.saturating_sub(1) as f32;
 
-            // Snapshot current widths at drag start
+            // Available width = viewport minus dividers (same base as render uses)
+            let viewport_width = f32::from(bounds.size.width);
+            let available_width = (viewport_width - num_dividers * 1.0).max(0.0);
+
+            // Snapshot current widths and min column width at drag start
             let ws = workspace.read(cx);
             let initial_widths: HashMap<String, f32> = project_ids.iter()
                 .map(|id| (id.clone(), ws.get_project_width(id, num_projects)))
                 .collect();
+            let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
 
             *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
                 divider_index,
                 project_ids: project_ids.clone(),
-                container_bounds: bounds,
+                available_width,
                 initial_mouse_pos: mouse_pos,
                 initial_widths,
+                min_col_width,
             });
         },
     )

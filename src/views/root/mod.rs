@@ -20,7 +20,9 @@ use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use parking_lot::Mutex;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Shared terminals registry for PTY event routing
@@ -51,6 +53,13 @@ pub struct RootView {
     active_drag: ActiveDrag,
     /// Focus handle for capturing global keybindings
     focus_handle: FocusHandle,
+    /// Scroll handle for horizontal scrolling of project columns
+    projects_scroll_handle: ScrollHandle,
+    /// Persistent container bounds for projects grid (used to compute pixel widths)
+    projects_grid_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    /// Horizontal scrollbar drag state
+    hscroll_dragging: bool,
+    hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
 }
@@ -124,6 +133,13 @@ impl RootView {
             toast_overlay,
             active_drag: new_active_drag(),
             focus_handle,
+            projects_scroll_handle: ScrollHandle::new(),
+            projects_grid_bounds: Rc::new(RefCell::new(Bounds {
+                origin: Point::default(),
+                size: Size { width: px(800.0), height: px(600.0) },
+            })),
+            hscroll_dragging: false,
+            hscroll_bounds: Rc::new(RefCell::new(None)),
             remote_manager: None,
         };
 

@@ -183,6 +183,10 @@ pub struct AppSettings {
     #[serde(default = "default_remote_listen_address")]
     pub remote_listen_address: String,
 
+    /// Minimum project column width in pixels (default: 400)
+    #[serde(default = "default_min_column_width")]
+    pub min_column_width: f32,
+
     /// Whether to ignore whitespace changes in diff viewer
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
@@ -220,6 +224,7 @@ impl Default for AppSettings {
             diff_view_mode: DiffViewMode::default(),
             remote_server_enabled: false,
             remote_listen_address: default_remote_listen_address(),
+            min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
             remote_connections: Vec::new(),
@@ -270,6 +275,10 @@ fn default_scrollback_lines() -> u32 {
 
 fn default_file_opener() -> String {
     String::new()
+}
+
+fn default_min_column_width() -> f32 {
+    400.0
 }
 
 fn default_remote_listen_address() -> String {
