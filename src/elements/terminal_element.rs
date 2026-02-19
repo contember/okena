@@ -622,5 +622,20 @@ impl Element for TerminalElement {
                 }
             }
         });
+
+        // Phase 5: Paint fog overlay for unfocused terminals
+        // Uses the unfocused bg color at partial opacity to wash out text,
+        // creating a subtle "in the fog" effect. Alpha-blending the same color
+        // over the background is a no-op, so only text/content gets dimmed.
+        if !is_focused {
+            let bg_rgba = rgb(bg_color);
+            let fog = Hsla::from(Rgba {
+                r: bg_rgba.r,
+                g: bg_rgba.g,
+                b: bg_rgba.b,
+                a: 0.2,
+            });
+            window.paint_quad(fill(bounds, fog));
+        }
     }
 }

@@ -276,7 +276,7 @@ pub const PASTEL_DARK_THEME: ThemeColors = ThemeColors {
     term_bright_white: 0xffffff,
     term_foreground: 0xbbbbbb,
     term_background: 0x000000,
-    term_background_unfocused: 0x111111,
+    term_background_unfocused: 0x1a1a1a,
     cursor: 0xffa560,
     scrollbar: 0x3a3a3a,
     scrollbar_hover: 0x555555,
