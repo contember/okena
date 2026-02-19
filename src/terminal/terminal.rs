@@ -68,6 +68,9 @@ impl EventListener for ZedEventListener {
             TermEvent::Title(title) => {
                 *self.title.lock() = Some(title);
             }
+            TermEvent::ResetTitle => {
+                *self.title.lock() = None;
+            }
             TermEvent::Bell => {
                 *self.has_bell.lock() = true;
             }
@@ -1009,5 +1012,91 @@ fn named_color_sgr_code(color: &NamedColor, is_fg: bool) -> Option<u8> {
     } else {
         // Bright colors: 90-97 / 100-107
         Some(if is_fg { 90 + (code - 8) } else { 100 + (code - 8) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct NullTransport;
+    impl TerminalTransport for NullTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool { false }
+    }
+
+    #[test]
+    fn test_osc_title_set() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".to_string(),
+        );
+
+        // Feed OSC 0 (set title) sequence: ESC ] 0 ; MOJE_JMENO BEL
+        let osc_data = b"\x1b]0;MOJE_JMENO\x07";
+        terminal.process_output(osc_data);
+
+        assert_eq!(terminal.title(), Some("MOJE_JMENO".to_string()));
+    }
+
+    #[test]
+    fn test_osc_title_with_surrounding_data() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".to_string(),
+        );
+
+        // Simulate what dtach sends: clear screen + OSC title + some output
+        let data = b"\x1b[H\x1b[J\x1b]0;MOJE_JMENO\x07DONE\r\n";
+        terminal.process_output(data);
+
+        assert_eq!(terminal.title(), Some("MOJE_JMENO".to_string()));
+    }
+
+    #[test]
+    fn test_osc_title_split_across_chunks() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".to_string(),
+        );
+
+        // Split the OSC sequence across two process_output calls
+        terminal.process_output(b"\x1b]0;MOJE");
+        assert_eq!(terminal.title(), None); // Not complete yet
+
+        terminal.process_output(b"_JMENO\x07");
+        assert_eq!(terminal.title(), Some("MOJE_JMENO".to_string()));
+    }
+
+    #[test]
+    fn test_osc_title_reset() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".to_string(),
+        );
+
+        // Set title
+        terminal.process_output(b"\x1b]0;MOJE_JMENO\x07");
+        assert_eq!(terminal.title(), Some("MOJE_JMENO".to_string()));
+
+        // Reset title (OSC 0 with empty string => set_title(None) in alacritty)
+        terminal.process_output(b"\x1b]0;\x07");
+        // After reset, title should be cleared or set to empty
+        let title = terminal.title();
+        assert!(title.is_none() || title.as_deref() == Some(""), "title should be empty or None, got: {:?}", title);
     }
 }

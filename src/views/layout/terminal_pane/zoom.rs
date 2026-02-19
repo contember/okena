@@ -78,8 +78,9 @@ impl TerminalPane {
         let ws = self.workspace.read(cx);
 
         let terminal_name = if let Some(ref tid) = self.terminal_id {
+            let osc_title = self.terminal.as_ref().and_then(|t| t.title());
             ws.project(&self.project_id)
-                .and_then(|p| p.terminal_names.get(tid).cloned())
+                .map(|p| p.terminal_display_name(tid, osc_title))
                 .unwrap_or_else(|| "Terminal".to_string())
         } else {
             "Terminal".to_string()

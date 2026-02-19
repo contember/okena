@@ -16,7 +16,6 @@ pub struct DetachedTerminalView {
     workspace: Entity<Workspace>,
     terminal: Arc<Terminal>,
     terminal_id: String,
-    terminal_name: String,
     focus_handle: FocusHandle,
     pending_focus: bool,
     /// Flag to track if we should close the window
@@ -35,19 +34,14 @@ impl DetachedTerminalView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Get terminal name and project_id from workspace
-        let (terminal_name, project_id, layout_path, project_path) = {
+        // Get project info from workspace
+        let (project_id, layout_path, project_path) = {
             let ws = workspace.read(cx);
-            let mut name = terminal_id.chars().take(8).collect::<String>();
             let mut found_project_id = String::new();
             let mut found_layout_path = vec![];
             let mut found_project_path = String::new();
 
             for project in ws.projects() {
-                if let Some(custom_name) = project.terminal_names.get(&terminal_id) {
-                    name = custom_name.clone();
-                }
-                // Find layout path for this terminal
                 if let Some(layout) = &project.layout {
                     if let Some(path) = layout.find_terminal_path(&terminal_id) {
                         found_project_id = project.id.clone();
@@ -57,7 +51,7 @@ impl DetachedTerminalView {
                     }
                 }
             }
-            (name, found_project_id, found_layout_path, found_project_path)
+            (found_project_id, found_layout_path, found_project_path)
         };
 
         // Get or create terminal from registry
@@ -122,7 +116,6 @@ impl DetachedTerminalView {
             workspace,
             terminal,
             terminal_id,
-            terminal_name,
             focus_handle,
             pending_focus: true,
             should_close: false,
@@ -156,7 +149,16 @@ impl Render for DetachedTerminalView {
 
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let terminal_name = self.terminal_name.clone();
+
+        // Compute terminal name dynamically: user-set custom name > OSC title > directory fallback
+        let terminal_name = {
+            let ws = self.workspace.read(cx);
+            let osc_title = self.terminal.title();
+            ws.projects().iter()
+                .find(|p| p.layout.as_ref().and_then(|l| l.find_terminal_path(&self.terminal_id)).is_some())
+                .map(|p| p.terminal_display_name(&self.terminal_id, osc_title.clone()))
+                .unwrap_or_else(|| osc_title.unwrap_or_else(|| "Terminal".to_string()))
+        };
 
         let is_maximized = window.is_maximized();
         let decorations = window.window_decorations();

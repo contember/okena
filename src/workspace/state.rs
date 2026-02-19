@@ -73,6 +73,56 @@ pub struct ProjectData {
     pub connection_id: Option<String>,
 }
 
+impl ProjectData {
+    /// Get the display name for a terminal.
+    /// Priority: user-set custom name > non-prompt OSC title > directory-based fallback.
+    /// OSC titles matching bash prompt format (user@host:...) are ignored in favor
+    /// of the directory name. Explicit titles (e.g. from printf) are shown.
+    pub fn terminal_display_name(&self, terminal_id: &str, osc_title: Option<String>) -> String {
+        if let Some(custom_name) = self.terminal_names.get(terminal_id) {
+            return custom_name.clone();
+        }
+        if let Some(ref title) = osc_title {
+            if !is_bash_prompt_title(title) {
+                return title.clone();
+            }
+        }
+        self.directory_name()
+    }
+
+    /// Get the directory name from the project path (used as terminal name fallback).
+    pub fn directory_name(&self) -> String {
+        std::path::Path::new(&self.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Terminal")
+            .to_string()
+    }
+}
+
+/// Check if an OSC title looks like a bash/zsh prompt title (e.g. "user@host: ~/path").
+/// These are auto-set by the shell and should not override the directory-based name.
+fn is_bash_prompt_title(title: &str) -> bool {
+    // Match pattern: non-whitespace@non-whitespace:
+    // e.g. "matej21@matej21-hp: ~/projects/contember/webmaster"
+    // e.g. "root@server:/var/log"
+    let bytes = title.as_bytes();
+    let mut i = 0;
+    // Find '@'
+    while i < bytes.len() && bytes[i] != b'@' && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i == 0 || i >= bytes.len() || bytes[i] != b'@' {
+        return false;
+    }
+    i += 1; // skip '@'
+    // Find ':' after hostname
+    while i < bytes.len() && bytes[i] != b':' && !bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i > 1 && i < bytes.len() && bytes[i] == b':'
+}
+
 use crate::terminal::shell_config::ShellType;
 
 fn default_workspace_version() -> u32 {
@@ -871,6 +921,104 @@ mod tests {
             children,
             active_tab: 0,
         }
+    }
+
+    // === ProjectData helpers ===
+
+    use super::ProjectData;
+    use std::collections::HashMap;
+
+    fn make_project(path: &str) -> ProjectData {
+        ProjectData {
+            id: "test-id".to_string(),
+            name: "test".to_string(),
+            path: path.to_string(),
+            is_visible: true,
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            folder_color: Default::default(),
+            hooks: Default::default(),
+            is_remote: false,
+            connection_id: None,
+        }
+    }
+
+    #[test]
+    fn directory_name_from_path() {
+        assert_eq!(make_project("/home/user/myproject").directory_name(), "myproject");
+        assert_eq!(make_project("/").directory_name(), "Terminal");
+    }
+
+    #[test]
+    fn terminal_display_name_prefers_custom_name() {
+        let mut project = make_project("/home/user/myproject");
+        project.terminal_names.insert("t1".to_string(), "My Terminal".to_string());
+        assert_eq!(
+            project.terminal_display_name("t1", Some("osc-title".to_string())),
+            "My Terminal"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_uses_osc_title_when_no_custom() {
+        let project = make_project("/home/user/myproject");
+        assert_eq!(
+            project.terminal_display_name("t1", Some("osc-title".to_string())),
+            "osc-title"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_falls_back_to_directory() {
+        let project = make_project("/home/user/myproject");
+        assert_eq!(
+            project.terminal_display_name("t1", None),
+            "myproject"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_ignores_bash_prompt_title() {
+        let project = make_project("/home/user/myproject");
+        // Bash prompt format should be ignored, fall back to directory name
+        assert_eq!(
+            project.terminal_display_name("t1", Some("matej21@matej21-hp: ~/projects/myproject".to_string())),
+            "myproject"
+        );
+        assert_eq!(
+            project.terminal_display_name("t1", Some("root@server:/var/log".to_string())),
+            "myproject"
+        );
+    }
+
+    #[test]
+    fn terminal_display_name_shows_explicit_osc_title() {
+        let project = make_project("/home/user/myproject");
+        // Explicit printf titles should be shown
+        assert_eq!(
+            project.terminal_display_name("t1", Some("MOJE_JMENO".to_string())),
+            "MOJE_JMENO"
+        );
+        assert_eq!(
+            project.terminal_display_name("t1", Some("my-app dev server".to_string())),
+            "my-app dev server"
+        );
+    }
+
+    #[test]
+    fn is_bash_prompt_title_detection() {
+        use super::is_bash_prompt_title;
+        // Should match bash prompt patterns
+        assert!(is_bash_prompt_title("matej21@matej21-hp: ~/projects"));
+        assert!(is_bash_prompt_title("root@server:/var/log"));
+        assert!(is_bash_prompt_title("user@host:~"));
+        // Should NOT match explicit titles
+        assert!(!is_bash_prompt_title("MOJE_JMENO"));
+        assert!(!is_bash_prompt_title("my-app dev server"));
+        assert!(!is_bash_prompt_title("Terminal 1"));
+        assert!(!is_bash_prompt_title(""));
     }
 
     // === get_at_path ===

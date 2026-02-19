@@ -374,17 +374,10 @@ impl ProjectColumn {
                     let workspace = self.workspace.clone();
                     let project_id = self.project_id.clone();
 
-                    // Priority: custom name > OSC title > terminal ID prefix
-                    let terminal_name = if let Some(custom_name) = project.terminal_names.get(&terminal_id) {
-                        custom_name.clone()
-                    } else {
-                        // Try to get OSC title from terminal
-                        let terminals = self.terminals.lock();
-                        if let Some(terminal) = terminals.get(&terminal_id) {
-                            terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
-                        } else {
-                            terminal_id.chars().take(8).collect()
-                        }
+                    // Priority: user-set custom name > non-prompt OSC title > directory fallback
+                    let terminal_name = {
+                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
+                        project.terminal_display_name(&terminal_id, osc_title)
                     };
 
                     div()
@@ -423,17 +416,10 @@ impl ProjectColumn {
                     let workspace = self.workspace.clone();
                     let terminal_id_for_click = terminal_id.clone();
 
-                    // Priority: custom name > OSC title > terminal ID prefix
-                    let terminal_name = if let Some(custom_name) = project.terminal_names.get(&terminal_id) {
-                        custom_name.clone()
-                    } else {
-                        // Try to get OSC title from terminal
-                        let terminals = self.terminals.lock();
-                        if let Some(terminal) = terminals.get(&terminal_id) {
-                            terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
-                        } else {
-                            terminal_id.chars().take(8).collect()
-                        }
+                    // Priority: user-set custom name > non-prompt OSC title > directory fallback
+                    let terminal_name = {
+                        let osc_title = self.terminals.lock().get(&terminal_id).and_then(|t| t.title());
+                        project.terminal_display_name(&terminal_id, osc_title)
                     };
 
                     div()

@@ -7,7 +7,7 @@ use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
 impl Workspace {
-    /// Set terminal ID at a layout path and assign a default name based on directory
+    /// Set terminal ID at a layout path
     pub fn set_terminal_id(
         &mut self,
         project_id: &str,
@@ -15,40 +15,11 @@ impl Workspace {
         terminal_id: String,
         cx: &mut Context<Self>,
     ) {
-        let tid = terminal_id.clone();
         self.with_project(project_id, cx, |project| {
-            // Set terminal ID in layout node
             if let Some(ref mut layout) = project.layout {
                 if let Some(node) = layout.get_at_path_mut(path) {
                     if let LayoutNode::Terminal { terminal_id: id, .. } = node {
                         *id = Some(terminal_id);
-
-                        // Set default name based on directory if not already set
-                        if !project.terminal_names.contains_key(&tid) {
-                            let base_name = std::path::Path::new(&project.path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("Terminal")
-                                .to_string();
-
-                            // Check if name already exists and add counter if needed
-                            let existing_names: Vec<_> = project.terminal_names.values().collect();
-                            let default_name = if existing_names.contains(&&base_name) {
-                                // Find next available number
-                                let mut counter = 2;
-                                loop {
-                                    let candidate = format!("{} ({})", base_name, counter);
-                                    if !existing_names.contains(&&candidate) {
-                                        break candidate;
-                                    }
-                                    counter += 1;
-                                }
-                            } else {
-                                base_name
-                            };
-
-                            project.terminal_names.insert(tid, default_name);
-                        }
                         return true;
                     }
                 }

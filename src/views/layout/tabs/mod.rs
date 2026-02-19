@@ -382,6 +382,7 @@ impl LayoutContainer {
         let workspace_reader = self.workspace.read(cx);
         let project = workspace_reader.project(&self.project_id);
         let terminal_names_map = project.map(|p| p.terminal_names.clone());
+        let project_for_names = project.cloned();
 
         // Check if the focused terminal is within this tab group
         let is_pane_focused = workspace_reader.focus_manager
@@ -409,18 +410,13 @@ impl LayoutContainer {
                 _ => None,
             };
 
-            // Get tab label: custom name > OSC title > "Tab N"
+            // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
-                let custom_name = terminal_names_map.as_ref().and_then(|m| m.get(tid).cloned());
-                if let Some(name) = custom_name {
-                    name
+                if let Some(ref p) = project_for_names {
+                    let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
+                    p.terminal_display_name(tid, osc_title)
                 } else {
-                    let terminals_guard = terminals.lock();
-                    if let Some(terminal) = terminals_guard.get(tid) {
-                        terminal.title().unwrap_or_else(|| format!("Tab {}", i + 1))
-                    } else {
-                        format!("Tab {}", i + 1)
-                    }
+                    format!("Tab {}", i + 1)
                 }
             } else {
                 format!("Tab {}", i + 1)

@@ -309,23 +309,23 @@ impl Sidebar {
         let project_id = project_id.to_string();
         let terminal_id = terminal_id.to_string();
 
-        // Priority: custom name > OSC title > terminal ID prefix
+        // Priority: user-set custom name > non-prompt OSC title > directory fallback
         // Also check for bell notification
         let (terminal_name, has_bell) = {
+            let ws = self.workspace.read(cx);
+            let project = ws.project(&project_id);
             let terminals = self.terminals.lock();
-            if let Some(terminal) = terminals.get(terminal_id.as_str()) {
-                let name = if let Some(custom_name) = terminal_names.get(terminal_id.as_str()) {
-                    custom_name.clone()
-                } else {
-                    terminal.title().unwrap_or_else(|| terminal_id.chars().take(8).collect())
-                };
-                (name, terminal.has_bell())
+            let terminal = terminals.get(terminal_id.as_str());
+            let osc_title = terminal.and_then(|t| t.title());
+            let name = if let Some(custom_name) = terminal_names.get(terminal_id.as_str()) {
+                custom_name.clone()
+            } else if let Some(p) = project {
+                p.terminal_display_name(terminal_id.as_str(), osc_title)
             } else {
-                let name = terminal_names.get(terminal_id.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| terminal_id.chars().take(8).collect());
-                (name, false)
-            }
+                "Terminal".to_string()
+            };
+            let bell = terminal.map_or(false, |t| t.has_bell());
+            (name, bell)
         };
 
         // Check if this terminal is being renamed
