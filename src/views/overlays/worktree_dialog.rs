@@ -1,5 +1,7 @@
 use crate::git;
 use crate::keybindings::Cancel;
+use crate::process::command;
+use crate::settings::settings;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, input_container};
 use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
@@ -7,7 +9,14 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
+
+#[derive(Clone, Debug)]
+struct PrInfo {
+    number: u32,
+    title: String,
+    branch: String,
+}
 
 /// Events emitted by the worktree dialog
 #[derive(Clone)]
@@ -29,10 +38,19 @@ pub struct WorktreeDialog {
     filtered_branches: Vec<usize>,
     selected_branch_index: Option<usize>,
     branch_search_input: Entity<SimpleInputState>,
+    custom_path_input: Entity<SimpleInputState>,
+    use_custom_path: bool,
     error_message: Option<String>,
     focus_handle: FocusHandle,
     initialized: bool,
     last_search_query: String,
+    pr_mode: bool,
+    pr_list: Vec<PrInfo>,
+    loading_prs: bool,
+    pr_error: Option<String>,
+    selected_pr_branch: Option<String>,
+    prs_loaded_once: bool,
+    path_template: String,
 }
 
 impl WorktreeDialog {
@@ -52,8 +70,14 @@ impl WorktreeDialog {
                 .icon("icons/search.svg")
         });
 
+        let custom_path_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Custom worktree path...")
+        });
+
         let filtered_branches: Vec<usize> = (0..branches.len()).collect();
         let focus_handle = cx.focus_handle();
+        let path_template = settings(cx).worktree.path_template;
 
         Self {
             workspace,
@@ -63,10 +87,19 @@ impl WorktreeDialog {
             filtered_branches,
             selected_branch_index: None,
             branch_search_input,
+            custom_path_input,
+            use_custom_path: false,
             error_message: None,
             focus_handle,
             initialized: false,
             last_search_query: String::new(),
+            pr_mode: false,
+            pr_list: vec![],
+            loading_prs: false,
+            pr_error: None,
+            selected_pr_branch: None,
+            prs_loaded_once: false,
+            path_template,
         }
     }
 
@@ -99,19 +132,36 @@ impl WorktreeDialog {
 
     fn get_target_path(&self, branch: &str) -> String {
         let base_path = PathBuf::from(&self.project_path);
-        let parent = base_path.parent().unwrap_or(&base_path);
-        let repo_name = base_path.file_name()
+        let repo = base_path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("repo");
         let safe_branch = branch.replace('/', "-");
-        parent.join(format!("{}-wt", repo_name))
-            .join(&safe_branch)
-            .to_string_lossy()
-            .to_string()
+
+        let expanded = self.path_template
+            .replace("{repo}", repo)
+            .replace("{branch}", &safe_branch);
+
+        let path = PathBuf::from(&expanded);
+        if path.is_relative() {
+            normalize_path(&base_path.join(&expanded))
+                .to_string_lossy()
+                .to_string()
+        } else {
+            expanded
+        }
     }
 
     fn create_worktree(&mut self, cx: &mut Context<Self>) {
-        let (branch, create_branch) = if let Some(filtered_idx) = self.selected_branch_index {
+        let (branch, create_branch) = if self.pr_mode {
+            // PR mode: use selected PR branch
+            if let Some(ref pr_branch) = self.selected_pr_branch {
+                (pr_branch.clone(), false)
+            } else {
+                self.error_message = Some("Please select a pull request".to_string());
+                cx.notify();
+                return;
+            }
+        } else if let Some(filtered_idx) = self.selected_branch_index {
             // Use selected existing branch
             if let Some(&branch_idx) = self.filtered_branches.get(filtered_idx) {
                 if let Some(branch) = self.branches.get(branch_idx) {
@@ -142,7 +192,17 @@ impl WorktreeDialog {
             }
         };
 
-        let target_path = self.get_target_path(&branch);
+        let target_path = if self.use_custom_path {
+            let custom = self.custom_path_input.read(cx).value().trim().to_string();
+            if custom.is_empty() {
+                self.error_message = Some("Custom path cannot be empty".to_string());
+                cx.notify();
+                return;
+            }
+            custom
+        } else {
+            self.get_target_path(&branch)
+        };
         let project_id = self.project_id.clone();
 
         // Create the worktree project
@@ -159,6 +219,153 @@ impl WorktreeDialog {
                 cx.notify();
             }
         }
+    }
+
+    fn load_prs(&mut self, cx: &mut Context<Self>) {
+        self.loading_prs = true;
+        self.pr_error = None;
+        cx.notify();
+
+        let project_path = self.project_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                let output = command("gh")
+                    .args(["pr", "list", "--json", "number,title,headRefName", "--limit", "20"])
+                    .current_dir(&project_path)
+                    .output();
+
+                match output {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&stdout);
+                        match parsed {
+                            Ok(items) => {
+                                let prs: Vec<PrInfo> = items
+                                    .into_iter()
+                                    .filter_map(|v| {
+                                        Some(PrInfo {
+                                            number: v.get("number")?.as_u64()? as u32,
+                                            title: v.get("title")?.as_str()?.to_string(),
+                                            branch: v.get("headRefName")?.as_str()?.to_string(),
+                                        })
+                                    })
+                                    .collect();
+                                Ok(prs)
+                            }
+                            Err(e) => Err(format!("Failed to parse PR data: {}", e)),
+                        }
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        Err(stderr.trim().to_string())
+                    }
+                    Err(_) => Err("GitHub CLI not found. Install gh: https://cli.github.com".to_string()),
+                }
+            })
+            .await;
+
+            let _ = cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    match result {
+                        Ok(prs) => {
+                            this.pr_list = prs;
+                        }
+                        Err(e) => {
+                            this.pr_error = Some(e);
+                        }
+                    }
+                    this.loading_prs = false;
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn render_pr_list(&self, t: crate::theme::ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.loading_prs {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child("Loading PRs...")
+                .into_any_element();
+        }
+
+        if let Some(ref err) = self.pr_error {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child(err.clone())
+                .into_any_element();
+        }
+
+        if self.pr_list.is_empty() {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child("No open pull requests")
+                .into_any_element();
+        }
+
+        div()
+            .id("pr-list-scroll")
+            .flex()
+            .flex_col()
+            .max_h(px(200.0))
+            .overflow_y_scroll()
+            .children(
+                self.pr_list.iter().enumerate().map(|(idx, pr)| {
+                    let is_selected = self.selected_pr_branch.as_deref() == Some(&pr.branch);
+                    let branch = pr.branch.clone();
+
+                    div()
+                        .id(ElementId::Name(format!("pr-{}", idx).into()))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .cursor_pointer()
+                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.selected_pr_branch = Some(branch.clone());
+                            this.selected_branch_index = None;
+                            cx.notify();
+                        }))
+                        .child(
+                            h_flex()
+                                .gap(px(6.0))
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("#{}", pr.number))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(t.text_primary))
+                                        .flex_1()
+                                        .overflow_x_hidden()
+                                        .whitespace_nowrap()
+                                        .child(pr.title.clone())
+                                )
+                        )
+                        .child(
+                            div()
+                                .pl(px(28.0))
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.text_muted))
+                                .child(pr.branch.clone())
+                        )
+                })
+            )
+            .into_any_element()
     }
 
     fn render_branch_list(&self, t: crate::theme::ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
@@ -237,7 +444,11 @@ impl Render for WorktreeDialog {
         self.filter_branches(cx);
 
         let branch_search_input = self.branch_search_input.clone();
+        let custom_path_input = self.custom_path_input.clone();
         let search_input_focused = self.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+        let custom_path_focused = self.custom_path_input.read(cx).focus_handle(cx).is_focused(window);
+        let use_custom_path = self.use_custom_path;
+        let pr_mode = self.pr_mode;
 
         div()
             .id("worktree-dialog-backdrop")
@@ -367,13 +578,152 @@ impl Render for WorktreeDialog {
                                     .flex()
                                     .flex_col()
                                     .gap(px(8.0))
-                                    // Search input
+                                    // Mode toggle tabs
                                     .child(
-                                        input_container(&t, Some(search_input_focused))
-                                            .child(SimpleInput::new(&branch_search_input).text_size(px(12.0))),
+                                        h_flex()
+                                            .gap(px(0.0))
+                                            .border_1()
+                                            .border_color(rgb(t.border))
+                                            .rounded(px(4.0))
+                                            .overflow_hidden()
+                                            .child(
+                                                div()
+                                                    .id("tab-branches")
+                                                    .flex_1()
+                                                    .px(px(12.0))
+                                                    .py(px(6.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(12.0))
+                                                    .cursor_pointer()
+                                                    .when(!pr_mode, |d| {
+                                                        d.bg(rgb(t.bg_selection))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                    })
+                                                    .when(pr_mode, |d| {
+                                                        d.text_color(rgb(t.text_muted))
+                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    })
+                                                    .child("Branches")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.pr_mode = false;
+                                                        this.selected_pr_branch = None;
+                                                        cx.notify();
+                                                    }))
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(1.0))
+                                                    .h_full()
+                                                    .bg(rgb(t.border))
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("tab-from-pr")
+                                                    .flex_1()
+                                                    .px(px(12.0))
+                                                    .py(px(6.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(12.0))
+                                                    .cursor_pointer()
+                                                    .when(pr_mode, |d| {
+                                                        d.bg(rgb(t.bg_selection))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                    })
+                                                    .when(!pr_mode, |d| {
+                                                        d.text_color(rgb(t.text_muted))
+                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    })
+                                                    .child("From PR")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.pr_mode = true;
+                                                        this.selected_branch_index = None;
+                                                        if !this.prs_loaded_once {
+                                                            this.prs_loaded_once = true;
+                                                            this.load_prs(cx);
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                            )
                                     )
-                                    // Branch list
-                                    .child(self.render_branch_list(t, cx))
+                                    // Search input (only in branch mode)
+                                    .when(!pr_mode, |d| {
+                                        d.child(
+                                            input_container(&t, Some(search_input_focused))
+                                                .child(SimpleInput::new(&branch_search_input).text_size(px(12.0))),
+                                        )
+                                    })
+                                    // Branch list or PR list
+                                    .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
+                                    .when(pr_mode, |d| d.child(self.render_pr_list(t, cx)))
+                                    // Custom path checkbox
+                                    .child(
+                                        div()
+                                            .id("custom-path-checkbox")
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.0))
+                                            .py(px(4.0))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.use_custom_path = !this.use_custom_path;
+                                                if this.use_custom_path {
+                                                    // Pre-fill with auto-generated path for current branch
+                                                    let branch = if let Some(filtered_idx) = this.selected_branch_index {
+                                                        this.filtered_branches.get(filtered_idx)
+                                                            .and_then(|&idx| this.branches.get(idx))
+                                                            .cloned()
+                                                    } else {
+                                                        let val = this.branch_search_input.read(cx).value().trim().to_string();
+                                                        if val.is_empty() { None } else { Some(val) }
+                                                    };
+                                                    if let Some(branch) = branch {
+                                                        let path = this.get_target_path(&branch);
+                                                        this.custom_path_input.update(cx, |input, cx| {
+                                                            input.set_value(&path, cx);
+                                                        });
+                                                    }
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .w(px(16.0))
+                                                    .h(px(16.0))
+                                                    .rounded(px(3.0))
+                                                    .border_1()
+                                                    .border_color(rgb(t.border_active))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .when(use_custom_path, |d| {
+                                                        d.bg(rgb(t.border_active)).child(
+                                                            svg()
+                                                                .path("icons/check.svg")
+                                                                .size(px(12.0))
+                                                                .text_color(rgb(t.text_primary)),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.0))
+                                                    .text_color(rgb(t.text_primary))
+                                                    .child("Use custom path"),
+                                            ),
+                                    )
+                                    // Custom path input (shown when enabled)
+                                    .when(use_custom_path, |d| {
+                                        d.child(
+                                            input_container(&t, Some(custom_path_focused))
+                                                .child(SimpleInput::new(&custom_path_input).text_size(px(12.0))),
+                                        )
+                                    })
                             )
                     )
                     // Error message
@@ -417,4 +767,17 @@ impl Render for WorktreeDialog {
                     )
             )
     }
+}
+
+/// Normalize a path by resolving `.` and `..` components without filesystem access.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => { result.pop(); }
+            Component::CurDir => {}
+            other => result.push(other),
+        }
+    }
+    result
 }
