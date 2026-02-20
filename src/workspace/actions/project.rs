@@ -85,6 +85,30 @@ impl Workspace {
         }
     }
 
+    /// Add a new terminal running a specific command to a project
+    pub fn add_terminal_with_command(
+        &mut self,
+        project_id: &str,
+        command: &str,
+        env_vars: &HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project_mut(project_id) {
+            let new_node = LayoutNode::new_terminal_with_command(command, env_vars);
+            if let Some(ref old_layout) = project.layout {
+                let old_layout = old_layout.clone();
+                project.layout = Some(LayoutNode::Split {
+                    direction: crate::workspace::state::SplitDirection::Vertical,
+                    sizes: vec![50.0, 50.0],
+                    children: vec![old_layout, new_node],
+                });
+            } else {
+                project.layout = Some(new_node);
+            }
+            self.notify_data(cx);
+        }
+    }
+
     /// Rename a project
     pub fn rename_project(&mut self, project_id: &str, new_name: String, cx: &mut Context<Self>) {
         self.with_project(project_id, cx, |project| {

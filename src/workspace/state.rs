@@ -463,6 +463,34 @@ impl LayoutNode {
         }
     }
 
+    /// Create a terminal node that runs a specific command with env vars
+    pub fn new_terminal_with_command(
+        command: &str,
+        env_vars: &std::collections::HashMap<String, String>,
+    ) -> Self {
+        let env_prefix = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let full_cmd = if env_prefix.is_empty() {
+            command.to_string()
+        } else {
+            format!("{} {}", env_prefix, command)
+        };
+
+        LayoutNode::Terminal {
+            terminal_id: None,
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Custom {
+                path: "sh".to_string(),
+                args: vec!["-c".to_string(), full_cmd],
+            },
+            zoom_level: 1.0,
+        }
+    }
+
     /// Get the layout node at a given path
     pub fn get_at_path(&self, path: &[usize]) -> Option<&LayoutNode> {
         if path.is_empty() {

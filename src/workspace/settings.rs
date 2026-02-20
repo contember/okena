@@ -62,6 +62,18 @@ pub struct HooksConfig {
     pub on_worktree_create: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_worktree_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_worktree_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_removed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_rebase_conflict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_dirty_worktree_close: Option<String>,
 }
 
 /// Default sidebar width in pixels.
@@ -557,5 +569,53 @@ where
         updater(&mut settings.remote_connections);
         save_settings(&settings)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HooksConfig;
+
+    #[test]
+    fn hooks_config_serde_round_trip_with_all_fields() {
+        let config = HooksConfig {
+            on_project_open: Some("echo open".into()),
+            on_project_close: Some("echo close".into()),
+            on_worktree_create: Some("npm install".into()),
+            on_worktree_close: Some("cleanup".into()),
+            pre_merge: Some("lint".into()),
+            post_merge: Some("notify".into()),
+            before_worktree_remove: Some("backup".into()),
+            worktree_removed: Some("log".into()),
+            on_rebase_conflict: Some("terminal: claude -p \"fix\"".into()),
+            on_dirty_worktree_close: Some("echo dirty".into()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HooksConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.pre_merge, Some("lint".into()));
+        assert_eq!(deserialized.post_merge, Some("notify".into()));
+        assert_eq!(deserialized.before_worktree_remove, Some("backup".into()));
+        assert_eq!(deserialized.worktree_removed, Some("log".into()));
+    }
+
+    #[test]
+    fn hooks_config_backward_compat_missing_new_fields() {
+        // Simulate old config JSON without the new hook fields
+        let json = r#"{"on_project_open": "echo open"}"#;
+        let config: HooksConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.on_project_open, Some("echo open".into()));
+        assert!(config.pre_merge.is_none());
+        assert!(config.post_merge.is_none());
+        assert!(config.before_worktree_remove.is_none());
+        assert!(config.worktree_removed.is_none());
+    }
+
+    #[test]
+    fn hooks_config_empty_json_deserializes_to_defaults() {
+        let json = "{}";
+        let config: HooksConfig = serde_json::from_str(json).unwrap();
+        assert!(config.on_project_open.is_none());
+        assert!(config.pre_merge.is_none());
+        assert!(config.worktree_removed.is_none());
     }
 }

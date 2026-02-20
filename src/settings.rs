@@ -145,6 +145,42 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set hook: pre_merge
+    pub fn set_hook_pre_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.pre_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: post_merge
+    pub fn set_hook_post_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.post_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: before_worktree_remove
+    pub fn set_hook_before_worktree_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.before_worktree_remove = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: worktree_removed
+    pub fn set_hook_worktree_removed(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree_removed = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_rebase_conflict
+    pub fn set_hook_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_rebase_conflict = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_dirty_worktree_close
+    pub fn set_hook_on_dirty_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_dirty_worktree_close = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set diff view mode (unified or side-by-side)
     pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
         self.settings.diff_view_mode = value;
