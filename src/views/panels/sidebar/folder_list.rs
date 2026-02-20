@@ -382,6 +382,9 @@ impl Sidebar {
                 )
             })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+            .when(project.worktree_count > 0, |d| {
+                d.child(sidebar_worktree_badge(project.worktree_count, &t))
+            })
             .child(
                 {
                     let is_visible = project.is_visible;

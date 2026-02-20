@@ -451,7 +451,7 @@ impl ProjectColumn {
                                 .rounded(px(3.0))
                                 .bg(rgb(t.border_active))
                                 .text_size(px(9.0))
-                                .text_color(rgb(0xffffff))
+                                .text_color(rgb(t.bg_primary))
                                 .child("WT")
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
                         )

@@ -161,6 +161,9 @@ impl Sidebar {
                 )
             })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+            .when(project.worktree_count > 0, |d| {
+                d.child(sidebar_worktree_badge(project.worktree_count, &t))
+            })
             .child(
                 {
                     let is_visible = project.is_visible;
@@ -260,7 +263,11 @@ impl Sidebar {
                         svg()
                             .path("icons/git-branch.svg")
                             .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
+                            .text_color(if project.is_orphan {
+                                rgb(t.warning)
+                            } else {
+                                rgb(t.text_secondary)
+                            })
                     )
             )
             .child(
