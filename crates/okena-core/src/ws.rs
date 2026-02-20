@@ -40,6 +40,10 @@ pub enum WsOutbound {
     },
     Subscribed {
         mappings: std::collections::HashMap<String, u32>,
+        /// Terminal sizes (cols, rows) keyed by terminal_id.
+        /// Clients should pre-resize grids to these dimensions before snapshots arrive.
+        #[serde(default)]
+        sizes: std::collections::HashMap<String, (u16, u16)>,
     },
     StateChanged {
         state_version: u64,
@@ -143,6 +147,7 @@ mod tests {
             },
             WsOutbound::Subscribed {
                 mappings: [("t1".into(), 1)].into_iter().collect(),
+                sizes: [("t1".into(), (120, 40))].into_iter().collect(),
             },
             WsOutbound::StateChanged { state_version: 5 },
             WsOutbound::Dropped { count: 3 },

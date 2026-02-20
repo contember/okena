@@ -54,6 +54,12 @@ impl ConnectionHandler for MobileConnectionHandler {
         }
     }
 
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16) {
+        if let Some(holder) = self.terminals.read().get(prefixed_id) {
+            holder.resize(cols, rows);
+        }
+    }
+
     fn remove_terminal(&self, prefixed_id: &str) {
         self.terminals.write().remove(prefixed_id);
     }

@@ -17,6 +17,8 @@ pub enum RemoteCommand {
     GetState,
     /// Render a terminal's visible content as ANSI bytes (for snapshots).
     RenderSnapshot { terminal_id: String },
+    /// Get current grid sizes (cols, rows) for multiple terminals.
+    GetTerminalSizes { terminal_ids: Vec<String> },
 }
 
 /// Result of processing a RemoteCommand.

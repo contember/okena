@@ -28,6 +28,9 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]);
     /// Terminal removed — clean up platform terminal object.
     fn remove_terminal(&self, prefixed_id: &str);
+    /// Pre-resize a terminal's grid to match the server's dimensions.
+    /// Called before snapshot arrives so the ANSI data renders at the correct size.
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16);
     /// Connection is disconnecting — remove ALL terminals for this connection.
     fn remove_all_terminals(&self, connection_id: &str);
 }
@@ -739,6 +742,19 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                     sm.insert(terminal_id.clone(), *stream_id);
                                                 }
                                             }
+                                            // Pre-resize terminals to server dimensions before snapshots arrive
+                                            if let Some(sizes) = value.get("sizes") {
+                                                if let Ok(size_map) = serde_json::from_value::<
+                                                    HashMap<String, (u16, u16)>,
+                                                >(sizes.clone()) {
+                                                    for (terminal_id, (cols, rows)) in &size_map {
+                                                        let prefixed = make_prefixed_id(&config_id, terminal_id);
+                                                        handler_clone.resize_terminal(&prefixed, *cols, *rows);
+                                                    }
+                                                    log::info!("Pre-resized {} terminals to server dimensions", size_map.len());
+                                                }
+                                            }
+
                                             let _ = event_tx_clone
                                                 .send(ConnectionEvent::SubscriptionMappings {
                                                     connection_id: config_id.clone(),

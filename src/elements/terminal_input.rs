@@ -22,6 +22,8 @@ impl TerminalInputHandler {
         if text.is_empty() {
             return;
         }
+        // Local keyboard input reclaims resize authority from remote clients
+        self.terminal.claim_resize_local();
 
         // Filter out macOS function key characters
         let filtered: String = text

@@ -93,7 +93,25 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         stream_id_map.get(id).map(|sid| (id.clone(), *sid))
                                     })
                                     .collect();
-                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings }).expect("BUG: WsOutbound must serialize");
+                                // Query terminal sizes so client can pre-resize before snapshot
+                                let sizes = {
+                                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                    let ids = terminal_ids.clone();
+                                    if state.bridge_tx.send(BridgeMessage {
+                                        command: RemoteCommand::GetTerminalSizes { terminal_ids: ids },
+                                        reply: reply_tx,
+                                    }).await.is_ok() {
+                                        match reply_rx.await {
+                                            Ok(CommandResult::Ok(Some(val))) => {
+                                                serde_json::from_value(val).unwrap_or_default()
+                                            }
+                                            _ => HashMap::new(),
+                                        }
+                                    } else {
+                                        HashMap::new()
+                                    }
+                                };
+                                let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes }).expect("BUG: WsOutbound must serialize");
                                 if socket.send(Message::Text(resp.into())).await.is_err() {
                                     break;
                                 }

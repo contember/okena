@@ -18,6 +18,31 @@ pub trait TerminalTransport: Send + Sync {
     fn uses_mouse_backend(&self) -> bool;
 }
 
+/// Tracks who currently controls a terminal's resize.
+/// The "last to type" wins: local input sets Local, remote input sets Remote.
+/// After 30s of no remote input, the server auto-reclaims Local authority.
+#[derive(Clone, Debug)]
+pub enum ResizeOwner {
+    /// Server's own UI controls resize (default).
+    Local,
+    /// A remote client controls resize (set when remote input arrives).
+    Remote { last_input: std::time::Instant },
+}
+
+impl ResizeOwner {
+    const STALE_TIMEOUT_SECS: u64 = 30;
+
+    /// Returns true if the server should perform resize (Local or stale Remote).
+    pub fn is_local(&self) -> bool {
+        match self {
+            ResizeOwner::Local => true,
+            ResizeOwner::Remote { last_input } => {
+                last_input.elapsed().as_secs() >= Self::STALE_TIMEOUT_SECS
+            }
+        }
+    }
+}
+
 /// Terminal size in cells and pixels
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalSize {
@@ -195,6 +220,8 @@ pub struct Terminal {
     has_bell: Arc<Mutex<bool>>,
     /// Dirty flag - set when terminal content changes, cleared after render
     dirty: std::sync::atomic::AtomicBool,
+    /// Who controls resize for this terminal (server UI vs remote client).
+    resize_owner: Mutex<ResizeOwner>,
     /// Initial working directory (for resolving relative file paths in URL detection)
     initial_cwd: String,
 }
@@ -238,6 +265,7 @@ impl Terminal {
             title,
             has_bell,
             dirty: std::sync::atomic::AtomicBool::new(false),
+            resize_owner: Mutex::new(ResizeOwner::Local),
             initial_cwd,
         }
     }
@@ -352,6 +380,38 @@ impl Terminal {
             // Store pending resize - will be applied on next resize that passes debounce
             rs.pending_pty_resize = Some((new_size.cols, new_size.rows));
         }
+    }
+
+    /// Resize only the local alacritty grid, without sending resize to PTY/transport.
+    /// Used by remote clients to pre-resize the grid to match server dimensions before snapshot.
+    pub fn resize_grid_only(&self, cols: u16, rows: u16) {
+        let size = TerminalSize {
+            cols,
+            rows,
+            cell_width: self.resize_state.lock().size.cell_width,
+            cell_height: self.resize_state.lock().size.cell_height,
+        };
+        self.resize_state.lock().size = size;
+        let mut term = self.term.lock();
+        let term_size = TermSize::new(cols as usize, rows as usize);
+        term.resize(term_size);
+    }
+
+    /// Mark this terminal as locally controlled (server UI input).
+    pub fn claim_resize_local(&self) {
+        *self.resize_owner.lock() = ResizeOwner::Local;
+    }
+
+    /// Mark this terminal as remotely controlled (remote client sent input).
+    pub fn claim_resize_remote(&self) {
+        *self.resize_owner.lock() = ResizeOwner::Remote {
+            last_input: std::time::Instant::now(),
+        };
+    }
+
+    /// Check if the server's UI should perform resize (Local or stale Remote).
+    pub fn is_resize_owner_local(&self) -> bool {
+        self.resize_owner.lock().is_local()
     }
 
     /// Flush any pending PTY resize (call this when resize operations complete)
@@ -1098,5 +1158,58 @@ mod tests {
         // After reset, title should be cleared or set to empty
         let title = terminal.title();
         assert!(title.is_none() || title.as_deref() == Some(""), "title should be empty or None, got: {:?}", title);
+    }
+
+    #[test]
+    fn resize_owner_defaults_to_local() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, String::new());
+        assert!(terminal.is_resize_owner_local());
+    }
+
+    #[test]
+    fn resize_owner_transitions() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, String::new());
+
+        terminal.claim_resize_remote();
+        assert!(!terminal.is_resize_owner_local());
+
+        terminal.claim_resize_local();
+        assert!(terminal.is_resize_owner_local());
+    }
+
+    #[test]
+    fn resize_owner_stale_remote_reclaims_local() {
+        let owner = ResizeOwner::Remote {
+            last_input: std::time::Instant::now() - std::time::Duration::from_secs(31),
+        };
+        assert!(owner.is_local(), "stale remote (>30s) should be treated as local");
+
+        let owner = ResizeOwner::Remote {
+            last_input: std::time::Instant::now(),
+        };
+        assert!(!owner.is_local(), "fresh remote should NOT be treated as local");
+    }
+
+    #[test]
+    fn resize_grid_only_does_not_call_transport() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct SpyTransport { resize_called: AtomicBool }
+        impl TerminalTransport for SpyTransport {
+            fn send_input(&self, _: &str, _: &[u8]) {}
+            fn resize(&self, _: &str, _: u16, _: u16) {
+                self.resize_called.store(true, Ordering::Relaxed);
+            }
+            fn uses_mouse_backend(&self) -> bool { false }
+        }
+
+        let transport = Arc::new(SpyTransport { resize_called: AtomicBool::new(false) });
+        let terminal = Terminal::new("t".into(), TerminalSize::default(), transport.clone(), String::new());
+
+        terminal.resize_grid_only(120, 40);
+        assert!(!transport.resize_called.load(Ordering::Relaxed));
+        assert_eq!(terminal.resize_state.lock().size.cols, 120);
+        assert_eq!(terminal.resize_state.lock().size.rows, 40);
     }
 }

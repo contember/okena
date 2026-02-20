@@ -50,6 +50,12 @@ impl ConnectionHandler for DesktopConnectionHandler {
         }
     }
 
+    fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16) {
+        if let Some(terminal) = self.terminals.lock().get(prefixed_id) {
+            terminal.resize_grid_only(cols, rows);
+        }
+    }
+
     fn remove_terminal(&self, prefixed_id: &str) {
         self.terminals.lock().remove(prefixed_id);
     }

@@ -277,6 +277,20 @@ impl HeadlessApp {
                             CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
                         })
                     }
+                    RemoteCommand::GetTerminalSizes { terminal_ids } => {
+                        cx.update(|_cx| {
+                            let terms = terminals.lock();
+                            let mut sizes = std::collections::HashMap::new();
+                            for id in &terminal_ids {
+                                if let Some(term) = terms.get(id) {
+                                    let s = term.resize_state.lock().size;
+                                    sizes.insert(id.clone(), (s.cols, s.rows));
+                                }
+                            }
+                            let val = serde_json::to_value(sizes).expect("BUG: sizes must serialize");
+                            CommandResult::Ok(Some(val))
+                        })
+                    }
                     RemoteCommand::RenderSnapshot { terminal_id } => {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);

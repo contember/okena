@@ -110,6 +110,7 @@ pub fn execute_action(
         ActionRequest::SendText { terminal_id, text } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {
+                    term.claim_resize_remote();
                     term.send_input(&text);
                     ActionResult::Ok(None)
                 }
@@ -121,6 +122,7 @@ pub fn execute_action(
             command,
         } => match ensure_terminal(&terminal_id, terminals, backend, ws) {
             Some(term) => {
+                term.claim_resize_remote();
                 term.send_input(&format!("{}\r", command));
                 ActionResult::Ok(None)
             }
@@ -129,6 +131,7 @@ pub fn execute_action(
         ActionRequest::SendSpecialKey { terminal_id, key } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {
+                    term.claim_resize_remote();
                     term.send_bytes(key.to_bytes());
                     ActionResult::Ok(None)
                 }

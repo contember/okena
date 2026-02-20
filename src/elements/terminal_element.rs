@@ -285,8 +285,10 @@ impl Element for TerminalElement {
         let cell_size_changed = (cell_width_f - current_size.cell_width).abs() > 0.001
             || (line_height_f - current_size.cell_height).abs() > 0.001;
 
-        if cols_rows_changed {
-            // Full resize: grid dimensions changed, need to resize terminal and PTY
+        if cols_rows_changed && self.terminal.is_resize_owner_local() {
+            // Full resize: grid dimensions changed, need to resize terminal and PTY.
+            // Only resize if we (server UI) are the resize authority.
+            // When a remote client is actively typing, they control the terminal size.
             let new_size = crate::terminal::terminal::TerminalSize {
                 cols: new_cols,
                 rows: new_rows,
