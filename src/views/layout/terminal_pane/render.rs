@@ -3,6 +3,7 @@
 //! Contains the GPUI Render trait implementation which composes
 //! the content, search bar, and zoom header into the final view.
 
+use okena_core::api::ActionRequest;
 use crate::keybindings::{
     AddTab, CloseSearch, CloseTerminal, Copy, FocusDown, FocusLeft, FocusNextTerminal,
     FocusPrevTerminal, FocusRight, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal,
@@ -205,9 +206,13 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &ToggleFullscreen, _window, cx| {
                 let is_fullscreen = this.workspace.read(cx).focus_manager.has_fullscreen();
                 if is_fullscreen {
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.exit_fullscreen(cx);
-                    });
+                    let action = ActionRequest::SetFullscreen {
+                        project_id: this.project_id.clone(),
+                        terminal_id: None,
+                    };
+                    if let Some(ref dispatcher) = this.action_dispatcher {
+                        dispatcher.dispatch(action, cx);
+                    }
                 } else {
                     this.handle_fullscreen(cx);
                 }
