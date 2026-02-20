@@ -7,6 +7,18 @@ pub use repository::{
     create_worktree,
     remove_worktree,
     get_available_branches_for_worktree,
+    has_uncommitted_changes,
+    get_current_branch,
+    get_default_branch,
+    rebase_onto,
+    merge_branch,
+    stash_changes,
+    stash_pop,
+    fetch_all,
+    delete_local_branch,
+    delete_remote_branch,
+    push_branch,
+    count_unpushed_commits,
 };
 
 use parking_lot::Mutex;
@@ -127,7 +139,7 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
 
     // Get tracked file changes with numstat
     let output = crate::process::safe_output(
-        crate::process::command("git").args(["-C", path_str, "diff", "--numstat", "HEAD"]),
+        crate::process::command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
     )
     .ok();
 

@@ -84,6 +84,7 @@ impl SettingsState {
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
+    setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals
     pub fn set_default_shell(&mut self, value: ShellType, cx: &mut Context<Self>) {
         self.settings.default_shell = value;
@@ -144,6 +145,42 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set hook: pre_merge
+    pub fn set_hook_pre_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.pre_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: post_merge
+    pub fn set_hook_post_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.post_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: before_worktree_remove
+    pub fn set_hook_before_worktree_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.before_worktree_remove = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: worktree_removed
+    pub fn set_hook_worktree_removed(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree_removed = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_rebase_conflict
+    pub fn set_hook_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_rebase_conflict = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set hook: on_dirty_worktree_close
+    pub fn set_hook_on_dirty_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.on_dirty_worktree_close = value;
+        self.save_and_notify(cx);
+    }
+
     /// Set diff view mode (unified or side-by-side)
     pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
         self.settings.diff_view_mode = value;
@@ -153,6 +190,42 @@ impl SettingsState {
     /// Set diff ignore whitespace option
     pub fn set_diff_ignore_whitespace(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.diff_ignore_whitespace = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree path template
+    pub fn set_worktree_path_template(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.worktree.path_template = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default merge
+    pub fn set_worktree_default_merge(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default stash
+    pub fn set_worktree_default_stash(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_stash = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default fetch
+    pub fn set_worktree_default_fetch(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_fetch = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default push
+    pub fn set_worktree_default_push(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_push = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default delete branch
+    pub fn set_worktree_default_delete_branch(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_delete_branch = value;
         self.save_and_notify(cx);
     }
 

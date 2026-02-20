@@ -305,9 +305,11 @@ pub fn get_diff_with_options(
     // Build git diff command based on mode
     // WorkingTree: unstaged changes (working tree vs index)
     // Staged: staged changes (index vs HEAD)
+    // --no-color: prevent ANSI codes when user has color.ui=always
+    // --no-ext-diff: prevent external diff tools from intercepting output
     let mut args = match mode {
-        DiffMode::WorkingTree => vec!["-C", path_str, "diff"],
-        DiffMode::Staged => vec!["-C", path_str, "diff", "--cached"],
+        DiffMode::WorkingTree => vec!["-C", path_str, "diff", "--no-color", "--no-ext-diff"],
+        DiffMode::Staged => vec!["-C", path_str, "diff", "--cached", "--no-color", "--no-ext-diff"],
     };
 
     // Add -w flag to ignore whitespace changes
@@ -321,11 +323,13 @@ pub fn get_diff_with_options(
     log::debug!("[get_diff_with_options] git diff command: {:?}, stdout: {} bytes", t0.elapsed(), output.stdout.len());
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Empty diff is not an error
-        if stderr.is_empty() || stderr.contains("Not a git repository") {
-            return Err(stderr.trim().to_string());
-        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let msg = if stderr.is_empty() {
+            format!("git diff failed with exit code {}", output.status.code().unwrap_or(-1))
+        } else {
+            stderr
+        };
+        return Err(msg);
     }
 
     let t1 = std::time::Instant::now();

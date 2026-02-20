@@ -13,6 +13,7 @@ pub enum FolderContextMenuEvent {
     Close,
     RenameFolder { folder_id: String, folder_name: String },
     DeleteFolder { folder_id: String },
+    FilterToFolder { folder_id: String },
 }
 
 /// Folder context menu component
@@ -52,6 +53,12 @@ impl FolderContextMenu {
             folder_id: self.request.folder_id.clone(),
         });
     }
+
+    fn toggle_folder_filter(&self, cx: &mut Context<Self>) {
+        cx.emit(FolderContextMenuEvent::FilterToFolder {
+            folder_id: self.request.folder_id.clone(),
+        });
+    }
 }
 
 impl EventEmitter<FolderContextMenuEvent> for FolderContextMenu {}
@@ -71,6 +78,7 @@ impl Render for FolderContextMenu {
         let ws = self.workspace.read(cx);
         let folder = ws.folder(&self.request.folder_id);
         let project_count = folder.map(|f| f.project_ids.len()).unwrap_or(0);
+        let is_active_filter = ws.active_folder_filter() == Some(&self.request.folder_id);
 
         div()
             .track_focus(&self.focus_handle)
@@ -93,6 +101,18 @@ impl Render for FolderContextMenu {
                     .snap_to_window()
                     .child(
                         context_menu_panel("folder-context-menu", &t)
+                    // Filter option
+                    .child(
+                        menu_item(
+                            "folder-ctx-filter",
+                            if is_active_filter { "icons/eye-off.svg" } else { "icons/eye.svg" },
+                            if is_active_filter { "Show All Projects" } else { "Show Only This Folder" },
+                            &t,
+                        )
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.toggle_folder_filter(cx);
+                        })),
+                    )
                     // Rename option
                     .child(
                         menu_item("folder-ctx-rename", "icons/edit.svg", "Rename Folder", &t)

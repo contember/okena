@@ -139,6 +139,27 @@ pub fn sidebar_terminal_badge(
     }
 }
 
+/// Worktree count badge (branch icon + count) for parent projects.
+pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            svg()
+                .path("icons/git-branch.svg")
+                .size(px(10.0))
+                .text_color(rgb(t.text_muted))
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(t.text_muted))
+                .child(format!("{}", count))
+        )
+}
+
 /// Visibility toggle (eye / eye-off).
 ///
 /// Caller chains `.on_click()` to toggle visibility.

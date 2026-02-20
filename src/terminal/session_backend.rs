@@ -32,11 +32,11 @@ impl SessionBackend {
         }
     }
 
-    /// Load from environment variable TERM_MANAGER_SESSION_BACKEND
+    /// Load from environment variable OKENA_SESSION_BACKEND
     /// Defaults to Auto if not set
     #[allow(dead_code)]
     pub fn from_env() -> Self {
-        std::env::var("TERM_MANAGER_SESSION_BACKEND")
+        std::env::var("OKENA_SESSION_BACKEND")
             .map(|s| Self::from_str(&s))
             .unwrap_or_default()
     }

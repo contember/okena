@@ -28,6 +28,45 @@ impl RootView {
 
         let num_projects = visible_projects.len();
 
+        // Empty state when folder filter yields no results
+        if num_projects == 0 {
+            let has_folder_filter = self.workspace.read(cx).active_folder_filter().is_some();
+            if has_folder_filter {
+                let t = theme(cx);
+                let workspace = self.workspace.clone();
+                return div()
+                    .id("projects-grid-empty")
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(rgb(t.text_muted))
+                            .child("No projects in this folder"),
+                    )
+                    .child(
+                        div()
+                            .id("clear-folder-filter")
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.border_active))
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child("Show all projects")
+                            .on_click(move |_, _window, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.set_folder_filter(None, cx);
+                                });
+                            }),
+                    )
+                    .into_any_element();
+            }
+        }
+
         // Get widths for each project
         // When only one project is visible (focused), always use 100%
         // Otherwise, normalize widths so they sum to 100%

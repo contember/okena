@@ -35,6 +35,8 @@ pub mod remote_context_menu;
 pub mod tab_context_menu;
 pub mod terminal_context_menu;
 pub mod pairing_dialog;
+pub mod close_worktree_dialog;
+pub mod rename_directory_dialog;
 pub mod worktree_dialog;
 
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};

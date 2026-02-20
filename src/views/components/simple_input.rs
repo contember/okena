@@ -1,7 +1,8 @@
 use crate::theme::theme;
+use crate::views::components::code_view::find_word_boundaries;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::h_flex;
+
 use std::ops::Range;
 use std::time::Duration;
 
@@ -29,6 +30,15 @@ pub struct SimpleInputState {
     cursor_visible: bool,
     _blink_task: Option<Task<()>>,
     icon: Option<SharedString>,
+    highlight_vars: bool,
+    multiline: bool,
+    input_bounds: Option<Bounds<Pixels>>,
+    /// Per-line TextLayouts for accurate click-to-cursor mapping via index_for_position().
+    text_layouts: Vec<TextLayout>,
+    /// Whether the user is currently dragging to select text.
+    is_selecting: bool,
+    /// Anchor position (char offset) for drag selection — where the mouse-down started.
+    select_anchor: usize,
 }
 
 impl SimpleInputState {
@@ -60,6 +70,12 @@ impl SimpleInputState {
             cursor_visible: true,
             _blink_task: Some(blink_task),
             icon: None,
+            highlight_vars: false,
+            multiline: false,
+            input_bounds: None,
+            text_layouts: Vec::new(),
+            is_selecting: false,
+            select_anchor: 0,
         }
     }
 
@@ -82,6 +98,18 @@ impl SimpleInputState {
 
     pub fn icon(mut self, icon: impl Into<SharedString>) -> Self {
         self.icon = Some(icon.into());
+        self
+    }
+
+    /// Enable highlighting of `{var}` template variables in a distinct color.
+    pub fn highlight_vars(mut self) -> Self {
+        self.highlight_vars = true;
+        self
+    }
+
+    /// Enable multiline mode: Enter inserts newline, paste preserves lines, Up/Down navigate.
+    pub fn multiline(mut self) -> Self {
+        self.multiline = true;
         self
     }
 
@@ -311,6 +339,143 @@ impl SimpleInputState {
         start..end
     }
 
+    /// Get (line_index, col_chars) for the current cursor position.
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let byte_pos = self.byte_position_for_char(self.cursor_position);
+        let before = &self.value[..byte_pos];
+        let line_idx = before.matches('\n').count();
+        let col_bytes = before.rfind('\n').map_or(before.len(), |i| before.len() - i - 1);
+        let col_chars = before[before.len() - col_bytes..].chars().count();
+        (line_idx, col_chars)
+    }
+
+    /// Get the char offset of the start of a given line.
+    fn line_start_char(&self, target_line: usize) -> usize {
+        let mut line = 0;
+        for (i, c) in self.value.chars().enumerate() {
+            if line == target_line {
+                return i;
+            }
+            if c == '\n' {
+                line += 1;
+            }
+        }
+        if line == target_line {
+            self.value.chars().count()
+        } else {
+            0
+        }
+    }
+
+    /// Get the char count of a given line (not counting '\n').
+    fn line_char_count(&self, target_line: usize) -> usize {
+        self.value
+            .split('\n')
+            .nth(target_line)
+            .map_or(0, |l| l.chars().count())
+    }
+
+    fn move_cursor_up(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        let (line, col) = self.cursor_line_col();
+        if line > 0 {
+            let old_pos = self.cursor_position;
+            let prev_line_start = self.line_start_char(line - 1);
+            let prev_line_len = self.line_char_count(line - 1);
+            self.cursor_position = prev_line_start + col.min(prev_line_len);
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else {
+                self.selection = None;
+            }
+            self.reset_cursor_blink();
+            cx.notify();
+        }
+    }
+
+    fn move_cursor_down(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        let (line, col) = self.cursor_line_col();
+        let total_lines = self.value.split('\n').count();
+        if line + 1 < total_lines {
+            let old_pos = self.cursor_position;
+            let next_line_start = self.line_start_char(line + 1);
+            let next_line_len = self.line_char_count(line + 1);
+            self.cursor_position = next_line_start + col.min(next_line_len);
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else {
+                self.selection = None;
+            }
+            self.reset_cursor_blink();
+            cx.notify();
+        }
+    }
+
+    /// Resolve a mouse position to a char offset using stored text_layouts and input_bounds.
+    fn char_position_for_mouse(&self, position: Point<Pixels>) -> usize {
+        if self.multiline && self.value.contains('\n') {
+            if let Some(bounds) = self.input_bounds {
+                let line_height: f32 = 18.0;
+                let top_padding: f32 = 4.0;
+                let click_y = f32::from(position.y) - f32::from(bounds.origin.y) - top_padding;
+                let clicked_line = (click_y / line_height).floor().max(0.0) as usize;
+                let total_lines = self.value.split('\n').count();
+                let line_idx = clicked_line.min(total_lines - 1);
+
+                let col = if line_idx < self.text_layouts.len() {
+                    self.text_layouts[line_idx]
+                        .index_for_position(position)
+                        .unwrap_or_else(|ix| ix)
+                        .min(self.line_char_count(line_idx))
+                } else {
+                    0
+                };
+                self.line_start_char(line_idx) + col
+            } else {
+                self.value.chars().count()
+            }
+        } else {
+            let char_count = self.value.chars().count();
+            if let Some(layout) = self.text_layouts.first() {
+                layout
+                    .index_for_position(position)
+                    .unwrap_or_else(|ix| ix)
+                    .min(char_count)
+            } else {
+                char_count
+            }
+        }
+    }
+
+    /// Select the word around the given char position.
+    fn select_word_at(&mut self, pos: usize, cx: &mut Context<Self>) {
+        let (start, end) = find_word_boundaries(&self.value, pos);
+        if start != end {
+            self.selection = Some(start..end);
+            self.cursor_position = end;
+        }
+        self.reset_cursor_blink();
+        cx.notify();
+    }
+
+    /// Select the entire line containing the given char position (for multiline), or select all.
+    fn select_line_at(&mut self, pos: usize, cx: &mut Context<Self>) {
+        if self.multiline && self.value.contains('\n') {
+            // Find which line contains pos
+            let byte_pos = self.byte_position_for_char(pos);
+            let before = &self.value[..byte_pos];
+            let line_idx = before.matches('\n').count();
+            let start = self.line_start_char(line_idx);
+            let end = start + self.line_char_count(line_idx);
+            self.selection = Some(start..end);
+            self.cursor_position = end;
+        } else {
+            self.select_all(cx);
+            return;
+        }
+        self.reset_cursor_blink();
+        cx.notify();
+    }
+
     /// Handle key down event. Returns KeyHandled enum indicating how the key was processed.
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> KeyHandled {
         let key = event.keystroke.key.as_str();
@@ -358,10 +523,16 @@ impl SimpleInputState {
             "v" if modifiers.platform || modifiers.control => {
                 if let Some(clipboard_item) = cx.read_from_clipboard() {
                     if let Some(text) = clipboard_item.text() {
-                        // Only insert first line (no newlines in single-line input)
-                        let line = text.lines().next().unwrap_or("");
-                        if !line.is_empty() {
-                            self.insert_text(line, cx);
+                        if self.multiline {
+                            if !text.is_empty() {
+                                self.insert_text(&text, cx);
+                            }
+                        } else {
+                            // Only insert first line (no newlines in single-line input)
+                            let line = text.lines().next().unwrap_or("");
+                            if !line.is_empty() {
+                                self.insert_text(line, cx);
+                            }
                         }
                     }
                 }
@@ -394,9 +565,23 @@ impl SimpleInputState {
                 }
                 return KeyHandled::NotHandled;
             }
-            // These keys are handled by parent (enter for confirm, tab for focus)
-            "enter" | "tab" => {
+            "enter" => {
+                if self.multiline {
+                    self.insert_text("\n", cx);
+                    return KeyHandled::Handled;
+                }
                 return KeyHandled::NotHandled;
+            }
+            "tab" => {
+                return KeyHandled::NotHandled;
+            }
+            "up" if self.multiline => {
+                self.move_cursor_up(extend_selection, cx);
+                return KeyHandled::Handled;
+            }
+            "down" if self.multiline => {
+                self.move_cursor_down(extend_selection, cx);
+                return KeyHandled::Handled;
             }
             // Skip modifier-only and function keys
             "shift" | "control" | "alt" | "meta" | "capslock"
@@ -421,6 +606,34 @@ impl SimpleInputState {
 
 }
 
+/// Parse text into segments of (text, is_variable) based on `{...}` patterns.
+fn var_segments(text: &str) -> Vec<(&str, bool)> {
+    let mut segments = Vec::new();
+    let mut last_end = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(close) = text[i..].find('}') {
+                if i > last_end {
+                    segments.push((&text[last_end..i], false));
+                }
+                let end = i + close + 1;
+                segments.push((&text[i..end], true));
+                last_end = end;
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if last_end < text.len() {
+        segments.push((&text[last_end..], false));
+    }
+    segments
+}
+
 impl Render for SimpleInputState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -433,32 +646,196 @@ impl Render for SimpleInputState {
         let cursor_visible = self.cursor_visible && is_focused;
         let icon = self.icon.clone();
 
-        // Split value into parts for rendering with cursor
-        let (before_cursor, after_cursor) = {
-            let byte_pos = self.byte_position_for_char(cursor_position);
-            let (before, after) = value.split_at(byte_pos);
-            (before.to_string(), after.to_string())
-        };
+        let cursor_byte = self.byte_position_for_char(cursor_position);
 
         let show_placeholder = value.is_empty() && !is_focused;
+        let highlight_vars = self.highlight_vars;
+        let multiline = self.multiline;
+        let var_color = t.term_cyan;
+        let cursor_color = rgb(t.text_primary);
 
-        let cursor_element = div()
-            .w(px(1.0))
-            .h(px(14.0))
-            .when(cursor_visible, |d| d.bg(rgb(t.text_primary)));
+        // Build StyledText per line — used for both rendering AND click/cursor mapping.
+        // Text is rendered as single unbroken elements so shaping is preserved.
+        self.text_layouts.clear();
+
+        let content: AnyElement = if show_placeholder {
+            if highlight_vars {
+                let mut highlights = Vec::new();
+                for (seg, is_var) in var_segments(&placeholder) {
+                    if is_var {
+                        let start = seg.as_ptr() as usize - placeholder.as_ptr() as usize;
+                        highlights.push((start..start + seg.len(), HighlightStyle {
+                            color: Some(rgb(var_color).into()),
+                            ..Default::default()
+                        }));
+                    }
+                }
+                div()
+                    .text_color(rgb(t.text_muted))
+                    .child(StyledText::new(placeholder).with_highlights(highlights))
+                    .into_any_element()
+            } else {
+                div()
+                    .text_color(rgb(t.text_muted))
+                    .child(placeholder)
+                    .into_any_element()
+            }
+        } else if multiline && value.contains('\n') {
+            // Multiline: each line as a StyledText in its own row
+            let lines: Vec<&str> = value.split('\n').collect();
+            let (cursor_line, _) = self.cursor_line_col();
+
+            let mut container = div().flex().flex_col().text_color(cursor_color).relative();
+            let mut byte_offset = 0;
+
+            for (line_idx, line_text) in lines.iter().enumerate() {
+                let display = if line_text.is_empty() { "\u{200B}".to_string() } else { line_text.to_string() };
+                let line_char_count = line_text.chars().count();
+
+                // Compute per-line selection highlights
+                let styled = if let Some(ref sel) = selection {
+                    let line_start = self.line_start_char(line_idx);
+                    let line_end = line_start + line_char_count;
+                    let sel_start_in_line = sel.start.max(line_start).saturating_sub(line_start);
+                    let sel_end_in_line = sel.end.min(line_end).saturating_sub(line_start);
+                    if sel_start_in_line < sel_end_in_line && sel.end > line_start && sel.start < line_end {
+                        // Compute byte offsets within this line's text
+                        let sel_start_byte: usize = line_text.char_indices().nth(sel_start_in_line).map(|(i, _)| i).unwrap_or(line_text.len());
+                        let sel_end_byte: usize = line_text.char_indices().nth(sel_end_in_line).map(|(i, _)| i).unwrap_or(line_text.len());
+                        let highlights = vec![(sel_start_byte..sel_end_byte, HighlightStyle {
+                            background_color: Some(rgb(t.selection_bg).into()),
+                            color: Some(rgb(t.selection_fg).into()),
+                            ..Default::default()
+                        })];
+                        StyledText::new(display).with_highlights(highlights)
+                    } else {
+                        StyledText::new(display)
+                    }
+                } else {
+                    StyledText::new(display)
+                };
+                let layout = styled.layout().clone();
+                self.text_layouts.push(layout.clone());
+
+                let local_cursor_byte = cursor_byte.saturating_sub(byte_offset);
+                let is_cursor_line = line_idx == cursor_line;
+
+                container = container.child(
+                    div()
+                        .relative()
+                        .min_h(px(18.0))
+                        .child(styled)
+                        .when(is_cursor_line, |d| {
+                            d.child(cursor_canvas(layout, local_cursor_byte, cursor_visible, cursor_color))
+                        })
+                );
+
+                byte_offset += line_text.len() + 1; // +1 for '\n'
+            }
+            container.into_any_element()
+        } else {
+            // Single-line: one StyledText with optional highlights
+            let styled = if let Some(ref sel) = selection {
+                let sel_start_byte = self.byte_position_for_char(sel.start);
+                let sel_end_byte = self.byte_position_for_char(sel.end);
+                let highlights = vec![(sel_start_byte..sel_end_byte, HighlightStyle {
+                    background_color: Some(rgb(t.selection_bg).into()),
+                    color: Some(rgb(t.selection_fg).into()),
+                    ..Default::default()
+                })];
+                StyledText::new(value.clone()).with_highlights(highlights)
+            } else if highlight_vars {
+                let mut highlights = Vec::new();
+                for (seg, is_var) in var_segments(&value) {
+                    if is_var {
+                        let start = seg.as_ptr() as usize - value.as_ptr() as usize;
+                        highlights.push((start..start + seg.len(), HighlightStyle {
+                            color: Some(rgb(var_color).into()),
+                            ..Default::default()
+                        }));
+                    }
+                }
+                StyledText::new(value.clone()).with_highlights(highlights)
+            } else {
+                StyledText::new(value.clone())
+            };
+
+            let layout = styled.layout().clone();
+            self.text_layouts.push(layout.clone());
+
+            div()
+                .relative()
+                .text_color(cursor_color)
+                .child(styled)
+                .child(cursor_canvas(layout, cursor_byte, cursor_visible, cursor_color))
+                .into_any_element()
+        };
 
         div()
             .id("simple-input")
             .track_focus(&focus_handle)
+            .relative()
             .flex()
-            .items_center()
+            .when(multiline, |d| d.items_start())
+            .when(!multiline, |d| d.items_center())
             .gap(px(6.0))
             .w_full()
-            .h(px(24.0))
+            .when(multiline, |d| d.min_h(px(24.0)).py(px(4.0)))
+            .when(!multiline, |d| d.h(px(24.0)))
             .px(px(8.0))
             .cursor_text()
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .child(canvas({
+                let entity = cx.entity().downgrade();
+                move |bounds, _, cx: &mut App| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, _| {
+                            this.input_bounds = Some(bounds);
+                        });
+                    }
+                }
+            }, |_, _, _, _| {}).absolute().size_full())
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.focus(window, cx);
+                let pos = this.char_position_for_mouse(event.position);
+
+                if event.click_count >= 3 {
+                    // Triple-click: select line (multiline) or all
+                    this.is_selecting = false;
+                    this.select_line_at(pos, cx);
+                } else if event.click_count == 2 {
+                    // Double-click: select word
+                    this.is_selecting = false;
+                    this.select_word_at(pos, cx);
+                } else {
+                    // Single click: position cursor, start drag selection
+                    this.cursor_position = pos;
+                    this.selection = None;
+                    this.is_selecting = true;
+                    this.select_anchor = pos;
+                    this.reset_cursor_blink();
+                    cx.notify();
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.is_selecting {
+                    if event.pressed_button != Some(MouseButton::Left) {
+                        this.is_selecting = false;
+                        return;
+                    }
+                    let pos = this.char_position_for_mouse(event.position);
+                    this.cursor_position = pos;
+                    let anchor = this.select_anchor;
+                    if pos != anchor {
+                        this.selection = Some(anchor.min(pos)..anchor.max(pos));
+                    } else {
+                        this.selection = None;
+                    }
+                    this.reset_cursor_blink();
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                this.is_selecting = false;
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 if this.handle_key_down(event, cx) == KeyHandled::Handled {
@@ -474,41 +851,44 @@ impl Render for SimpleInputState {
                         .text_color(rgb(t.text_muted))
                 )
             })
-            .child(if show_placeholder {
-                div()
-                    .text_color(rgb(t.text_muted))
-                    .child(placeholder)
-                    .into_any_element()
-            } else if let Some(sel) = selection {
-                // Render with selection highlight
-                let sel_start_byte = self.byte_position_for_char(sel.start);
-                let sel_end_byte = self.byte_position_for_char(sel.end);
-                let before_sel = value[..sel_start_byte].to_string();
-                let selected = value[sel_start_byte..sel_end_byte].to_string();
-                let after_sel = value[sel_end_byte..].to_string();
-
-                h_flex()
-                    .text_color(rgb(t.text_primary))
-                    .child(before_sel)
-                    .child(
-                        div()
-                            .bg(rgb(t.selection_bg))
-                            .text_color(rgb(t.selection_fg))
-                            .child(selected),
-                    )
-                    .child(after_sel)
-                    .child(cursor_element)
-                    .into_any_element()
-            } else {
-                // Normal rendering with cursor
-                h_flex()
-                    .text_color(rgb(t.text_primary))
-                    .child(before_cursor)
-                    .child(cursor_element)
-                    .child(after_cursor)
-                    .into_any_element()
-            })
+            .child(content)
     }
+}
+
+/// Canvas element that paints a cursor line at the position from a TextLayout.
+/// The layout is read during prepaint (after the sibling StyledText has been laid out),
+/// and the cursor is painted during the paint phase.
+fn cursor_canvas(
+    layout: TextLayout,
+    cursor_byte: usize,
+    visible: bool,
+    color: impl Into<Hsla> + Clone + 'static,
+) -> impl IntoElement {
+    let color: Hsla = color.into();
+    canvas(
+        // Prepaint: read cursor position and line height from the text layout
+        move |_bounds, _window, _cx| {
+            let pos = layout.position_for_index(cursor_byte);
+            let line_h = layout.line_height();
+            (pos, line_h)
+        },
+        // Paint: draw the 1px cursor line, vertically centered within the text line
+        move |_bounds, (cursor_pos, line_h), window, _cx| {
+            if visible {
+                if let Some(pos) = cursor_pos {
+                    let cursor_h = px(14.0).min(line_h);
+                    let y_offset = (line_h - cursor_h) * 0.5;
+                    let adjusted = point(pos.x, pos.y + y_offset);
+                    window.paint_quad(fill(
+                        Bounds::new(adjusted, size(px(1.0), cursor_h)),
+                        color,
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 impl_focusable!(SimpleInputState);

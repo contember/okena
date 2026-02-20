@@ -62,6 +62,63 @@ pub struct HooksConfig {
     pub on_worktree_create: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_worktree_close: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_merge: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_worktree_remove: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_removed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_rebase_conflict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_dirty_worktree_close: Option<String>,
+}
+
+/// Configuration for worktree creation and close defaults
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorktreeConfig {
+    /// Path template for new worktrees.
+    /// Supports relative paths (resolved from project dir). Variables: {repo} = repo folder name, {branch} = branch name
+    #[serde(default = "default_worktree_path_template")]
+    pub path_template: String,
+    /// Default: enable merge on close
+    #[serde(default)]
+    pub default_merge: bool,
+    /// Default: enable stash on close
+    #[serde(default)]
+    pub default_stash: bool,
+    /// Default: enable fetch on close
+    #[serde(default = "default_true")]
+    pub default_fetch: bool,
+    /// Default: enable push on close
+    #[serde(default)]
+    pub default_push: bool,
+    /// Default: enable delete branch on close
+    #[serde(default)]
+    pub default_delete_branch: bool,
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            path_template: default_worktree_path_template(),
+            default_merge: false,
+            default_stash: false,
+            default_fetch: true,
+            default_push: false,
+            default_delete_branch: false,
+        }
+    }
+}
+
+fn default_worktree_path_template() -> String {
+    "../{repo}-wt/{branch}".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Default sidebar width in pixels.
@@ -195,6 +252,14 @@ pub struct AppSettings {
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
 
+    /// Idle timeout in seconds for "waiting for input" detection (default: 5, 0 = disabled)
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u32,
+
+    /// Worktree creation and close defaults
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -227,6 +292,8 @@ impl Default for AppSettings {
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),
         }
     }
@@ -279,6 +346,10 @@ fn default_file_opener() -> String {
 
 fn default_min_column_width() -> f32 {
     400.0
+}
+
+fn default_idle_timeout_secs() -> u32 {
+    0
 }
 
 fn default_remote_listen_address() -> String {
@@ -425,6 +496,12 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
         settings.auto_update_enabled = v;
     }
 
+    if let Some(v) = obj.get("worktree") {
+        if let Ok(wt) = serde_json::from_value::<WorktreeConfig>(v.clone()) {
+            settings.worktree = wt;
+        }
+    }
+
     Ok(settings)
 }
 
@@ -548,5 +625,53 @@ where
         updater(&mut settings.remote_connections);
         save_settings(&settings)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HooksConfig;
+
+    #[test]
+    fn hooks_config_serde_round_trip_with_all_fields() {
+        let config = HooksConfig {
+            on_project_open: Some("echo open".into()),
+            on_project_close: Some("echo close".into()),
+            on_worktree_create: Some("npm install".into()),
+            on_worktree_close: Some("cleanup".into()),
+            pre_merge: Some("lint".into()),
+            post_merge: Some("notify".into()),
+            before_worktree_remove: Some("backup".into()),
+            worktree_removed: Some("log".into()),
+            on_rebase_conflict: Some("terminal: claude -p \"fix\"".into()),
+            on_dirty_worktree_close: Some("echo dirty".into()),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HooksConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.pre_merge, Some("lint".into()));
+        assert_eq!(deserialized.post_merge, Some("notify".into()));
+        assert_eq!(deserialized.before_worktree_remove, Some("backup".into()));
+        assert_eq!(deserialized.worktree_removed, Some("log".into()));
+    }
+
+    #[test]
+    fn hooks_config_backward_compat_missing_new_fields() {
+        // Simulate old config JSON without the new hook fields
+        let json = r#"{"on_project_open": "echo open"}"#;
+        let config: HooksConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.on_project_open, Some("echo open".into()));
+        assert!(config.pre_merge.is_none());
+        assert!(config.post_merge.is_none());
+        assert!(config.before_worktree_remove.is_none());
+        assert!(config.worktree_removed.is_none());
+    }
+
+    #[test]
+    fn hooks_config_empty_json_deserializes_to_defaults() {
+        let json = "{}";
+        let config: HooksConfig = serde_json::from_str(json).unwrap();
+        assert!(config.on_project_open.is_none());
+        assert!(config.pre_merge.is_none());
+        assert!(config.worktree_removed.is_none());
     }
 }

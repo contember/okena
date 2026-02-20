@@ -707,9 +707,50 @@ impl Sidebar {
             )
     }
 
+    /// Count how many terminals from the given IDs are currently waiting for input
+    pub(super) fn count_waiting_terminals(&self, terminal_ids: &[String]) -> usize {
+        let terminals = self.terminals.lock();
+        terminal_ids.iter()
+            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+            .count()
+    }
+
+    fn cycle_folder_filter(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let folders: Vec<String> = workspace.data().folders.iter().map(|f| f.id.clone()).collect();
+        let current = workspace.active_folder_filter().cloned();
+        let next = match current {
+            None => folders.first().cloned(),
+            Some(ref current_id) => {
+                let pos = folders.iter().position(|id| id == current_id);
+                match pos {
+                    Some(i) if i + 1 < folders.len() => Some(folders[i + 1].clone()),
+                    _ => None, // wrap back to "All"
+                }
+            }
+        };
+
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_folder_filter(next, cx);
+        });
+    }
+
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let workspace = self.workspace.clone();
+        let workspace_entity = self.workspace.clone();
+
+        // Get current folder filter state
+        let workspace = self.workspace.read(cx);
+        let filter_label = match workspace.active_folder_filter() {
+            None => "All".to_string(),
+            Some(folder_id) => {
+                workspace.folder(folder_id)
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "All".to_string())
+            }
+        };
+        let has_filter = workspace.active_folder_filter().is_some();
+        let has_folders = !workspace.data().folders.is_empty();
 
         div()
             .h(px(28.0))
@@ -721,7 +762,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .id("projects-header")
             .on_click(move |_, _window, cx| {
-                workspace.update(cx, |ws, cx| {
+                workspace_entity.update(cx, |ws, cx| {
                     ws.set_focused_project(None, cx);
                 });
             })
@@ -732,6 +773,29 @@ impl Sidebar {
                     .text_color(rgb(t.text_secondary))
                     .child("PROJECTS"),
             )
+            .when(has_folders, |d| {
+                d.child(
+                    div()
+                        .id("folder-filter-btn")
+                        .cursor_pointer()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .text_size(px(10.0))
+                        .when(has_filter, |d| {
+                            d.bg(rgba(t.border_active.wrapping_shl(8) | 0x30))
+                                .text_color(rgb(t.border_active))
+                        })
+                        .when(!has_filter, |d| {
+                            d.text_color(rgb(t.text_secondary))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                        })
+                        .child(filter_label)
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.cycle_folder_filter(cx);
+                        })),
+                )
+            })
     }
 }
 
@@ -750,6 +814,10 @@ pub(super) struct SidebarProjectInfo {
     pub inactive_tab_terminals: HashSet<String>,
     /// Terminal IDs that belong to a tab group (Tabs node with 2+ children)
     pub tab_group_terminals: HashSet<String>,
+    /// Number of active worktrees under this project
+    pub worktree_count: usize,
+    /// True if this is a worktree whose parent project no longer exists
+    pub is_orphan: bool,
 }
 
 impl SidebarProjectInfo {
@@ -771,6 +839,8 @@ impl SidebarProjectInfo {
                 .map(|l| l.collect_tab_group_terminal_ids())
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
+            worktree_count: 0,
+            is_orphan: false,
         }
     }
 }
@@ -840,16 +910,23 @@ impl Render for Sidebar {
         for id in &workspace.data().project_order {
             // Check if this is a folder
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
-                let folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
+                let mut folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
                     .filter_map(|pid| all_projects.get(pid.as_str()))
                     .filter(|p| p.worktree_info.is_none() || !all_project_ids.contains(
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
-                    .map(|p| SidebarProjectInfo::from_project(p))
+                    .map(|p| {
+                        let mut info = SidebarProjectInfo::from_project(p);
+                        info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
+                            !all_project_ids.contains(wt.parent_project_id.as_str())
+                        });
+                        info
+                    })
                     .collect();
                 let mut folder_wt_children: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
-                for fp in &folder_projects {
+                for fp in &mut folder_projects {
                     if let Some(children) = worktree_children_map.remove(&fp.id) {
+                        fp.worktree_count = children.len();
                         folder_wt_children.insert(fp.id.clone(), children);
                     }
                 }
@@ -872,8 +949,13 @@ impl Render for Sidebar {
                     }
                 }
                 let wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
+                let mut project_info = SidebarProjectInfo::from_project(project);
+                project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
+                    !all_project_ids.contains(wt.parent_project_id.as_str())
+                });
+                project_info.worktree_count = wt_children.len();
                 items.push(SidebarItem::Project {
-                    project: SidebarProjectInfo::from_project(project),
+                    project: project_info,
                     index: top_index,
                     worktree_children: wt_children,
                 });
@@ -904,9 +986,15 @@ impl Render for Sidebar {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
                     let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
-                    flat_elements.push(
-                        self.render_project_item(&project, index, is_cursor, is_focused_project, window, cx).into_any_element()
-                    );
+                    if project.is_orphan {
+                        flat_elements.push(
+                            self.render_worktree_item(&project, is_cursor, is_focused_project, window, cx).into_any_element()
+                        );
+                    } else {
+                        flat_elements.push(
+                            self.render_project_item(&project, index, is_cursor, is_focused_project, window, cx).into_any_element()
+                        );
+                    }
                     flat_idx += 1;
 
                     // Expanded terminals
@@ -958,8 +1046,17 @@ impl Render for Sidebar {
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
+                    let idle_terminal_count = if folder.collapsed {
+                        let terminals = self.terminals.lock();
+                        projects.iter()
+                            .flat_map(|p| p.terminal_ids.iter())
+                            .filter(|id| terminals.get(id.as_str()).map_or(false, |t| t.is_waiting_for_input()))
+                            .count()
+                    } else {
+                        0
+                    };
                     flat_elements.push(
-                        self.render_folder_header(&folder, index, projects.len(), is_cursor, window, cx).into_any_element()
+                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
@@ -968,9 +1065,15 @@ impl Render for Sidebar {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
                             let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
-                            flat_elements.push(
-                                self.render_folder_project_item(fp, &folder.id, is_cursor, is_focused_project, window, cx).into_any_element()
-                            );
+                            if fp.is_orphan {
+                                flat_elements.push(
+                                    self.render_worktree_item(fp, is_cursor, is_focused_project, window, cx).into_any_element()
+                                );
+                            } else {
+                                flat_elements.push(
+                                    self.render_folder_project_item(fp, &folder.id, is_cursor, is_focused_project, window, cx).into_any_element()
+                                );
+                            }
                             flat_idx += 1;
 
                             // Expanded terminals for folder project

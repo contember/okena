@@ -42,6 +42,8 @@ pub struct CustomThemeColors {
     pub border_focused: String,
     #[serde(default = "default_border_bell")]
     pub border_bell: String,
+    #[serde(default = "default_border_idle")]
+    pub border_idle: String,
 
     // Text colors
     #[serde(default = "default_text_primary")]
@@ -186,6 +188,7 @@ fn default_border() -> String { "#252526".to_string() }
 fn default_border_active() -> String { "#007acc".to_string() }
 fn default_border_focused() -> String { "#569cd6".to_string() }
 fn default_border_bell() -> String { "#e69500".to_string() }
+fn default_border_idle() -> String { "#e5a100".to_string() }
 fn default_text_primary() -> String { "#cccccc".to_string() }
 fn default_text_secondary() -> String { "#808080".to_string() }
 fn default_text_muted() -> String { "#6a6a6a".to_string() }
@@ -262,6 +265,7 @@ impl CustomThemeColors {
             border_active: Self::parse_hex(&self.border_active),
             border_focused: Self::parse_hex(&self.border_focused),
             border_bell: Self::parse_hex(&self.border_bell),
+            border_idle: Self::parse_hex(&self.border_idle),
             text_primary: Self::parse_hex(&self.text_primary),
             text_secondary: Self::parse_hex(&self.text_secondary),
             text_muted: Self::parse_hex(&self.text_muted),
@@ -357,6 +361,7 @@ pub fn load_custom_themes() -> Vec<(ThemeInfo, ThemeColors)> {
                 border_active: "#96cbfe".to_string(),
                 border_focused: "#96cbfe".to_string(),
                 border_bell: "#ffa560".to_string(),
+                border_idle: "#e5a100".to_string(),
                 text_primary: "#eeeeee".to_string(),
                 text_secondary: "#999999".to_string(),
                 text_muted: "#666666".to_string(),

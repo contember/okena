@@ -29,9 +29,19 @@ impl SettingsPanel {
                         |state, val, cx| state.set_cursor_blink(val, cx), cx,
                     ))
                     .child(self.render_integer_stepper(
-                        "scrollback", "Scrollback Lines", s.scrollback_lines, 1000, 70.0, false,
+                        "scrollback", "Scrollback Lines", s.scrollback_lines, 1000, 70.0, true,
                         |state, val, cx| state.set_scrollback_lines(val, cx), cx,
-                    )),
+                    ))
+                    .child(self.render_toggle(
+                        "idle-detection", "Idle Detection", s.idle_timeout_secs > 0, true,
+                        |state, val, cx| state.set_idle_timeout_secs(if val { 5 } else { 0 }, cx), cx,
+                    ))
+                    .when(s.idle_timeout_secs > 0, |el| {
+                        el.child(self.render_integer_stepper(
+                            "idle-timeout", "Idle Timeout (seconds)", s.idle_timeout_secs, 1, 50.0, false,
+                            |state, val, cx| state.set_idle_timeout_secs(val, cx), cx,
+                        ))
+                    }),
             )
     }
 

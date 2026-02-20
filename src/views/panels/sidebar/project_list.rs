@@ -24,6 +24,13 @@ impl Sidebar {
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
 
+        // Count idle terminals when project is collapsed (not expanded)
+        let idle_count = if !is_expanded {
+            self.count_waiting_terminals(&project.terminal_ids)
+        } else {
+            0
+        };
+
         // Project row
         div()
             .id(ElementId::Name(format!("project-row-{}", project.id).into()))
@@ -143,7 +150,20 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(idle_count > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(t.border_idle))
+                )
+            })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+            .when(project.worktree_count > 0, |d| {
+                d.child(sidebar_worktree_badge(project.worktree_count, &t))
+            })
             .child(
                 {
                     let is_visible = project.is_visible;
@@ -178,6 +198,13 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Count idle terminals when project is collapsed (not expanded)
+        let idle_count = if !is_expanded {
+            self.count_waiting_terminals(&project.terminal_ids)
+        } else {
+            0
+        };
 
         // Worktree project row - indented under parent
         div()
@@ -236,7 +263,11 @@ impl Sidebar {
                         svg()
                             .path("icons/git-branch.svg")
                             .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
+                            .text_color(if project.is_orphan {
+                                rgb(t.warning)
+                            } else {
+                                rgb(t.text_secondary)
+                            })
                     )
             )
             .child(
@@ -269,6 +300,16 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(idle_count > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .bg(rgb(t.border_idle))
+                )
+            })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .child(
                 {
@@ -311,8 +352,8 @@ impl Sidebar {
         let terminal_id = terminal_id.to_string();
 
         // Priority: user-set custom name > non-prompt OSC title > directory fallback
-        // Also check for bell notification
-        let (terminal_name, has_bell) = {
+        // Also check for bell notification and cached idle/waiting state
+        let (terminal_name, has_bell, is_waiting, idle_label) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(&project_id);
             let terminals = self.terminals.lock();
@@ -326,7 +367,9 @@ impl Sidebar {
                 "Terminal".to_string()
             };
             let bell = terminal.map_or(false, |t| t.has_bell());
-            (name, bell)
+            let waiting = terminal.map_or(false, |t| t.is_waiting_for_input());
+            let idle = if waiting { terminal.map(|t| t.idle_duration_display()) } else { None };
+            (name, bell, waiting, idle)
         };
 
         // Check if this terminal is being renamed
@@ -399,6 +442,8 @@ impl Sidebar {
                             .size(px(12.0))
                             .text_color(if has_bell {
                                 rgb(t.border_bell)
+                            } else if is_waiting {
+                                rgb(t.border_idle)
                             } else if is_minimized {
                                 rgb(t.text_muted)
                             } else if is_inactive_tab {
@@ -446,6 +491,13 @@ impl Sidebar {
                         .into_any_element()
                 },
             )
+            .children(idle_label.map(|d| {
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.border_idle))
+                    .flex_shrink_0()
+                    .child(d)
+            }))
             .child(
                 // Action buttons - show on hover
                 div()

@@ -36,6 +36,7 @@ use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A terminal pane view composed of child entity views.
 pub struct TerminalPane {
@@ -65,6 +66,7 @@ pub struct TerminalPane {
     detached: bool,
     cursor_visible: bool,
     shell_type: ShellType,
+    was_focused: bool,
 
     // Action dispatcher (local or remote)
     pub(super) action_dispatcher: Option<ActionDispatcher>,
@@ -130,6 +132,7 @@ impl TerminalPane {
             detached,
             cursor_visible: true,
             shell_type,
+            was_focused: false,
             action_dispatcher,
         };
 
@@ -144,6 +147,7 @@ impl TerminalPane {
         // Start background loops
         pane.start_dirty_check_loop(cx);
         pane.start_cursor_blink_loop(cx);
+        pane.start_idle_check_loop(cx);
 
         pane
     }
@@ -265,12 +269,97 @@ impl TerminalPane {
         .detach();
     }
 
+    /// Start idle check loop — polls terminal idle state every 2 seconds.
+    /// Runs the pgrep check on a background thread via smol::unblock to avoid
+    /// blocking the GPUI thread. Only triggers re-render on state transitions.
+    fn start_idle_check_loop(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+            let interval = Duration::from_secs(2);
+            let mut was_waiting = false;
+            loop {
+                smol::Timer::after(interval).await;
+
+                // Step 1: gather data from the main thread (cheap, no subprocess)
+                let check_info = this.update(cx, |pane, cx| {
+                    let idle_timeout = settings(cx).idle_timeout_secs;
+                    if idle_timeout == 0 {
+                        return None;
+                    }
+                    pane.terminal.as_ref().map(|t| {
+                        let idle_threshold = Duration::from_secs(idle_timeout as u64);
+                        let is_idle = t.last_output_time().elapsed() >= idle_threshold;
+                        let pid = t.shell_pid();
+                        let had_input = t.had_user_input();
+                        let has_unseen = t.has_unseen_output();
+                        (t.clone(), is_idle, pid, had_input, has_unseen)
+                    })
+                });
+
+                let check_info = match check_info {
+                    Ok(Some(info)) => info,
+                    Ok(None) => {
+                        // Feature disabled or no terminal — clear waiting state
+                        if was_waiting {
+                            was_waiting = false;
+                            let _ = this.update(cx, |pane, cx| {
+                                if let Some(ref t) = pane.terminal {
+                                    t.set_waiting_for_input(false);
+                                }
+                                cx.notify();
+                            });
+                        }
+                        continue;
+                    }
+                    Err(_) => break, // Entity dropped
+                };
+
+                let (terminal, is_idle, pid, had_input, has_unseen) = check_info;
+
+                // Skip terminals the user has never interacted with (fresh/untouched)
+                // or terminals where the user already saw the last output
+                if !had_input || !has_unseen {
+                    if was_waiting {
+                        was_waiting = false;
+                        terminal.set_waiting_for_input(false);
+                        let _ = this.update(cx, |_pane, cx| { cx.notify(); });
+                    }
+                    continue;
+                }
+
+                // Step 2: run pgrep on a background thread (expensive, off main thread)
+                let has_children = if let Some(pid) = pid {
+                    smol::unblock(move || crate::terminal::terminal::has_child_processes(pid)).await
+                } else {
+                    false
+                };
+
+                // Step 3: compute waiting state
+                // Flag as waiting if: idle + no child processes running
+                let is_waiting = is_idle && !has_children;
+
+                // Step 4: update cache and notify on transitions or while waiting
+                // (continuous notify while waiting keeps the duration display updated)
+                terminal.set_waiting_for_input(is_waiting);
+                if is_waiting || is_waiting != was_waiting {
+                    was_waiting = is_waiting;
+                    let _ = this.update(cx, |_pane, cx| {
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     // === Terminal creation ===
 
     /// Create terminal for existing PTY.
     fn create_terminal_for_existing_pty(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         let existing = self.terminals.lock().get(&terminal_id).cloned();
         if let Some(terminal) = existing {
+            if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
+                terminal.set_shell_pid(pid);
+            }
             self.terminal = Some(terminal.clone());
             self.update_child_terminals(terminal, cx);
             return;
@@ -294,6 +383,9 @@ impl TerminalPane {
 
         let size = TerminalSize::default();
         let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
+        if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
+            terminal.set_shell_pid(pid);
+        }
         self.terminals.lock().insert(terminal_id, terminal.clone());
         self.terminal = Some(terminal.clone());
         self.update_child_terminals(terminal, cx);
@@ -331,6 +423,9 @@ impl TerminalPane {
                 let size = TerminalSize::default();
                 let terminal =
                     Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), project_path));
+                if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
+                    terminal.set_shell_pid(pid);
+                }
                 self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
                 self.terminal = Some(terminal.clone());
 
