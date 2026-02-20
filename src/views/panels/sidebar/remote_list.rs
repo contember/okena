@@ -38,15 +38,11 @@ impl Sidebar {
         let mut children: Vec<AnyElement> = Vec::new();
         children.push(self.render_remote_header(cx).into_any_element());
 
-        // Only show connection headers for non-connected states (connecting, error, etc.)
-        // Connected connections have their projects shown via the regular folder rendering
         for snap in &snapshots {
-            if !matches!(snap.status, ConnectionStatus::Connected) {
-                children.push(
-                    self.render_connection_header(&snap.config, &snap.status, false, cx)
-                        .into_any_element(),
-                );
-            }
+            children.push(
+                self.render_connection_header(&snap.config, &snap.status, false, cx)
+                    .into_any_element(),
+            );
         }
 
         children.push(self.render_add_connection_button(cx).into_any_element());
