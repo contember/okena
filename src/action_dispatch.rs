@@ -207,5 +207,49 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             path,
             in_group,
         },
+        ActionRequest::SetActiveTab {
+            project_id,
+            path,
+            index,
+        } => ActionRequest::SetActiveTab {
+            project_id: s(&project_id),
+            path,
+            index,
+        },
+        ActionRequest::MoveTab {
+            project_id,
+            path,
+            from_index,
+            to_index,
+        } => ActionRequest::MoveTab {
+            project_id: s(&project_id),
+            path,
+            from_index,
+            to_index,
+        },
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+        } => ActionRequest::MoveTerminalToTabGroup {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            target_path,
+            position,
+        },
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => ActionRequest::MovePaneTo {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            target_project_id: s(&target_project_id),
+            target_terminal_id: s(&target_terminal_id),
+            zone,
+        },
     }
 }

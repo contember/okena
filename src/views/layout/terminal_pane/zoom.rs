@@ -8,6 +8,7 @@ use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, Heade
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
+use okena_core::api::ActionRequest;
 
 use super::TerminalPane;
 
@@ -42,9 +43,12 @@ impl TerminalPane {
             if let Some(idx) = terminals.iter().position(|id| id == current_id) {
                 let next_idx = (idx + 1) % terminals.len();
                 let next_id = terminals[next_idx].clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_fullscreen_terminal(self.project_id.clone(), next_id, cx);
-                });
+                if let Some(ref dispatcher) = self.action_dispatcher {
+                    dispatcher.dispatch(ActionRequest::SetFullscreen {
+                        project_id: self.project_id.clone(),
+                        terminal_id: Some(next_id),
+                    }, cx);
+                }
             }
         }
     }
@@ -62,9 +66,12 @@ impl TerminalPane {
             if let Some(idx) = terminals.iter().position(|id| id == current_id) {
                 let prev_idx = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
                 let prev_id = terminals[prev_idx].clone();
-                self.workspace.update(cx, |ws, cx| {
-                    ws.set_fullscreen_terminal(self.project_id.clone(), prev_id, cx);
-                });
+                if let Some(ref dispatcher) = self.action_dispatcher {
+                    dispatcher.dispatch(ActionRequest::SetFullscreen {
+                        project_id: self.project_id.clone(),
+                        terminal_id: Some(prev_id),
+                    }, cx);
+                }
             }
         }
     }
@@ -73,6 +80,7 @@ impl TerminalPane {
     pub(super) fn render_zoom_header(&self, cx: &Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.clone();
+        let dispatcher = self.action_dispatcher.clone();
 
         // Get terminal info
         let ws = self.workspace.read(cx);
@@ -147,6 +155,7 @@ impl TerminalPane {
                                     let workspace = workspace.clone();
                                     let project_id = self.project_id.clone();
                                     let terminal_id = self.terminal_id.clone();
+                                    let dispatcher = dispatcher.clone();
                                     move |_, _window, cx| {
                                         let terminals = {
                                             let ws = workspace.read(cx);
@@ -158,9 +167,12 @@ impl TerminalPane {
                                         if let Some(ref tid) = terminal_id {
                                             if let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let prev = if idx == 0 { terminals.len() - 1 } else { idx - 1 };
-                                                workspace.update(cx, |ws, cx| {
-                                                    ws.set_fullscreen_terminal(project_id.clone(), terminals[prev].clone(), cx);
-                                                });
+                                                if let Some(ref dispatcher) = dispatcher {
+                                                    dispatcher.dispatch(ActionRequest::SetFullscreen {
+                                                        project_id: project_id.clone(),
+                                                        terminal_id: Some(terminals[prev].clone()),
+                                                    }, cx);
+                                                }
                                             }
                                         }
                                     }
@@ -172,6 +184,7 @@ impl TerminalPane {
                                     let workspace = workspace.clone();
                                     let project_id = self.project_id.clone();
                                     let terminal_id = self.terminal_id.clone();
+                                    let dispatcher = dispatcher.clone();
                                     move |_, _window, cx| {
                                         let terminals = {
                                             let ws = workspace.read(cx);
@@ -183,9 +196,12 @@ impl TerminalPane {
                                         if let Some(ref tid) = terminal_id {
                                             if let Some(idx) = terminals.iter().position(|id| id == tid) {
                                                 let next = (idx + 1) % terminals.len();
-                                                workspace.update(cx, |ws, cx| {
-                                                    ws.set_fullscreen_terminal(project_id.clone(), terminals[next].clone(), cx);
-                                                });
+                                                if let Some(ref dispatcher) = dispatcher {
+                                                    dispatcher.dispatch(ActionRequest::SetFullscreen {
+                                                        project_id: project_id.clone(),
+                                                        terminal_id: Some(terminals[next].clone()),
+                                                    }, cx);
+                                                }
                                             }
                                         }
                                     }
@@ -195,12 +211,16 @@ impl TerminalPane {
                     .child(
                         header_button_base(HeaderAction::ExitZoom, id_suffix, size, &t, None)
                             .on_click({
-                                let workspace = workspace.clone();
+                                let project_id = self.project_id.clone();
+                                let dispatcher = dispatcher.clone();
                                 move |_, _window, cx| {
                                     cx.stop_propagation();
-                                    workspace.update(cx, |ws, cx| {
-                                        ws.exit_fullscreen(cx);
-                                    });
+                                    if let Some(ref dispatcher) = dispatcher {
+                                        dispatcher.dispatch(ActionRequest::SetFullscreen {
+                                            project_id: project_id.clone(),
+                                            terminal_id: None,
+                                        }, cx);
+                                    }
                                 }
                             }),
                     ),

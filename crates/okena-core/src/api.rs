@@ -123,6 +123,30 @@ pub enum ActionRequest {
         path: Vec<usize>,
         in_group: bool,
     },
+    SetActiveTab {
+        project_id: String,
+        path: Vec<usize>,
+        index: usize,
+    },
+    MoveTab {
+        project_id: String,
+        path: Vec<usize>,
+        from_index: usize,
+        to_index: usize,
+    },
+    MoveTerminalToTabGroup {
+        project_id: String,
+        terminal_id: String,
+        target_path: Vec<usize>,
+        position: Option<usize>,
+    },
+    MovePaneTo {
+        project_id: String,
+        terminal_id: String,
+        target_project_id: String,
+        target_terminal_id: String,
+        zone: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -285,6 +309,30 @@ mod tests {
                 project_id: "p1".into(),
                 path: vec![0, 1],
                 in_group: true,
+            },
+            ActionRequest::SetActiveTab {
+                project_id: "p1".into(),
+                path: vec![0],
+                index: 2,
+            },
+            ActionRequest::MoveTab {
+                project_id: "p1".into(),
+                path: vec![0],
+                from_index: 0,
+                to_index: 2,
+            },
+            ActionRequest::MoveTerminalToTabGroup {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                target_path: vec![1],
+                position: Some(0),
+            },
+            ActionRequest::MovePaneTo {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                target_project_id: "p1".into(),
+                target_terminal_id: "t2".into(),
+                zone: "left".into(),
             },
         ];
         for action in actions {

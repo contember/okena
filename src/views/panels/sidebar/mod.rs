@@ -14,10 +14,12 @@ mod item_widgets;
 mod project_list;
 mod remote_list;
 
+use crate::action_dispatch::ActionDispatcher;
 use crate::keybindings::{
     SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
 };
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
 use crate::views::components::{
@@ -32,6 +34,7 @@ use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
 
@@ -86,6 +89,8 @@ pub struct Sidebar {
     pub(super) remote_manager: Option<Entity<RemoteConnectionManager>>,
     /// Collapsed state for remote connections
     pub(super) collapsed_connections: HashMap<String, bool>,
+    /// Terminal backend for building dispatchers
+    backend: Option<Arc<dyn TerminalBackend>>,
 }
 
 impl Sidebar {
@@ -125,6 +130,7 @@ impl Sidebar {
             saved_focus: None,
             remote_manager: None,
             collapsed_connections: HashMap::new(),
+            backend: None,
         }
     }
 
@@ -156,9 +162,13 @@ impl Sidebar {
 
     pub(super) fn finish_rename(&mut self, cx: &mut Context<Self>) {
         if let Some(((project_id, terminal_id), new_name)) = finish_rename(&mut self.terminal_rename, cx) {
-            self.workspace.update(cx, |ws, cx| {
-                ws.rename_terminal(&project_id, &terminal_id, new_name, cx);
-            });
+            if let Some(dispatcher) = self.dispatcher_for_project(&project_id, cx) {
+                dispatcher.dispatch(okena_core::api::ActionRequest::RenameTerminal {
+                    project_id,
+                    terminal_id,
+                    name: new_name,
+                }, cx);
+            }
         }
         self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
         cx.notify();
@@ -292,6 +302,32 @@ impl Sidebar {
     /// Public accessor for the focus handle (used by RootView for FocusSidebar)
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    pub fn set_backend(&mut self, backend: Arc<dyn TerminalBackend>) {
+        self.backend = Some(backend);
+    }
+
+    /// Build an ActionDispatcher for the given project.
+    /// Returns Remote dispatcher for remote projects, Local for local ones.
+    fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
+        let ws = self.workspace.read(cx);
+        let project = ws.project(project_id)?;
+        if project.is_remote {
+            let connection_id = project.connection_id.as_ref()?;
+            let manager = self.remote_manager.as_ref()?;
+            Some(ActionDispatcher::Remote {
+                connection_id: connection_id.clone(),
+                manager: manager.clone(),
+            })
+        } else {
+            let backend = self.backend.as_ref()?;
+            Some(ActionDispatcher::Local {
+                workspace: self.workspace.clone(),
+                backend: backend.clone(),
+                terminals: self.terminals.clone(),
+            })
+        }
     }
 
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {

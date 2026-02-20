@@ -289,18 +289,26 @@ impl LayoutContainer {
     ) -> impl IntoElement {
         let t = theme(cx);
         let highlight = with_alpha(t.border_active, 0.3);
-        let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
         let tid = terminal_id.clone();
         let id_suffix = terminal_id.unwrap_or_else(|| format!("none-{:?}", self.layout_path));
+        let dispatcher = self.action_dispatcher.clone();
 
         let make_zone = |zone: DropZone, id_suffix: &str, active_drag: &ActiveDrag| -> Stateful<Div> {
             let zone_id = format!("drop-zone-{}-{:?}", id_suffix, zone);
-            let ws = workspace.clone();
             let pid = project_id.clone();
             let this_tid = tid.clone();
             let active_drag_for_hover = active_drag.clone();
             let active_drag_for_drop = active_drag.clone();
+            let dispatcher = dispatcher.clone();
+
+            let zone_str = match zone {
+                DropZone::Top => "top",
+                DropZone::Bottom => "bottom",
+                DropZone::Left => "left",
+                DropZone::Right => "right",
+                DropZone::Center => "center",
+            };
 
             div()
                 .id(ElementId::Name(zone_id.into()))
@@ -328,16 +336,15 @@ impl LayoutContainer {
                             return;
                         }
                         if let Some(ref target_id) = this_tid {
-                            ws.update(cx, |ws, cx| {
-                                ws.move_pane(
-                                    &drag.project_id,
-                                    &drag.terminal_id,
-                                    &pid,
-                                    target_id,
-                                    zone,
-                                    cx,
-                                );
-                            });
+                            if let Some(ref dispatcher) = dispatcher {
+                                dispatcher.dispatch(ActionRequest::MovePaneTo {
+                                    project_id: drag.project_id.clone(),
+                                    terminal_id: drag.terminal_id.clone(),
+                                    target_project_id: pid.clone(),
+                                    target_terminal_id: target_id.clone(),
+                                    zone: zone_str.to_string(),
+                                }, cx);
+                            }
                         }
                     }
                 }))
@@ -508,6 +515,7 @@ impl LayoutContainer {
                     self.layout_path.clone(),
                     container_bounds_ref.clone(),
                     &self.active_drag,
+                    self.action_dispatcher.clone(),
                     cx,
                 );
                 elements.push(divider.into_any_element());

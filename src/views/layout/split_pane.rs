@@ -1,3 +1,4 @@
+use crate::action_dispatch::ActionDispatcher;
 use crate::elements::resize_handle::ResizeHandle;
 use crate::settings::settings_entity;
 use crate::theme::theme;
@@ -26,6 +27,8 @@ pub enum DragState {
         initial_sizes: Vec<f32>,
         /// Sum of visible children's sizes (for correct delta scaling)
         visible_sizes_sum: f32,
+        /// Action dispatcher for routing resize to local or remote
+        action_dispatcher: Option<ActionDispatcher>,
     },
     /// Resizing project columns
     ProjectColumn {
@@ -59,7 +62,7 @@ pub fn compute_resize(
     cx: &mut App,
 ) {
     match drag_state {
-        DragState::Split { project_id, layout_path, left_child, right_child, direction, container_bounds, initial_mouse_pos, initial_sizes, visible_sizes_sum } => {
+        DragState::Split { project_id, layout_path, left_child, right_child, direction, container_bounds, initial_mouse_pos, initial_sizes, visible_sizes_sum, action_dispatcher } => {
             let bounds = *container_bounds;
             let is_horizontal = *direction == SplitDirection::Horizontal;
             let left_child = *left_child;
@@ -109,9 +112,17 @@ pub fn compute_resize(
             let project_id = project_id.clone();
             let layout_path = layout_path.clone();
 
-            workspace.update(cx, |ws, cx| {
-                ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
-            });
+            if let Some(dispatcher) = action_dispatcher {
+                dispatcher.dispatch(okena_core::api::ActionRequest::UpdateSplitSizes {
+                    project_id,
+                    path: layout_path,
+                    sizes: new_sizes,
+                }, cx);
+            } else {
+                workspace.update(cx, |ws, cx| {
+                    ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
+                });
+            }
         }
         DragState::ProjectColumn { divider_index, project_ids, available_width, initial_mouse_pos, initial_widths, min_col_width } => {
             let container_width = *available_width;
@@ -165,6 +176,7 @@ pub fn render_split_divider(
     layout_path: Vec<usize>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
     active_drag: &ActiveDrag,
+    action_dispatcher: Option<ActionDispatcher>,
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
@@ -201,6 +213,7 @@ pub fn render_split_divider(
                 initial_mouse_pos: mouse_pos,
                 initial_sizes,
                 visible_sizes_sum,
+                action_dispatcher: action_dispatcher.clone(),
             });
         },
     )

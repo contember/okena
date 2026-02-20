@@ -96,7 +96,7 @@ impl LayoutContainer {
         let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
-        let terminal_id_for_fullscreen = terminal_id;
+        let terminal_id_for_fullscreen = terminal_id.clone();
 
         // Clone context for each action - much cleaner than individual clones
         let ctx_split_v = ctx.clone();
@@ -173,17 +173,18 @@ impl LayoutContainer {
             // Minimize
             .child(
                 header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
-                    .on_click(move |_, _window, cx| {
-                        let full_path = if ctx_minimize.standalone {
-                            ctx_minimize.layout_path.clone()
-                        } else {
-                            let mut p = ctx_minimize.layout_path.clone();
-                            p.push(ctx_minimize.active_tab);
-                            p
-                        };
-                        ctx_minimize.workspace.update(cx, |ws, cx| {
-                            ws.toggle_terminal_minimized(&ctx_minimize.project_id, &full_path, cx);
-                        });
+                    .on_click({
+                        let terminal_id_for_minimize = terminal_id.clone();
+                        move |_, _window, cx| {
+                            if let Some(ref tid) = terminal_id_for_minimize {
+                                if let Some(ref dispatcher) = ctx_minimize.action_dispatcher {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::ToggleMinimized {
+                                        project_id: ctx_minimize.project_id.clone(),
+                                        terminal_id: tid.clone(),
+                                    }, cx);
+                                }
+                            }
+                        }
                     }),
             )
             // Export Buffer (conditional)
@@ -205,9 +206,12 @@ impl LayoutContainer {
                 header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None)
                     .on_click(move |_, _window, cx| {
                         if let Some(ref tid) = terminal_id_for_fullscreen {
-                            ctx_fullscreen.workspace.update(cx, |ws, cx| {
-                                ws.set_fullscreen_terminal(ctx_fullscreen.project_id.clone(), tid.clone(), cx);
-                            });
+                            if let Some(ref dispatcher) = ctx_fullscreen.action_dispatcher {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::SetFullscreen {
+                                    project_id: ctx_fullscreen.project_id.clone(),
+                                    terminal_id: Some(tid.clone()),
+                                }, cx);
+                            }
                         }
                     }),
             )
@@ -381,7 +385,6 @@ impl LayoutContainer {
         let terminals = self.terminals.clone();
         let workspace_reader = self.workspace.read(cx);
         let project = workspace_reader.project(&self.project_id);
-        let terminal_names_map = project.map(|p| p.terminal_names.clone());
         let project_for_names = project.cloned();
 
         // Check if the focused terminal is within this tab group
@@ -396,7 +399,6 @@ impl LayoutContainer {
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
             let is_active = i == active_tab;
             let workspace = workspace.clone();
-            let workspace_for_drop = workspace.clone();
             let project_id = project_id.clone();
             let project_id_for_drag = project_id.clone();
             let project_id_for_drop = project_id.clone();
@@ -588,6 +590,7 @@ impl LayoutContainer {
                     })
                     .on_drop(cx.listener({
                         let active_drag = self.active_drag.clone();
+                        let dispatcher_for_drop = self.action_dispatcher.clone();
                         move |this, drag: &PaneDrag, _window, cx| {
                             if active_drag.borrow().is_some() {
                                 return;
@@ -603,19 +606,26 @@ impl LayoutContainer {
                                 if let Some(from_index) = drag_tab_index {
                                     if from_index != i {
                                         let target_index = if from_index < i { i - 1 } else { i };
-                                        workspace_for_drop.update(cx, |ws, cx| {
-                                            ws.move_tab(&project_id_for_drop, &layout_path_for_drop, from_index, i, cx);
-                                        });
+                                        if let Some(ref dispatcher) = dispatcher_for_drop {
+                                            dispatcher.dispatch(okena_core::api::ActionRequest::MoveTab {
+                                                project_id: project_id_for_drop.clone(),
+                                                path: layout_path_for_drop.clone(),
+                                                from_index,
+                                                to_index: i,
+                                            }, cx);
+                                        }
                                         this.start_drop_animation(target_index, cx);
                                     }
                                 }
                             } else {
-                                workspace_for_drop.update(cx, |ws, cx| {
-                                    ws.move_terminal_to_tab_group(
-                                        &drag.project_id, &drag.terminal_id,
-                                        &layout_path_for_drop, Some(i), cx,
-                                    );
-                                });
+                                if let Some(ref dispatcher) = dispatcher_for_drop {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
+                                        project_id: drag.project_id.clone(),
+                                        terminal_id: drag.terminal_id.clone(),
+                                        target_path: layout_path_for_drop.clone(),
+                                        position: Some(i),
+                                    }, cx);
+                                }
                             }
                         }
                     }))
@@ -626,6 +636,7 @@ impl LayoutContainer {
                     let layout_path = layout_path.clone();
                     let terminal_id = terminal_id.clone();
                     let tab_label = tab_label.clone();
+                    let dispatcher_for_click = self.action_dispatcher.clone();
                     cx.listener(move |this, _, window, cx| {
                         let is_double_click = this.tab_click_detector.check(i);
 
@@ -641,9 +652,13 @@ impl LayoutContainer {
 
                         if !standalone {
                             // Switch to clicked tab
-                            workspace.update(cx, |ws, cx| {
-                                ws.set_active_tab(&project_id, &layout_path, i, cx);
-                            });
+                            if let Some(ref dispatcher) = dispatcher_for_click {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::SetActiveTab {
+                                    project_id: project_id.clone(),
+                                    path: layout_path.clone(),
+                                    index: i,
+                                }, cx);
+                            }
                         }
 
                         // Focus the terminal in the clicked tab
@@ -671,9 +686,9 @@ impl LayoutContainer {
         }).collect();
 
         // End drop zone / empty area
-        let workspace_for_new = self.workspace.clone();
         let project_id_for_new = self.project_id.clone();
         let layout_path_for_new = self.layout_path.clone();
+        let dispatcher_for_new = self.action_dispatcher.clone();
 
         let mut end_drop_zone = div()
             .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
@@ -682,22 +697,23 @@ impl LayoutContainer {
             .min_w(px(20.0))
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if this.empty_area_click_detector.check(()) {
-                    workspace_for_new.update(cx, |ws, cx| {
-                        if standalone {
-                            ws.add_tab(&project_id_for_new, &layout_path_for_new, cx);
-                        } else {
-                            ws.add_tab_to_group(&project_id_for_new, &layout_path_for_new, cx);
-                        }
-                    });
+                    if let Some(ref dispatcher) = dispatcher_for_new {
+                        dispatcher.add_tab(
+                            &project_id_for_new,
+                            &layout_path_for_new,
+                            !standalone,
+                            cx,
+                        );
+                    }
                 }
             }));
 
         if !standalone {
             let active_drag_for_end_hover = self.active_drag.clone();
             let active_drag_for_end_drop = self.active_drag.clone();
-            let workspace_for_end = self.workspace.clone();
             let project_id_for_end = self.project_id.clone();
             let layout_path_for_end = self.layout_path.clone();
+            let dispatcher_for_end = self.action_dispatcher.clone();
 
             end_drop_zone = end_drop_zone
                 .drag_over::<PaneDrag>(move |style, _, _, _| {
@@ -724,19 +740,26 @@ impl LayoutContainer {
                         if let Some(from_index) = drag_tab_index {
                             let target_index = num_children;
                             if from_index != target_index - 1 {
-                                workspace_for_end.update(cx, |ws, cx| {
-                                    ws.move_tab(&project_id_for_end, &layout_path_for_end, from_index, target_index, cx);
-                                });
+                                if let Some(ref dispatcher) = dispatcher_for_end {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::MoveTab {
+                                        project_id: project_id_for_end.clone(),
+                                        path: layout_path_for_end.clone(),
+                                        from_index,
+                                        to_index: target_index,
+                                    }, cx);
+                                }
                                 this.start_drop_animation(num_children - 1, cx);
                             }
                         }
                     } else {
-                        workspace_for_end.update(cx, |ws, cx| {
-                            ws.move_terminal_to_tab_group(
-                                &drag.project_id, &drag.terminal_id,
-                                &layout_path_for_end, None, cx,
-                            );
-                        });
+                        if let Some(ref dispatcher) = dispatcher_for_end {
+                            dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
+                                project_id: drag.project_id.clone(),
+                                terminal_id: drag.terminal_id.clone(),
+                                target_path: layout_path_for_end.clone(),
+                                position: None,
+                            }, cx);
+                        }
                     }
                 }));
         }

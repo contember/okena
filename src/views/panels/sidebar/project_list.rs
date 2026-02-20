@@ -6,6 +6,7 @@ use crate::views::components::is_renaming;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use okena_core::api::ActionRequest;
 
 use super::item_widgets::*;
 use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag};
@@ -473,9 +474,12 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_terminal_minimized_by_id(&project_id, &terminal_id, cx);
-                                    });
+                                    if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
+                                        dispatcher.dispatch(ActionRequest::ToggleMinimized {
+                                            project_id: project_id.clone(),
+                                            terminal_id: terminal_id.clone(),
+                                        }, cx);
+                                    }
                                 }
                             }))
                             .child(
@@ -513,13 +517,12 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.set_fullscreen_terminal(
-                                            project_id.clone(),
-                                            terminal_id.clone(),
-                                            cx,
-                                        );
-                                    });
+                                    if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
+                                        dispatcher.dispatch(ActionRequest::SetFullscreen {
+                                            project_id: project_id.clone(),
+                                            terminal_id: Some(terminal_id.clone()),
+                                        }, cx);
+                                    }
                                 }
                             }))
                             .child(

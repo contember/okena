@@ -10,6 +10,7 @@ use crate::remote::bridge::CommandResult;
 use crate::remote::types::ActionRequest;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::terminal::{Terminal, TerminalSize};
+use crate::views::layout::pane_drag::DropZone;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
@@ -199,6 +200,50 @@ pub fn execute_action(
                 ws.add_tab(&project_id, &path, cx);
             }
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
+        }
+        ActionRequest::SetActiveTab {
+            project_id,
+            path,
+            index,
+        } => {
+            ws.set_active_tab(&project_id, &path, index, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::MoveTab {
+            project_id,
+            path,
+            from_index,
+            to_index,
+        } => {
+            ws.move_tab(&project_id, &path, from_index, to_index, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+        } => {
+            ws.move_terminal_to_tab_group(&project_id, &terminal_id, &target_path, position, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        } => {
+            let drop_zone = match zone.as_str() {
+                "top" => DropZone::Top,
+                "bottom" => DropZone::Bottom,
+                "left" => DropZone::Left,
+                "right" => DropZone::Right,
+                "center" => DropZone::Center,
+                _ => return ActionResult::Err(format!("invalid drop zone: {}", zone)),
+            };
+            ws.move_pane(&project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
+            ActionResult::Ok(None)
         }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {

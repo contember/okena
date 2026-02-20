@@ -123,6 +123,11 @@ impl RootView {
         // Wrap PtyManager in LocalBackend for the TerminalBackend trait
         let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
 
+        // Give the sidebar access to the backend for building dispatchers
+        sidebar.update(cx, |s, _cx| {
+            s.set_backend(backend.clone());
+        });
+
         let mut view = Self {
             workspace,
             request_broker,
