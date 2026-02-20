@@ -698,7 +698,6 @@ impl ProjectColumn {
     /// Render empty state for bookmark projects (no terminal)
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let workspace = self.workspace.clone();
         let project_id = self.project_id.clone();
 
         v_flex()
@@ -754,10 +753,18 @@ impl ProjectColumn {
                             .text_color(rgb(t.button_primary_fg))
                             .child("Start Terminal")
                     )
-                    .on_click(move |_, _window, cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.start_terminal(&project_id, cx);
-                        });
+                    .on_click({
+                        let dispatcher = self.action_dispatcher.clone();
+                        move |_, _window, cx| {
+                            if let Some(ref dispatcher) = dispatcher {
+                                dispatcher.dispatch(
+                                    okena_core::api::ActionRequest::CreateTerminal {
+                                        project_id: project_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            }
+                        }
                     })
             )
     }
