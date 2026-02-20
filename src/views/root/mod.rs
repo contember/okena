@@ -248,7 +248,14 @@ impl RootView {
                         if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
                             existing.name = api_project.name.clone();
                             existing.path = api_project.path.clone();
-                            existing.layout = layout;
+                            // Merge server layout with locally-preserved visual state
+                            // (split sizes, minimized, detached, active_tab).
+                            existing.layout = match (&existing.layout, &layout) {
+                                (Some(local), Some(server)) => {
+                                    Some(LayoutNode::merge_visual_state(server, local))
+                                }
+                                _ => layout,
+                            };
                             existing.terminal_names = terminal_names;
                             // Don't overwrite is_visible — it's client-side state
                             // (the user may have toggled visibility locally).
@@ -367,10 +374,12 @@ impl RootView {
                     if let Some(conn_id) = connection_id {
                         let backend = self.remote_manager.as_ref()
                             .and_then(|rm| rm.read(cx).backend_for(conn_id));
+                        let workspace_for_dispatch = self.workspace.clone();
                         let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
                             crate::action_dispatch::ActionDispatcher::Remote {
                                 connection_id: conn_id.clone(),
                                 manager: rm.clone(),
+                                workspace: workspace_for_dispatch,
                             }
                         });
 

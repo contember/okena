@@ -29,9 +29,13 @@ pub enum ActionDispatcher {
         terminals: TerminalsRegistry,
     },
     /// Remote project — send actions via HTTP to the remote server.
+    /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
+    /// are executed locally on the client workspace to avoid server round-trips
+    /// and to survive state syncs.
     Remote {
         connection_id: String,
         manager: Entity<RemoteConnectionManager>,
+        workspace: Entity<Workspace>,
     },
 }
 
@@ -58,7 +62,66 @@ impl ActionDispatcher {
             Self::Remote {
                 connection_id,
                 manager,
+                workspace,
             } => {
+                // Visual/presentation actions are executed locally on the client
+                // workspace. They never reach the server, so each client has
+                // independent visual state that survives state syncs.
+                match &action {
+                    ActionRequest::UpdateSplitSizes { project_id, path, sizes } => {
+                        let pid = project_id.clone();
+                        let p = path.clone();
+                        let s = sizes.clone();
+                        workspace.update(cx, |ws, cx| {
+                            ws.update_split_sizes(&pid, &p, s, cx);
+                        });
+                        return;
+                    }
+                    ActionRequest::ToggleMinimized { project_id, terminal_id } => {
+                        let pid = project_id.clone();
+                        let tid = terminal_id.clone();
+                        workspace.update(cx, |ws, cx| {
+                            ws.toggle_terminal_minimized_by_id(&pid, &tid, cx);
+                        });
+                        return;
+                    }
+                    ActionRequest::SetFullscreen { project_id, terminal_id } => {
+                        let pid = project_id.clone();
+                        let tid = terminal_id.clone();
+                        workspace.update(cx, |ws, cx| {
+                            match tid {
+                                Some(tid) => ws.set_fullscreen_terminal(pid, tid, cx),
+                                None => ws.exit_fullscreen(cx),
+                            }
+                        });
+                        return;
+                    }
+                    ActionRequest::SetActiveTab { project_id, path, index } => {
+                        let pid = project_id.clone();
+                        let p = path.clone();
+                        let idx = *index;
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_active_tab(&pid, &p, idx, cx);
+                        });
+                        return;
+                    }
+                    ActionRequest::FocusTerminal { project_id, terminal_id } => {
+                        let pid = project_id.clone();
+                        let tid = terminal_id.clone();
+                        workspace.update(cx, |ws, cx| {
+                            if let Some(project) = ws.project(&pid) {
+                                if let Some(ref layout) = project.layout {
+                                    if let Some(path) = layout.find_terminal_path(&tid) {
+                                        ws.set_focused_terminal(pid, path, cx);
+                                    }
+                                }
+                            }
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+
                 let action = strip_remote_ids(action, connection_id);
                 let cid = connection_id.clone();
                 manager.update(cx, |rm, cx| {

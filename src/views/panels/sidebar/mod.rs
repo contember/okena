@@ -319,6 +319,7 @@ impl Sidebar {
             Some(ActionDispatcher::Remote {
                 connection_id: connection_id.clone(),
                 manager: manager.clone(),
+                workspace: self.workspace.clone(),
             })
         } else {
             let backend = self.backend.as_ref()?;

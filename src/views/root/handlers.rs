@@ -21,6 +21,7 @@ impl RootView {
                     return ActionDispatcher::Remote {
                         connection_id: conn_id.clone(),
                         manager: rm.clone(),
+                        workspace: self.workspace.clone(),
                     };
                 }
             }
