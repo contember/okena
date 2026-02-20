@@ -130,6 +130,17 @@ impl ToastManager {
 
     /// Post a toast, capping the queue at MAX_VISIBLE_TOASTS (oldest dropped).
     pub fn post(toast: Toast, cx: &App) {
+        match toast.level {
+            ToastLevel::Error => {
+                log::error!("[toast] {}", toast.message);
+                eprintln!("[ERROR] {}", toast.message);
+            }
+            ToastLevel::Warning => {
+                log::warn!("[toast] {}", toast.message);
+                eprintln!("[WARN] {}", toast.message);
+            }
+            _ => {}
+        }
         if let Some(tm) = cx.try_global::<ToastManager>() {
             let mut queue = tm.0.lock();
             queue.push(toast);
@@ -258,9 +269,12 @@ impl Render for ToastOverlay {
                     )
                     // Content
                     .child(
-                        h_flex()
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
                             .flex_1()
-                            .items_center()
+                            .overflow_x_hidden()
                             .gap(SPACE_SM)
                             .px(SPACE_MD)
                             .py(SPACE_SM)
@@ -270,12 +284,16 @@ impl Render for ToastOverlay {
                                     .text_color(rgb(accent_color))
                                     .text_size(TEXT_MS)
                                     .flex_shrink_0()
+                                    .mt(px(1.0))
                                     .child(icon_char),
                             )
                             // Message
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_x_hidden()
+                                    .whitespace_normal()
                                     .text_size(TEXT_MS)
                                     .text_color(rgb(t.text_primary))
                                     .child(toast.message.clone()),
