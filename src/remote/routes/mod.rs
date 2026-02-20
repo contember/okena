@@ -15,7 +15,9 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use okena_core::api::ApiGitStatus;
 use rust_embed::RustEmbed;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +33,7 @@ pub struct AppState {
     pub broadcaster: Arc<PtyBroadcaster>,
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
+    pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
 }
 
 /// Build the complete axum router.
@@ -40,6 +43,7 @@ pub fn build_router(
     broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
+    git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -47,6 +51,7 @@ pub fn build_router(
         broadcaster,
         state_version,
         start_time,
+        git_status,
     };
 
     // Routes that require auth

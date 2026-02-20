@@ -1,3 +1,4 @@
+use crate::git::watcher::GitStatusWatcher;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -10,6 +11,7 @@ use crate::workspace::persistence;
 use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
+use okena_core::api::ApiGitStatus;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -35,6 +37,9 @@ pub struct HeadlessApp {
     auth_store: Arc<AuthStore>,
     pty_broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
+    git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
+    #[allow(dead_code)]
+    git_watcher: Entity<GitStatusWatcher>,
     #[allow(dead_code)]
     save_pending: Arc<AtomicBool>,
 }
@@ -106,6 +111,15 @@ impl HeadlessApp {
         })
         .detach();
 
+        // Git status watcher
+        let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
+        let git_status_tx = Arc::new(git_status_tx);
+        let git_watcher = cx.new({
+            let workspace = workspace.clone();
+            let git_status_tx = git_status_tx.clone();
+            |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
+        });
+
         // Create bridge channel
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
@@ -117,6 +131,8 @@ impl HeadlessApp {
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
+            git_status_tx: git_status_tx.clone(),
+            git_watcher,
             save_pending,
         };
 
@@ -147,6 +163,7 @@ impl HeadlessApp {
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
             listen_addr,
+            self.git_status_tx.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();
@@ -228,6 +245,7 @@ impl HeadlessApp {
         let workspace = self.workspace.clone();
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
+        let git_status_tx = self.git_status_tx.clone();
 
         cx.spawn(async move |_this: WeakEntity<HeadlessApp>, cx| {
             loop {
@@ -249,7 +267,9 @@ impl HeadlessApp {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
                             let sv = *state_version.borrow();
+                            let git_statuses = git_status_tx.borrow().clone();
                             let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
+                                let git_status = git_statuses.get(&p.id).cloned();
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
@@ -257,6 +277,7 @@ impl HeadlessApp {
                                     is_visible: p.is_visible,
                                     layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
+                                    git_status,
                                 }
                             }).collect();
 

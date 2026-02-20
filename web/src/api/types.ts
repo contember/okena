@@ -22,7 +22,16 @@ export interface ApiProject {
   is_visible: boolean;
   layout: ApiLayoutNode | null;
   terminal_names: Record<string, string>;
+  git_status?: ApiGitStatus | null;
 }
+
+export interface ApiGitStatus {
+  branch: string | null;
+  lines_added: number;
+  lines_removed: number;
+}
+
+export type DiffMode = "working_tree" | "staged";
 
 // serde(tag = "type", rename_all = "lowercase")
 export type ApiLayoutNode =
@@ -49,7 +58,12 @@ export type ActionRequest =
   | { action: "read_content"; terminal_id: string }
   | { action: "resize"; terminal_id: string; cols: number; rows: number }
   | { action: "create_terminal"; project_id: string }
-  | { action: "update_split_sizes"; project_id: string; path: number[]; sizes: number[] };
+  | { action: "update_split_sizes"; project_id: string; path: number[]; sizes: number[] }
+  | { action: "git_status"; project_id: string }
+  | { action: "git_diff_summary"; project_id: string }
+  | { action: "git_diff"; project_id: string; mode?: DiffMode; ignore_whitespace?: boolean }
+  | { action: "git_branches"; project_id: string }
+  | { action: "git_file_contents"; project_id: string; file_path: string; mode?: DiffMode };
 
 export interface PairRequest {
   code: string;
@@ -84,7 +98,8 @@ export type WsOutbound =
   | { type: "state_changed"; state_version: number }
   | { type: "dropped"; count: number }
   | { type: "pong" }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string }
+  | { type: "git_status_changed"; projects: Record<string, ApiGitStatus> };
 
 // Default PascalCase serialization
 export type SpecialKey =

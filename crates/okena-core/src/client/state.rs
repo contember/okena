@@ -157,6 +157,7 @@ mod tests {
             is_visible: true,
             layout,
             terminal_names: Default::default(),
+            git_status: None,
         }
     }
 

@@ -4,6 +4,7 @@ mod render;
 mod sidebar;
 mod terminal_actions;
 
+use crate::git::watcher::GitStatusWatcher;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
@@ -63,6 +64,8 @@ pub struct RootView {
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
+    /// Git status watcher (set by Okena after creation)
+    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Whether the pane switcher overlay is active
     pane_switch_active: bool,
     /// Pane switcher overlay entity (separate entity for proper focus handling)
@@ -151,6 +154,7 @@ impl RootView {
             hscroll_dragging: false,
             hscroll_bounds: Rc::new(RefCell::new(None)),
             remote_manager: None,
+            git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
         };
@@ -164,6 +168,11 @@ impl RootView {
     /// Get the terminals registry (for sharing with detached windows)
     pub fn terminals(&self) -> &TerminalsRegistry {
         &self.terminals
+    }
+
+    /// Set the git watcher entity (called by Okena after creation).
+    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>) {
+        self.git_watcher = Some(watcher);
     }
 
     /// Set the remote connection manager (called after creation by Okena).
@@ -373,6 +382,7 @@ impl RootView {
                                     backend,
                                     terminals_clone,
                                     active_drag_clone,
+                                    None, // remote projects don't get git watcher
                                     cx,
                                 );
                                 col.set_action_dispatcher(action_dispatcher);
@@ -387,6 +397,7 @@ impl RootView {
                     let workspace_for_dispatch = self.workspace.clone();
                     let backend_for_dispatch = self.backend.clone();
                     let terminals_for_dispatch = self.terminals.clone();
+                    let git_watcher = self.git_watcher.clone();
                     let entity = cx.new(move |cx| {
                         let mut col = ProjectColumn::new(
                             workspace_clone,
@@ -395,6 +406,7 @@ impl RootView {
                             backend_clone,
                             terminals_clone,
                             active_drag_clone,
+                            git_watcher,
                             cx,
                         );
                         col.set_action_dispatcher(Some(

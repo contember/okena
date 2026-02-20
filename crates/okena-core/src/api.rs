@@ -1,5 +1,5 @@
 use crate::keys::SpecialKey;
-use crate::types::SplitDirection;
+use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
 // ── API request/response types ──────────────────────────────────────────────
@@ -21,6 +21,13 @@ pub struct StateResponse {
     pub fullscreen_terminal: Option<ApiFullscreen>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiGitStatus {
+    pub branch: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ApiProject {
     pub id: String,
@@ -29,6 +36,8 @@ pub struct ApiProject {
     pub is_visible: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_status: Option<ApiGitStatus>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -147,6 +156,28 @@ pub enum ActionRequest {
         target_terminal_id: String,
         zone: String,
     },
+    GitStatus {
+        project_id: String,
+    },
+    GitDiffSummary {
+        project_id: String,
+    },
+    GitDiff {
+        project_id: String,
+        #[serde(default)]
+        mode: DiffMode,
+        #[serde(default)]
+        ignore_whitespace: bool,
+    },
+    GitBranches {
+        project_id: String,
+    },
+    GitFileContents {
+        project_id: String,
+        file_path: String,
+        #[serde(default)]
+        mode: DiffMode,
+    },
 }
 
 /// POST /v1/pair request
@@ -228,6 +259,7 @@ mod tests {
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
+                git_status: None,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -333,6 +365,25 @@ mod tests {
                 target_project_id: "p1".into(),
                 target_terminal_id: "t2".into(),
                 zone: "left".into(),
+            },
+            ActionRequest::GitStatus {
+                project_id: "p1".into(),
+            },
+            ActionRequest::GitDiffSummary {
+                project_id: "p1".into(),
+            },
+            ActionRequest::GitDiff {
+                project_id: "p1".into(),
+                mode: DiffMode::WorkingTree,
+                ignore_whitespace: false,
+            },
+            ActionRequest::GitBranches {
+                project_id: "p1".into(),
+            },
+            ActionRequest::GitFileContents {
+                project_id: "p1".into(),
+                file_path: "src/main.rs".into(),
+                mode: DiffMode::Staged,
             },
         ];
         for action in actions {

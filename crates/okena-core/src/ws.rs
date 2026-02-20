@@ -1,3 +1,4 @@
+use crate::api::ApiGitStatus;
 use crate::keys::SpecialKey;
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,9 @@ pub enum WsOutbound {
     Pong,
     Error {
         error: String,
+    },
+    GitStatusChanged {
+        projects: std::collections::HashMap<String, ApiGitStatus>,
     },
 }
 
@@ -154,6 +158,18 @@ mod tests {
             WsOutbound::Pong,
             WsOutbound::Error {
                 error: "oops".into(),
+            },
+            WsOutbound::GitStatusChanged {
+                projects: [(
+                    "p1".into(),
+                    ApiGitStatus {
+                        branch: Some("main".into()),
+                        lines_added: 10,
+                        lines_removed: 3,
+                    },
+                )]
+                .into_iter()
+                .collect(),
             },
         ];
         for msg in messages {

@@ -69,6 +69,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
     // Subscribe to state_version changes (immediate push, no polling)
     let mut state_rx = state.state_version.subscribe();
 
+    // Subscribe to git status changes
+    let mut git_rx = state.git_status.subscribe();
+
     loop {
         tokio::select! {
             // Incoming messages from client
@@ -240,6 +243,19 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                 } else {
                     // Sender dropped
                     break;
+                }
+            }
+
+            // Git status changes push
+            result = git_rx.changed() => {
+                if result.is_ok() {
+                    let statuses = git_rx.borrow_and_update().clone();
+                    let resp = serde_json::to_string(&WsOutbound::GitStatusChanged {
+                        projects: statuses,
+                    }).expect("BUG: WsOutbound must serialize");
+                    if socket.send(Message::Text(resp.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
         }

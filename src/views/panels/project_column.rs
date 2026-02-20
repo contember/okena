@@ -1,5 +1,5 @@
 use crate::git::{self, FileDiffSummary};
-use crate::git::GitStatus;
+use crate::git::watcher::GitStatusWatcher;
 use crate::action_dispatch::ActionDispatcher;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
@@ -40,8 +40,8 @@ pub struct ProjectColumn {
     diff_popover_project_path: String,
     /// Hover token to cancel pending popover show
     hover_token: Arc<AtomicU64>,
-    /// Cached git status (fetched asynchronously)
-    cached_git_status: Option<GitStatus>,
+    /// Git status watcher (centralized polling)
+    git_watcher: Option<Entity<GitStatusWatcher>>,
     /// Shared drag state for resize operations
     active_drag: ActiveDrag,
     /// Action dispatcher for routing terminal actions (local or remote)
@@ -56,15 +56,12 @@ impl ProjectColumn {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
+        git_watcher: Option<Entity<GitStatusWatcher>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Spawn initial async git status fetch (skip for remote projects)
-        let project_info = workspace.read(cx).project(&project_id)
-            .map(|p| (p.path.clone(), p.is_remote));
-        if let Some((path, is_remote)) = project_info {
-            if !is_remote {
-                Self::spawn_git_status_refresh(path, cx);
-            }
+        // Observe git watcher for re-renders (replaces per-column polling)
+        if let Some(ref watcher) = git_watcher {
+            cx.observe(watcher, |_, _, cx| cx.notify()).detach();
         }
 
         Self {
@@ -78,7 +75,7 @@ impl ProjectColumn {
             diff_file_summaries: Vec::new(),
             diff_popover_project_path: String::new(),
             hover_token: Arc::new(AtomicU64::new(0)),
-            cached_git_status: None,
+            git_watcher,
             active_drag,
             action_dispatcher: None,
         }
@@ -87,30 +84,6 @@ impl ProjectColumn {
     /// Set the action dispatcher (used for remote projects).
     pub fn set_action_dispatcher(&mut self, dispatcher: Option<ActionDispatcher>) {
         self.action_dispatcher = dispatcher;
-    }
-
-    /// Spawn an async task to fetch git status and schedule the next refresh.
-    fn spawn_git_status_refresh(project_path: String, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let path = project_path.clone();
-            let status = smol::unblock(move || {
-                git::get_git_status(Path::new(&path))
-            }).await;
-
-            let should_continue = this.update(cx, |this, cx| {
-                this.cached_git_status = status;
-                cx.notify();
-                true
-            }).unwrap_or(false);
-
-            if should_continue {
-                // Schedule next refresh after cache TTL
-                smol::Timer::after(Duration::from_secs(5)).await;
-                let _ = this.update(cx, |_this, cx| {
-                    Self::spawn_git_status_refresh(project_path, cx);
-                });
-            }
-        }).detach();
     }
 
     fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -446,7 +419,8 @@ impl ProjectColumn {
     }
 
     fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.cached_git_status.clone();
+        let status = self.git_watcher.as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned());
         let is_worktree = project.worktree_info.is_some();
         let main_repo_path = project.worktree_info.as_ref()
             .map(|w| w.main_repo_path.clone())

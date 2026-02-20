@@ -6,9 +6,11 @@
 use std::path::Path;
 
 use crate::process::{command, safe_output};
+use serde::{Serialize, Deserialize};
 
 /// Type of a diff line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiffLineType {
     /// Context line (unchanged).
     Context,
@@ -21,7 +23,7 @@ pub enum DiffLineType {
 }
 
 /// A single line in a diff.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffLine {
     /// Type of this line.
     pub line_type: DiffLineType,
@@ -34,23 +36,20 @@ pub struct DiffLine {
 }
 
 /// A hunk in a diff (section of changes).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffHunk {
     /// The hunk header (e.g., "@@ -10,5 +10,7 @@ fn example()").
-    #[allow(dead_code)]
     pub header: String,
     /// Starting line number in old file.
-    #[allow(dead_code)]
     pub old_start: usize,
     /// Starting line number in new file.
-    #[allow(dead_code)]
     pub new_start: usize,
     /// Lines in this hunk.
     pub lines: Vec<DiffLine>,
 }
 
 /// Diff for a single file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileDiff {
     /// Old file path (None for new files).
     pub old_path: Option<String>,
@@ -77,36 +76,10 @@ impl FileDiff {
 
 }
 
-/// Mode for git diff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum DiffMode {
-    /// Unstaged changes (working tree vs index).
-    #[default]
-    WorkingTree,
-    /// Staged changes (index vs HEAD).
-    Staged,
-}
-
-impl DiffMode {
-    /// Get the display name for this mode.
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            DiffMode::WorkingTree => "Unstaged",
-            DiffMode::Staged => "Staged",
-        }
-    }
-
-    /// Toggle to the other mode.
-    pub fn toggle(&self) -> Self {
-        match self {
-            DiffMode::WorkingTree => DiffMode::Staged,
-            DiffMode::Staged => DiffMode::WorkingTree,
-        }
-    }
-}
+pub use okena_core::types::DiffMode;
 
 /// Result of a diff operation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DiffResult {
     /// Files with changes.
     pub files: Vec<FileDiff>,

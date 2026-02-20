@@ -1,5 +1,6 @@
 pub mod diff;
 mod repository;
+pub mod watcher;
 
 pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
 pub use repository::{
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// Git status information for display in project header
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitStatus {
     /// Current branch name (None if detached HEAD shows short commit hash)
     pub branch: Option<String>,
@@ -28,7 +29,7 @@ pub struct GitStatus {
 }
 
 /// Per-file diff summary for popover display
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileDiffSummary {
     /// File path (relative to repo root)
     pub path: String,

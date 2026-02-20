@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 pub use okena_core::api::{
-    ActionRequest, ApiFullscreen, ApiLayoutNode, ApiProject, ErrorResponse, HealthResponse,
-    PairRequest, PairResponse, StateResponse,
+    ActionRequest, ApiFullscreen, ApiGitStatus, ApiLayoutNode, ApiProject, ErrorResponse,
+    HealthResponse, PairRequest, PairResponse, StateResponse,
 };
 #[allow(unused_imports)]
 pub use okena_core::ws::{

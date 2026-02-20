@@ -3,6 +3,7 @@ pub mod headless;
 mod remote_commands;
 mod update_checker;
 
+use crate::git::watcher::GitStatusWatcher;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -19,7 +20,8 @@ use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
-use std::collections::HashSet;
+use okena_core::api::ApiGitStatus;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,6 +41,10 @@ pub struct Okena {
     /// Note: Field is read by spawned tasks, not directly
     #[allow(dead_code)]
     save_pending: Arc<AtomicBool>,
+    // ── Git status watcher ────────────────────────────────────────────
+    #[allow(dead_code)]
+    git_watcher: Entity<GitStatusWatcher>,
+    git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     // ── Remote control fields ───────────────────────────────────────────
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
@@ -142,6 +148,20 @@ impl Okena {
         })
         .detach();
 
+        // ── Git status watcher ─────────────────────────────────────────
+        let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
+        let git_status_tx = Arc::new(git_status_tx);
+        let git_watcher = cx.new({
+            let workspace = workspace.clone();
+            let git_status_tx = git_status_tx.clone();
+            |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
+        });
+
+        // Pass git_watcher to root view so ProjectColumns can observe it
+        root_view.update(cx, |rv, _cx| {
+            rv.set_git_watcher(git_watcher.clone());
+        });
+
         // ── Remote control setup ────────────────────────────────────────
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
@@ -168,6 +188,8 @@ impl Okena {
             terminals,
             opened_detached_windows: HashSet::new(),
             save_pending,
+            git_watcher,
+            git_status_tx: git_status_tx.clone(),
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
@@ -267,6 +289,7 @@ impl Okena {
             self.pty_broadcaster.clone(),
             self.state_version.clone(),
             self.listen_addr,
+            self.git_status_tx.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();

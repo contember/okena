@@ -251,5 +251,32 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             target_terminal_id: s(&target_terminal_id),
             zone,
         },
+        ActionRequest::GitStatus { project_id } => ActionRequest::GitStatus {
+            project_id: s(&project_id),
+        },
+        ActionRequest::GitDiffSummary { project_id } => ActionRequest::GitDiffSummary {
+            project_id: s(&project_id),
+        },
+        ActionRequest::GitDiff {
+            project_id,
+            mode,
+            ignore_whitespace,
+        } => ActionRequest::GitDiff {
+            project_id: s(&project_id),
+            mode,
+            ignore_whitespace,
+        },
+        ActionRequest::GitBranches { project_id } => ActionRequest::GitBranches {
+            project_id: s(&project_id),
+        },
+        ActionRequest::GitFileContents {
+            project_id,
+            file_path,
+            mode,
+        } => ActionRequest::GitFileContents {
+            project_id: s(&project_id),
+            file_path,
+            mode,
+        },
     }
 }

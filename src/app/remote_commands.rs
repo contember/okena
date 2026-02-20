@@ -19,6 +19,7 @@ impl Okena {
         let workspace = self.workspace.clone();
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
+        let git_status_tx = self.git_status_tx.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx| {
             loop {
@@ -40,7 +41,9 @@ impl Okena {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
                             let sv = *state_version.borrow();
+                            let git_statuses = git_status_tx.borrow().clone();
                             let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
+                                let git_status = git_statuses.get(&p.id).cloned();
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
@@ -48,6 +51,7 @@ impl Okena {
                                     is_visible: p.is_visible,
                                     layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
+                                    git_status,
                                 }
                             }).collect();
 

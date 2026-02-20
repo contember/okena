@@ -245,6 +245,65 @@ pub fn execute_action(
             ws.move_pane(&project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
             ActionResult::Ok(None)
         }
+        ActionRequest::GitStatus { project_id } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    let status = crate::git::get_git_status(std::path::Path::new(&path));
+                    ActionResult::Ok(Some(serde_json::to_value(status).expect("BUG: GitStatus must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::GitDiffSummary { project_id } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    let summary = crate::git::get_diff_file_summary(std::path::Path::new(&path));
+                    ActionResult::Ok(Some(serde_json::to_value(summary).expect("BUG: FileDiffSummary must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::GitDiff { project_id, mode, ignore_whitespace } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    match crate::git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
+                        Ok(diff) => ActionResult::Ok(Some(serde_json::to_value(diff).expect("BUG: DiffResult must serialize"))),
+                        Err(e) => ActionResult::Err(e),
+                    }
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::GitBranches { project_id } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    let branches = crate::git::get_available_branches_for_worktree(std::path::Path::new(&path));
+                    ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::GitFileContents { project_id, file_path, mode } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let repo_path = p.path.clone();
+                    let (old, new) = crate::git::get_file_contents_for_diff(
+                        std::path::Path::new(&repo_path),
+                        &file_path,
+                        mode,
+                    );
+                    ActionResult::Ok(Some(serde_json::json!({
+                        "old_content": old,
+                        "new_content": new,
+                    })))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {
