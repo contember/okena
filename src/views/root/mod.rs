@@ -250,7 +250,8 @@ impl RootView {
                             existing.path = api_project.path.clone();
                             existing.layout = layout;
                             existing.terminal_names = terminal_names;
-                            existing.is_visible = api_project.is_visible;
+                            // Don't overwrite is_visible — it's client-side state
+                            // (the user may have toggled visibility locally).
                         } else {
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
