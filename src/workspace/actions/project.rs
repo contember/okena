@@ -117,6 +117,15 @@ impl Workspace {
         });
     }
 
+    /// Rename a project's directory path and update the project name to match
+    pub fn rename_project_directory(&mut self, project_id: &str, new_path: String, new_name: String, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            project.path = new_path;
+            project.name = new_name;
+            true
+        });
+    }
+
     /// Set the folder color for a project
     pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         self.with_project(project_id, cx, |project| {

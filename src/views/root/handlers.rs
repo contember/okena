@@ -71,13 +71,15 @@ impl RootView {
                     }, cx);
                 });
             }
-            OverlayManagerEvent::CloseWorktree { project_id } => {
-                let result = self.workspace.update(cx, |ws, cx| {
-                    ws.remove_worktree_project(project_id, false, cx)
+            OverlayManagerEvent::RenameDirectory { project_id, project_path } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_rename_directory_dialog(project_id.clone(), project_path.clone(), cx);
                 });
-                if let Err(e) = result {
-                    log::error!("Failed to close worktree: {}", e);
-                }
+            }
+            OverlayManagerEvent::CloseWorktree { project_id } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_close_worktree_dialog(project_id.clone(), cx);
+                });
             }
             OverlayManagerEvent::DeleteProject { project_id } => {
                 self.workspace.update(cx, |ws, cx| {
@@ -88,6 +90,41 @@ impl RootView {
                 self.overlay_manager.update(cx, |om, cx| {
                     om.show_settings_for_project(project_id.clone(), cx);
                 });
+            }
+            OverlayManagerEvent::CloseAllWorktrees { project_id } => {
+                // Collect all worktree project IDs for this parent
+                let worktree_ids: Vec<String> = self.workspace.read(cx)
+                    .data().projects.iter()
+                    .filter(|p| p.worktree_info.as_ref()
+                        .map_or(false, |wt| wt.parent_project_id == *project_id))
+                    .map(|p| p.id.clone())
+                    .collect();
+
+                // Remove each one (non-force, skip dirty ones)
+                let mut errors = Vec::new();
+                for wt_id in &worktree_ids {
+                    let result = self.workspace.update(cx, |ws, cx| {
+                        ws.remove_worktree_project(wt_id, false, cx)
+                    });
+                    if let Err(e) = result {
+                        errors.push(e);
+                    }
+                }
+                if !errors.is_empty() {
+                    log::warn!("Some worktrees could not be closed: {:?}", errors);
+                }
+            }
+            OverlayManagerEvent::FocusParent { project_id } => {
+                let parent_id = self.workspace.read(cx)
+                    .project(project_id)
+                    .and_then(|p| p.worktree_info.as_ref())
+                    .map(|wt| wt.parent_project_id.clone());
+
+                if let Some(parent_id) = parent_id {
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project(Some(parent_id), cx);
+                    });
+                }
             }
             OverlayManagerEvent::FocusProject(project_id) => {
                 self.workspace.update(cx, |ws, cx| {

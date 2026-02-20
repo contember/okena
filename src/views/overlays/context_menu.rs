@@ -15,9 +15,12 @@ pub enum ContextMenuEvent {
     AddTerminal { project_id: String },
     CreateWorktree { project_id: String, project_path: String },
     RenameProject { project_id: String, project_name: String },
+    RenameDirectory { project_id: String, project_path: String },
     CloseWorktree { project_id: String },
+    CloseAllWorktrees { project_id: String },
     DeleteProject { project_id: String },
     ConfigureHooks { project_id: String },
+    FocusParent { project_id: String },
 }
 
 /// Project context menu component
@@ -65,6 +68,13 @@ impl ContextMenu {
         });
     }
 
+    fn rename_directory(&self, project_path: String, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::RenameDirectory {
+            project_id: self.request.project_id.clone(),
+            project_path,
+        });
+    }
+
     fn close_worktree(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::CloseWorktree {
             project_id: self.request.project_id.clone(),
@@ -79,6 +89,18 @@ impl ContextMenu {
 
     fn configure_hooks(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::ConfigureHooks {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn close_all_worktrees(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::CloseAllWorktrees {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn focus_parent(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::FocusParent {
             project_id: self.request.project_id.clone(),
         });
     }
@@ -104,8 +126,12 @@ impl Render for ContextMenu {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
         let is_git_repo = git::get_git_status(std::path::Path::new(&project_path)).is_some();
+        let worktree_count = ws.data().projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |wt| wt.parent_project_id == self.request.project_id))
+            .count();
 
         let project_path_for_worktree = project_path.clone();
+        let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();
 
         div()
@@ -149,6 +175,20 @@ impl Render for ContextMenu {
                                 })),
                         )
                     })
+                    // Close All Worktrees option (only for git repos that are not worktrees and have child worktrees)
+                    .when(is_git_repo && !is_worktree && worktree_count > 0, |d| {
+                        d.child(
+                            menu_item_with_color(
+                                "context-menu-close-all-worktrees",
+                                "icons/git-branch.svg",
+                                &format!("Close All Worktrees ({})", worktree_count),
+                                t.warning, t.warning, &t,
+                            )
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_all_worktrees(cx);
+                            }))
+                        )
+                    })
                     // Separator
                     .child(menu_separator(&t))
                     // Rename option
@@ -161,6 +201,16 @@ impl Render for ContextMenu {
                                 }
                             })),
                     )
+                    // Rename Directory option
+                    .child(
+                        menu_item("context-menu-rename-dir", "icons/folder.svg", "Rename Directory...", &t)
+                            .on_click(cx.listener({
+                                let project_path = project_path_for_rename_dir.clone();
+                                move |this, _, _window, cx| {
+                                    this.rename_directory(project_path.clone(), cx);
+                                }
+                            })),
+                    )
                     // Configure Hooks option
                     .child(
                         menu_item("context-menu-configure-hooks", "icons/terminal.svg", "Configure Hooks...", &t)
@@ -168,6 +218,15 @@ impl Render for ContextMenu {
                                 this.configure_hooks(cx);
                             })),
                     )
+                    // Focus Parent Project option (only for worktree projects)
+                    .when(is_worktree, |d| {
+                        d.child(
+                            menu_item("context-menu-focus-parent", "icons/chevron-up.svg", "Focus Parent Project", &t)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.focus_parent(cx);
+                                })),
+                        )
+                    })
                     // Close Worktree option (only for worktree projects)
                     .when(is_worktree, |d| {
                         d.child(

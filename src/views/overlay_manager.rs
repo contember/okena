@@ -25,6 +25,8 @@ use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteC
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
 use crate::views::overlays::terminal_context_menu::{TerminalContextMenu, TerminalContextMenuEvent};
+use crate::views::overlays::close_worktree_dialog::{CloseWorktreeDialog, CloseWorktreeDialogEvent};
+use crate::views::overlays::rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use okena_core::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
@@ -182,6 +184,18 @@ impl CloseEvent for PairingDialogEvent {
     }
 }
 
+impl CloseEvent for CloseWorktreeDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, CloseWorktreeDialogEvent::Closed)
+    }
+}
+
+impl CloseEvent for RenameDirectoryDialogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, RenameDirectoryDialogEvent::Close | RenameDirectoryDialogEvent::Renamed)
+    }
+}
+
 // ============================================================================
 // OverlayManager Entity
 // ============================================================================
@@ -214,6 +228,9 @@ pub enum OverlayManagerEvent {
     /// Context menu: Rename project
     RenameProject { project_id: String, project_name: String },
 
+    /// Context menu: Rename directory on disk
+    RenameDirectory { project_id: String, project_path: String },
+
     /// Context menu: Close worktree project
     CloseWorktree { project_id: String },
 
@@ -222,6 +239,12 @@ pub enum OverlayManagerEvent {
 
     /// Context menu: Configure hooks for a project
     ConfigureHooks { project_id: String },
+
+    /// Context menu: Close all worktrees of a parent project
+    CloseAllWorktrees { project_id: String },
+
+    /// Context menu: Focus parent project of a worktree
+    FocusParent { project_id: String },
 
     /// Project switcher: Focus a specific project
     FocusProject(String),
@@ -577,6 +600,55 @@ impl OverlayManager {
     }
 
     // ========================================================================
+    // Close worktree dialog (parametric)
+    // ========================================================================
+
+    /// Show close worktree confirmation dialog.
+    pub fn show_close_worktree_dialog(
+        &mut self,
+        project_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let dialog = cx.new(|cx| {
+            CloseWorktreeDialog::new(workspace, project_id, cx)
+        });
+        cx.subscribe(&dialog, |this, _, event: &CloseWorktreeDialogEvent, cx| {
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(dialog, cx);
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Rename directory dialog (parametric)
+    // ========================================================================
+
+    /// Show rename directory dialog for a project.
+    pub fn show_rename_directory_dialog(
+        &mut self,
+        project_id: String,
+        project_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let dialog = cx.new(|cx| {
+            RenameDirectoryDialog::new(workspace, project_id, project_path, cx)
+        });
+        cx.subscribe(&dialog, |this, _, event: &RenameDirectoryDialogEvent, cx| {
+            if event.is_close() {
+                this.close_modal(cx);
+            }
+        })
+        .detach();
+        self.open_modal(dialog, cx);
+        cx.notify();
+    }
+
+    // ========================================================================
     // Context menu (parametric - remains as separate OverlaySlot)
     // ========================================================================
 
@@ -613,6 +685,13 @@ impl OverlayManager {
                         project_name: project_name.clone(),
                     });
                 }
+                ContextMenuEvent::RenameDirectory { project_id, project_path } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RenameDirectory {
+                        project_id: project_id.clone(),
+                        project_path: project_path.clone(),
+                    });
+                }
                 ContextMenuEvent::CloseWorktree { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::CloseWorktree {
@@ -628,6 +707,18 @@ impl OverlayManager {
                 ContextMenuEvent::ConfigureHooks { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ConfigureHooks {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::CloseAllWorktrees { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::CloseAllWorktrees {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::FocusParent { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::FocusParent {
                         project_id: project_id.clone(),
                     });
                 }
