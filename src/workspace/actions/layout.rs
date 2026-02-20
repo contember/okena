@@ -353,6 +353,7 @@ impl Workspace {
 
     /// Close a tab at a specific index within a tabs container.
     /// Returns the terminal IDs that were removed.
+    #[allow(dead_code)]
     pub fn close_tab(
         &mut self,
         project_id: &str,
@@ -392,6 +393,7 @@ impl Workspace {
 
     /// Close all tabs except the one at the specified index.
     /// Returns the terminal IDs that were removed.
+    #[allow(dead_code)]
     pub fn close_other_tabs(
         &mut self,
         project_id: &str,
@@ -418,6 +420,7 @@ impl Workspace {
 
     /// Close all tabs to the right of the specified index.
     /// Returns the terminal IDs that were removed.
+    #[allow(dead_code)]
     pub fn close_tabs_to_right(
         &mut self,
         project_id: &str,

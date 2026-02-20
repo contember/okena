@@ -368,11 +368,13 @@ impl Workspace {
     }
 
     /// Check if a project is remote
+    #[allow(dead_code)]
     pub fn is_remote_project(&self, id: &str) -> bool {
         self.data.projects.iter().any(|p| p.id == id && p.is_remote)
     }
 
     /// Remove all remote projects (and their folder) for a given connection_id.
+    #[allow(dead_code)]
     pub fn remove_remote_projects(&mut self, connection_id: &str, cx: &mut Context<Self>) {
         let folder_id = format!("remote-folder:{}", connection_id);
         let prefix = format!("remote:{}:", connection_id);

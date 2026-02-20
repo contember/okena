@@ -157,6 +157,7 @@ impl RemoteConnectionManager {
     }
 
     /// Get the remote state for a specific connection.
+    #[allow(dead_code)]
     pub fn remote_state(&self, connection_id: &str) -> Option<&StateResponse> {
         self.connections
             .get(connection_id)
