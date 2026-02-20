@@ -59,7 +59,7 @@ impl ActionDispatcher {
                 connection_id,
                 manager,
             } => {
-                let action = strip_remote_terminal_prefix(action, connection_id);
+                let action = strip_remote_ids(action, connection_id);
                 let cid = connection_id.clone();
                 manager.update(cx, |rm, cx| {
                     rm.send_action(&cid, action, cx);
@@ -102,50 +102,110 @@ impl ActionDispatcher {
     }
 }
 
-/// Strip the `remote:{connection_id}:` prefix from terminal IDs before sending to server.
-fn strip_remote_terminal_prefix(action: ActionRequest, connection_id: &str) -> ActionRequest {
-    let prefix = format!("remote:{}", connection_id);
+/// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
+fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest {
+    let s = |id: &str| strip_prefix(id, connection_id);
     match action {
+        ActionRequest::SendText { terminal_id, text } => ActionRequest::SendText {
+            terminal_id: s(&terminal_id),
+            text,
+        },
+        ActionRequest::RunCommand {
+            terminal_id,
+            command,
+        } => ActionRequest::RunCommand {
+            terminal_id: s(&terminal_id),
+            command,
+        },
+        ActionRequest::SendSpecialKey { terminal_id, key } => ActionRequest::SendSpecialKey {
+            terminal_id: s(&terminal_id),
+            key,
+        },
+        ActionRequest::SplitTerminal {
+            project_id,
+            path,
+            direction,
+        } => ActionRequest::SplitTerminal {
+            project_id: s(&project_id),
+            path,
+            direction,
+        },
         ActionRequest::CloseTerminal {
             project_id,
             terminal_id,
         } => ActionRequest::CloseTerminal {
-            project_id,
-            terminal_id: strip_prefix(&terminal_id, &prefix),
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
         },
         ActionRequest::CloseTerminals {
             project_id,
             terminal_ids,
         } => ActionRequest::CloseTerminals {
+            project_id: s(&project_id),
+            terminal_ids: terminal_ids.iter().map(|id| s(id)).collect(),
+        },
+        ActionRequest::FocusTerminal {
             project_id,
-            terminal_ids: terminal_ids
-                .into_iter()
-                .map(|id| strip_prefix(&id, &prefix))
-                .collect(),
+            terminal_id,
+        } => ActionRequest::FocusTerminal {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::ReadContent { terminal_id } => ActionRequest::ReadContent {
+            terminal_id: s(&terminal_id),
+        },
+        ActionRequest::Resize {
+            terminal_id,
+            cols,
+            rows,
+        } => ActionRequest::Resize {
+            terminal_id: s(&terminal_id),
+            cols,
+            rows,
+        },
+        ActionRequest::CreateTerminal { project_id } => ActionRequest::CreateTerminal {
+            project_id: s(&project_id),
+        },
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path,
+            sizes,
+        } => ActionRequest::UpdateSplitSizes {
+            project_id: s(&project_id),
+            path,
+            sizes,
         },
         ActionRequest::ToggleMinimized {
             project_id,
             terminal_id,
         } => ActionRequest::ToggleMinimized {
-            project_id,
-            terminal_id: strip_prefix(&terminal_id, &prefix),
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
         },
         ActionRequest::SetFullscreen {
             project_id,
             terminal_id,
         } => ActionRequest::SetFullscreen {
-            project_id,
-            terminal_id: terminal_id.map(|id| strip_prefix(&id, &prefix)),
+            project_id: s(&project_id),
+            terminal_id: terminal_id.map(|id| s(&id)),
         },
         ActionRequest::RenameTerminal {
             project_id,
             terminal_id,
             name,
         } => ActionRequest::RenameTerminal {
-            project_id,
-            terminal_id: strip_prefix(&terminal_id, &prefix),
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
             name,
         },
-        other => other,
+        ActionRequest::AddTab {
+            project_id,
+            path,
+            in_group,
+        } => ActionRequest::AddTab {
+            project_id: s(&project_id),
+            path,
+            in_group,
+        },
     }
 }
