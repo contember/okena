@@ -16,6 +16,10 @@ pub trait TerminalTransport: Send + Sync {
     fn send_input(&self, terminal_id: &str, data: &[u8]);
     fn resize(&self, terminal_id: &str, cols: u16, rows: u16);
     fn uses_mouse_backend(&self) -> bool;
+    /// Debounce interval for transport resize calls (ms).
+    /// Local PTY uses 16ms (just enough to batch rapid resizes).
+    /// Remote uses longer interval to avoid flooding the network.
+    fn resize_debounce_ms(&self) -> u64 { 16 }
 }
 
 /// Tracks who currently controls a terminal's resize.
@@ -203,6 +207,8 @@ pub struct ResizeState {
     pub size: TerminalSize,
     last_pty_resize: std::time::Instant,
     pending_pty_resize: Option<(u16, u16)>,
+    /// True when a background flush timer is scheduled to send the pending resize.
+    flush_timer_active: bool,
 }
 
 /// A terminal instance wrapping alacritty_terminal
@@ -210,7 +216,7 @@ pub struct Terminal {
     term: Arc<Mutex<Term<ZedEventListener>>>,
     processor: Mutex<Processor>,
     pub terminal_id: String,
-    pub resize_state: Mutex<ResizeState>,
+    pub resize_state: Arc<Mutex<ResizeState>>,
     transport: Arc<dyn TerminalTransport>,
     selection_state: Mutex<SelectionState>,
     scroll_offset: Mutex<i32>,
@@ -252,13 +258,14 @@ impl Terminal {
             term: Arc::new(Mutex::new(term)),
             processor: Mutex::new(Processor::new()),
             terminal_id,
-            resize_state: Mutex::new(ResizeState {
+            resize_state: Arc::new(Mutex::new(ResizeState {
                 size,
                 // Use a time in the past so the first resize from paint() always
                 // passes the debounce check and sends SIGWINCH to the PTY immediately
                 last_pty_resize: std::time::Instant::now() - std::time::Duration::from_secs(1),
+                flush_timer_active: false,
                 pending_pty_resize: None,
-            }),
+            })),
             transport,
             selection_state: Mutex::new(SelectionState::default()),
             scroll_offset: Mutex::new(0),
@@ -345,40 +352,60 @@ impl Terminal {
         }
     }
 
-    /// Resize the terminal with debounced PTY resize
+    /// Resize the terminal with debounced transport resize.
     ///
-    /// The terminal grid is always resized immediately for correct rendering.
-    /// PTY resize signals are debounced to avoid flooding the shell during
-    /// rapid resize operations (e.g., dragging a split divider).
+    /// The terminal grid is always resized immediately (optimistic update) for
+    /// smooth rendering. Transport resize signals (PTY/remote) are debounced to
+    /// avoid flooding the shell or network.
     ///
-    /// Debounce interval: 16ms (~60fps) - enough to batch rapid resize events
-    /// while still feeling responsive.
+    /// Debounce interval is transport-dependent: 16ms for local PTY (~60fps),
+    /// 150ms for remote connections. A trailing-edge timer ensures the final
+    /// resize is always sent even when resize events stop mid-debounce.
     pub fn resize(&self, new_size: TerminalSize) {
-        const DEBOUNCE_MS: u64 = 16;
+        let debounce_ms = self.transport.resize_debounce_ms();
 
-        // Always update local size immediately
+        // Always update local size immediately (optimistic UI)
         self.resize_state.lock().size = new_size;
 
-        // Resize terminal grid (independent mutex)
+        // Resize terminal grid immediately (independent mutex)
         let mut term = self.term.lock();
         let term_size = TermSize::new(new_size.cols as usize, new_size.rows as usize);
         term.resize(term_size);
         drop(term);
 
-        // Debounce PTY resize to avoid excessive SIGWINCH signals
+        // Debounce transport resize
         let now = std::time::Instant::now();
         let mut rs = self.resize_state.lock();
         let elapsed = now.duration_since(rs.last_pty_resize);
 
-        if elapsed.as_millis() >= DEBOUNCE_MS as u128 {
-            // Enough time has passed - send resize immediately
+        if elapsed.as_millis() >= debounce_ms as u128 {
+            // Enough time has passed — send resize immediately
             rs.pending_pty_resize = None;
             rs.last_pty_resize = now;
             drop(rs);
             self.transport.resize(&self.terminal_id, new_size.cols, new_size.rows);
         } else {
-            // Store pending resize - will be applied on next resize that passes debounce
+            // Store pending resize
             rs.pending_pty_resize = Some((new_size.cols, new_size.rows));
+
+            // Schedule a trailing-edge flush timer if not already active.
+            // This ensures the final resize is always sent even when events stop.
+            if !rs.flush_timer_active {
+                rs.flush_timer_active = true;
+                let transport = self.transport.clone();
+                let terminal_id = self.terminal_id.clone();
+                let resize_state = self.resize_state.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(debounce_ms));
+                    let mut rs = resize_state.lock();
+                    rs.flush_timer_active = false;
+                    if let Some((cols, rows)) = rs.pending_pty_resize.take() {
+                        rs.last_pty_resize = std::time::Instant::now();
+                        drop(rs);
+                        transport.resize(&terminal_id, cols, rows);
+                    }
+                });
+            }
         }
     }
 

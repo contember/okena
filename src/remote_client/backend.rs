@@ -37,6 +37,10 @@ impl TerminalTransport for RemoteTransport {
     fn uses_mouse_backend(&self) -> bool {
         false
     }
+
+    fn resize_debounce_ms(&self) -> u64 {
+        150
+    }
 }
 
 /// Backend implementation for remote terminals.
