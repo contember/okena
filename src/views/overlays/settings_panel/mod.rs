@@ -13,6 +13,7 @@ mod render_general;
 mod render_hooks;
 mod render_paired_devices;
 mod render_terminal;
+mod render_worktree;
 mod sidebar;
 
 use categories::SettingsCategory;
@@ -74,6 +75,8 @@ pub struct SettingsPanel {
     pub(super) project_hook_worktree_removed: Entity<SimpleInputState>,
     pub(super) project_hook_on_rebase_conflict: Entity<SimpleInputState>,
     pub(super) project_hook_on_dirty_worktree_close: Entity<SimpleInputState>,
+    // Worktree dir suffix input
+    pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
     // File opener input
     pub(super) file_opener_input: Entity<SimpleInputState>,
     // Remote listen address input
@@ -400,6 +403,18 @@ impl SettingsPanel {
             }
         }).detach();
 
+        // Worktree path template input
+        let worktree_dir_suffix_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("../{repo}-wt/{branch}")
+                .highlight_vars()
+                .default_value(s.worktree.path_template.clone())
+        });
+        cx.subscribe(&worktree_dir_suffix_input, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = entity.read(cx).value().to_string();
+            settings_entity(cx).update(cx, |state, cx| state.set_worktree_path_template(val, cx));
+        }).detach();
+
         // File opener input
         let file_opener_input = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
@@ -465,6 +480,7 @@ impl SettingsPanel {
             project_hook_worktree_removed,
             project_hook_on_rebase_conflict,
             project_hook_on_dirty_worktree_close,
+            worktree_dir_suffix_input,
             file_opener_input,
             listen_address_input,
             paired_devices,
@@ -588,6 +604,7 @@ impl SettingsPanel {
                 SettingsCategory::General => self.render_general(cx).into_any_element(),
                 SettingsCategory::Font => self.render_font(cx).into_any_element(),
                 SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
+                SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
                 SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
                 SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),
             })

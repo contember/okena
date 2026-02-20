@@ -193,6 +193,42 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Set worktree path template
+    pub fn set_worktree_path_template(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.worktree.path_template = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default merge
+    pub fn set_worktree_default_merge(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_merge = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default stash
+    pub fn set_worktree_default_stash(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_stash = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default fetch
+    pub fn set_worktree_default_fetch(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_fetch = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default push
+    pub fn set_worktree_default_push(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_push = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set worktree default delete branch
+    pub fn set_worktree_default_delete_branch(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.worktree.default_delete_branch = value;
+        self.save_and_notify(cx);
+    }
+
     /// Synchronously flush any pending settings save (called on quit)
     pub fn flush_pending_save(&self) {
         if self.save_pending.swap(false, Ordering::Relaxed) {

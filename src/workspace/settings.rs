@@ -76,6 +76,51 @@ pub struct HooksConfig {
     pub on_dirty_worktree_close: Option<String>,
 }
 
+/// Configuration for worktree creation and close defaults
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorktreeConfig {
+    /// Path template for new worktrees.
+    /// Supports relative paths (resolved from project dir). Variables: {repo} = repo folder name, {branch} = branch name
+    #[serde(default = "default_worktree_path_template")]
+    pub path_template: String,
+    /// Default: enable merge on close
+    #[serde(default)]
+    pub default_merge: bool,
+    /// Default: enable stash on close
+    #[serde(default)]
+    pub default_stash: bool,
+    /// Default: enable fetch on close
+    #[serde(default = "default_true")]
+    pub default_fetch: bool,
+    /// Default: enable push on close
+    #[serde(default)]
+    pub default_push: bool,
+    /// Default: enable delete branch on close
+    #[serde(default)]
+    pub default_delete_branch: bool,
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            path_template: default_worktree_path_template(),
+            default_merge: false,
+            default_stash: false,
+            default_fetch: true,
+            default_push: false,
+            default_delete_branch: false,
+        }
+    }
+}
+
+fn default_worktree_path_template() -> String {
+    "../{repo}-wt/{branch}".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Default sidebar width in pixels.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 250.0;
 /// Minimum sidebar width in pixels.
@@ -211,6 +256,10 @@ pub struct AppSettings {
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u32,
 
+    /// Worktree creation and close defaults
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -244,6 +293,7 @@ impl Default for AppSettings {
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
             idle_timeout_secs: default_idle_timeout_secs(),
+            worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),
         }
     }
@@ -444,6 +494,12 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("auto_update_enabled").and_then(|v| v.as_bool()) {
         settings.auto_update_enabled = v;
+    }
+
+    if let Some(v) = obj.get("worktree") {
+        if let Ok(wt) = serde_json::from_value::<WorktreeConfig>(v.clone()) {
+            settings.worktree = wt;
+        }
     }
 
     Ok(settings)
