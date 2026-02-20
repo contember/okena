@@ -412,12 +412,14 @@ impl Terminal {
     /// Resize only the local alacritty grid, without sending resize to PTY/transport.
     /// Used by remote clients to pre-resize the grid to match server dimensions before snapshot.
     pub fn resize_grid_only(&self, cols: u16, rows: u16) {
+        let rs = self.resize_state.lock();
         let size = TerminalSize {
             cols,
             rows,
-            cell_width: self.resize_state.lock().size.cell_width,
-            cell_height: self.resize_state.lock().size.cell_height,
+            cell_width: rs.size.cell_width,
+            cell_height: rs.size.cell_height,
         };
+        drop(rs);
         self.resize_state.lock().size = size;
         let mut term = self.term.lock();
         let term_size = TermSize::new(cols as usize, rows as usize);
