@@ -607,7 +607,7 @@ impl ProjectColumn {
                             .gap(px(2.0))
                             .opacity(0.0)
                             .group_hover("project-header", |s| s.opacity(1.0))
-                            .when(!is_remote, |d| d.child(
+                            .child(
                                 // Hide project button
                                 div()
                                     .id("hide-project-btn")
@@ -635,7 +635,7 @@ impl ProjectColumn {
                                             .text_color(rgb(t.text_secondary))
                                     )
                                     .tooltip(|_window, cx| Tooltip::new("Hide Project").build(_window, cx)),
-                            ))
+                            )
                             .child(
                                 // Fullscreen button
                                 div()
