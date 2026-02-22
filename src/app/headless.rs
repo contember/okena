@@ -254,14 +254,24 @@ impl HeadlessApp {
                     Err(_) => break,
                 };
 
+                log::info!("[headless] received bridge message: {:?}", msg.command);
                 let result = match msg.command {
                     RemoteCommand::Action(action) => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                execute_action(action, ws, &*backend, &terminals, cx)
-                                    .into_command_result()
-                            })
-                        })
+                        log::info!("[headless] executing action: {:?}", action);
+                        let r = cx.update(|cx| {
+                            log::info!("[headless] inside cx.update");
+                            let r = workspace.update(cx, |ws, cx| {
+                                log::info!("[headless] inside workspace.update, calling execute_action");
+                                let r = execute_action(action, ws, &*backend, &terminals, cx)
+                                    .into_command_result();
+                                log::info!("[headless] execute_action returned");
+                                r
+                            });
+                            log::info!("[headless] workspace.update returned");
+                            r
+                        });
+                        log::info!("[headless] cx.update returned");
+                        r
                     }
                     RemoteCommand::GetState => {
                         cx.update(|cx| {

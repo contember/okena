@@ -140,11 +140,15 @@ impl ActionDispatcher {
                     _ => {}
                 }
 
+                log::info!("[dispatch] sending remote action to server");
                 let action = strip_remote_ids(action, connection_id);
                 let cid = connection_id.clone();
                 manager.update(cx, |rm, cx| {
+                    log::info!("[dispatch] inside manager.update, calling send_action");
                     rm.send_action(&cid, action, cx);
+                    log::info!("[dispatch] send_action returned");
                 });
+                log::info!("[dispatch] manager.update completed");
             }
         }
     }
