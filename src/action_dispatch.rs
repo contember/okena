@@ -119,6 +119,24 @@ impl ActionDispatcher {
                         });
                         return;
                     }
+                    ActionRequest::CreateTerminal { project_id } => {
+                        // Optimistically set focus for the expected new terminal path.
+                        // add_terminal() wraps root in Split{[old, new]}, so new terminal
+                        // will be at path [1]. If no layout existed, it's at root [].
+                        let pid = project_id.clone();
+                        workspace.update(cx, |ws, cx| {
+                            let path = if ws.project(&pid)
+                                .and_then(|p| p.layout.as_ref())
+                                .is_some()
+                            {
+                                vec![1]
+                            } else {
+                                vec![]
+                            };
+                            ws.set_focused_terminal(pid, path, cx);
+                        });
+                        // Don't return — action proceeds to be sent to server below
+                    }
                     _ => {}
                 }
 
