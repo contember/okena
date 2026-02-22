@@ -192,6 +192,11 @@ pub struct Workspace {
     /// Transient folder filter — when set, only projects from this folder are shown.
     /// Not serialized; resets to None on restart.
     pub(crate) active_folder_filter: Option<String>,
+    /// Remote project IDs awaiting focus on the next state sync.
+    /// When a CreateTerminal action is dispatched for a remote project,
+    /// the project ID is recorded here. On the next sync, we detect the
+    /// new terminal and focus it.
+    pub pending_remote_focus: HashSet<String>,
 }
 
 impl Workspace {
@@ -202,6 +207,7 @@ impl Workspace {
             project_access_times: HashMap::new(),
             data_version: 0,
             active_folder_filter: None,
+            pending_remote_focus: HashSet::new(),
         }
     }
 
