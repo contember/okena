@@ -226,6 +226,17 @@ impl RootView {
         let active_conn_ids: std::collections::HashSet<String> = snapshots.iter()
             .map(|s| s.config.id.clone()).collect();
 
+        // Collect old terminal IDs for projects pending focus, so we can detect new ones after sync.
+        let old_terminal_ids: std::collections::HashMap<String, Vec<String>> = workspace.update(cx, |ws, _cx| {
+            ws.pending_remote_focus.iter().filter_map(|pid| {
+                let ids = ws.project(pid)
+                    .and_then(|p| p.layout.as_ref())
+                    .map(|l| l.collect_terminal_ids())
+                    .unwrap_or_default();
+                Some((pid.clone(), ids))
+            }).collect()
+        });
+
         for snap in &snapshots {
             let conn_id = &snap.config.id;
             let folder_id = format!("remote-folder:{}", conn_id);
@@ -333,6 +344,34 @@ impl RootView {
                 .collect();
             ws.data.project_order.retain(|id| valid_ids.contains(id.as_str()));
         });
+
+        // Focus newly appeared terminals for projects that had a pending CreateTerminal.
+        if !old_terminal_ids.is_empty() {
+            workspace.update(cx, |ws, cx| {
+                let pending: Vec<String> = ws.pending_remote_focus.drain().collect();
+                for pid in pending {
+                    let old_ids = match old_terminal_ids.get(&pid) {
+                        Some(ids) => ids,
+                        None => continue,
+                    };
+                    let new_ids = match ws.project(&pid).and_then(|p| p.layout.as_ref()) {
+                        Some(layout) => layout.collect_terminal_ids(),
+                        None => continue,
+                    };
+                    // Find the first terminal ID that wasn't in the old set
+                    let old_set: std::collections::HashSet<&str> =
+                        old_ids.iter().map(|s| s.as_str()).collect();
+                    if let Some(new_tid) = new_ids.iter().find(|id| !old_set.contains(id.as_str())) {
+                        if let Some(path) = ws.project(&pid)
+                            .and_then(|p| p.layout.as_ref())
+                            .and_then(|l| l.find_terminal_path(new_tid))
+                        {
+                            ws.set_focused_terminal(pid.clone(), path, cx);
+                        }
+                    }
+                }
+            });
+        }
 
         // Notify UI without bumping data_version (remote changes shouldn't trigger auto-save)
         workspace.update(cx, |ws, cx| {

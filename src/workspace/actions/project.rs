@@ -83,6 +83,14 @@ impl Workspace {
             }
             self.notify_data(cx);
         }
+
+        // Focus the newly created terminal (terminal_id: None)
+        let new_path = self.project(project_id)
+            .and_then(|p| p.layout.as_ref())
+            .and_then(|l| l.find_uninitialized_terminal_path());
+        if let Some(path) = new_path {
+            self.set_focused_terminal(project_id.to_string(), path, cx);
+        }
     }
 
     /// Add a new terminal running a specific command to a project
