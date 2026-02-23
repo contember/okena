@@ -47,7 +47,7 @@ impl ConnectionHandler for MobileConnectionHandler {
             .insert(prefixed_id.to_string(), holder);
     }
 
-    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
+    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8], _acked_input_seq: Option<u64>) {
         *self.last_activity.lock() = Instant::now();
         if let Some(holder) = self.terminals.read().get(prefixed_id) {
             holder.process_output(data);
@@ -120,7 +120,7 @@ mod tests {
         let (tx, _rx) = async_channel::bounded(1);
 
         handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
-        handler.on_terminal_output("remote:conn1:t1", b"hello");
+        handler.on_terminal_output("remote:conn1:t1", b"hello", None);
 
         let terminals = handler.terminals().read();
         let holder = terminals.get("remote:conn1:t1").unwrap();

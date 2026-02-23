@@ -623,6 +623,69 @@ impl Element for TerminalElement {
             }
         });
 
+        // Phase 4.5: Paint prediction overlay (remote input echo)
+        if self.terminal.is_remote() {
+            let overlay_cells = self.terminal.overlay_cells();
+            if !overlay_cells.is_empty() {
+                let origin = bounds.origin;
+                for cell in &overlay_cells {
+                    // We need to determine the visual line for this cell
+                    // overlay cells store buffer-coordinate rows; to get visual line
+                    // we need the display_offset which was inside the with_content closure.
+                    // For simplicity, read it again (cheap lock).
+                    let display_offset = self.terminal.display_offset() as i32;
+                    let visual_line = cell.row + display_offset;
+                    let screen_lines = self.terminal.screen_lines() as i32;
+
+                    if visual_line < 0 || visual_line >= screen_lines {
+                        continue;
+                    }
+
+                    let x = px((f32::from(origin.x) + cell.col as f32 * cell_width_f).floor());
+                    let y = px((f32::from(origin.y) + visual_line as f32 * line_height_f).floor());
+
+                    // Paint the predicted character with foreground color
+                    let fg_color = Hsla::from(Rgba {
+                        r: 0.7,
+                        g: 0.7,
+                        b: 0.7,
+                        a: 0.9,
+                    });
+
+                    let mut char_buf = [0u8; 4];
+                    let char_str = cell.character.encode_utf8(&mut char_buf);
+                    let text_run = TextRun {
+                        len: char_str.len(),
+                        font: state.font.clone(),
+                        color: fg_color,
+                        background_color: None,
+                        underline: Some(UnderlineStyle {
+                            color: Some(Hsla::from(Rgba {
+                                r: 0.5,
+                                g: 0.5,
+                                b: 0.5,
+                                a: 0.4,
+                            })),
+                            thickness: px(1.0),
+                            wavy: false,
+                        }),
+                        strikethrough: None,
+                    };
+
+                    let char_string: SharedString = char_str.to_string().into();
+                    let line = window
+                        .text_system()
+                        .shape_line(
+                            char_string,
+                            font_size,
+                            &[text_run],
+                            None,
+                        );
+                    line.paint(point(x, y), line_height, TextAlign::Left, None, window, cx).ok();
+                }
+            }
+        }
+
         // Phase 5: Paint fog overlay for unfocused terminals
         // Uses the unfocused bg color at partial opacity to wash out text,
         // creating a subtle "in the fog" effect. Alpha-blending the same color

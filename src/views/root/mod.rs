@@ -180,8 +180,11 @@ impl RootView {
         // Observe remote manager and sync remote projects into workspace
         let workspace = self.workspace.clone();
         cx.observe(&manager, move |this, rm, cx| {
+            log::info!("[root] remote manager notified, syncing remote projects");
             Self::sync_remote_projects_into_workspace(&workspace, &rm, cx);
+            log::info!("[root] sync done, syncing project columns");
             this.sync_project_columns(cx);
+            log::info!("[root] project columns synced");
             cx.notify();
         }).detach();
 

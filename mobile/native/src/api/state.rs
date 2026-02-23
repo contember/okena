@@ -81,6 +81,7 @@ pub async fn send_special_key(
         WsClientMessage::SendText {
             terminal_id,
             text,
+            input_seq: 0,
         },
     );
     Ok(())

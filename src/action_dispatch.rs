@@ -119,14 +119,36 @@ impl ActionDispatcher {
                         });
                         return;
                     }
+                    ActionRequest::CreateTerminal { project_id } => {
+                        // Optimistically set focus for the expected new terminal path.
+                        // add_terminal() wraps root in Split{[old, new]}, so new terminal
+                        // will be at path [1]. If no layout existed, it's at root [].
+                        let pid = project_id.clone();
+                        workspace.update(cx, |ws, cx| {
+                            let path = if ws.project(&pid)
+                                .and_then(|p| p.layout.as_ref())
+                                .is_some()
+                            {
+                                vec![1]
+                            } else {
+                                vec![]
+                            };
+                            ws.set_focused_terminal(pid, path, cx);
+                        });
+                        // Don't return — action proceeds to be sent to server below
+                    }
                     _ => {}
                 }
 
+                log::info!("[dispatch] sending remote action to server");
                 let action = strip_remote_ids(action, connection_id);
                 let cid = connection_id.clone();
                 manager.update(cx, |rm, cx| {
+                    log::info!("[dispatch] inside manager.update, calling send_action");
                     rm.send_action(&cid, action, cx);
+                    log::info!("[dispatch] send_action returned");
                 });
+                log::info!("[dispatch] manager.update completed");
             }
         }
     }

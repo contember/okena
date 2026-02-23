@@ -6,9 +6,10 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::grid::{Scroll, Dimensions};
+use crate::terminal::input_overlay::{InputOverlay, PredictedCell};
 use parking_lot::Mutex;
 use regex::Regex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -242,15 +243,56 @@ pub struct Terminal {
     had_user_input: AtomicBool,
     /// Timestamp of when the user last viewed this terminal (on blur)
     last_viewed_time: Arc<Mutex<Instant>>,
+    /// Optimistic input prediction overlay for remote terminals
+    input_overlay: Mutex<InputOverlay>,
+    /// Whether this terminal is connected to a remote server
+    is_remote: bool,
+    /// Latest input sequence number (for remote transport to read)
+    latest_input_seq: Arc<AtomicU64>,
 }
 
 impl Terminal {
-    /// Create a new terminal
+    /// Create a new terminal.
+    /// Set `is_remote` to true for remote terminals (enables input prediction).
     pub fn new(
         terminal_id: String,
         size: TerminalSize,
         transport: Arc<dyn TerminalTransport>,
         initial_cwd: String,
+    ) -> Self {
+        Self::new_inner(terminal_id, size, transport, initial_cwd, false)
+    }
+
+    /// Create a new remote terminal with input prediction enabled.
+    pub fn new_remote(
+        terminal_id: String,
+        size: TerminalSize,
+        transport: Arc<dyn TerminalTransport>,
+        initial_cwd: String,
+    ) -> Self {
+        Self::new_inner(terminal_id, size, transport, initial_cwd, true)
+    }
+
+    /// Create a new remote terminal with a shared input sequence atomic.
+    /// The same `AtomicU64` should be passed to `RemoteTransport` so they stay in sync.
+    pub fn new_remote_with_seq(
+        terminal_id: String,
+        size: TerminalSize,
+        transport: Arc<dyn TerminalTransport>,
+        initial_cwd: String,
+        input_seq: Arc<AtomicU64>,
+    ) -> Self {
+        let mut terminal = Self::new_inner(terminal_id, size, transport, initial_cwd, true);
+        terminal.latest_input_seq = input_seq;
+        terminal
+    }
+
+    fn new_inner(
+        terminal_id: String,
+        size: TerminalSize,
+        transport: Arc<dyn TerminalTransport>,
+        initial_cwd: String,
+        is_remote: bool,
     ) -> Self {
         let config = TermConfig::default();
         let term_size = TermSize::new(size.cols as usize, size.rows as usize);
@@ -291,6 +333,9 @@ impl Terminal {
             waiting_for_input: AtomicBool::new(false),
             had_user_input: AtomicBool::new(false),
             last_viewed_time: Arc::new(Mutex::new(Instant::now())),
+            input_overlay: Mutex::new(InputOverlay::new()),
+            is_remote,
+            latest_input_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -302,6 +347,13 @@ impl Terminal {
         processor.advance(&mut *term, data);
         self.dirty.store(true, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
+
+        // Update input overlay: gc expired predictions
+        if self.is_remote {
+            drop(processor);
+            drop(term);
+            self.input_overlay.lock().gc_expired();
+        }
     }
 
     /// Check if terminal has pending changes (and clear the flag)
@@ -692,6 +744,53 @@ impl Terminal {
     /// Whether new output has arrived since the user last viewed this terminal.
     pub fn has_unseen_output(&self) -> bool {
         *self.last_output_time.lock() > *self.last_viewed_time.lock()
+    }
+
+    /// Whether this terminal is connected to a remote server.
+    pub fn is_remote(&self) -> bool {
+        self.is_remote
+    }
+
+    /// Get the latest input sequence atomic (for transport to read).
+    pub fn latest_input_seq(&self) -> &Arc<AtomicU64> {
+        &self.latest_input_seq
+    }
+
+    /// Predict a character for optimistic display (remote terminals only).
+    /// Returns the assigned input sequence number if prediction was made.
+    pub fn predict_char(&self, c: char) -> Option<u64> {
+        if !self.is_remote {
+            return None;
+        }
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let cols = term.grid().columns();
+        drop(term);
+
+        let mut overlay = self.input_overlay.lock();
+        let seq = overlay.predict_char(c, (cursor.column.0, cursor.line.0), cols)?;
+        self.latest_input_seq.store(seq, Ordering::Relaxed);
+        Some(seq)
+    }
+
+    /// Acknowledge predictions up to the given sequence number.
+    pub fn ack_predictions(&self, seq: u64) {
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        drop(term);
+
+        let mut overlay = self.input_overlay.lock();
+        overlay.on_server_frame(seq, (cursor.column.0, cursor.line.0));
+    }
+
+    /// Get overlay cells for rendering (cloned).
+    pub fn overlay_cells(&self) -> Vec<PredictedCell> {
+        self.input_overlay.lock().cells().iter().cloned().collect()
+    }
+
+    /// Get the predicted cursor position (if predictions are active).
+    pub fn predicted_cursor(&self) -> Option<(usize, i32)> {
+        self.input_overlay.lock().predicted_cursor()
     }
 
     /// Search the terminal grid for occurrences of a query string
