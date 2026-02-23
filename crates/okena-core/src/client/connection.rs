@@ -25,7 +25,8 @@ pub trait ConnectionHandler: Send + Sync + 'static {
         ws_sender: async_channel::Sender<WsClientMessage>,
     );
     /// Binary PTY output arrived — route to the terminal's emulator.
-    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]);
+    /// `acked_input_seq` is the server's echo of the latest input sequence (v2 protocol).
+    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8], acked_input_seq: Option<u64>);
     /// Terminal removed — clean up platform terminal object.
     fn remove_terminal(&self, prefixed_id: &str);
     /// Pre-resize a terminal's grid to match the server's dimensions.
@@ -614,17 +615,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         let writer_handle = tokio::spawn(async move {
             while let Ok(msg) = ws_rx_clone.recv().await {
                 // For SendText, prefer binary frame when stream_id is known
-                if let WsClientMessage::SendText { terminal_id, text } = &msg {
+                if let WsClientMessage::SendText { terminal_id, text, input_seq } = &msg {
                     let stream_id = stream_map_for_writer
                         .read()
                         .ok()
                         .and_then(|m| m.get(terminal_id).copied());
                     if let Some(sid) = stream_id {
-                        let frame = crate::ws::build_binary_frame(
-                            crate::ws::FRAME_TYPE_INPUT,
-                            sid,
-                            text.as_bytes(),
-                        );
+                        // Use v2 frame if we have a non-zero input_seq (prediction active)
+                        let frame = if *input_seq > 0 {
+                            crate::ws::build_input_frame_v2(sid, *input_seq, text.as_bytes())
+                        } else {
+                            crate::ws::build_binary_frame(
+                                crate::ws::FRAME_TYPE_INPUT,
+                                sid,
+                                text.as_bytes(),
+                            )
+                        };
                         if let Err(e) = futures::SinkExt::send(
                             &mut ws_write,
                             tungstenite::Message::Binary(frame.into()),
@@ -639,7 +645,7 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                 }
 
                 let json = match &msg {
-                    WsClientMessage::SendText { terminal_id, text } => {
+                    WsClientMessage::SendText { terminal_id, text, .. } => {
                         serde_json::json!({
                             "type": "send_text",
                             "terminal_id": terminal_id,
@@ -694,16 +700,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         loop {
             match futures::StreamExt::next(&mut ws_read).await {
                 Some(Ok(tungstenite::Message::Binary(data))) => {
-                    // Generic binary frame: [proto:1][type:1][stream_id:4 BE][payload...]
-                    if let Some((frame_type, stream_id, payload)) =
-                        crate::ws::parse_binary_frame(&data)
+                    // Parse binary frame (v1 or v2)
+                    if let Some((frame_type, stream_id, payload, acked_seq)) =
+                        crate::ws::parse_binary_frame_any(&data)
                     {
                         match frame_type {
-                            crate::ws::FRAME_TYPE_PTY | crate::ws::FRAME_TYPE_SNAPSHOT => {
-                                // Route PTY output or snapshot to the correct terminal
+                            crate::ws::FRAME_TYPE_PTY => {
                                 if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
                                     let prefixed = make_prefixed_id(&config_id, remote_tid);
-                                    handler_clone.on_terminal_output(&prefixed, payload);
+                                    handler_clone.on_terminal_output(&prefixed, payload, acked_seq);
+                                }
+                            }
+                            crate::ws::FRAME_TYPE_SNAPSHOT => {
+                                // Snapshots implicitly ack everything
+                                if let Some(remote_tid) = reverse_stream_map.get(&stream_id) {
+                                    let prefixed = make_prefixed_id(&config_id, remote_tid);
+                                    handler_clone.on_terminal_output(&prefixed, payload, Some(u64::MAX));
                                 }
                             }
                             _ => {

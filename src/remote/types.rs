@@ -7,6 +7,8 @@ pub use okena_core::api::{
 pub use okena_core::ws::{
     WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
     parse_pty_frame, FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION,
+    PROTO_VERSION_2, build_input_frame_v2, parse_input_frame_v2, build_pty_frame_v2,
+    parse_pty_frame_v2, parse_binary_frame_any,
 };
 
 use crate::workspace::state::LayoutNode;

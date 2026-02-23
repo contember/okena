@@ -1,8 +1,8 @@
 use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::remote::routes::AppState;
 use crate::remote::types::{
-    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
-    FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
+    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, build_pty_frame_v2,
+    parse_binary_frame_any, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
 };
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
@@ -65,6 +65,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
     let mut stream_id_map: HashMap<String, u32> = HashMap::new();
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
+    // Track latest input sequence per stream_id (for v2 protocol echo)
+    let mut last_input_seq: HashMap<u32, u64> = HashMap::new();
 
     // Subscribe to state_version changes (immediate push, no polling)
     let mut state_rx = state.state_version.subscribe();
@@ -177,8 +179,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // Binary input frame from client
-                        if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data) {
+                        // Binary input frame from client (v1 or v2)
+                        if let Some((FRAME_TYPE_INPUT, stream_id, payload, seq)) = parse_binary_frame_any(&data) {
+                            // Track input sequence for v2 echo
+                            if let Some(s) = seq {
+                                last_input_seq.insert(stream_id, s);
+                            }
                             if let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
                                 let text = String::from_utf8_lossy(payload).to_string();
                                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -205,7 +211,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     Ok(event) => {
                         if subscribed_ids.contains(&event.terminal_id) {
                             if let Some(&stream_id) = stream_id_map.get(&event.terminal_id) {
-                                let frame = build_pty_frame(stream_id, &event.data);
+                                // Use v2 frame (with input_seq echo) if client sent v2 input
+                                let frame = if let Some(&seq) = last_input_seq.get(&stream_id) {
+                                    build_pty_frame_v2(stream_id, seq, &event.data)
+                                } else {
+                                    build_pty_frame(stream_id, &event.data)
+                                };
                                 if socket.send(Message::Binary(frame.into())).await.is_err() {
                                     break;
                                 }

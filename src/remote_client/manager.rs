@@ -215,6 +215,7 @@ impl RemoteConnectionManager {
 
         self.runtime.spawn(async move {
             let url = format!("http://{}:{}/v1/actions", host, port);
+            log::info!("[send_action] POST {} action={:?}", url, action);
             let client = reqwest::Client::new();
             let result = client
                 .post(&url)
@@ -223,6 +224,7 @@ impl RemoteConnectionManager {
                 .timeout(std::time::Duration::from_secs(10))
                 .send()
                 .await;
+            log::info!("[send_action] POST completed, result={}", result.is_ok());
 
             match result {
                 Ok(resp) if resp.status().is_success() => {

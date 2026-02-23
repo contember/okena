@@ -260,6 +260,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub worktree: WorktreeConfig,
 
+    /// Enable optimistic input prediction for remote terminals (default: true)
+    #[serde(default = "default_prediction_enabled")]
+    pub prediction_enabled: bool,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -294,6 +298,7 @@ impl Default for AppSettings {
             auto_update_enabled: default_auto_update_enabled(),
             idle_timeout_secs: default_idle_timeout_secs(),
             worktree: WorktreeConfig::default(),
+            prediction_enabled: default_prediction_enabled(),
             remote_connections: Vec::new(),
         }
     }
@@ -350,6 +355,10 @@ fn default_min_column_width() -> f32 {
 
 fn default_idle_timeout_secs() -> u32 {
     0
+}
+
+fn default_prediction_enabled() -> bool {
+    true
 }
 
 fn default_remote_listen_address() -> String {

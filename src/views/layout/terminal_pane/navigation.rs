@@ -94,6 +94,13 @@ impl TerminalPane {
             terminal.claim_resize_local();
             let app_cursor_mode = terminal.is_app_cursor_mode();
             if let Some(input) = key_to_bytes(event, app_cursor_mode) {
+                // Predict printable ASCII chars for remote terminals
+                if terminal.is_remote() && input.len() == 1 {
+                    let byte = input[0];
+                    if byte >= 0x20 && byte < 0x7f {
+                        terminal.predict_char(byte as char);
+                    }
+                }
                 terminal.send_bytes(&input);
             }
         }

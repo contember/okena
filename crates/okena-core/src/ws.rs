@@ -64,6 +64,7 @@ pub enum WsOutbound {
 // ── Binary frame protocol ──────────────────────────────────────────────────
 
 pub const PROTO_VERSION: u8 = 1;
+pub const PROTO_VERSION_2: u8 = 2;
 pub const FRAME_TYPE_PTY: u8 = 1; // server → client: live PTY output
 pub const FRAME_TYPE_SNAPSHOT: u8 = 2; // server → client: full screen redraw
 pub const FRAME_TYPE_INPUT: u8 = 3; // client → server: terminal input
@@ -103,6 +104,83 @@ pub fn parse_pty_frame(data: &[u8]) -> Option<(u32, &[u8])> {
 /// Build a binary PTY output frame.
 pub fn build_pty_frame(stream_id: u32, data: &[u8]) -> Vec<u8> {
     build_binary_frame(FRAME_TYPE_PTY, stream_id, data)
+}
+
+// ── V2 binary frame protocol (with input sequence numbers) ─────────────────
+
+/// Build a v2 INPUT frame: [proto=2][type=3][stream_id:4 BE][input_seq:8 BE][payload...]
+pub fn build_input_frame_v2(stream_id: u32, input_seq: u64, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(14 + data.len());
+    frame.push(PROTO_VERSION_2);
+    frame.push(FRAME_TYPE_INPUT);
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(&input_seq.to_be_bytes());
+    frame.extend_from_slice(data);
+    frame
+}
+
+/// Parse a v2 INPUT frame.
+/// Returns (stream_id, input_seq, payload) or None if invalid.
+pub fn parse_input_frame_v2(data: &[u8]) -> Option<(u32, u64, &[u8])> {
+    if data.len() < 14 || data[0] != PROTO_VERSION_2 || data[1] != FRAME_TYPE_INPUT {
+        return None;
+    }
+    let stream_id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+    let input_seq = u64::from_be_bytes([data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13]]);
+    Some((stream_id, input_seq, &data[14..]))
+}
+
+/// Build a v2 PTY frame: [proto=2][type=1][stream_id:4 BE][last_input_seq:8 BE][payload...]
+pub fn build_pty_frame_v2(stream_id: u32, last_input_seq: u64, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(14 + data.len());
+    frame.push(PROTO_VERSION_2);
+    frame.push(FRAME_TYPE_PTY);
+    frame.extend_from_slice(&stream_id.to_be_bytes());
+    frame.extend_from_slice(&last_input_seq.to_be_bytes());
+    frame.extend_from_slice(data);
+    frame
+}
+
+/// Parse a v2 PTY frame.
+/// Returns (stream_id, last_input_seq, payload) or None if invalid.
+pub fn parse_pty_frame_v2(data: &[u8]) -> Option<(u32, u64, &[u8])> {
+    if data.len() < 14 || data[0] != PROTO_VERSION_2 || data[1] != FRAME_TYPE_PTY {
+        return None;
+    }
+    let stream_id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+    let last_input_seq = u64::from_be_bytes([data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13]]);
+    Some((stream_id, last_input_seq, &data[14..]))
+}
+
+/// Parse a binary frame that could be v1 or v2.
+/// Returns (frame_type, stream_id, payload, acked_input_seq).
+/// For v1 frames, acked_input_seq is None. For v2 PTY/INPUT frames, it's Some(seq).
+pub fn parse_binary_frame_any(data: &[u8]) -> Option<(u8, u32, &[u8], Option<u64>)> {
+    if data.len() < 6 {
+        return None;
+    }
+    let proto = data[0];
+    let frame_type = data[1];
+
+    if proto == PROTO_VERSION_2 && (frame_type == FRAME_TYPE_PTY || frame_type == FRAME_TYPE_INPUT) {
+        // v2 frame with input_seq
+        if data.len() < 14 {
+            return None;
+        }
+        let stream_id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+        let seq = u64::from_be_bytes([data[6], data[7], data[8], data[9], data[10], data[11], data[12], data[13]]);
+        Some((frame_type, stream_id, &data[14..], Some(seq)))
+    } else if proto == PROTO_VERSION {
+        // v1 frame
+        let stream_id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+        Some((frame_type, stream_id, &data[6..], None))
+    } else if proto == PROTO_VERSION_2 && frame_type == FRAME_TYPE_SNAPSHOT {
+        // v2 snapshot — same format as v1 (no seq)
+        let stream_id = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+        Some((frame_type, stream_id, &data[6..], None))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -270,5 +348,70 @@ mod tests {
             assert_eq!(parsed_id, stream_id);
             assert_eq!(parsed_data, payload.as_bytes());
         }
+    }
+
+    // ── V2 frame tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn v2_input_frame_round_trip() {
+        let frame = build_input_frame_v2(42, 12345, b"hello");
+        let (sid, seq, payload) = parse_input_frame_v2(&frame).unwrap();
+        assert_eq!(sid, 42);
+        assert_eq!(seq, 12345);
+        assert_eq!(payload, b"hello");
+    }
+
+    #[test]
+    fn v2_pty_frame_round_trip() {
+        let frame = build_pty_frame_v2(7, 99, b"output");
+        let (sid, seq, payload) = parse_pty_frame_v2(&frame).unwrap();
+        assert_eq!(sid, 7);
+        assert_eq!(seq, 99);
+        assert_eq!(payload, b"output");
+    }
+
+    #[test]
+    fn v1_frames_still_parse() {
+        let frame = build_binary_frame(FRAME_TYPE_PTY, 1, b"data");
+        let (ft, sid, payload) = parse_binary_frame(&frame).unwrap();
+        assert_eq!(ft, FRAME_TYPE_PTY);
+        assert_eq!(sid, 1);
+        assert_eq!(payload, b"data");
+    }
+
+    #[test]
+    fn v2_parser_rejects_short_frames() {
+        assert!(parse_input_frame_v2(&[2, 3, 0, 0, 0, 0, 0, 0]).is_none());
+        assert!(parse_pty_frame_v2(&[2, 1, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn parse_binary_frame_any_v1() {
+        let frame = build_binary_frame(FRAME_TYPE_PTY, 5, b"test");
+        let (ft, sid, payload, seq) = parse_binary_frame_any(&frame).unwrap();
+        assert_eq!(ft, FRAME_TYPE_PTY);
+        assert_eq!(sid, 5);
+        assert_eq!(payload, b"test");
+        assert!(seq.is_none());
+    }
+
+    #[test]
+    fn parse_binary_frame_any_v2_pty() {
+        let frame = build_pty_frame_v2(5, 100, b"test");
+        let (ft, sid, payload, seq) = parse_binary_frame_any(&frame).unwrap();
+        assert_eq!(ft, FRAME_TYPE_PTY);
+        assert_eq!(sid, 5);
+        assert_eq!(payload, b"test");
+        assert_eq!(seq, Some(100));
+    }
+
+    #[test]
+    fn parse_binary_frame_any_v2_input() {
+        let frame = build_input_frame_v2(3, 50, b"keys");
+        let (ft, sid, payload, seq) = parse_binary_frame_any(&frame).unwrap();
+        assert_eq!(ft, FRAME_TYPE_INPUT);
+        assert_eq!(sid, 3);
+        assert_eq!(payload, b"keys");
+        assert_eq!(seq, Some(50));
     }
 }
