@@ -238,6 +238,21 @@ impl Sidebar {
         self.workspace.update(cx, |ws, cx| {
             ws.set_folder_color(project_id, color, cx);
         });
+        // Send to server for remote projects
+        if let Some(conn_id) = self.workspace.read(cx).project(project_id)
+            .filter(|p| p.is_remote)
+            .and_then(|p| p.connection_id.clone())
+        {
+            if let Some(ref manager) = self.remote_manager {
+                let server_id = okena_core::client::strip_prefix(project_id, &conn_id);
+                manager.update(cx, |rm, cx| {
+                    rm.send_action(&conn_id, okena_core::api::ActionRequest::SetProjectColor {
+                        project_id: server_id,
+                        color,
+                    }, cx);
+                });
+            }
+        }
         self.hide_color_picker(cx);
     }
 

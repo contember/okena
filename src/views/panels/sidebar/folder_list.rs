@@ -12,6 +12,32 @@ use super::{Sidebar, SidebarProjectInfo, ProjectDrag, FolderDrag, FolderDragView
 use crate::workspace::state::FolderData;
 
 impl Sidebar {
+    /// Send a reorder action to the remote server when a project is reordered
+    /// within a "remote-folder:{conn_id}" on the client.
+    fn send_remote_reorder(this: &mut Self, conn_id: &str, prefixed_project_id: &str, new_index: usize, cx: &mut Context<Self>) {
+        let Some(ref manager) = this.remote_manager else { return };
+        let server_project_id = okena_core::client::strip_prefix(prefixed_project_id, conn_id);
+
+        // Look up the server's folder structure from the cached state
+        let server_folder_id = manager.read(cx).connections().iter()
+            .find(|(config, _, _)| config.id == conn_id)
+            .and_then(|(_, _, state)| state.as_ref())
+            .and_then(|state| {
+                state.folders.iter().find(|f| f.project_ids.contains(&server_project_id))
+                    .map(|f| f.id.clone())
+            });
+
+        if let Some(folder_id) = server_folder_id {
+            manager.update(cx, |rm, cx| {
+                rm.send_action(conn_id, okena_core::api::ActionRequest::ReorderProjectInFolder {
+                    folder_id,
+                    project_id: server_project_id,
+                    new_index,
+                }, cx);
+            });
+        }
+    }
+
     /// Renders only the folder header row (expand arrow, icon, name, badges)
     pub(super) fn render_folder_header(
         &self,
@@ -279,6 +305,12 @@ impl Sidebar {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
                             });
+                            // Send reorder to server for remote folders
+                            if folder_id.starts_with("remote-folder:") {
+                                if let Some(conn_id) = folder_id.strip_prefix("remote-folder:") {
+                                    Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
+                                }
+                            }
                         }
                     }
                 }

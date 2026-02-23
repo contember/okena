@@ -352,5 +352,26 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             mode,
         },
         ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index,
+        } => ActionRequest::ReorderProjectInFolder {
+            folder_id: s(&folder_id),
+            project_id: s(&project_id),
+            new_index,
+        },
+        ActionRequest::SetProjectColor { project_id, color } => {
+            ActionRequest::SetProjectColor {
+                project_id: s(&project_id),
+                color,
+            }
+        }
+        ActionRequest::SetFolderColor { folder_id, color } => {
+            ActionRequest::SetFolderColor {
+                folder_id: s(&folder_id),
+                color,
+            }
+        }
     }
 }
