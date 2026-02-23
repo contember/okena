@@ -1,4 +1,5 @@
 use crate::keys::SpecialKey;
+use crate::theme::FolderColor;
 use crate::types::{DiffMode, SplitDirection};
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,10 @@ pub struct StateResponse {
     pub projects: Vec<ApiProject>,
     pub focused_project_id: Option<String>,
     pub fullscreen_terminal: Option<ApiFullscreen>,
+    #[serde(default)]
+    pub project_order: Vec<String>,
+    #[serde(default)]
+    pub folders: Vec<ApiFolder>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +43,17 @@ pub struct ApiProject {
     pub terminal_names: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_status: Option<ApiGitStatus>,
+    #[serde(default)]
+    pub folder_color: FolderColor,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ApiFolder {
+    pub id: String,
+    pub name: String,
+    pub project_ids: Vec<String>,
+    #[serde(default)]
+    pub folder_color: FolderColor,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -182,6 +198,19 @@ pub enum ActionRequest {
         name: String,
         path: String,
     },
+    ReorderProjectInFolder {
+        folder_id: String,
+        project_id: String,
+        new_index: usize,
+    },
+    SetProjectColor {
+        project_id: String,
+        color: FolderColor,
+    },
+    SetFolderColor {
+        folder_id: String,
+        color: FolderColor,
+    },
 }
 
 /// POST /v1/pair request
@@ -264,16 +293,39 @@ mod tests {
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
                 git_status: None,
+                folder_color: FolderColor::Blue,
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
+            project_order: vec!["folder1".into(), "p1".into()],
+            folders: vec![ApiFolder {
+                id: "folder1".into(),
+                name: "My Folder".into(),
+                project_ids: vec!["p2".into()],
+                folder_color: FolderColor::Red,
+            }],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.state_version, 42);
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "p1");
+        assert!(matches!(parsed.projects[0].folder_color, FolderColor::Blue));
         assert!(parsed.fullscreen_terminal.is_none());
+        assert_eq!(parsed.project_order, vec!["folder1", "p1"]);
+        assert_eq!(parsed.folders.len(), 1);
+        assert_eq!(parsed.folders[0].id, "folder1");
+        assert!(matches!(parsed.folders[0].folder_color, FolderColor::Red));
+    }
+
+    #[test]
+    fn state_response_backward_compat() {
+        // Old server response without project_order/folders/folder_color
+        let json = r#"{"state_version":1,"projects":[{"id":"p1","name":"Test","path":"/tmp","is_visible":true,"layout":null,"terminal_names":{}}],"focused_project_id":null,"fullscreen_terminal":null}"#;
+        let parsed: StateResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.project_order.len(), 0);
+        assert_eq!(parsed.folders.len(), 0);
+        assert!(matches!(parsed.projects[0].folder_color, FolderColor::Default));
     }
 
     #[test]
@@ -392,6 +444,19 @@ mod tests {
             ActionRequest::AddProject {
                 name: "My Project".into(),
                 path: "/home/user/projects/my-project".into(),
+            },
+            ActionRequest::ReorderProjectInFolder {
+                folder_id: "f1".into(),
+                project_id: "p1".into(),
+                new_index: 2,
+            },
+            ActionRequest::SetProjectColor {
+                project_id: "p1".into(),
+                color: FolderColor::Green,
+            },
+            ActionRequest::SetFolderColor {
+                folder_id: "f1".into(),
+                color: FolderColor::Purple,
             },
         ];
         for action in actions {

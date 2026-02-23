@@ -308,6 +308,22 @@ pub fn execute_action(
             ws.add_project(name, path, true, cx);
             ActionResult::Ok(None)
         }
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index,
+        } => {
+            ws.reorder_project_in_folder(&folder_id, &project_id, new_index, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::SetProjectColor { project_id, color } => {
+            ws.set_folder_color(&project_id, color, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::SetFolderColor { folder_id, color } => {
+            ws.set_folder_item_color(&folder_id, color, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {

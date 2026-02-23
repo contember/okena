@@ -13,6 +13,8 @@ export interface StateResponse {
   projects: ApiProject[];
   focused_project_id: string | null;
   fullscreen_terminal: ApiFullscreen | null;
+  project_order?: string[];
+  folders?: ApiFolder[];
 }
 
 export interface ApiProject {
@@ -23,6 +25,14 @@ export interface ApiProject {
   layout: ApiLayoutNode | null;
   terminal_names: Record<string, string>;
   git_status?: ApiGitStatus | null;
+  folder_color?: string;
+}
+
+export interface ApiFolder {
+  id: string;
+  name: string;
+  project_ids: string[];
+  folder_color?: string;
 }
 
 export interface ApiGitStatus {
@@ -63,7 +73,10 @@ export type ActionRequest =
   | { action: "git_diff_summary"; project_id: string }
   | { action: "git_diff"; project_id: string; mode?: DiffMode; ignore_whitespace?: boolean }
   | { action: "git_branches"; project_id: string }
-  | { action: "git_file_contents"; project_id: string; file_path: string; mode?: DiffMode };
+  | { action: "git_file_contents"; project_id: string; file_path: string; mode?: DiffMode }
+  | { action: "reorder_project_in_folder"; folder_id: string; project_id: string; new_index: number }
+  | { action: "set_project_color"; project_id: string; color: string }
+  | { action: "set_folder_color"; folder_id: string; color: string };
 
 export interface PairRequest {
   code: string;

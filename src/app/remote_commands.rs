@@ -1,8 +1,9 @@
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFullscreen, ApiProject, StateResponse};
+use crate::remote::types::{ApiFolder, ApiFullscreen, ApiProject, StateResponse};
 use crate::terminal::backend::TerminalBackend;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 use gpui::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::Okena;
@@ -42,7 +43,17 @@ impl Okena {
                             let ws = workspace.read(cx);
                             let sv = *state_version.borrow();
                             let git_statuses = git_status_tx.borrow().clone();
-                            let projects: Vec<ApiProject> = ws.data().projects.iter().map(|p| {
+                            let data = ws.data();
+
+                            // Build a lookup map for projects
+                            let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
+                                data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
+
+                            // Build ordered projects following project_order + folder expansion
+                            let mut projects: Vec<ApiProject> = Vec::new();
+                            let mut seen: HashSet<String> = HashSet::new();
+
+                            let build_api_project = |p: &crate::workspace::state::ProjectData| -> ApiProject {
                                 let git_status = git_statuses.get(&p.id).cloned();
                                 ApiProject {
                                     id: p.id.clone(),
@@ -52,6 +63,40 @@ impl Okena {
                                     layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
                                     git_status,
+                                    folder_color: p.folder_color,
+                                }
+                            };
+
+                            for id in &data.project_order {
+                                if let Some(folder) = data.folders.iter().find(|f| &f.id == id) {
+                                    for pid in &folder.project_ids {
+                                        if seen.insert(pid.clone()) {
+                                            if let Some(p) = project_map.get(pid.as_str()) {
+                                                projects.push(build_api_project(p));
+                                            }
+                                        }
+                                    }
+                                } else if seen.insert(id.clone()) {
+                                    if let Some(p) = project_map.get(id.as_str()) {
+                                        projects.push(build_api_project(p));
+                                    }
+                                }
+                            }
+
+                            // Append orphan projects not in any order
+                            for p in &data.projects {
+                                if seen.insert(p.id.clone()) {
+                                    projects.push(build_api_project(p));
+                                }
+                            }
+
+                            // Build folders for response
+                            let folders: Vec<ApiFolder> = data.folders.iter().map(|f| {
+                                ApiFolder {
+                                    id: f.id.clone(),
+                                    name: f.name.clone(),
+                                    project_ids: f.project_ids.clone(),
+                                    folder_color: f.folder_color,
                                 }
                             }).collect();
 
@@ -67,6 +112,8 @@ impl Okena {
                                 projects,
                                 focused_project_id: ws.focused_project_id().cloned(),
                                 fullscreen_terminal: fullscreen,
+                                project_order: data.project_order.clone(),
+                                folders,
                             };
 
                             CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))

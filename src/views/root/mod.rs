@@ -242,12 +242,46 @@ impl RootView {
             let folder_id = format!("remote-folder:{}", conn_id);
 
             if let Some(ref state) = snap.state {
-                let mut folder_project_ids: Vec<String> = Vec::new();
+                // Build folder_project_ids using server's order when available
+                let folder_project_ids: Vec<String> = if !state.project_order.is_empty() {
+                    // New server: walk project_order, expand folder entries via state.folders
+                    let server_folder_map: std::collections::HashMap<&str, &okena_core::api::ApiFolder> =
+                        state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
+                    let mut ordered = Vec::new();
+                    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for order_id in &state.project_order {
+                        if let Some(sf) = server_folder_map.get(order_id.as_str()) {
+                            for pid in &sf.project_ids {
+                                let prefixed = format!("remote:{}:{}", conn_id, pid);
+                                if seen_ids.insert(prefixed.clone()) {
+                                    ordered.push(prefixed);
+                                }
+                            }
+                        } else {
+                            let prefixed = format!("remote:{}:{}", conn_id, order_id);
+                            if seen_ids.insert(prefixed.clone()) {
+                                ordered.push(prefixed);
+                            }
+                        }
+                    }
+                    // Append orphans not in order
+                    for api_project in &state.projects {
+                        let prefixed = format!("remote:{}:{}", conn_id, api_project.id);
+                        if seen_ids.insert(prefixed.clone()) {
+                            ordered.push(prefixed);
+                        }
+                    }
+                    ordered
+                } else {
+                    // Old server: fall back to state.projects Vec order
+                    state.projects.iter()
+                        .map(|p| format!("remote:{}:{}", conn_id, p.id))
+                        .collect()
+                };
 
                 for api_project in &state.projects {
                     let prefixed_id = format!("remote:{}:{}", conn_id, api_project.id);
                     expected_remote_ids.insert(prefixed_id.clone());
-                    folder_project_ids.push(prefixed_id.clone());
 
                     let layout = api_project.layout.as_ref().map(|l| {
                         LayoutNode::from_api_prefixed(l, &format!("remote:{}", conn_id))
@@ -257,6 +291,7 @@ impl RootView {
                         .map(|(k, v)| (format!("remote:{}:{}", conn_id, k), v.clone()))
                         .collect();
 
+                    let project_color = api_project.folder_color;
                     let conn_id_owned = conn_id.clone();
                     workspace.update(cx, |ws, _cx| {
                         if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
@@ -271,6 +306,7 @@ impl RootView {
                                 _ => layout,
                             };
                             existing.terminal_names = terminal_names;
+                            existing.folder_color = project_color;
                             // Don't overwrite is_visible — it's client-side state
                             // (the user may have toggled visibility locally).
                         } else {
@@ -283,7 +319,7 @@ impl RootView {
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
                                 worktree_info: None,
-                                folder_color: FolderColor::default(),
+                                folder_color: project_color,
                                 hooks: HooksConfig::default(),
                                 is_remote: true,
                                 connection_id: Some(conn_id_owned),
