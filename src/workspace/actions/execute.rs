@@ -304,6 +304,10 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
             }
         }
+        ActionRequest::AddProject { name, path } => {
+            ws.add_project(name, path, true, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {

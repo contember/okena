@@ -1,6 +1,7 @@
 //! Add project modal dialog overlay.
 
 use crate::keybindings::Cancel;
+use crate::remote_client::manager::RemoteConnectionManager;
 use crate::theme::theme;
 use crate::views::components::{
     button, button_primary, input_container, labeled_input, modal_backdrop, modal_content,
@@ -10,15 +11,28 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
+use okena_core::api::ActionRequest;
+use okena_core::client::ConnectionStatus;
+
+enum AddProjectTarget {
+    Local,
+    Remote {
+        connection_id: String,
+        connection_name: String,
+    },
+}
 
 pub struct AddProjectDialog {
     workspace: Entity<Workspace>,
+    remote_manager: Option<Entity<RemoteConnectionManager>>,
     focus_handle: FocusHandle,
     name_input: Entity<SimpleInputState>,
     path_input: Entity<PathAutoCompleteState>,
     pending_name_value: Option<String>,
     pending_path_value: Option<String>,
     initial_focus_done: bool,
+    targets: Vec<AddProjectTarget>,
+    selected_target: usize,
 }
 
 pub enum AddProjectDialogEvent {
@@ -28,18 +42,39 @@ pub enum AddProjectDialogEvent {
 impl EventEmitter<AddProjectDialogEvent> for AddProjectDialog {}
 
 impl AddProjectDialog {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        remote_manager: Option<Entity<RemoteConnectionManager>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Enter project name..."));
         let path_input = cx.new(|cx| PathAutoCompleteState::new(cx));
 
+        // Build targets list: Local + connected remote connections
+        let mut targets = vec![AddProjectTarget::Local];
+        if let Some(ref rm) = remote_manager {
+            let rm = rm.read(cx);
+            for (config, status, _state) in rm.connections() {
+                if matches!(status, ConnectionStatus::Connected) {
+                    targets.push(AddProjectTarget::Remote {
+                        connection_id: config.id.clone(),
+                        connection_name: config.name.clone(),
+                    });
+                }
+            }
+        }
+
         Self {
             workspace,
+            remote_manager,
             focus_handle: cx.focus_handle(),
             name_input,
             path_input,
             pending_name_value: None,
             pending_path_value: None,
             initial_focus_done: false,
+            targets,
+            selected_target: 0,
         }
     }
 
@@ -47,16 +82,44 @@ impl AddProjectDialog {
         cx.emit(AddProjectDialogEvent::Close);
     }
 
+    fn is_remote_target(&self) -> bool {
+        matches!(
+            self.targets.get(self.selected_target),
+            Some(AddProjectTarget::Remote { .. })
+        )
+    }
+
     fn add_project(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name_input.read(cx).value().to_string();
         let path = self.path_input.read(cx).value(cx);
 
-        if !name.is_empty() && !path.is_empty() {
-            self.workspace.update(cx, |ws, cx| {
-                ws.add_project(name, path, true, cx);
-            });
-            self.close(cx);
+        if name.is_empty() || path.is_empty() {
+            return;
         }
+
+        match self.targets.get(self.selected_target) {
+            Some(AddProjectTarget::Local) | None => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.add_project(name, path, true, cx);
+                });
+            }
+            Some(AddProjectTarget::Remote {
+                connection_id, ..
+            }) => {
+                if let Some(ref rm) = self.remote_manager {
+                    let cid = connection_id.clone();
+                    rm.update(cx, |rm, cx| {
+                        rm.send_action(
+                            &cid,
+                            ActionRequest::AddProject { name, path },
+                            cx,
+                        );
+                    });
+                }
+            }
+        }
+
+        self.close(cx);
     }
 
     fn open_folder_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -88,6 +151,45 @@ impl AddProjectDialog {
         .detach();
     }
 
+    fn render_target_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+
+        div()
+            .flex()
+            .gap(px(6.0))
+            .children(self.targets.iter().enumerate().map(|(i, target)| {
+                let is_selected = i == self.selected_target;
+                let label = match target {
+                    AddProjectTarget::Local => "Local".to_string(),
+                    AddProjectTarget::Remote {
+                        connection_name, ..
+                    } => connection_name.clone(),
+                };
+
+                div()
+                    .id(ElementId::Name(format!("target-{}", i).into()))
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .text_size(px(11.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .when(is_selected, |d| {
+                        d.bg(rgb(t.border_active))
+                            .text_color(rgb(t.bg_primary))
+                    })
+                    .when(!is_selected, |d| {
+                        d.bg(rgb(t.bg_secondary))
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.selected_target = i;
+                        cx.notify();
+                    }))
+            }))
+    }
+
     fn render_path_suggestions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let path_input = self.path_input.clone();
@@ -101,11 +203,17 @@ impl AddProjectDialog {
             return div().into_any_element();
         }
 
+        // Adjust top offset when target selector is visible
+        let top_offset = if self.targets.len() > 1 {
+            210.0
+        } else {
+            180.0
+        };
+
         div()
             .absolute()
             // Position below the path input inside the modal content
-            // Header(~44) + padding(16) + name section(~52) + gap(12) + path section(~52) + gap(4)
-            .top(px(180.0))
+            .top(px(top_offset))
             .left(px(20.0))
             .right(px(20.0))
             .id("path-suggestions-container")
@@ -207,7 +315,15 @@ impl Render for AddProjectDialog {
                 .update(cx, |i, cx| i.set_value_quiet(&path_value, cx));
         }
 
-        let has_suggestions = self.path_input.read(cx).has_suggestions();
+        let is_remote = self.is_remote_target();
+        let has_suggestions = !is_remote && self.path_input.read(cx).has_suggestions();
+        let has_multiple_targets = self.targets.len() > 1;
+
+        let path_label = if is_remote {
+            "Path:"
+        } else {
+            "Path (Tab to complete):"
+        };
 
         modal_backdrop("add-project-backdrop", &t)
             .track_focus(&focus_handle)
@@ -238,6 +354,13 @@ impl Render for AddProjectDialog {
                             .flex()
                             .flex_col()
                             .gap(px(12.0))
+                            // Target selector (only when multiple targets available)
+                            .when(has_multiple_targets, |d| {
+                                d.child(
+                                    labeled_input("Target:", &t)
+                                        .child(self.render_target_selector(cx)),
+                                )
+                            })
                             // Name input
                             .child(
                                 labeled_input("Name:", &t).child(
@@ -246,22 +369,36 @@ impl Render for AddProjectDialog {
                                     ),
                                 ),
                             )
-                            // Path input with auto-complete
+                            // Path input with auto-complete (or plain input for remote)
                             .child(
-                                labeled_input("Path (Tab to complete):", &t)
-                                    .child(self.path_input.clone()),
+                                labeled_input(path_label, &t)
+                                    .when(!is_remote, |d| {
+                                        d.child(self.path_input.clone())
+                                    })
+                                    .when(is_remote, |d| {
+                                        d.child(
+                                            input_container(&t, None).child(
+                                                SimpleInput::new(
+                                                    self.path_input.read(cx).input(),
+                                                )
+                                                .text_size(px(12.0)),
+                                            ),
+                                        )
+                                    }),
                             )
-                            // Browse button
-                            .child(
-                                button("browse-folder-btn", "Browse...", &t)
-                                    .px(px(8.0))
-                                    .py(px(4.0))
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(t.text_primary))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_folder_picker(window, cx);
-                                    })),
-                            )
+                            // Browse button (only for local target)
+                            .when(!is_remote, |d| {
+                                d.child(
+                                    button("browse-folder-btn", "Browse...", &t)
+                                        .px(px(8.0))
+                                        .py(px(4.0))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(t.text_primary))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_folder_picker(window, cx);
+                                        })),
+                                )
+                            })
                             // Action buttons
                             .child(
                                 div()
@@ -284,7 +421,7 @@ impl Render for AddProjectDialog {
                                     ),
                             ),
                     )
-                    // Path suggestions overlay
+                    // Path suggestions overlay (only for local target)
                     .when(has_suggestions, |d| {
                         d.child(self.render_path_suggestions(cx))
                     }),

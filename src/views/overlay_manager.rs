@@ -396,12 +396,16 @@ impl OverlayManager {
     // ========================================================================
 
     /// Toggle add project dialog overlay.
-    pub fn toggle_add_project_dialog(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_add_project_dialog(
+        &mut self,
+        remote_manager: Option<Entity<RemoteConnectionManager>>,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_modal::<AddProjectDialog>() {
             self.close_modal(cx);
         } else {
             let workspace = self.workspace.clone();
-            let entity = cx.new(|cx| AddProjectDialog::new(workspace, cx));
+            let entity = cx.new(|cx| AddProjectDialog::new(workspace, remote_manager, cx));
             cx.subscribe(&entity, |this, _, event: &AddProjectDialogEvent, cx| {
                 if event.is_close() {
                     this.close_modal(cx);
