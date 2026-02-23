@@ -178,6 +178,10 @@ pub enum ActionRequest {
         #[serde(default)]
         mode: DiffMode,
     },
+    AddProject {
+        name: String,
+        path: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -384,6 +388,10 @@ mod tests {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
                 mode: DiffMode::Staged,
+            },
+            ActionRequest::AddProject {
+                name: "My Project".into(),
+                path: "/home/user/projects/my-project".into(),
             },
         ];
         for action in actions {

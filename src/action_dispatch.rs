@@ -351,5 +351,6 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             file_path,
             mode,
         },
+        ActionRequest::AddProject { name, path } => ActionRequest::AddProject { name, path },
     }
 }

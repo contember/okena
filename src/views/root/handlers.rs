@@ -326,8 +326,9 @@ impl RootView {
                     });
                 }
                 OverlayRequest::AddProjectDialog => {
+                    let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_add_project_dialog(cx);
+                        om.toggle_add_project_dialog(rm, cx);
                     });
                 }
                 OverlayRequest::DiffViewer { path, file } => {

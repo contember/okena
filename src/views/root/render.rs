@@ -436,8 +436,9 @@ impl Render for RootView {
             // Handle new project action
             .on_action(cx.listener({
                 let overlay_manager = overlay_manager.clone();
-                move |_this, _: &NewProject, _window, cx| {
-                    overlay_manager.update(cx, |om, cx| om.toggle_add_project_dialog(cx));
+                move |this, _: &NewProject, _window, cx| {
+                    let rm = this.remote_manager.clone();
+                    overlay_manager.update(cx, |om, cx| om.toggle_add_project_dialog(rm, cx));
                 }
             }))
             // Handle open settings file action
