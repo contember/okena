@@ -1,6 +1,8 @@
-use crate::git::{self, FileDiffSummary};
+use crate::git;
+use crate::git::FileDiffSummary;
 use crate::git::watcher::GitStatusWatcher;
-use crate::views::components::file_tree::build_file_tree;
+use crate::vcs;
+use crate::views::components::build_file_tree;
 use crate::action_dispatch::ActionDispatcher;
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
@@ -355,7 +357,7 @@ impl ProjectColumn {
             }
 
             // Load file summaries
-            let summaries = git::get_diff_file_summary(Path::new(&project_path));
+            let summaries = vcs::get_diff_file_summary(Path::new(&project_path));
 
             let _ = this.update(cx, |this, cx| {
                 // Re-check token after loading
