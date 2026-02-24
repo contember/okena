@@ -1,7 +1,6 @@
 use crate::theme::theme;
 use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MS, ICON_SM};
 use gpui::*;
-use gpui_component::h_flex;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

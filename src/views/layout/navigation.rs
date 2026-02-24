@@ -148,6 +148,7 @@ impl PaneMap {
     /// Return panes sorted by reading order: top-to-bottom, then left-to-right.
     ///
     /// Sorts by Y center ascending, then X center ascending.
+    #[allow(dead_code)]
     pub fn sorted_by_reading_order(&self) -> Vec<&PaneBounds> {
         let mut sorted: Vec<&PaneBounds> = self.panes.iter().collect();
         sorted.sort_by(|a, b| {

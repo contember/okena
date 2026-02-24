@@ -55,23 +55,6 @@ impl Workspace {
         }
     }
 
-    /// Toggle terminal minimized state
-    pub fn toggle_terminal_minimized(
-        &mut self,
-        project_id: &str,
-        path: &[usize],
-        cx: &mut Context<Self>,
-    ) {
-        self.with_layout_node(project_id, path, cx, |node| {
-            if let LayoutNode::Terminal { minimized, .. } = node {
-                *minimized = !*minimized;
-                true
-            } else {
-                false
-            }
-        });
-    }
-
     /// Rename a terminal
     pub fn rename_terminal(
         &mut self,

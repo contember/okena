@@ -58,16 +58,6 @@ impl Workspace {
         hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
     }
 
-    /// Start a terminal for a project that doesn't have one (bookmark -> active project)
-    pub fn start_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        if let Some(project) = self.project_mut(project_id) {
-            if project.layout.is_none() {
-                project.layout = Some(LayoutNode::new_terminal());
-                self.notify_data(cx);
-            }
-        }
-    }
-
     /// Add a new terminal to a project by splitting the root layout
     pub fn add_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(project_id) {

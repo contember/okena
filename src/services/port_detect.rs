@@ -9,12 +9,6 @@ const IGNORED_PORTS: &[u16] = &[9229];
 /// Linux default ephemeral range starts at 32768.
 const EPHEMERAL_PORT_MIN: u16 = 32768;
 
-/// Detect TCP ports that a service process (or any of its descendants) is listening on.
-/// Filters out known debug ports and ephemeral ports.
-pub fn detect_ports_for_pid(pid: u32) -> Vec<u16> {
-    detect_ports_for_pids(&[pid])
-}
-
 /// Detect TCP ports for multiple root PIDs (e.g. session backend daemon PIDs).
 /// Walks the process tree from each root and checks for listening TCP ports.
 pub fn detect_ports_for_pids(root_pids: &[u32]) -> Vec<u16> {

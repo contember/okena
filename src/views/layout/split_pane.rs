@@ -144,7 +144,6 @@ pub fn compute_resize(
             let default_width = 100.0 / num_projects as f32;
             let left_initial = initial_widths.get(left_id).copied().unwrap_or(default_width);
             let right_initial = initial_widths.get(right_id).copied().unwrap_or(default_width);
-            let combined = left_initial + right_initial;
 
             // Delta-based: only adjust the two adjacent projects
             let delta_px = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
