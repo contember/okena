@@ -340,9 +340,12 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
+        app_broadcaster: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> Option<okena_views_terminal::layout::app_pane::AppPaneEntity> {
+        let broadcaster = app_broadcaster
+            .and_then(|b| b.downcast::<crate::remote::app_broadcaster::AppStateBroadcaster>().ok());
         crate::views::layout::app_registry::create_app_pane(
             kind,
             app_id,
@@ -351,6 +354,7 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
             project_id,
             project_path,
             layout_path,
+            broadcaster,
             window,
             cx,
         )

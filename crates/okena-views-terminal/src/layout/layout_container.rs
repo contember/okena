@@ -108,6 +108,7 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) empty_area_click_detector: ClickDetector<()>,
     pub(super) tab_rename_state: Option<RenameState<String>>,
     pub(super) action_dispatcher: Option<D>,
+    pub(super) app_broadcaster: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
@@ -121,6 +122,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         action_dispatcher: Option<D>,
+        app_broadcaster: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Self {
         Self {
             workspace,
@@ -143,6 +145,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
             action_dispatcher,
+            app_broadcaster,
         }
     }
 
@@ -224,6 +227,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 self.project_id.clone(),
                 self.project_path.clone(),
                 self.layout_path.clone(),
+                self.app_broadcaster.clone(),
                 window,
                 cx,
             )
@@ -566,6 +570,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })
@@ -628,6 +633,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })

@@ -251,6 +251,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })
@@ -305,6 +306,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                     self.terminals.clone(),
                                     self.active_drag.clone(),
                                     self.action_dispatcher.clone(),
+                                    self.app_broadcaster.clone(),
                                 )
                             })
                         })

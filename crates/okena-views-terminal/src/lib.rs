@@ -54,10 +54,11 @@ pub trait ActionDispatch: Clone + 'static {
         project_id: String,
         project_path: String,
         layout_path: Vec<usize>,
+        app_broadcaster: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> Option<crate::layout::app_pane::AppPaneEntity> {
-        let _ = (kind, app_id, app_config, workspace, project_id, project_path, layout_path, window, cx);
+        let _ = (kind, app_id, app_config, workspace, project_id, project_path, layout_path, app_broadcaster, window, cx);
         None
     }
 }

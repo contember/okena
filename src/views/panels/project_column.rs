@@ -4,6 +4,7 @@ use crate::vcs;
 use crate::action_dispatch::ActionDispatcher;
 use okena_views_git::git_header::GitHeader;
 use crate::services::manager::ServiceManager;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
@@ -41,6 +42,8 @@ pub struct ProjectColumn {
     git_header: Entity<GitHeader>,
     /// Self-contained service panel entity
     service_panel: Entity<ServicePanel<ActionDispatcher>>,
+    /// App state broadcaster for passing to LayoutContainer → KruhPane
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl ProjectColumn {
@@ -52,6 +55,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         git_watcher: Option<Entity<GitStatusWatcher>>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Observe git watcher for re-renders (replaces per-column polling)
@@ -96,6 +100,7 @@ impl ProjectColumn {
             action_dispatcher: None,
             git_header,
             service_panel,
+            app_broadcaster,
         }
     }
 
@@ -171,6 +176,8 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let action_dispatcher = self.action_dispatcher.clone();
+            let app_broadcaster: Option<Arc<dyn std::any::Any + Send + Sync>> =
+                self.app_broadcaster.clone().map(|b| b as Arc<dyn std::any::Any + Send + Sync>);
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
@@ -183,6 +190,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
+                    app_broadcaster,
                 )
             }));
         } else if let Some(container) = &self.layout_container {

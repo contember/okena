@@ -8,7 +8,9 @@
 //! Everything else (sidebar, tabs, actions, persistence) is data-driven.
 
 use gpui::*;
+use std::sync::Arc;
 
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use okena_views_terminal::layout::app_pane::AppPaneEntity;
 use crate::views::layout::kruh_pane::KruhPane;
 use crate::views::layout::kruh_pane::config::KruhConfig;
@@ -57,6 +59,7 @@ pub fn create_app_pane(
     project_id: String,
     project_path: String,
     layout_path: Vec<usize>,
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AppPaneEntity> {
@@ -75,6 +78,7 @@ pub fn create_app_pane(
                     layout_path,
                     app_id_clone,
                     config,
+                    app_broadcaster,
                     window,
                     cx,
                 )
