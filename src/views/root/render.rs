@@ -5,9 +5,7 @@ use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use gpui::*;
 use gpui::prelude::*;
-use std::cell::RefCell;
 use std::future::Future;
-use std::rc::Rc;
 
 use super::RootView;
 
