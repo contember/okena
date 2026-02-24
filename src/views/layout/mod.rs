@@ -6,6 +6,9 @@
 //! - Individual terminal panes
 //! - Focus navigation between panes
 
+pub mod app_pane;
+pub mod app_registry;
+pub mod kruh_pane;
 pub mod layout_container;
 pub mod navigation;
 pub mod pane_drag;

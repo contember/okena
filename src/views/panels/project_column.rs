@@ -702,44 +702,96 @@ impl ProjectColumn {
                     .child("This project is saved as a bookmark. Start a terminal to begin working.")
             )
             .child(
-                // Start Terminal button
-                div()
-                    .id("start-terminal-btn")
-                    .cursor_pointer()
-                    .px(px(16.0))
-                    .py(px(8.0))
-                    .rounded(px(6.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .child(
-                        svg()
-                            .path("icons/terminal.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.button_primary_fg))
-                    )
-                    .child(
+                        // Start Terminal button
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.button_primary_fg))
-                            .child("Start Terminal")
+                            .id("start-terminal-btn")
+                            .cursor_pointer()
+                            .px(px(16.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .bg(rgb(t.button_primary_bg))
+                            .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                svg()
+                                    .path("icons/terminal.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.button_primary_fg))
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(t.button_primary_fg))
+                                    .child("Start Terminal")
+                            )
+                            .on_click({
+                                let dispatcher = self.action_dispatcher.clone();
+                                let project_id = project_id.clone();
+                                move |_, _window, cx| {
+                                    if let Some(ref dispatcher) = dispatcher {
+                                        dispatcher.dispatch(
+                                            okena_core::api::ActionRequest::CreateTerminal {
+                                                project_id: project_id.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                }
+                            })
                     )
-                    .on_click({
-                        let dispatcher = self.action_dispatcher.clone();
-                        move |_, _window, cx| {
-                            if let Some(ref dispatcher) = dispatcher {
-                                dispatcher.dispatch(
-                                    okena_core::api::ActionRequest::CreateTerminal {
-                                        project_id: project_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
-                        }
-                    })
+                    .children(
+                        crate::views::layout::app_registry::all_apps().iter().map(|app| {
+                            let dispatcher = self.action_dispatcher.clone();
+                            let project_id = project_id.clone();
+                            let app_kind = app.kind.to_string();
+                            let icon_path = app.icon_path;
+                            let display_name = app.display_name;
+                            div()
+                                .id(SharedString::from(format!("start-app-{}", app.kind)))
+                                .cursor_pointer()
+                                .px(px(16.0))
+                                .py(px(8.0))
+                                .rounded(px(6.0))
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_primary))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(t.text_primary))
+                                        .child(format!("Start {}", display_name))
+                                )
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(ref dispatcher) = dispatcher {
+                                        dispatcher.dispatch(
+                                            okena_core::api::ActionRequest::CreateApp {
+                                                project_id: project_id.clone(),
+                                                app_kind: app_kind.clone(),
+                                                app_config: serde_json::Value::Null,
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })
+                        })
+                    )
             )
     }
 }
