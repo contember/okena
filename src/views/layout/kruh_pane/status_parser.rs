@@ -882,6 +882,61 @@ mod tests {
     }
 
     #[test]
+    fn test_editor_roundtrip_preserves_metadata() {
+        // Simulate content written by loop_runner with both config and run metadata keys
+        let original = "---\nmodel: claude-sonnet-4-6\nmax_iterations: 50\nstartedAt: 2026-02-25T14:30:45\nagent: claude\niteration: 3\nendedAt: 2026-02-25T14:35:12\nexitCode: 0\nduration: 267s\n---\n\n# My Issue\n\nBody text.\n";
+
+        // Step 1: extract extra keys (run metadata)
+        let extras = extract_extra_frontmatter_keys(original);
+        assert!(extras.iter().any(|(k, _)| k == "startedAt"));
+        assert!(extras.iter().any(|(k, _)| k == "endedAt"));
+        assert!(extras.iter().any(|(k, _)| k == "exitCode"));
+        assert!(extras.iter().any(|(k, _)| k == "duration"));
+        assert!(extras.iter().any(|(k, _)| k == "iteration"));
+        assert!(!extras.iter().any(|(k, _)| k == "model"));
+        assert!(!extras.iter().any(|(k, _)| k == "agent"));
+
+        // Step 2: parse config overrides
+        let overrides = parse_plan_overrides_content(original);
+        assert_eq!(overrides.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(overrides.max_iterations, Some(50));
+        assert_eq!(overrides.agent.as_deref(), Some("claude"));
+
+        // Step 3: strip frontmatter to get body (simulates editor_input content)
+        let body = strip_frontmatter(original);
+
+        // Step 4: reconstruct using update_frontmatter_content with overrides + extras
+        let mut owned: Vec<(String, String)> = Vec::new();
+        if let Some(ref a) = overrides.agent {
+            owned.push(("agent".to_string(), a.clone()));
+        }
+        if let Some(ref m) = overrides.model {
+            owned.push(("model".to_string(), m.clone()));
+        }
+        if let Some(n) = overrides.max_iterations {
+            owned.push(("max_iterations".to_string(), n.to_string()));
+        }
+        for (k, v) in &extras {
+            owned.push((k.clone(), v.clone()));
+        }
+        let updates: Vec<(&str, &str)> =
+            owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let reconstructed = update_frontmatter_content(body, &updates);
+
+        // Step 5: verify all keys survive
+        assert!(reconstructed.contains("model: claude-sonnet-4-6"));
+        assert!(reconstructed.contains("max_iterations: 50"));
+        assert!(reconstructed.contains("agent: claude"));
+        assert!(reconstructed.contains("startedAt: 2026-02-25T14:30:45"));
+        assert!(reconstructed.contains("endedAt: 2026-02-25T14:35:12"));
+        assert!(reconstructed.contains("exitCode: 0"));
+        assert!(reconstructed.contains("duration: 267s"));
+        assert!(reconstructed.contains("iteration: 3"));
+        assert!(reconstructed.contains("# My Issue"));
+        assert!(reconstructed.contains("Body text."));
+    }
+
+    #[test]
     fn test_build_prompt_without_agent_md() {
         let plans_dir = std::env::temp_dir().join("kruh_prompt_no_agent_md");
         let docs_dir = plans_dir.join("my-plan");

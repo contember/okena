@@ -76,6 +76,7 @@ pub struct KruhPane {
     pub editor_fm_max_iters: Option<Entity<SimpleInputState>>,
     pub editor_fm_sleep: Option<Entity<SimpleInputState>>,
     pub editor_fm_dangerous: Option<Entity<SimpleInputState>>,
+    pub editor_fm_extra: Vec<(String, String)>,
 
     // Async scan task
     pub _scan_task: Option<Task<()>>,
@@ -146,6 +147,7 @@ impl KruhPane {
             editor_fm_max_iters: None,
             editor_fm_sleep: None,
             editor_fm_dangerous: None,
+            editor_fm_extra: Vec::new(),
             _scan_task: None,
         };
 
@@ -284,6 +286,7 @@ impl KruhPane {
         // For issue files, parse frontmatter into structured override inputs
         if target == EditTarget::Issue {
             let overrides = status_parser::parse_plan_overrides_content(&content);
+            self.editor_fm_extra = status_parser::extract_extra_frontmatter_keys(&content);
             let body = status_parser::strip_frontmatter(&content);
 
             self.editor_fm_agent = Some(cx.new(|cx| {
@@ -352,14 +355,36 @@ impl KruhPane {
         if let (Some(input), Some(path)) = (&self.editor_input, &self.editor_file_path) {
             let body = input.read(cx).value().to_string();
 
-            // For issue files, reconstruct frontmatter from structured inputs
+            // For issue files, reconstruct frontmatter from structured inputs,
+            // merging in extra (run metadata) keys preserved when the editor was opened.
             let content = if self.editor_target == Some(EditTarget::Issue) {
                 let overrides = self.read_frontmatter_inputs(cx);
-                let frontmatter = overrides.to_frontmatter();
-                if frontmatter.is_empty() {
+                // Collect config overrides + extra metadata as ordered key-value pairs
+                let mut owned: Vec<(String, String)> = Vec::new();
+                if let Some(ref a) = overrides.agent {
+                    owned.push(("agent".to_string(), a.clone()));
+                }
+                if let Some(ref m) = overrides.model {
+                    owned.push(("model".to_string(), m.clone()));
+                }
+                if let Some(n) = overrides.max_iterations {
+                    owned.push(("max_iterations".to_string(), n.to_string()));
+                }
+                if let Some(s) = overrides.sleep_secs {
+                    owned.push(("sleep_secs".to_string(), s.to_string()));
+                }
+                if let Some(d) = overrides.dangerous {
+                    owned.push(("dangerous".to_string(), d.to_string()));
+                }
+                for (k, v) in &self.editor_fm_extra {
+                    owned.push((k.clone(), v.clone()));
+                }
+                if owned.is_empty() {
                     body
                 } else {
-                    format!("{frontmatter}\n{body}")
+                    let updates: Vec<(&str, &str)> =
+                        owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    status_parser::update_frontmatter_content(&body, &updates)
                 }
             } else {
                 body
@@ -408,6 +433,7 @@ impl KruhPane {
         self.editor_fm_max_iters = None;
         self.editor_fm_sleep = None;
         self.editor_fm_dangerous = None;
+        self.editor_fm_extra = Vec::new();
         self.state = KruhState::TaskBrowser;
         cx.notify();
     }
