@@ -32,6 +32,7 @@ mod terminal_overlay_utils;
 pub mod theme_selector;
 pub mod remote_connect_dialog;
 pub mod remote_context_menu;
+pub mod remote_pair_dialog;
 pub mod tab_context_menu;
 pub mod terminal_context_menu;
 pub mod pairing_dialog;
