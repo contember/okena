@@ -1,11 +1,13 @@
 //! Recursive layout container that renders terminal/split/tabs nodes
 
 use crate::ActionDispatch;
+use crate::actions::{CloseTerminal, ToggleFullscreen};
 use okena_core::api::ActionRequest;
 use okena_terminal::backend::TerminalBackend;
 use okena_files::theme::theme;
 use okena_ui::theme::with_alpha;
 use okena_ui::click_detector::ClickDetector;
+use crate::layout::app_pane::AppPaneEntity;
 use crate::layout::pane_drag::{PaneDrag, DropZone};
 use crate::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::layout::terminal_pane::TerminalPane;
@@ -97,6 +99,7 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
     terminal_pane: Option<Entity<TerminalPane<D>>>,
+    app_pane: Option<AppPaneEntity>,
     pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer<D>>>,
     pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
     pub(super) drop_animation: Option<(usize, f32)>,
@@ -128,6 +131,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             backend,
             terminals,
             terminal_pane: None,
+            app_pane: None,
             child_containers: HashMap::new(),
             container_bounds_ref: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
@@ -193,6 +197,118 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 pane.set_detached(detached, cx);
             });
         }
+    }
+
+    fn ensure_app_pane(
+        &mut self,
+        app_id: &Option<String>,
+        app_kind: &str,
+        app_config: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Check if we already have the right app pane
+        if let Some(ref existing) = self.app_pane {
+            if existing.app_id() == app_id.as_deref() {
+                return;
+            }
+        }
+
+        // Create new app pane via ActionDispatch
+        self.app_pane = self.action_dispatcher.as_ref().and_then(|d| {
+            d.create_app_pane(
+                app_kind,
+                app_id,
+                app_config,
+                self.workspace.clone(),
+                self.project_id.clone(),
+                self.project_path.clone(),
+                self.layout_path.clone(),
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn render_app(
+        &mut self,
+        app_id: &Option<String>,
+        app_kind: &str,
+        app_config: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.ensure_app_pane(app_id, app_kind, app_config, window, cx);
+
+        // Clear terminal pane if we had one (switching from terminal to app)
+        self.terminal_pane = None;
+
+        let app_element = self
+            .app_pane
+            .as_ref()
+            .map(|pane| pane.into_any_element());
+
+        let in_tab_group = self.is_in_tab_group(cx);
+
+        let mut container = div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .relative();
+
+        // Show standalone tab bar if not already inside a Tabs container
+        if !in_tab_group {
+            container = container.child(self.render_standalone_tab_bar(window, cx));
+        }
+
+        let pane_id = app_id.clone().unwrap_or_else(|| format!("app-none-{:?}", self.layout_path));
+
+        // Close action for Cmd+W on app panes
+        let app_id_for_close = app_id.clone();
+        let dispatcher_for_close = self.action_dispatcher.clone();
+        let project_id_for_close = self.project_id.clone();
+
+        // Fullscreen action for Shift+Escape on app panes
+        let dispatcher_for_fullscreen = self.action_dispatcher.clone();
+        let project_id_for_fullscreen = self.project_id.clone();
+
+        // Get focus handle from the app pane for key context tracking
+        let app_focus_handle = self.app_pane.as_ref().map(|p| p.focus_handle().clone());
+
+        let mut content = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .on_action(cx.listener(move |_this, _: &CloseTerminal, _window, cx| {
+                if let Some(ref aid) = app_id_for_close {
+                    if let Some(ref dispatcher) = dispatcher_for_close {
+                        dispatcher.dispatch(ActionRequest::CloseApp {
+                            project_id: project_id_for_close.clone(),
+                            app_id: aid.clone(),
+                        }, cx);
+                    }
+                }
+            }))
+            .on_action(cx.listener(move |_this, _: &ToggleFullscreen, _window, cx| {
+                if let Some(ref dispatcher) = dispatcher_for_fullscreen {
+                    dispatcher.dispatch(ActionRequest::SetFullscreen {
+                        project_id: project_id_for_fullscreen.clone(),
+                        terminal_id: None,
+                    }, cx);
+                }
+            }))
+            .children(app_element)
+            .child(self.render_drop_zones(Some(pane_id), cx, &self.active_drag.clone()));
+
+        // Add TerminalPane key context so CloseTerminal keybinding (Cmd+W) works
+        if let Some(focus) = app_focus_handle {
+            content = content
+                .key_context("TerminalPane")
+                .track_focus(&focus);
+        }
+
+        container.child(content)
     }
 
     pub(super) fn get_layout<'a>(&self, workspace: &'a Workspace) -> Option<&'a LayoutNode> {
@@ -360,14 +476,14 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         if active_drag_for_drop.borrow().is_some() {
                             return;
                         }
-                        if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
+                        if Some(drag.pane_id.as_str()) == this_tid.as_deref() {
                             return;
                         }
                         if let Some(ref target_id) = this_tid {
                             if let Some(ref dispatcher) = dispatcher {
                                 dispatcher.dispatch(ActionRequest::MovePaneTo {
                                     project_id: drag.project_id.clone(),
-                                    terminal_id: drag.terminal_id.clone(),
+                                    terminal_id: drag.pane_id.clone(),
                                     target_project_id: pid.clone(),
                                     target_terminal_id: target_id.clone(),
                                     zone: zone_str.to_string(),
@@ -577,14 +693,21 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
                 if !self.child_containers.is_empty() {
                     self.child_containers.clear();
                 }
+                self.app_pane = None;
             }
-            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) | Some(LayoutNode::App { .. }) => {
-                if self.terminal_pane.is_some() {
-                    self.terminal_pane = None;
+            Some(LayoutNode::App { .. }) => {
+                if !self.child_containers.is_empty() {
+                    self.child_containers.clear();
                 }
+                self.terminal_pane = None;
+            }
+            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
+                self.terminal_pane = None;
+                self.app_pane = None;
             }
             None => {
                 self.terminal_pane = None;
+                self.app_pane = None;
                 self.child_containers.clear();
             }
         }
@@ -614,13 +737,12 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
                 .render_tabs(children, active_tab, window, cx)
                 .into_any_element(),
 
-            Some(LayoutNode::App { app_kind, .. }) => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(t.text_muted))
-                .child(format!("App: {}", app_kind))
+            Some(LayoutNode::App {
+                ref app_id,
+                ref app_kind,
+                ref app_config,
+            }) => self
+                .render_app(app_id, app_kind, app_config, window, cx)
                 .into_any_element(),
 
             None => div()

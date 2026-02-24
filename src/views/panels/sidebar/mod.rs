@@ -70,6 +70,7 @@ pub(super) enum SidebarCursorItem {
     GroupHeader { project_id: String, group: GroupKind },
     Terminal { project_id: String, terminal_id: String },
     Service { project_id: String, service_name: String },
+    App { project_id: String, app_id: String },
     #[allow(dead_code)]
     Hook { project_id: String, terminal_id: String },
     #[allow(dead_code)]
@@ -924,6 +925,14 @@ impl Sidebar {
                     }
                 }
             }
+
+            // Apps
+            for (aid, _kind) in layout.collect_app_info() {
+                cursor_items.push(SidebarCursorItem::App {
+                    project_id: project_id.to_string(),
+                    app_id: aid,
+                });
+            }
         }
 
         // Services group
@@ -1069,6 +1078,16 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
+            SidebarCursorItem::App { project_id, app_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_app_by_id(&project_id, &app_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
             SidebarCursorItem::Folder { folder_id } => {
                 self.workspace.update(cx, |ws, cx| {
                     ws.toggle_folder_collapsed(&folder_id, cx);
@@ -1157,7 +1176,7 @@ impl Sidebar {
             SidebarCursorItem::GroupHeader { project_id, group } => {
                 self.toggle_group(&project_id, group);
             }
-            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } | SidebarCursorItem::Hook { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } | SidebarCursorItem::Hook { .. } | SidebarCursorItem::App { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -1363,6 +1382,8 @@ pub(super) struct SidebarProjectInfo {
     pub is_creating: bool,
     /// Whether this project is itself a worktree
     pub is_worktree: bool,
+    /// App panes: (app_id, app_kind)
+    pub app_info: Vec<(String, String)>,
 }
 
 impl SidebarProjectInfo {
@@ -1405,6 +1426,9 @@ impl SidebarProjectInfo {
             is_closing: false,
             is_creating: false,
             is_worktree: project.worktree_info.is_some(),
+            app_info: layout
+                .map(|l| l.collect_app_info())
+                .unwrap_or_default(),
         }
     }
 }

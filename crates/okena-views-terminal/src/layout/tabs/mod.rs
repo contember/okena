@@ -68,6 +68,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         &self,
         ctx: TabActionContext<D>,
         terminal_id: Option<String>,
+        app_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
@@ -77,6 +78,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
+        let app_id_for_close = app_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
 
         let ctx_split_v = ctx.clone();
@@ -206,8 +208,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .child({
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }), None)
                     .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_close {
-                            if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                        if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                            if let Some(ref aid) = app_id_for_close {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseApp {
+                                    project_id: ctx_close.project_id.clone(),
+                                    app_id: aid.clone(),
+                                }, cx);
+                            } else if let Some(ref tid) = terminal_id_for_close {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
                                     project_id: ctx_close.project_id.clone(),
                                     terminal_id: tid.clone(),
@@ -320,6 +327,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let children: &[LayoutNode] = match node {
             Some(ref n @ LayoutNode::Terminal { .. }) => std::slice::from_ref(n),
+            Some(ref n @ LayoutNode::App { .. }) => std::slice::from_ref(n),
             _ => &[],
         };
 
@@ -363,6 +371,21 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             let layout_path_for_drag = layout_path.clone();
             let layout_path_for_drop = layout_path.clone();
 
+            // Detect terminal vs app child and extract pane info
+            let (pane_id, pane_icon, is_app) = match child {
+                LayoutNode::Terminal { terminal_id: Some(id), .. } => (Some(id.clone()), "icons/terminal.svg", false),
+                LayoutNode::App { app_id, app_kind, .. } => {
+                    // Use app kind as icon hint; concrete icon comes from AppPaneEntity
+                    let icon = match app_kind.as_str() {
+                        "kruh" => "icons/kruh.svg",
+                        _ => "icons/terminal.svg",
+                    };
+                    (app_id.clone(), icon, true)
+                }
+                _ => (None, "icons/terminal.svg", false),
+            };
+
+
             let terminal_id = match child {
                 LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.clone()),
                 _ => None,
@@ -383,7 +406,18 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 project_for_names.as_ref().map_or(false, |p| p.hook_terminals.contains_key(tid))
             });
 
-            let tab_label = if let Some(ref tid) = terminal_id {
+            let tab_label = if is_app {
+                match child {
+                    LayoutNode::App { app_kind, .. } => {
+                        let mut name = app_kind.clone();
+                        if let Some(first) = name.get_mut(0..1) {
+                            first.make_ascii_uppercase();
+                        }
+                        name
+                    }
+                    _ => format!("Tab {}", i + 1),
+                }
+            } else if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
                     let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
                     p.terminal_display_name(tid, osc_title)
@@ -440,38 +474,58 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
                         is_renaming(&self.tab_rename_state, tid)
                     });
-                    if let Some(input) = is_renaming_this.then(|| rename_input(&self.tab_rename_state)).flatten() {
-                        div()
-                            .id(format!("tab-rename-{}", i))
-                            .key_context("TerminalRename")
-                            .flex_1()
-                            .min_w(px(80.0))
-                            .bg(rgb(t.bg_secondary))
-                            .border_1()
-                            .border_color(rgb(t.border_active))
-                            .rounded(px(4.0))
-                            .child(SimpleInput::new(input).text_size(px(12.0)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_click(|_, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                this.cancel_tab_rename(cx);
-                            }))
-                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                cx.stop_propagation();
-                                if event.keystroke.key.as_str() == "enter" {
-                                    this.finish_tab_rename(cx);
-                                }
-                            }))
-                            .into_any_element()
+                    if !is_app && is_renaming_this {
+                        if let Some(input) = rename_input(&self.tab_rename_state) {
+                            div()
+                                .id(format!("tab-rename-{}", i))
+                                .key_context("TerminalRename")
+                                .flex_1()
+                                .min_w(px(80.0))
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border_active))
+                                .rounded(px(4.0))
+                                .child(SimpleInput::new(input).text_size(px(12.0)))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_click(|_, _window, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                    this.cancel_tab_rename(cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                    if event.keystroke.key.as_str() == "enter" {
+                                        this.finish_tab_rename(cx);
+                                    }
+                                }))
+                                .into_any_element()
+                        } else {
+                            let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                            h_flex()
+                                .gap(px(6.0))
+                                .child(svg().path(pane_icon).size(px(12.0)).text_color(icon_color))
+                                .child(tab_label.clone())
+                                .children(idle_label.as_ref().map(|d| {
+                                    div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
+                                }))
+                                .into_any_element()
+                        }
                     } else {
-                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_app {
+                            if is_active { rgb(t.success) } else { rgb(t.text_muted) }
+                        } else if is_waiting {
+                            rgb(t.border_idle)
+                        } else if is_active {
+                            rgb(t.success)
+                        } else {
+                            rgb(t.text_muted)
+                        };
                         h_flex()
                             .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
+                            .child(svg().path(pane_icon).size(px(12.0)).text_color(icon_color))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
@@ -500,22 +554,30 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 })
                 .on_mouse_down(MouseButton::Middle, {
                     let project_id = project_id.clone();
-                    let terminal_id = terminal_id.clone();
+                    let pane_id = pane_id.clone();
+                    let is_app = is_app;
                     let action_dispatcher = self.action_dispatcher.clone();
                     cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
-                        if let Some(ref tid) = terminal_id {
+                        if let Some(ref id) = pane_id {
                             if let Some(ref dispatcher) = action_dispatcher {
-                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
-                                    project_id: project_id.clone(),
-                                    terminal_id: tid.clone(),
-                                }, cx);
+                                if is_app {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::CloseApp {
+                                        project_id: project_id.clone(),
+                                        app_id: id.clone(),
+                                    }, cx);
+                                } else {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
+                                        project_id: project_id.clone(),
+                                        terminal_id: id.clone(),
+                                    }, cx);
+                                }
                             }
                         }
                         cx.stop_propagation();
                     })
                 })
-                .when_some(terminal_id.clone(), |el, tid| {
-                    let terminal_path = if standalone {
+                .when_some(pane_id.clone(), |el, pid| {
+                    let pane_path = if standalone {
                         layout_path_for_drag.clone()
                     } else {
                         let mut p = layout_path_for_drag.clone();
@@ -525,12 +587,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     el.on_drag(
                         PaneDrag {
                             project_id: project_id_for_drag.clone(),
-                            layout_path: terminal_path,
-                            terminal_id: tid,
-                            terminal_name: tab_label.clone(),
+                            layout_path: pane_path,
+                            pane_id: pid,
+                            pane_name: tab_label.clone(),
+                            icon_path: pane_icon.to_string(),
                         },
                         move |drag, _position, _window, cx| {
-                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
+                            cx.new(|_| PaneDragView::new(drag.pane_name.clone(), drag.icon_path.clone()))
                         },
                     )
                 })
@@ -579,7 +642,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 if let Some(ref dispatcher) = dispatcher_for_drop {
                                     dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
                                         project_id: drag.project_id.clone(),
-                                        terminal_id: drag.terminal_id.clone(),
+                                        terminal_id: drag.pane_id.clone(),
                                         target_path: layout_path_for_drop.clone(),
                                         position: Some(i),
                                         target_project_id: Some(project_id_for_drop.clone()),
@@ -594,6 +657,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     let project_id = project_id.clone();
                     let layout_path = layout_path.clone();
                     let terminal_id = terminal_id.clone();
+                    let pane_id = pane_id.clone();
+                    let is_app = is_app;
                     let tab_label = tab_label.clone();
                     let dispatcher_for_click = self.action_dispatcher.clone();
                     cx.listener(move |this, _, window, cx| {
@@ -618,8 +683,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             }
                         }
 
-                        if terminal_id.is_some() {
-                            let terminal_path = if standalone {
+                        if pane_id.is_some() {
+                            let pane_path = if standalone {
                                 layout_path.clone()
                             } else {
                                 let mut p = layout_path.clone();
@@ -627,11 +692,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                                 p
                             };
                             workspace.update(cx, |ws, cx| {
-                                ws.set_focused_terminal(project_id.clone(), terminal_path, cx);
+                                ws.set_focused_terminal(project_id.clone(), pane_path, cx);
                             });
                         }
 
-                        if is_double_click {
+                        if is_double_click && !is_app {
                             if let Some(ref tid) = terminal_id {
                                 this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
                             }
@@ -708,7 +773,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         if let Some(ref dispatcher) = dispatcher_for_end {
                             dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
                                 project_id: drag.project_id.clone(),
-                                terminal_id: drag.terminal_id.clone(),
+                                terminal_id: drag.pane_id.clone(),
                                 target_path: layout_path_for_end.clone(),
                                 position: None,
                                 target_project_id: Some(project_id_for_end.clone()),
@@ -727,16 +792,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             action_dispatcher: self.action_dispatcher.clone(),
         };
 
-        let terminal_id_for_actions = if standalone {
+        let (terminal_id_for_actions, app_id_for_actions) = if standalone {
             match children.first() {
-                Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
-                _ => None,
+                Some(LayoutNode::Terminal { terminal_id, .. }) => (terminal_id.clone(), None),
+                Some(LayoutNode::App { app_id, .. }) => (None, app_id.clone()),
+                _ => (None, None),
             }
         } else {
-            self.get_active_terminal_id(active_tab, cx)
+            (self.get_active_terminal_id(active_tab, cx), self.get_active_app_id(active_tab, cx))
         };
 
-        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
+        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), app_id_for_actions, cx);
 
         let show_shell = terminal_view_settings(cx).show_shell_selector && !self.backend.is_remote();
 

@@ -42,6 +42,24 @@ pub trait ActionDispatch: Clone + 'static {
         in_group: bool,
         cx: &mut gpui::App,
     );
+
+    /// Create an app pane for the given app kind.
+    /// Returns None if the app kind is unknown.
+    fn create_app_pane(
+        &self,
+        kind: &str,
+        app_id: &Option<String>,
+        app_config: &serde_json::Value,
+        workspace: gpui::Entity<okena_workspace::state::Workspace>,
+        project_id: String,
+        project_path: String,
+        layout_path: Vec<usize>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Option<crate::layout::app_pane::AppPaneEntity> {
+        let _ = (kind, app_id, app_config, workspace, project_id, project_path, layout_path, window, cx);
+        None
+    }
 }
 
 /// Settings namespace used in ExtensionSettingsStore.

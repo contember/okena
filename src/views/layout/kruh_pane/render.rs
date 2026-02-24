@@ -12,6 +12,19 @@ use super::config::AGENTS;
 use super::types::{EditTarget, KruhState, PlanInfo};
 use super::KruhPane;
 
+fn kbd(label: &str, t: &ThemeColors) -> Div {
+    div()
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(4.0))
+        .bg(rgb(t.bg_secondary))
+        .border_1()
+        .border_color(rgb(t.border))
+        .text_size(TEXT_SM)
+        .text_color(rgb(t.text_muted))
+        .child(label.to_string())
+}
+
 impl KruhPane {
     pub fn render_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);

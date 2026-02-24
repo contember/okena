@@ -330,6 +330,31 @@ impl okena_views_terminal::ActionDispatch for ActionDispatcher {
     ) {
         self.add_tab(project_id, layout_path, in_group, cx);
     }
+
+    fn create_app_pane(
+        &self,
+        kind: &str,
+        app_id: &Option<String>,
+        app_config: &serde_json::Value,
+        workspace: gpui::Entity<crate::workspace::state::Workspace>,
+        project_id: String,
+        project_path: String,
+        layout_path: Vec<usize>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Option<okena_views_terminal::layout::app_pane::AppPaneEntity> {
+        crate::views::layout::app_registry::create_app_pane(
+            kind,
+            app_id,
+            app_config,
+            workspace,
+            project_id,
+            project_path,
+            layout_path,
+            window,
+            cx,
+        )
+    }
 }
 
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
