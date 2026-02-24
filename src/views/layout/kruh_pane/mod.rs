@@ -8,7 +8,6 @@ pub mod status_parser;
 pub mod types;
 
 use std::path::Path;
-use std::time::Instant;
 
 use gpui::*;
 
@@ -21,7 +20,10 @@ use crate::views::layout::navigation::{
 };
 use crate::workspace::state::Workspace;
 use config::{KruhConfig, KruhPlanOverrides};
-use types::{EditTarget, IssueDetail, KruhPaneEvent, KruhState, OutputLine, PlanInfo, StatusProgress};
+use types::{
+    EditTarget, IssueDetail, IssueViewInfo, KruhPaneEvent, KruhScreen, KruhState, KruhViewState,
+    LoopInstance, LoopState, LoopViewInfo, OutputLineView, PlanInfo, PlanViewInfo, ProgressViewInfo,
+};
 
 /// Native Kruh pane — automated AI agent loop tool.
 pub struct KruhPane {
@@ -33,21 +35,12 @@ pub struct KruhPane {
     pub focus_handle: FocusHandle,
     pub config: KruhConfig,
     pub state: KruhState,
-    pub iteration: usize,
-    pub pass_count: usize,
-    pub fail_count: usize,
-    pub start_time: Option<Instant>,
-    pub agent_handle: Option<agent::AgentHandle>,
-    pub output_lines: Vec<OutputLine>,
-    pub output_scroll: ScrollHandle,
-    pub diff_stat: Option<String>,
-    pub progress: StatusProgress,
-    pub paused: bool,
-    pub step_mode: bool,
-    pub skip_requested: bool,
-    pub quit_requested: bool,
-    pub step_advance_requested: bool,
-    pub _loop_task: Option<Task<()>>,
+
+    // Multi-loop state
+    pub active_loops: Vec<LoopInstance>,
+    pub loop_tasks: Vec<(usize, Task<()>)>, // (loop_id, task)
+    pub focused_loop_index: usize,
+    pub next_loop_id: usize,
 
     // Plan picker state
     pub plans: Vec<PlanInfo>,
@@ -71,6 +64,7 @@ pub struct KruhPane {
     pub setup_path_input: Entity<SimpleInputState>,
 
     // Editor state
+    pub editor_scroll: ScrollHandle,
     pub editor_input: Option<Entity<SimpleInputState>>,
     pub editor_target: Option<EditTarget>,
     pub editor_file_path: Option<String>,
@@ -125,21 +119,10 @@ impl KruhPane {
             focus_handle: cx.focus_handle(),
             config,
             state: KruhState::Scanning,
-            iteration: 0,
-            pass_count: 0,
-            fail_count: 0,
-            start_time: None,
-            agent_handle: None,
-            output_lines: Vec::new(),
-            output_scroll: ScrollHandle::new(),
-            diff_stat: None,
-            progress: StatusProgress::default(),
-            paused: false,
-            step_mode: false,
-            skip_requested: false,
-            quit_requested: false,
-            step_advance_requested: false,
-            _loop_task: None,
+            active_loops: Vec::new(),
+            loop_tasks: Vec::new(),
+            focused_loop_index: 0,
+            next_loop_id: 0,
             plans: Vec::new(),
             selected_plan_index: 0,
             selected_plan: None,
@@ -153,6 +136,7 @@ impl KruhPane {
             model_input,
             settings_scroll: ScrollHandle::new(),
             setup_path_input,
+            editor_scroll: ScrollHandle::new(),
             editor_input: None,
             editor_target: None,
             editor_file_path: None,
@@ -194,14 +178,19 @@ impl KruhPane {
             self.config.docs_dir = plan.dir.clone();
             self.selected_plan = Some(plan.clone());
 
+            // Ensure shared INSTRUCTIONS.md exists with default agent guidelines
+            let shared_instructions =
+                std::path::Path::new(&self.plans_dir).join("INSTRUCTIONS.md");
+            if Path::new(&self.plans_dir).is_dir() && !shared_instructions.exists() {
+                let _ = std::fs::write(
+                    &shared_instructions,
+                    agent_instructions::DEFAULT_AGENT_INSTRUCTIONS,
+                );
+            }
+
             // Load issues
             let docs_dir = plan.dir.clone();
             self.issues = status_parser::load_issue_details(&docs_dir);
-
-            // Update progress from plan info
-            self.progress.pending = plan.pending;
-            self.progress.done = plan.done;
-            self.progress.total = plan.total;
 
             self.selected_issue_index = 0;
             self.state = KruhState::TaskBrowser;
@@ -232,7 +221,9 @@ impl KruhPane {
 
         let file_path = match &target {
             EditTarget::Status => format!("{}/STATUS.md", docs_dir),
-            EditTarget::Instructions => format!("{}/INSTRUCTIONS.md", docs_dir),
+            EditTarget::Instructions => {
+                status_parser::resolve_instructions_path(docs_dir, &self.plans_dir)
+            }
             EditTarget::Issue => return, // use open_issue_editor instead
         };
 
@@ -403,12 +394,9 @@ impl KruhPane {
 
     /// Close the editor and return to TaskBrowser, refreshing issues if needed.
     pub fn close_editor(&mut self, cx: &mut Context<Self>) {
-        // Refresh issues and progress after editing any plan file
+        // Refresh issues after editing any plan file
         if let Some(plan) = &self.selected_plan {
             self.issues = status_parser::load_issue_details(&plan.dir);
-            if let Ok(progress) = status_parser::parse_status(&plan.dir) {
-                self.progress = progress;
-            }
         }
 
         self.editor_input = None;
@@ -429,25 +417,19 @@ impl KruhPane {
         self.config.model = self.model_input.read(cx).value().to_string();
         self.config.plans_dir = self.plans_dir.clone();
 
+        let plan = match &self.selected_plan {
+            Some(p) => p.clone(),
+            None => {
+                cx.notify();
+                return;
+            }
+        };
+
         // Validate docs_dir (should already be set by select_plan)
         if self.config.docs_dir.is_empty() {
-            self.add_output("Error: no plan selected", true);
             cx.notify();
             return;
         }
-
-        // Reset state for a new run
-        self.state = KruhState::Running;
-        self.iteration = 0;
-        self.pass_count = 0;
-        self.fail_count = 0;
-        self.output_lines.clear();
-        self.diff_stat = None;
-        self.paused = false;
-        self.skip_requested = false;
-        self.quit_requested = false;
-        self.step_advance_requested = false;
-        self.start_time = Some(Instant::now());
 
         // Save config to layout node's app_config for persistence
         if let Ok(config_json) = serde_json::to_value(&self.config) {
@@ -464,9 +446,104 @@ impl KruhPane {
             });
         }
 
-        self._loop_task = Some(loop_runner::start_loop(cx));
-        self.add_output("Loop started.", false);
+        // Create loop instance
+        let loop_id = self.next_loop_id;
+        self.next_loop_id += 1;
+        let mut config = self.config.clone();
+        config.docs_dir = plan.dir.clone();
+        let instance = LoopInstance::new(loop_id, plan, config);
+        self.active_loops.push(instance);
+        self.focused_loop_index = self.active_loops.len() - 1;
+
+        // Start the loop task
+        let task = loop_runner::start_loop(loop_id, cx);
+        self.loop_tasks.push((loop_id, task));
+
+        self.state = KruhState::LoopOverview;
         cx.notify();
+    }
+
+    /// Start loops for all plans that have pending tasks.
+    pub fn start_all_loops(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.config.model = self.model_input.read(cx).value().to_string();
+        self.config.plans_dir = self.plans_dir.clone();
+
+        // Save config
+        if let Ok(config_json) = serde_json::to_value(&self.config) {
+            let project_id = self.project_id.clone();
+            let layout_path = self.layout_path.clone();
+            self.workspace.update(cx, |ws, cx| {
+                ws.with_layout_node(&project_id, &layout_path, cx, |node| {
+                    if let crate::workspace::state::LayoutNode::App { app_config, .. } = node {
+                        *app_config = config_json;
+                        return true;
+                    }
+                    false
+                });
+            });
+        }
+
+        let plans: Vec<_> = self.plans.iter()
+            .filter(|p| p.pending > 0)
+            .cloned()
+            .collect();
+
+        if plans.is_empty() {
+            return;
+        }
+
+        for plan in plans {
+            let loop_id = self.next_loop_id;
+            self.next_loop_id += 1;
+            let mut config = self.config.clone();
+            config.docs_dir = plan.dir.clone();
+            let instance = LoopInstance::new(loop_id, plan, config);
+            self.active_loops.push(instance);
+
+            let task = loop_runner::start_loop(loop_id, cx);
+            self.loop_tasks.push((loop_id, task));
+        }
+
+        self.focused_loop_index = 0;
+        self.state = KruhState::LoopOverview;
+        cx.notify();
+    }
+
+    /// Get a mutable reference to a loop instance by ID.
+    pub fn loop_mut(&mut self, id: usize) -> Option<&mut LoopInstance> {
+        self.active_loops.iter_mut().find(|l| l.id == id)
+    }
+
+    /// Get an immutable reference to a loop instance by ID.
+    pub fn loop_ref(&self, id: usize) -> Option<&LoopInstance> {
+        self.active_loops.iter().find(|l| l.id == id)
+    }
+
+    /// Get the currently focused loop instance, if any.
+    pub fn focused_loop(&self) -> Option<&LoopInstance> {
+        self.active_loops.get(self.focused_loop_index)
+    }
+
+    /// Check if all loops are completed.
+    pub fn all_loops_completed(&self) -> bool {
+        !self.active_loops.is_empty()
+            && self.active_loops.iter().all(|l| l.state == LoopState::Completed)
+    }
+
+    /// Reset loop state and go back to plan picker.
+    pub fn close_loops(&mut self, cx: &mut Context<Self>) {
+        // Signal all loops to quit
+        for l in &mut self.active_loops {
+            l.quit_requested = true;
+        }
+        // Drop all tasks (cancels async loops)
+        self.loop_tasks.clear();
+        self.active_loops.clear();
+        self.focused_loop_index = 0;
+        self.selected_plan = None;
+        self.state = KruhState::PlanPicker;
+        // Re-scan to refresh plan status
+        self.start_scan(cx);
     }
 
     /// Handle directional navigation (Opt+Cmd+Arrow) — navigate to neighboring pane.
@@ -517,13 +594,105 @@ impl KruhPane {
 }
 
 impl KruhPane {
-    /// Append an output line to the display.
-    pub fn add_output(&mut self, text: &str, is_error: bool) {
-        self.output_lines.push(OutputLine {
-            text: text.to_string(),
-            timestamp: Instant::now(),
-            is_error,
-        });
+    /// Append an output line to a specific loop's display and auto-scroll to bottom.
+    pub fn add_loop_output(&mut self, loop_id: usize, text: &str, is_error: bool) {
+        if let Some(instance) = self.loop_mut(loop_id) {
+            instance.add_output(text, is_error);
+        }
+    }
+
+    /// Snapshot KruhPane into a pure-data `KruhViewState` suitable for remote rendering.
+    ///
+    /// No GPUI handles or `Instant` values appear in the output.
+    pub fn view_state(&self, cx: &Context<Self>) -> KruhViewState {
+        let screen = match &self.state {
+            KruhState::Scanning => KruhScreen::Scanning,
+            KruhState::PlanPicker => KruhScreen::PlanPicker {
+                plans: self
+                    .plans
+                    .iter()
+                    .map(|p| PlanViewInfo {
+                        name: p.name.clone(),
+                        path: p.dir.clone(),
+                        issue_count: p.total,
+                        completed_count: p.done,
+                    })
+                    .collect(),
+                selected_index: self.selected_plan_index,
+            },
+            KruhState::TaskBrowser => KruhScreen::TaskBrowser {
+                plan_name: self
+                    .selected_plan
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+                issues: self
+                    .issues
+                    .iter()
+                    .map(|issue| IssueViewInfo {
+                        number: issue.ref_info.number.clone(),
+                        title: issue.ref_info.name.clone(),
+                        status: if issue.done {
+                            "completed".to_string()
+                        } else {
+                            "pending".to_string()
+                        },
+                        priority: None,
+                    })
+                    .collect(),
+            },
+            KruhState::Editing => KruhScreen::Editing {
+                file_path: self.editor_file_path.clone().unwrap_or_default(),
+                content: self
+                    .editor_input
+                    .as_ref()
+                    .map(|e| e.read(cx).value().to_string())
+                    .unwrap_or_default(),
+                is_new: false,
+            },
+            KruhState::Settings => KruhScreen::Settings {
+                model: self.config.model.clone(),
+                max_iterations: self.config.max_iterations,
+                auto_start: false,
+            },
+            KruhState::LoopOverview => KruhScreen::LoopOverview {
+                loops: self
+                    .active_loops
+                    .iter()
+                    .map(|l| LoopViewInfo {
+                        loop_id: l.id,
+                        plan_name: l.plan.name.clone(),
+                        phase: format!("{}", l.loop_phase),
+                        state: match l.state {
+                            LoopState::Running => "running".to_string(),
+                            LoopState::Paused => "paused".to_string(),
+                            LoopState::WaitingForStep => "waiting".to_string(),
+                            LoopState::Completed => "completed".to_string(),
+                        },
+                        current_issue: l.current_issue_name.clone(),
+                        progress: ProgressViewInfo {
+                            completed: l.progress.done,
+                            total: l.progress.total,
+                        },
+                        // Cap output at last 200 lines
+                        output_lines: l
+                            .output_lines
+                            .iter()
+                            .rev()
+                            .take(200)
+                            .rev()
+                            .map(|o| OutputLineView {
+                                text: o.text.clone(),
+                                is_error: o.is_error,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                focused_index: self.focused_loop_index,
+            },
+        };
+
+        KruhViewState { app_id: self.app_id.clone(), screen }
     }
 }
 
@@ -579,10 +748,8 @@ impl Render for KruhPane {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     if this.state == KruhState::Editing {
-                        if let Some(input) = &this.editor_input {
-                            let editor_focus = input.read(cx).focus_handle(cx);
-                            window.focus(&editor_focus, cx);
-                        }
+                        // Don't steal focus from frontmatter inputs —
+                        // let SimpleInput handle focus via its own mouse_down handler.
                     } else if this.state == KruhState::Settings {
                         // Don't steal focus from inputs — let SimpleInput/PathAutoComplete
                         // handle focus via their own mouse_down handlers.
@@ -638,10 +805,10 @@ impl Focusable for KruhPane {
 
 impl Drop for KruhPane {
     fn drop(&mut self) {
-        // Kill any running agent subprocess
-        if let Some(mut handle) = self.agent_handle.take() {
-            handle.kill();
+        // Signal all loops to quit so agents get killed in their async tasks
+        for l in &mut self.active_loops {
+            l.quit_requested = true;
         }
-        // _loop_task is dropped automatically, which cancels the async task
+        // loop_tasks are dropped automatically, which cancels the async tasks
     }
 }
