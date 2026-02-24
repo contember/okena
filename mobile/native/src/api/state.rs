@@ -93,6 +93,7 @@ fn collect_layout_ids_vec(node: &okena_core::api::ApiLayoutNode, ids: &mut Vec<S
                 ids.push(id.clone());
             }
         }
+        okena_core::api::ApiLayoutNode::App { .. } => {}
         okena_core::api::ApiLayoutNode::Split { children, .. }
         | okena_core::api::ApiLayoutNode::Tabs { children, .. } => {
             for child in children {

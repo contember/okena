@@ -98,6 +98,10 @@ pub enum ApiLayoutNode {
         children: Vec<ApiLayoutNode>,
         active_tab: usize,
     },
+    App {
+        app_id: Option<String>,
+        app_kind: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -259,6 +263,16 @@ pub enum ActionRequest {
     ReloadServices {
         project_id: String,
     },
+    CreateApp {
+        project_id: String,
+        app_kind: String,
+        #[serde(default)]
+        app_config: serde_json::Value,
+    },
+    CloseApp {
+        project_id: String,
+        app_id: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -298,6 +312,7 @@ impl ApiLayoutNode {
                     ids.push(id.clone());
                 }
             }
+            ApiLayoutNode::App { .. } => {}
             ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
                 for child in children {
                     child.collect_terminal_ids_into(ids);
@@ -528,6 +543,15 @@ mod tests {
             },
             ActionRequest::ReloadServices {
                 project_id: "p1".into(),
+            },
+            ActionRequest::CreateApp {
+                project_id: "p1".into(),
+                app_kind: "kruh".into(),
+                app_config: serde_json::json!({"agent": "claude"}),
+            },
+            ActionRequest::CloseApp {
+                project_id: "p1".into(),
+                app_id: "app-123".into(),
             },
         ];
         for action in actions {

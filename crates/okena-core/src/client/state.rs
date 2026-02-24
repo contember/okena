@@ -89,6 +89,7 @@ fn collect_layout_terminal_ids(node: &ApiLayoutNode, ids: &mut HashSet<String>) 
                 ids.insert(id.clone());
             }
         }
+        ApiLayoutNode::App { .. } => {}
         ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
             for child in children {
                 collect_layout_terminal_ids(child, ids);
@@ -104,6 +105,7 @@ fn collect_layout_ids_vec(node: &ApiLayoutNode, ids: &mut Vec<String>) {
                 ids.push(id.clone());
             }
         }
+        ApiLayoutNode::App { .. } => {}
         ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
             for child in children {
                 collect_layout_ids_vec(child, ids);
