@@ -39,5 +39,8 @@ pub mod close_worktree_dialog;
 pub mod rename_directory_dialog;
 pub mod worktree_dialog;
 
+pub mod app_picker;
+
+pub use app_picker::{AppPickerOverlay, AppPickerEvent};
 pub use project_switcher::{ProjectSwitcher, ProjectSwitcherEvent};
 pub use shell_selector_overlay::{ShellSelectorOverlay, ShellSelectorOverlayEvent};

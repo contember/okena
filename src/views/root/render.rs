@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, NewKruhApp, ShowAppPicker, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -582,6 +582,39 @@ impl Render for RootView {
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
                 this.create_worktree_from_focus(cx);
+            }))
+            // Handle new kruh app action
+            .on_action(cx.listener({
+                let workspace = workspace.clone();
+                move |_this, _: &NewKruhApp, _window, cx| {
+                    let project_id = {
+                        let ws = workspace.read(cx);
+                        ws.focus_manager.focused_terminal_state()
+                            .map(|f| f.project_id.clone())
+                            .or_else(|| {
+                                ws.visible_projects()
+                                    .first()
+                                    .map(|p| p.id.clone())
+                            })
+                    };
+                    if let Some(project_id) = project_id {
+                        workspace.update(cx, |ws, cx| {
+                            ws.add_app(
+                                &project_id,
+                                "kruh",
+                                serde_json::Value::Null,
+                                cx,
+                            );
+                        });
+                    }
+                }
+            }))
+            // Handle show app picker action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowAppPicker, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_app_picker(cx));
+                }
             }))
             // Handle show file search action
             .on_action(cx.listener({

@@ -8,6 +8,7 @@ use gpui::*;
 use std::path::PathBuf;
 
 use crate::terminal::shell_config::ShellType;
+use crate::views::overlays::{AppPickerOverlay, AppPickerEvent};
 use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
 use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpEvent};
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
@@ -196,6 +197,12 @@ impl CloseEvent for RenameDirectoryDialogEvent {
     }
 }
 
+impl CloseEvent for AppPickerEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, AppPickerEvent::Close)
+    }
+}
+
 // ============================================================================
 // OverlayManager Entity
 // ============================================================================
@@ -282,6 +289,11 @@ pub enum OverlayManagerEvent {
     TabCloseOthers { project_id: String, layout_path: Vec<usize>, tab_index: usize },
     /// Tab context menu: close tabs to the right
     TabCloseToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+
+    /// App picker: open app as new tab
+    AppOpenAsTab { app_kind: String },
+    /// App picker: replace current pane with app
+    AppReplacePane { app_kind: String },
 }
 
 /// Centralized overlay manager that handles all modal overlays.
@@ -425,6 +437,37 @@ impl OverlayManager {
     /// Toggle command palette overlay.
     pub fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
         toggle_overlay!(self, cx, CommandPalette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
+    }
+
+    /// Toggle app picker overlay.
+    pub fn toggle_app_picker(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<AppPickerOverlay>() {
+            self.close_modal(cx);
+        } else {
+            let entity = cx.new(|cx| AppPickerOverlay::new(cx));
+            cx.subscribe(&entity, |this, _, event: &AppPickerEvent, cx| {
+                match event {
+                    AppPickerEvent::Close => {
+                        this.close_modal(cx);
+                    }
+                    AppPickerEvent::OpenAsTab { app_kind } => {
+                        cx.emit(OverlayManagerEvent::AppOpenAsTab {
+                            app_kind: app_kind.clone(),
+                        });
+                        this.close_modal(cx);
+                    }
+                    AppPickerEvent::ReplacePane { app_kind } => {
+                        cx.emit(OverlayManagerEvent::AppReplacePane {
+                            app_kind: app_kind.clone(),
+                        });
+                        this.close_modal(cx);
+                    }
+                }
+            })
+            .detach();
+            self.open_modal(entity, cx);
+        }
+        cx.notify();
     }
 
     /// Toggle settings panel overlay.

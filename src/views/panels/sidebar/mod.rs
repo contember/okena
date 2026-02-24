@@ -45,6 +45,7 @@ pub(super) enum SidebarCursorItem {
     Project { project_id: String },
     WorktreeProject { project_id: String },
     Terminal { project_id: String, terminal_id: String },
+    App { project_id: String, app_id: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
     #[allow(dead_code)]
@@ -432,13 +433,19 @@ impl Sidebar {
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
-        // Expanded terminal items
+        // Expanded terminal and app items
         if self.expanded_projects.contains(&project.id) {
             if let Some(ref layout) = project.layout {
                 for tid in layout.collect_terminal_ids() {
                     cursor_items.push(SidebarCursorItem::Terminal {
                         project_id: project.id.clone(),
                         terminal_id: tid,
+                    });
+                }
+                for (aid, _kind) in layout.collect_app_info() {
+                    cursor_items.push(SidebarCursorItem::App {
+                        project_id: project.id.clone(),
+                        app_id: aid,
                     });
                 }
             }
@@ -449,13 +456,19 @@ impl Sidebar {
             for child in children {
                 cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
 
-                // Expanded terminal items for worktree child
+                // Expanded terminal and app items for worktree child
                 if self.expanded_projects.contains(&child.id) {
                     if let Some(ref layout) = child.layout {
                         for tid in layout.collect_terminal_ids() {
                             cursor_items.push(SidebarCursorItem::Terminal {
                                 project_id: child.id.clone(),
                                 terminal_id: tid,
+                            });
+                        }
+                        for (aid, _kind) in layout.collect_app_info() {
+                            cursor_items.push(SidebarCursorItem::App {
+                                project_id: child.id.clone(),
+                                app_id: aid,
                             });
                         }
                     }
@@ -551,6 +564,16 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
+            SidebarCursorItem::App { project_id, app_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_app_by_id(&project_id, &app_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
             SidebarCursorItem::Folder { folder_id } => {
                 self.workspace.update(cx, |ws, cx| {
                     ws.toggle_folder_collapsed(&folder_id, cx);
@@ -591,7 +614,7 @@ impl Sidebar {
             SidebarCursorItem::WorktreeProject { project_id } => {
                 self.toggle_expanded(&project_id);
             }
-            SidebarCursorItem::Terminal { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::App { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -818,6 +841,8 @@ pub(super) struct SidebarProjectInfo {
     pub worktree_count: usize,
     /// True if this is a worktree whose parent project no longer exists
     pub is_orphan: bool,
+    /// App panes: (app_id, app_kind)
+    pub app_info: Vec<(String, String)>,
 }
 
 impl SidebarProjectInfo {
@@ -841,6 +866,9 @@ impl SidebarProjectInfo {
             terminal_names: project.terminal_names.clone(),
             worktree_count: 0,
             is_orphan: false,
+            app_info: layout
+                .map(|l| l.collect_app_info())
+                .unwrap_or_default(),
         }
     }
 }
@@ -997,7 +1025,7 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Expanded terminals
+                    // Expanded terminals and apps
                     if self.expanded_projects.contains(&project.id) {
                         let minimized_states: Vec<(String, bool)> = {
                             let ws = self.workspace.read(cx);
@@ -1011,6 +1039,13 @@ impl Render for Sidebar {
                             let is_in_tab_group = project.tab_group_terminals.contains(tid.as_str());
                             flat_elements.push(
                                 self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 28.0, "", is_cursor, cx).into_any_element()
+                            );
+                            flat_idx += 1;
+                        }
+                        for (aid, akind) in &project.app_info {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            flat_elements.push(
+                                self.render_app_item(&project.id, aid, akind, 28.0, is_cursor, cx).into_any_element()
                             );
                             flat_idx += 1;
                         }
@@ -1038,6 +1073,13 @@ impl Render for Sidebar {
                                 let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                 flat_elements.push(
                                     self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                );
+                                flat_idx += 1;
+                            }
+                            for (aid, akind) in &child.app_info {
+                                let is_cursor = cursor_index == Some(flat_idx);
+                                flat_elements.push(
+                                    self.render_app_item(&child.id, aid, akind, 48.0, is_cursor, cx).into_any_element()
                                 );
                                 flat_idx += 1;
                             }
@@ -1076,7 +1118,7 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Expanded terminals for folder project
+                            // Expanded terminals and apps for folder project
                             if self.expanded_projects.contains(&fp.id) {
                                 let minimized_states: Vec<(String, bool)> = {
                                     let ws = self.workspace.read(cx);
@@ -1090,6 +1132,13 @@ impl Render for Sidebar {
                                     let is_in_tab_group = fp.tab_group_terminals.contains(tid.as_str());
                                     flat_elements.push(
                                         self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "", is_cursor, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+                                }
+                                for (aid, akind) in &fp.app_info {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    flat_elements.push(
+                                        self.render_app_item(&fp.id, aid, akind, 48.0, is_cursor, cx).into_any_element()
                                     );
                                     flat_idx += 1;
                                 }
@@ -1118,6 +1167,13 @@ impl Render for Sidebar {
                                             let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                             flat_elements.push(
                                                 self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 68.0, "wt-", is_cursor, cx).into_any_element()
+                                            );
+                                            flat_idx += 1;
+                                        }
+                                        for (aid, akind) in &child.app_info {
+                                            let is_cursor = cursor_index == Some(flat_idx);
+                                            flat_elements.push(
+                                                self.render_app_item(&child.id, aid, akind, 68.0, is_cursor, cx).into_any_element()
                                             );
                                             flat_idx += 1;
                                         }

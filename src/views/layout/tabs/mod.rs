@@ -15,6 +15,7 @@ use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, Heade
 use crate::views::components::{is_renaming, rename_input, SimpleInput};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
+use crate::views::layout::app_registry;
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -86,6 +87,7 @@ impl LayoutContainer {
         &self,
         ctx: TabActionContext,
         terminal_id: Option<String>,
+        app_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
@@ -96,6 +98,7 @@ impl LayoutContainer {
         let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
+        let app_id_for_close = app_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
 
         // Clone context for each action - much cleaner than individual clones
@@ -237,8 +240,13 @@ impl LayoutContainer {
             .child({
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }))
                     .on_click(move |_, _window, cx| {
-                        if let Some(ref tid) = terminal_id_for_close {
-                            if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                        if let Some(ref dispatcher) = ctx_close.action_dispatcher {
+                            if let Some(ref aid) = app_id_for_close {
+                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseApp {
+                                    project_id: ctx_close.project_id.clone(),
+                                    app_id: aid.clone(),
+                                }, cx);
+                            } else if let Some(ref tid) = terminal_id_for_close {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
                                     project_id: ctx_close.project_id.clone(),
                                     terminal_id: tid.clone(),
@@ -344,8 +352,8 @@ impl LayoutContainer {
             )
     }
 
-    /// Render a tab bar for a standalone terminal (not inside a Tabs container).
-    /// Delegates to the shared `render_tab_bar` with the current terminal node.
+    /// Render a tab bar for a standalone pane (not inside a Tabs container).
+    /// Delegates to the shared `render_tab_bar` with the current node.
     pub(super) fn render_standalone_tab_bar(
         &mut self,
         _window: &mut Window,
@@ -358,6 +366,7 @@ impl LayoutContainer {
 
         let children: &[LayoutNode] = match node {
             Some(ref n @ LayoutNode::Terminal { .. }) => std::slice::from_ref(n),
+            Some(ref n @ LayoutNode::App { .. }) => std::slice::from_ref(n),
             _ => &[],
         };
 
@@ -406,13 +415,25 @@ impl LayoutContainer {
             let layout_path_for_drag = layout_path.clone();
             let layout_path_for_drop = layout_path.clone();
 
-            // Get terminal ID from the child node if it's a terminal
+            // Detect terminal vs app child and extract pane info
+            let (pane_id, pane_icon, is_app) = match child {
+                LayoutNode::Terminal { terminal_id: Some(id), .. } => (Some(id.clone()), "icons/terminal.svg", false),
+                LayoutNode::App { app_id, app_kind, .. } => {
+                    let icon = app_registry::find_app(app_kind)
+                        .map(|def| def.icon_path)
+                        .unwrap_or("icons/terminal.svg");
+                    (app_id.clone(), icon, true)
+                }
+                _ => (None, "icons/terminal.svg", false),
+            };
+
+            // Terminal-specific: get terminal_id for idle detection and rename
             let terminal_id = match child {
                 LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.clone()),
                 _ => None,
             };
 
-            // Check cached waiting state and idle duration (cheap atomic read, no subprocess)
+            // Check cached waiting state and idle duration (terminals only)
             let (is_waiting, idle_label) = terminal_id.as_ref().map_or((false, None), |tid| {
                 let guard = terminals.lock();
                 guard.get(tid).map_or((false, None), |t| {
@@ -424,8 +445,17 @@ impl LayoutContainer {
                 })
             });
 
-            // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
-            let tab_label = if let Some(ref tid) = terminal_id {
+            // Get tab label
+            let tab_label = if is_app {
+                match child {
+                    LayoutNode::App { app_kind, .. } => {
+                        app_registry::find_app(app_kind)
+                            .map(|def| def.display_name.to_string())
+                            .unwrap_or_else(|| format!("Tab {}", i + 1))
+                    }
+                    _ => format!("Tab {}", i + 1),
+                }
+            } else if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
                     let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
                     p.terminal_display_name(tid, osc_title)
@@ -485,7 +515,7 @@ impl LayoutContainer {
                     let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
                         is_renaming(&self.tab_rename_state, tid)
                     });
-                    if is_renaming_this {
+                    if !is_app && is_renaming_this {
                         if let Some(input) = rename_input(&self.tab_rename_state) {
                             div()
                                 .id(format!("tab-rename-{}", i))
@@ -517,7 +547,7 @@ impl LayoutContainer {
                             let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                             h_flex()
                                 .gap(px(6.0))
-                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
+                                .child(svg().path(pane_icon).size(px(12.0)).text_color(icon_color))
                                 .child(tab_label.clone())
                                 .children(idle_label.as_ref().map(|d| {
                                     div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
@@ -525,10 +555,18 @@ impl LayoutContainer {
                                 .into_any_element()
                         }
                     } else {
-                        let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_color = if is_app {
+                            if is_active { rgb(t.success) } else { rgb(t.text_muted) }
+                        } else if is_waiting {
+                            rgb(t.border_idle)
+                        } else if is_active {
+                            rgb(t.success)
+                        } else {
+                            rgb(t.text_muted)
+                        };
                         h_flex()
                             .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
+                            .child(svg().path(pane_icon).size(px(12.0)).text_color(icon_color))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
@@ -559,23 +597,31 @@ impl LayoutContainer {
                 // Middle-click to close tab
                 .on_mouse_down(MouseButton::Middle, {
                     let project_id = project_id.clone();
-                    let terminal_id = terminal_id.clone();
+                    let pane_id = pane_id.clone();
+                    let is_app = is_app;
                     let action_dispatcher = self.action_dispatcher.clone();
                     cx.listener(move |_this, _event: &MouseDownEvent, _window, cx| {
-                        if let Some(ref tid) = terminal_id {
+                        if let Some(ref id) = pane_id {
                             if let Some(ref dispatcher) = action_dispatcher {
-                                dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
-                                    project_id: project_id.clone(),
-                                    terminal_id: tid.clone(),
-                                }, cx);
+                                if is_app {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::CloseApp {
+                                        project_id: project_id.clone(),
+                                        app_id: id.clone(),
+                                    }, cx);
+                                } else {
+                                    dispatcher.dispatch(okena_core::api::ActionRequest::CloseTerminal {
+                                        project_id: project_id.clone(),
+                                        terminal_id: id.clone(),
+                                    }, cx);
+                                }
                             }
                         }
                         cx.stop_propagation();
                     })
                 })
-                // Drag source
-                .when_some(terminal_id.clone(), |el, tid| {
-                    let terminal_path = if standalone {
+                // Drag source (works for both terminals and apps)
+                .when_some(pane_id.clone(), |el, pid| {
+                    let pane_path = if standalone {
                         layout_path_for_drag.clone()
                     } else {
                         let mut p = layout_path_for_drag.clone();
@@ -585,12 +631,13 @@ impl LayoutContainer {
                     el.on_drag(
                         PaneDrag {
                             project_id: project_id_for_drag.clone(),
-                            layout_path: terminal_path,
-                            terminal_id: tid,
-                            terminal_name: tab_label.clone(),
+                            layout_path: pane_path,
+                            pane_id: pid,
+                            pane_name: tab_label.clone(),
+                            icon_path: pane_icon.to_string(),
                         },
                         move |drag, _position, _window, cx| {
-                            cx.new(|_| PaneDragView::new(drag.terminal_name.clone()))
+                            cx.new(|_| PaneDragView::new(drag.pane_name.clone(), drag.icon_path.clone()))
                         },
                     )
                 })
@@ -641,7 +688,7 @@ impl LayoutContainer {
                                 if let Some(ref dispatcher) = dispatcher_for_drop {
                                     dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
                                         project_id: drag.project_id.clone(),
-                                        terminal_id: drag.terminal_id.clone(),
+                                        terminal_id: drag.pane_id.clone(),
                                         target_path: layout_path_for_drop.clone(),
                                         position: Some(i),
                                     }, cx);
@@ -655,6 +702,8 @@ impl LayoutContainer {
                     let project_id = project_id.clone();
                     let layout_path = layout_path.clone();
                     let terminal_id = terminal_id.clone();
+                    let pane_id = pane_id.clone();
+                    let is_app = is_app;
                     let tab_label = tab_label.clone();
                     let dispatcher_for_click = self.action_dispatcher.clone();
                     cx.listener(move |this, _, window, cx| {
@@ -681,9 +730,9 @@ impl LayoutContainer {
                             }
                         }
 
-                        // Focus the terminal in the clicked tab
-                        if terminal_id.is_some() {
-                            let terminal_path = if standalone {
+                        // Focus the pane in the clicked tab
+                        if pane_id.is_some() {
+                            let pane_path = if standalone {
                                 layout_path.clone()
                             } else {
                                 let mut p = layout_path.clone();
@@ -691,12 +740,12 @@ impl LayoutContainer {
                                 p
                             };
                             workspace.update(cx, |ws, cx| {
-                                ws.set_focused_terminal(project_id.clone(), terminal_path, cx);
+                                ws.set_focused_terminal(project_id.clone(), pane_path, cx);
                             });
                         }
 
-                        // Double-click → start rename
-                        if is_double_click {
+                        // Double-click → start rename (terminals only, not apps)
+                        if is_double_click && !is_app {
                             if let Some(ref tid) = terminal_id {
                                 this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
                             }
@@ -775,7 +824,7 @@ impl LayoutContainer {
                         if let Some(ref dispatcher) = dispatcher_for_end {
                             dispatcher.dispatch(okena_core::api::ActionRequest::MoveTerminalToTabGroup {
                                 project_id: drag.project_id.clone(),
-                                terminal_id: drag.terminal_id.clone(),
+                                terminal_id: drag.pane_id.clone(),
                                 target_path: layout_path_for_end.clone(),
                                 position: None,
                             }, cx);
@@ -794,17 +843,18 @@ impl LayoutContainer {
             action_dispatcher: self.action_dispatcher.clone(),
         };
 
-        // Get terminal_id for actions
-        let terminal_id_for_actions = if standalone {
+        // Get terminal_id and app_id for actions
+        let (terminal_id_for_actions, app_id_for_actions) = if standalone {
             match children.first() {
-                Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
-                _ => None,
+                Some(LayoutNode::Terminal { terminal_id, .. }) => (terminal_id.clone(), None),
+                Some(LayoutNode::App { app_id, .. }) => (None, app_id.clone()),
+                _ => (None, None),
             }
         } else {
-            self.get_active_terminal_id(active_tab, cx)
+            (self.get_active_terminal_id(active_tab, cx), self.get_active_app_id(active_tab, cx))
         };
 
-        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
+        let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), app_id_for_actions, cx);
 
         // Check shell selector visibility
         let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();

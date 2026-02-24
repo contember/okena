@@ -341,5 +341,21 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             file_path,
             mode,
         },
+        ActionRequest::CreateApp {
+            project_id,
+            app_kind,
+            app_config,
+        } => ActionRequest::CreateApp {
+            project_id: s(&project_id),
+            app_kind,
+            app_config,
+        },
+        ActionRequest::CloseApp {
+            project_id,
+            app_id,
+        } => ActionRequest::CloseApp {
+            project_id: s(&project_id),
+            app_id: s(&app_id),
+        },
     }
 }

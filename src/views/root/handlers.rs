@@ -231,6 +231,57 @@ impl RootView {
                     }, cx);
                 }
             }
+            OverlayManagerEvent::AppOpenAsTab { app_kind } => {
+                let focus = self.workspace.read(cx).focus_manager.focused_terminal_state();
+                if let Some(focus) = focus {
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.add_app_as_tab(
+                            &focus.project_id,
+                            &focus.layout_path,
+                            app_kind.clone(),
+                            serde_json::Value::Null,
+                            cx,
+                        );
+                    });
+                }
+            }
+            OverlayManagerEvent::AppReplacePane { app_kind } => {
+                let (focus, terminal_id) = {
+                    let ws = self.workspace.read(cx);
+                    let focus = ws.focus_manager.focused_terminal_state();
+                    let terminal_id = focus.as_ref().and_then(|f| {
+                        ws.project(&f.project_id)
+                            .and_then(|p| p.layout.as_ref())
+                            .and_then(|l| l.get_at_path(&f.layout_path))
+                            .and_then(|node| {
+                                if let LayoutNode::Terminal { terminal_id, .. } = node {
+                                    terminal_id.clone()
+                                } else {
+                                    None
+                                }
+                            })
+                    });
+                    (focus, terminal_id)
+                };
+
+                if let Some(focus) = focus {
+                    // Kill terminal PTY if replacing a terminal
+                    if let Some(ref tid) = terminal_id {
+                        self.backend.kill(tid);
+                        self.terminals.lock().remove(tid);
+                    }
+
+                    self.workspace.update(cx, |ws, cx| {
+                        ws.replace_pane_with_app(
+                            &focus.project_id,
+                            &focus.layout_path,
+                            app_kind.clone(),
+                            serde_json::Value::Null,
+                            cx,
+                        );
+                    });
+                }
+            }
             OverlayManagerEvent::RemoteConnected { config } => {
                 if let Some(ref rm) = self.remote_manager {
                     let config_clone = config.clone();

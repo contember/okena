@@ -162,6 +162,13 @@ pub enum LayoutNode {
         #[serde(default)]
         active_tab: usize,
     },
+    App {
+        app_id: Option<String>,
+        #[serde(default)]
+        app_kind: String,
+        #[serde(default)]
+        app_config: serde_json::Value,
+    },
 }
 
 pub use okena_core::types::SplitDirection;
@@ -448,6 +455,7 @@ impl LayoutNode {
     pub fn is_all_hidden(&self) -> bool {
         match self {
             LayoutNode::Terminal { minimized, detached, .. } => *minimized || *detached,
+            LayoutNode::App { .. } => false,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 children.iter().all(|c| c.is_all_hidden())
             }
@@ -493,6 +501,86 @@ impl LayoutNode {
         }
     }
 
+    /// Create a new app pane node
+    #[allow(dead_code)]
+    pub fn new_app(kind: impl Into<String>, config: serde_json::Value) -> Self {
+        LayoutNode::App {
+            app_id: None,
+            app_kind: kind.into(),
+            app_config: config,
+        }
+    }
+
+    /// Collect all app IDs in this layout tree
+    pub fn collect_app_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        self.collect_app_ids_recursive(&mut ids);
+        ids
+    }
+
+    fn collect_app_ids_recursive(&self, ids: &mut Vec<String>) {
+        match self {
+            LayoutNode::Terminal { .. } | LayoutNode::App { app_id: None, .. } => {}
+            LayoutNode::App { app_id: Some(id), .. } => {
+                ids.push(id.clone());
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.collect_app_ids_recursive(ids);
+                }
+            }
+        }
+    }
+
+    /// Collect all app (id, kind) pairs in this layout tree
+    pub fn collect_app_info(&self) -> Vec<(String, String)> {
+        let mut info = Vec::new();
+        self.collect_app_info_recursive(&mut info);
+        info
+    }
+
+    fn collect_app_info_recursive(&self, info: &mut Vec<(String, String)>) {
+        match self {
+            LayoutNode::Terminal { .. } | LayoutNode::App { app_id: None, .. } => {}
+            LayoutNode::App { app_id: Some(id), app_kind, .. } => {
+                info.push((id.clone(), app_kind.clone()));
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.collect_app_info_recursive(info);
+                }
+            }
+        }
+    }
+
+    /// Find the layout path to an app pane by its ID
+    pub fn find_app_path(&self, target_id: &str) -> Option<Vec<usize>> {
+        self.find_app_path_recursive(target_id, vec![])
+    }
+
+    fn find_app_path_recursive(&self, target_id: &str, current_path: Vec<usize>) -> Option<Vec<usize>> {
+        match self {
+            LayoutNode::App { app_id, .. } => {
+                if app_id.as_deref() == Some(target_id) {
+                    Some(current_path)
+                } else {
+                    None
+                }
+            }
+            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    let mut child_path = current_path.clone();
+                    child_path.push(i);
+                    if let Some(found_path) = child.find_app_path_recursive(target_id, child_path) {
+                        return Some(found_path);
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Get the layout node at a given path
     pub fn get_at_path(&self, path: &[usize]) -> Option<&LayoutNode> {
         if path.is_empty() {
@@ -500,7 +588,7 @@ impl LayoutNode {
         }
 
         match self {
-            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 children.get(path[0])?.get_at_path(&path[1..])
             }
@@ -514,7 +602,7 @@ impl LayoutNode {
         }
 
         match self {
-            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 children.get_mut(path[0])?.get_at_path_mut(&path[1..])
             }
@@ -535,6 +623,7 @@ impl LayoutNode {
                     ids.push(id.clone());
                 }
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
                     child.collect_terminal_ids_recursive(ids);
@@ -552,6 +641,7 @@ impl LayoutNode {
                 *minimized = false;
                 *detached = false;
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
                     child.clear_terminal_ids();
@@ -574,11 +664,49 @@ impl LayoutNode {
                     None
                 }
             }
+            LayoutNode::App { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(i);
                     if let Some(found_path) = child.find_terminal_path_recursive(target_id, child_path) {
+                        return Some(found_path);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Find the layout path to any leaf (terminal or app) by its ID.
+    ///
+    /// Searches both terminal_id and app_id fields. Used by move operations
+    /// that need to locate either type of pane.
+    pub fn find_leaf_path(&self, target_id: &str) -> Option<Vec<usize>> {
+        self.find_leaf_path_recursive(target_id, vec![])
+    }
+
+    fn find_leaf_path_recursive(&self, target_id: &str, current_path: Vec<usize>) -> Option<Vec<usize>> {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if terminal_id.as_deref() == Some(target_id) {
+                    Some(current_path)
+                } else {
+                    None
+                }
+            }
+            LayoutNode::App { app_id, .. } => {
+                if app_id.as_deref() == Some(target_id) {
+                    Some(current_path)
+                } else {
+                    None
+                }
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    let mut child_path = current_path.clone();
+                    child_path.push(i);
+                    if let Some(found_path) = child.find_leaf_path_recursive(target_id, child_path) {
                         return Some(found_path);
                     }
                 }
@@ -604,6 +732,7 @@ impl LayoutNode {
                     }
                 }
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } => {
                 for child in children {
                     child.collect_inactive_tabs_recursive(result, is_behind_inactive_tab);
@@ -635,6 +764,7 @@ impl LayoutNode {
                     }
                 }
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } => {
                 for child in children {
                     child.collect_tab_group_recursive(result, inside_tab_group);
@@ -657,7 +787,7 @@ impl LayoutNode {
             return;
         }
         match self {
-            LayoutNode::Terminal { .. } => {}
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } => {
                 if let Some(child) = children.get_mut(path[0]) {
                     child.activate_tabs_along_path(&path[1..]);
@@ -688,6 +818,7 @@ impl LayoutNode {
                     }
                 }
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
@@ -714,6 +845,7 @@ impl LayoutNode {
                     }
                 }
             }
+            LayoutNode::App { .. } => {}
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
@@ -732,7 +864,7 @@ impl LayoutNode {
     fn find_uninitialized_terminal_path_recursive(&self, current_path: Vec<usize>) -> Option<Vec<usize>> {
         match self {
             LayoutNode::Terminal { terminal_id: None, .. } => Some(current_path),
-            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     let mut child_path = current_path.clone();
@@ -753,7 +885,7 @@ impl LayoutNode {
 
     fn find_first_terminal_path_recursive(&self, current_path: Vec<usize>) -> Vec<usize> {
         match self {
-            LayoutNode::Terminal { .. } => current_path,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => current_path,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 if let Some(first_child) = children.first() {
                     let mut child_path = current_path;
@@ -780,7 +912,7 @@ impl LayoutNode {
         let parent = self.get_at_path_mut(parent_path)?;
 
         match parent {
-            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => None,
             LayoutNode::Split { children, sizes, .. } => {
                 if child_index >= children.len() {
                     return None;
@@ -822,7 +954,7 @@ impl LayoutNode {
     pub fn normalize(&mut self) {
         // First, recursively normalize children
         match self {
-            LayoutNode::Terminal { .. } => return,
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => return,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children.iter_mut() {
                     child.normalize();
@@ -927,6 +1059,11 @@ impl LayoutNode {
             LayoutNode::Tabs { children, active_tab } => LayoutNode::Tabs {
                 children: children.iter().map(|c| c.clone_structure()).collect(),
                 active_tab: *active_tab,
+            },
+            LayoutNode::App { app_kind, app_config, .. } => LayoutNode::App {
+                app_id: None,
+                app_kind: app_kind.clone(),
+                app_config: app_config.clone(),
             },
         }
     }
@@ -1848,6 +1985,91 @@ mod tests {
             }
             _ => panic!("Expected split"),
         }
+    }
+
+    // === App pane tests ===
+
+    fn app(id: &str) -> LayoutNode {
+        LayoutNode::App {
+            app_id: Some(id.to_string()),
+            app_kind: "kruh".to_string(),
+            app_config: serde_json::json!({"docs_dir": "/tmp"}),
+        }
+    }
+
+    #[test]
+    fn app_serialization_roundtrip() {
+        let node = LayoutNode::new_app("kruh", serde_json::json!({"docs_dir": "/tmp"}));
+        let json = serde_json::to_string(&node).unwrap();
+        let deserialized: LayoutNode = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            LayoutNode::App { app_id, app_kind, app_config } => {
+                assert_eq!(app_id, None);
+                assert_eq!(app_kind, "kruh");
+                assert_eq!(app_config, serde_json::json!({"docs_dir": "/tmp"}));
+            }
+            _ => panic!("expected App variant"),
+        }
+    }
+
+    #[test]
+    fn collect_terminal_ids_excludes_apps() {
+        let tree = hsplit(vec![
+            terminal("t1"),
+            app("a1"),
+        ]);
+        let ids = tree.collect_terminal_ids();
+        assert_eq!(ids, vec!["t1"]);
+    }
+
+    #[test]
+    fn collect_app_ids_returns_only_apps() {
+        let tree = hsplit(vec![
+            terminal("t1"),
+            app("a1"),
+            tabs(vec![
+                terminal("t2"),
+                app("a2"),
+            ]),
+        ]);
+        let ids = tree.collect_app_ids();
+        assert_eq!(ids, vec!["a1", "a2"]);
+    }
+
+    #[test]
+    fn collect_app_ids_skips_none() {
+        let tree = hsplit(vec![
+            terminal("t1"),
+            LayoutNode::new_app("kruh", serde_json::Value::Null),
+        ]);
+        let ids = tree.collect_app_ids();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn find_app_path_in_nested_tree() {
+        let tree = hsplit(vec![
+            terminal("t1"),
+            tabs(vec![
+                terminal("t2"),
+                app("a1"),
+            ]),
+        ]);
+        let path = tree.find_app_path("a1");
+        assert_eq!(path, Some(vec![1, 1]));
+    }
+
+    #[test]
+    fn find_app_path_missing() {
+        let tree = hsplit(vec![terminal("t1"), app("a1")]);
+        assert_eq!(tree.find_app_path("a2"), None);
+    }
+
+    #[test]
+    fn backward_compat_no_app_nodes() {
+        let json = r#"{"type":"terminal","terminal_id":"t1"}"#;
+        let node: LayoutNode = serde_json::from_str(json).unwrap();
+        assert!(matches!(node, LayoutNode::Terminal { .. }));
     }
 }
 

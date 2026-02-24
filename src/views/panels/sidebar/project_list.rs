@@ -8,6 +8,8 @@ use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
 
+use crate::views::layout::app_registry;
+
 use super::item_widgets::*;
 use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag};
 use std::collections::HashMap;
@@ -589,6 +591,84 @@ impl Sidebar {
                                     .build(_window, cx)
                             }),
                     ),
+            )
+    }
+
+    pub(super) fn render_app_item(
+        &self,
+        project_id: &str,
+        app_id: &str,
+        app_kind: &str,
+        left_padding: f32,
+        is_cursor: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let t = theme(cx);
+        let project_id = project_id.to_string();
+        let app_id = app_id.to_string();
+
+        let def = app_registry::find_app(app_kind);
+        let icon = def.map(|d| d.icon_path).unwrap_or("icons/terminal.svg");
+        let name = def.map(|d| d.display_name).unwrap_or("App");
+
+        // Check if this app is currently focused
+        let is_focused = {
+            let ws = self.workspace.read(cx);
+            ws.focus_manager.focused_terminal_state().map_or(false, |ft| {
+                if let Some(proj) = ws.project(&project_id) {
+                    proj.layout.as_ref()
+                        .and_then(|l| l.find_app_path(&app_id))
+                        .map_or(false, |path| ft.project_id == project_id && ft.layout_path == path)
+                } else {
+                    false
+                }
+            })
+        };
+
+        div()
+            .id(ElementId::Name(format!("app-item-{}", app_id).into()))
+            .h(px(22.0))
+            .pl(px(left_padding))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
+            .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .on_click(cx.listener({
+                let project_id = project_id.clone();
+                let app_id = app_id.clone();
+                move |this, _, _window, cx| {
+                    this.cursor_index = None;
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.focus_app_by_id(&project_id, &app_id, cx);
+                    });
+                }
+            }))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path(icon)
+                            .size(px(12.0))
+                            .text_color(rgb(t.text_secondary))
+                    ),
+            )
+            .child(
+                sidebar_name_label(
+                    ElementId::Name(format!("app-name-{}", app_id).into()),
+                    name.to_string(),
+                    &t,
+                )
+                .into_any_element()
             )
     }
 }

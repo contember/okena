@@ -72,6 +72,8 @@ actions!(
         SidebarEscape,
         ShowPairingDialog,
         TogglePaneSwitcher,
+        NewKruhApp,
+        ShowAppPicker,
     ]
 );
 
@@ -224,6 +226,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
         "ShowPairingDialog" => Some(KeyBinding::new(keystroke, ShowPairingDialog, context)),
         "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
+        "NewKruhApp" => Some(KeyBinding::new(keystroke, NewKruhApp, context)),
+        "ShowAppPicker" => Some(KeyBinding::new(keystroke, ShowAppPicker, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None
