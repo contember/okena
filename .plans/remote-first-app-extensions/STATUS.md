@@ -7,7 +7,7 @@
 - [x] 03 — Add handle_action() to KruhPane
 - [x] 04 — Extend API types for app state and actions
 - [x] 05 — Create AppStateBroadcaster
-- [ ] 06 — App state publishing from GPUI thread
+- [x] 06 — App state publishing from GPUI thread
 - [ ] 07 — App Entity Registry and Bridge commands
 - [ ] 08 — WebSocket handler for app subscriptions
 - [ ] 09 — Include app state in GET /v1/state
