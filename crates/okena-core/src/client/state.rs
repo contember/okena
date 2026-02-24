@@ -7,6 +7,10 @@ pub struct StateDiff {
     pub added_terminals: Vec<String>,
     /// Terminal IDs that were in the old state but not the new
     pub removed_terminals: Vec<String>,
+    /// App IDs that appeared in the new state but not the old
+    pub added_apps: Vec<String>,
+    /// App IDs that were in the old state but not the new
+    pub removed_apps: Vec<String>,
     /// Project IDs whose layouts changed between old and new states
     pub changed_projects: Vec<String>,
 }
@@ -29,6 +33,12 @@ pub fn diff_states(old: &StateResponse, new: &StateResponse) -> StateDiff {
         .difference(&new_terminals)
         .cloned()
         .collect();
+
+    let old_apps = collect_all_app_ids(old);
+    let new_apps = collect_all_app_ids(new);
+
+    let added_apps: Vec<String> = new_apps.difference(&old_apps).cloned().collect();
+    let removed_apps: Vec<String> = old_apps.difference(&new_apps).cloned().collect();
 
     // Detect projects with layout changes by comparing serialized layouts
     let mut changed_projects = Vec::new();
@@ -56,7 +66,36 @@ pub fn diff_states(old: &StateResponse, new: &StateResponse) -> StateDiff {
     StateDiff {
         added_terminals,
         removed_terminals,
+        added_apps,
+        removed_apps,
         changed_projects,
+    }
+}
+
+/// Collect all app IDs from all projects in a StateResponse (as a HashSet).
+pub fn collect_all_app_ids(state: &StateResponse) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for project in &state.projects {
+        if let Some(ref layout) = project.layout {
+            collect_layout_app_ids(layout, &mut ids);
+        }
+    }
+    ids
+}
+
+fn collect_layout_app_ids(node: &ApiLayoutNode, ids: &mut HashSet<String>) {
+    match node {
+        ApiLayoutNode::App {
+            app_id: Some(id), ..
+        } => {
+            ids.insert(id.clone());
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                collect_layout_app_ids(child, ids);
+            }
+        }
+        _ => {}
     }
 }
 

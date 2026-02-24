@@ -28,6 +28,16 @@ pub enum WsInbound {
         cols: u16,
         rows: u16,
     },
+    SubscribeApps {
+        app_ids: Vec<String>,
+    },
+    UnsubscribeApps {
+        app_ids: Vec<String>,
+    },
+    AppAction {
+        app_id: String,
+        action: serde_json::Value,
+    },
     Ping,
 }
 
@@ -58,6 +68,11 @@ pub enum WsOutbound {
     },
     GitStatusChanged {
         projects: std::collections::HashMap<String, ApiGitStatus>,
+    },
+    AppStateChanged {
+        app_id: String,
+        app_kind: String,
+        state: serde_json::Value,
     },
 }
 
@@ -134,6 +149,16 @@ mod tests {
                 cols: 80,
                 rows: 24,
             },
+            WsInbound::SubscribeApps {
+                app_ids: vec!["app-1".into(), "app-2".into()],
+            },
+            WsInbound::UnsubscribeApps {
+                app_ids: vec!["app-1".into()],
+            },
+            WsInbound::AppAction {
+                app_id: "app-1".into(),
+                action: serde_json::json!({"kind": "click"}),
+            },
             WsInbound::Ping,
         ];
         for msg in messages {
@@ -170,6 +195,11 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+            },
+            WsOutbound::AppStateChanged {
+                app_id: "app-1".into(),
+                app_kind: "kruh".into(),
+                state: serde_json::json!({"step": 3}),
             },
         ];
         for msg in messages {
