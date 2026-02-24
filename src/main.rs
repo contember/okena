@@ -7,6 +7,7 @@ mod app;
 mod assets;
 mod elements;
 mod git;
+mod jj;
 mod keybindings;
 mod process;
 mod remote;
