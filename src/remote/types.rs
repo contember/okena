@@ -44,14 +44,13 @@ impl LayoutNode {
                 children: children.iter().map(LayoutNode::from_api).collect(),
                 active_tab: *active_tab,
             },
-            ApiLayoutNode::App {
-                app_id,
-                app_kind,
-            } => LayoutNode::App {
-                app_id: app_id.clone(),
-                app_kind: app_kind.clone(),
-                app_config: serde_json::Value::Null,
-            },
+            ApiLayoutNode::App { app_id, app_kind } => {
+                LayoutNode::App {
+                    app_id: app_id.clone(),
+                    app_kind: app_kind.clone(),
+                    app_config: serde_json::Value::Null,
+                }
+            }
         }
     }
 
@@ -92,14 +91,13 @@ impl LayoutNode {
                     .collect(),
                 active_tab: *active_tab,
             },
-            ApiLayoutNode::App {
-                app_id,
-                app_kind,
-            } => LayoutNode::App {
-                app_id: app_id.clone(),
-                app_kind: app_kind.clone(),
-                app_config: serde_json::Value::Null,
-            },
+            ApiLayoutNode::App { app_id, app_kind } => {
+                LayoutNode::App {
+                    app_id: app_id.clone(),
+                    app_kind: app_kind.clone(),
+                    app_config: serde_json::Value::Null,
+                }
+            }
         }
     }
 
@@ -135,10 +133,12 @@ impl LayoutNode {
                 app_id,
                 app_kind,
                 ..
-            } => ApiLayoutNode::App {
-                app_id: app_id.clone(),
-                app_kind: app_kind.clone(),
-            },
+            } => {
+                ApiLayoutNode::App {
+                    app_id: app_id.clone(),
+                    app_kind: app_kind.clone(),
+                }
+            }
         }
     }
 }

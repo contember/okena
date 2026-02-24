@@ -74,6 +74,8 @@ actions!(
         TogglePaneSwitcher,
         StartAllServices,
         StopAllServices,
+        NewKruhApp,
+        ShowAppPicker,
     ]
 );
 
@@ -228,6 +230,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
         "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
+        "NewKruhApp" => Some(KeyBinding::new(keystroke, NewKruhApp, context)),
+        "ShowAppPicker" => Some(KeyBinding::new(keystroke, ShowAppPicker, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

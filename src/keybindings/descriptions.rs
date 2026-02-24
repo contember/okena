@@ -5,11 +5,12 @@ use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
     CreateWorktree, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
-    MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
-    Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
-    ShowFileSearch, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices, StopAllServices,
-    ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+    MinimizeTerminal, NewKruhApp, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown,
+    ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowAppPicker, ShowCommandPalette,
+    ShowDiffViewer, ShowFileSearch, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
+    ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
+    StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
+    ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -434,6 +435,26 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Stop all services for the focused project",
             category: "Services",
             factory: || Box::new(StopAllServices),
+        },
+    );
+
+    map.insert(
+        "NewKruhApp",
+        ActionDescription {
+            name: "New Kruh App",
+            description: "Create a new Kruh automation loop pane",
+            category: "Project",
+            factory: || Box::new(NewKruhApp),
+        },
+    );
+
+    map.insert(
+        "ShowAppPicker",
+        ActionDescription {
+            name: "Open App",
+            description: "Open an app pane as a new tab or replace current pane",
+            category: "Project",
+            factory: || Box::new(ShowAppPicker),
         },
     );
 
