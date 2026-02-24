@@ -9,7 +9,8 @@ mod scrollbar;
 mod syntax;
 mod types;
 
-use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileDiff};
+use crate::git::{DiffMode, DiffResult, FileDiff};
+use crate::vcs;
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::{theme, theme_entity};
@@ -128,8 +129,8 @@ impl DiffViewer {
             is_dark,
         };
 
-        if !is_git_repo(std::path::Path::new(&project_path)) {
-            viewer.error_message = Some("Not a git repository".to_string());
+        if !vcs::is_vcs_repo(std::path::Path::new(&project_path)) {
+            viewer.error_message = Some("Not a version-controlled repository".to_string());
             return viewer;
         }
 
@@ -170,7 +171,7 @@ impl DiffViewer {
 
         let path = std::path::Path::new(&self.project_path);
         let t0 = std::time::Instant::now();
-        match get_diff_with_options(path, mode, self.ignore_whitespace) {
+        match vcs::get_diff_with_options(path, mode, self.ignore_whitespace) {
             Ok(result) => {
                 log::debug!("[load_diff] get_diff_with_options: {:?}, files: {}", t0.elapsed(), result.files.len());
                 if result.is_empty() {

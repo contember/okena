@@ -1,7 +1,8 @@
 //! Syntax highlighting for the diff viewer.
 
 use super::types::{DiffDisplayFile, DisplayLine, HighlightedSpan};
-use crate::git::{get_file_contents_for_diff, DiffLineType, DiffMode, FileDiff};
+use crate::git::{DiffLineType, DiffMode, FileDiff};
+use crate::vcs;
 use crate::views::components::syntax::{
     default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
 };
@@ -66,7 +67,7 @@ pub fn process_file(
     // Fetch and pre-highlight the full file content for both old and new versions.
     // This ensures correct syntax state for all hunks, even those starting mid-file.
     let t0 = std::time::Instant::now();
-    let (old_content, new_content) = get_file_contents_for_diff(repo_path, path, diff_mode);
+    let (old_content, new_content) = vcs::get_file_contents_for_diff(repo_path, path, diff_mode);
     log::debug!("[process_file] get_file_contents_for_diff: {:?}, old: {} bytes, new: {} bytes, file: {}",
         t0.elapsed(),
         old_content.as_ref().map(|c| c.len()).unwrap_or(0),
