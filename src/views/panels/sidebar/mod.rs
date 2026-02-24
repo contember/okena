@@ -13,12 +13,14 @@ mod folder_list;
 mod item_widgets;
 mod project_list;
 mod remote_list;
+mod service_list;
 
 use crate::action_dispatch::ActionDispatcher;
 use crate::keybindings::{
     SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
 };
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, FolderColor};
 use crate::ui::ClickDetector;
@@ -45,6 +47,7 @@ pub(super) enum SidebarCursorItem {
     Project { project_id: String },
     WorktreeProject { project_id: String },
     Terminal { project_id: String, terminal_id: String },
+    Service { project_id: String, service_name: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
     #[allow(dead_code)]
@@ -91,6 +94,8 @@ pub struct Sidebar {
     pub(super) collapsed_connections: HashMap<String, bool>,
     /// Terminal backend for building dispatchers
     backend: Option<Arc<dyn TerminalBackend>>,
+    /// Service manager (optional - set after creation)
+    pub(super) service_manager: Option<Entity<ServiceManager>>,
 }
 
 impl Sidebar {
@@ -131,6 +136,7 @@ impl Sidebar {
             remote_manager: None,
             collapsed_connections: HashMap::new(),
             backend: None,
+            service_manager: None,
         }
     }
 
@@ -355,6 +361,15 @@ impl Sidebar {
         cx.notify();
     }
 
+    pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
+        cx.observe(&manager, |_this, _sm, cx| {
+            cx.notify();
+        }).detach();
+        self.service_manager = Some(manager);
+        cx.notify();
+    }
+
+
     /// Initialize cursor to the focused project or first item
     pub fn activate_cursor(&mut self, cx: &mut Context<Self>) {
         let items = self.build_cursor_items(cx);
@@ -388,6 +403,23 @@ impl Sidebar {
         let all_project_ids: HashSet<&str> = workspace.data().projects.iter()
             .map(|p| p.id.as_str()).collect();
 
+        // Pre-collect service names per project (avoids borrow issues with cx)
+        let service_names: HashMap<String, Vec<String>> = if let Some(ref sm) = self.service_manager {
+            let sm = sm.read(cx);
+            workspace.data().projects.iter()
+                .filter(|p| sm.has_services(&p.id))
+                .map(|p| {
+                    let names = sm.services_for_project(&p.id)
+                        .into_iter()
+                        .map(|inst| inst.definition.name.clone())
+                        .collect();
+                    (p.id.clone(), names)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         // Build worktree children map
         let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
         for project in &workspace.data().projects {
@@ -417,7 +449,7 @@ impl Sidebar {
                             }) {
                                 continue;
                             }
-                            self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+                            self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
                         }
                     }
                 }
@@ -431,29 +463,40 @@ impl Sidebar {
                 }) {
                     continue;
                 }
-                self.push_project_cursor_items(project, &worktree_children_map, &mut cursor_items);
+                self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
             }
         }
 
         cursor_items
     }
 
-    /// Helper: push a project row + its expanded terminals + worktree children into cursor items
+    /// Helper: push a project row + its expanded terminals/services + worktree children into cursor items
     fn push_project_cursor_items(
         &self,
         project: &ProjectData,
         worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
+        service_names: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
-        // Expanded terminal items
+        // Expanded terminal and service items
         if self.expanded_projects.contains(&project.id) {
             if let Some(ref layout) = project.layout {
                 for tid in layout.collect_terminal_ids() {
                     cursor_items.push(SidebarCursorItem::Terminal {
                         project_id: project.id.clone(),
                         terminal_id: tid,
+                    });
+                }
+            }
+
+            // Service cursor items
+            if let Some(names) = service_names.get(&project.id) {
+                for name in names {
+                    cursor_items.push(SidebarCursorItem::Service {
+                        project_id: project.id.clone(),
+                        service_name: name.clone(),
                     });
                 }
             }
@@ -571,6 +614,28 @@ impl Sidebar {
                     ws.toggle_folder_collapsed(&folder_id, cx);
                 });
             }
+            SidebarCursorItem::Service { project_id, service_name } => {
+                // Toggle start/stop for the service
+                if let Some(ref sm) = self.service_manager {
+                    sm.update(cx, |sm, cx| {
+                        let key = (project_id.clone(), service_name.clone());
+                        if let Some(inst) = sm.instances().get(&key) {
+                            match inst.status {
+                                crate::services::manager::ServiceStatus::Running |
+                                crate::services::manager::ServiceStatus::Starting => {
+                                    sm.stop_service(&project_id, &service_name, cx);
+                                }
+                                _ => {
+                                    if let Some(path) = sm.project_path(&project_id) {
+                                        let path = path.clone();
+                                        sm.start_service(&project_id, &service_name, &path, cx);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -606,7 +671,7 @@ impl Sidebar {
             SidebarCursorItem::WorktreeProject { project_id } => {
                 self.toggle_expanded(&project_id);
             }
-            SidebarCursorItem::Terminal { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -814,6 +879,13 @@ impl Sidebar {
     }
 }
 
+/// Service info for sidebar rendering.
+#[derive(Clone)]
+pub(super) struct SidebarServiceInfo {
+    pub name: String,
+    pub status: crate::services::manager::ServiceStatus,
+}
+
 /// Lightweight projection of ProjectData for sidebar rendering.
 /// Avoids cloning the full LayoutNode tree, path, hidden_terminals, and hooks
 /// which are never used by the sidebar.
@@ -833,6 +905,8 @@ pub(super) struct SidebarProjectInfo {
     pub worktree_count: usize,
     /// True if this is a worktree whose parent project no longer exists
     pub is_orphan: bool,
+    /// Services defined in okena.yaml for this project
+    pub services: Vec<SidebarServiceInfo>,
 }
 
 impl SidebarProjectInfo {
@@ -856,6 +930,7 @@ impl SidebarProjectInfo {
             terminal_names: project.terminal_names.clone(),
             worktree_count: 0,
             is_orphan: false,
+            services: Vec::new(),
         }
     }
 }
@@ -919,6 +994,26 @@ impl Render for Sidebar {
             }
         }
 
+        // Collect services from ServiceManager for all projects
+        let mut project_services: HashMap<String, Vec<SidebarServiceInfo>> = if let Some(ref sm) = self.service_manager {
+            let sm = sm.read(cx);
+            workspace.data().projects.iter()
+                .filter(|p| sm.has_services(&p.id))
+                .map(|p| {
+                    let services = sm.services_for_project(&p.id)
+                        .into_iter()
+                        .map(|inst| SidebarServiceInfo {
+                            name: inst.definition.name.clone(),
+                            status: inst.status.clone(),
+                        })
+                        .collect();
+                    (p.id.clone(), services)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         // Build sidebar items from project_order
         let mut items: Vec<SidebarItem> = Vec::new();
         let mut top_index = 0;
@@ -940,6 +1035,9 @@ impl Render for Sidebar {
                     .collect();
                 let mut folder_wt_children: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
                 for fp in &mut folder_projects {
+                    if let Some(services) = project_services.remove(&fp.id) {
+                        fp.services = services;
+                    }
                     if let Some(children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
                         folder_wt_children.insert(fp.id.clone(), children);
@@ -969,6 +1067,9 @@ impl Render for Sidebar {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
                 project_info.worktree_count = wt_children.len();
+                if let Some(services) = project_services.remove(&project.id) {
+                    project_info.services = services;
+                }
                 items.push(SidebarItem::Project {
                     project: project_info,
                     index: top_index,
@@ -1012,7 +1113,7 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Expanded terminals
+                    // Expanded terminals and services
                     if self.expanded_projects.contains(&project.id) {
                         let minimized_states: Vec<(String, bool)> = {
                             let ws = self.workspace.read(cx);
@@ -1028,6 +1129,16 @@ impl Render for Sidebar {
                                 self.render_terminal_item(&project.id, tid, &project.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 28.0, "", is_cursor, cx).into_any_element()
                             );
                             flat_idx += 1;
+                        }
+
+                        // Service items
+                        if !project.services.is_empty() {
+                            flat_elements.push(self.render_services_header(&project, 28.0, cx).into_any_element());
+                            for service in &project.services {
+                                let is_cursor = cursor_index == Some(flat_idx);
+                                flat_elements.push(self.render_service_item(&project.id, service, 28.0, is_cursor, cx).into_any_element());
+                                flat_idx += 1;
+                            }
                         }
                     }
 
@@ -1091,7 +1202,7 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Expanded terminals for folder project
+                            // Expanded terminals and services for folder project
                             if self.expanded_projects.contains(&fp.id) {
                                 let minimized_states: Vec<(String, bool)> = {
                                     let ws = self.workspace.read(cx);
@@ -1107,6 +1218,16 @@ impl Render for Sidebar {
                                         self.render_terminal_item(&fp.id, tid, &fp.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "", is_cursor, cx).into_any_element()
                                     );
                                     flat_idx += 1;
+                                }
+
+                                // Service items for folder project
+                                if !fp.services.is_empty() {
+                                    flat_elements.push(self.render_services_header(fp, 48.0, cx).into_any_element());
+                                    for service in &fp.services {
+                                        let is_cursor = cursor_index == Some(flat_idx);
+                                        flat_elements.push(self.render_service_item(&fp.id, service, 48.0, is_cursor, cx).into_any_element());
+                                        flat_idx += 1;
+                                    }
                                 }
                             }
 

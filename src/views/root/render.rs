@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -326,6 +326,17 @@ impl Render for RootView {
                                 this.sidebar_ctrl.set_width(new_width, &mut this.app_settings);
                                 cx.notify();
                             }
+                            DragState::ServicePanel { project_id, initial_mouse_y, initial_height } => {
+                                // Dragging up increases height, dragging down decreases
+                                let delta = initial_mouse_y - f32::from(event.position.y);
+                                let new_height = initial_height + delta;
+                                let project_id = project_id.clone();
+                                if let Some(col) = this.project_columns.get(&project_id).cloned() {
+                                    col.update(cx, |col, cx| {
+                                        col.set_service_panel_height(new_height, cx);
+                                    });
+                                }
+                            }
                             _ => {
                                 // Handle split and project column resize
                                 compute_resize(event.position, state, &workspace, cx);
@@ -583,6 +594,37 @@ impl Render for RootView {
             // Handle create worktree action
             .on_action(cx.listener(|this, _: &CreateWorktree, _window, cx| {
                 this.create_worktree_from_focus(cx);
+            }))
+            // Handle start all services action
+            .on_action(cx.listener({
+                let workspace = workspace.clone();
+                move |this, _: &StartAllServices, _window, cx| {
+                    if let Some(ref sm) = this.service_manager {
+                        let project_id = workspace.read(cx).focus_manager
+                            .focused_terminal_state()
+                            .map(|f| f.project_id.clone());
+                        if let Some(pid) = project_id {
+                            let path = sm.read(cx).project_path(&pid).cloned();
+                            if let Some(path) = path {
+                                sm.update(cx, |sm, cx| sm.start_all(&pid, &path, cx));
+                            }
+                        }
+                    }
+                }
+            }))
+            // Handle stop all services action
+            .on_action(cx.listener({
+                let workspace = workspace.clone();
+                move |this, _: &StopAllServices, _window, cx| {
+                    if let Some(ref sm) = this.service_manager {
+                        let project_id = workspace.read(cx).focus_manager
+                            .focused_terminal_state()
+                            .map(|f| f.project_id.clone());
+                        if let Some(pid) = project_id {
+                            sm.update(cx, |sm, cx| sm.stop_all(&pid, cx));
+                        }
+                    }
+                }
             }))
             // Handle show file search action
             .on_action(cx.listener({

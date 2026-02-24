@@ -45,6 +45,12 @@ pub enum DragState {
     },
     /// Resizing sidebar width
     Sidebar,
+    /// Resizing per-project service panel height
+    ServicePanel {
+        project_id: String,
+        initial_mouse_y: f32,
+        initial_height: f32,
+    },
 }
 
 pub type ActiveDrag = Rc<RefCell<Option<DragState>>>;
@@ -160,8 +166,8 @@ pub fn compute_resize(
                 ws.update_project_widths(new_widths, cx);
             });
         }
-        DragState::Sidebar => {
-            // Sidebar resize is handled directly in RootView
+        DragState::Sidebar | DragState::ServicePanel { .. } => {
+            // Handled directly in RootView's on_mouse_move
         }
     }
 }
