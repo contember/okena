@@ -1,5 +1,6 @@
-use crate::git::{self, FileDiffSummary};
+use crate::git::FileDiffSummary;
 use crate::git::watcher::GitStatusWatcher;
+use crate::vcs;
 use crate::action_dispatch::ActionDispatcher;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
@@ -105,7 +106,7 @@ impl ProjectColumn {
             }
 
             // Load file summaries
-            let summaries = git::get_diff_file_summary(Path::new(&project_path));
+            let summaries = vcs::get_diff_file_summary(Path::new(&project_path));
 
             let _ = this.update(cx, |this, cx| {
                 // Re-check token after loading
