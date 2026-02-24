@@ -3,6 +3,7 @@
 use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use crate::theme::ThemeColors;
+use crate::vcs::VcsBackend;
 use crate::views::components::segmented_toggle;
 use gpui::prelude::*;
 use gpui::*;
@@ -128,16 +129,18 @@ impl DiffViewer {
                                 t,
                             )),
                     )
-                    // Diff mode toggle
-                    .child(
-                        div()
-                            .id("diff-mode-toggle")
-                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
-                            .child(segmented_toggle(
-                                &[("Unstaged", is_working), ("Staged", !is_working)],
-                                t,
-                            )),
-                    )
+                    // Diff mode toggle (hidden for jj repos — no staging area)
+                    .when(self.vcs_backend != Some(VcsBackend::Jujutsu), |d| {
+                        d.child(
+                            div()
+                                .id("diff-mode-toggle")
+                                .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
+                                .child(segmented_toggle(
+                                    &[("Unstaged", is_working), ("Staged", !is_working)],
+                                    t,
+                                )),
+                        )
+                    })
                     // Separator
                     .child(
                         div()
@@ -523,7 +526,9 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t))
-                    .child(self.render_hint("Tab", "staged/unstaged", t))
+                    .when(self.vcs_backend != Some(VcsBackend::Jujutsu), |d| {
+                        d.child(self.render_hint("Tab", "staged/unstaged", t))
+                    })
                     .child(self.render_hint("S", "split", t))
                     .child(self.render_hint("↑↓", "navigate", t))
                     .child(self.render_hint(

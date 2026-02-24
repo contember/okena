@@ -75,6 +75,8 @@ pub struct DiffViewer {
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting).
     is_dark: bool,
+    /// VCS backend detected for the project (None if not yet detected).
+    vcs_backend: Option<vcs::VcsBackend>,
 }
 
 impl DiffViewer {
@@ -127,12 +129,15 @@ impl DiffViewer {
             selection_side: None,
             measured_char_width: file_font_size * 0.6,
             is_dark,
+            vcs_backend: None,
         };
 
-        if !vcs::is_vcs_repo(std::path::Path::new(&project_path)) {
+        let backend = vcs::detect_vcs(std::path::Path::new(&project_path));
+        if backend.is_none() {
             viewer.error_message = Some("Not a version-controlled repository".to_string());
             return viewer;
         }
+        viewer.vcs_backend = backend;
 
         viewer.load_diff(DiffMode::WorkingTree);
 
@@ -470,7 +475,11 @@ impl Render for DiffViewer {
                 let modifiers = &event.keystroke.modifiers;
 
                 match key {
-                    "tab" => this.toggle_mode(cx),
+                    "tab" => {
+                        if this.vcs_backend != Some(vcs::VcsBackend::Jujutsu) {
+                            this.toggle_mode(cx);
+                        }
+                    }
                     "s" => this.toggle_view_mode(cx),
                     "w" => this.toggle_ignore_whitespace(cx),
                     "up" => this.prev_file(cx),
