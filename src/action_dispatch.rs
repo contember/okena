@@ -357,5 +357,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             app_id: s(&app_id),
         },
+        ActionRequest::AppAction {
+            project_id,
+            app_id,
+            payload,
+        } => ActionRequest::AppAction {
+            project_id: s(&project_id),
+            app_id: s(&app_id),
+            payload,
+        },
     }
 }

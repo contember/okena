@@ -168,6 +168,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::Auth { .. }) => {
                                 // Already authenticated, ignore
                             }
+                            Ok(WsInbound::SubscribeApps { .. })
+                            | Ok(WsInbound::UnsubscribeApps { .. })
+                            | Ok(WsInbound::AppAction { .. }) => {
+                                // Not yet implemented — handled in a later issue
+                            }
                             Err(_) => {
                                 let resp = serde_json::to_string(&WsOutbound::Error {
                                     error: "invalid message".into(),

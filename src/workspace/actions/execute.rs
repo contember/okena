@@ -250,7 +250,7 @@ pub fn execute_action(
             match ws.project(&project_id) {
                 Some(p) => {
                     let path = p.path.clone();
-                    let status = crate::git::get_git_status(std::path::Path::new(&path));
+                    let status = crate::vcs::get_vcs_status(std::path::Path::new(&path));
                     ActionResult::Ok(Some(serde_json::to_value(status).expect("BUG: GitStatus must serialize")))
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -260,7 +260,7 @@ pub fn execute_action(
             match ws.project(&project_id) {
                 Some(p) => {
                     let path = p.path.clone();
-                    let summary = crate::git::get_diff_file_summary(std::path::Path::new(&path));
+                    let summary = crate::vcs::get_diff_file_summary(std::path::Path::new(&path));
                     ActionResult::Ok(Some(serde_json::to_value(summary).expect("BUG: FileDiffSummary must serialize")))
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -270,7 +270,7 @@ pub fn execute_action(
             match ws.project(&project_id) {
                 Some(p) => {
                     let path = p.path.clone();
-                    match crate::git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
+                    match crate::vcs::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
                         Ok(diff) => ActionResult::Ok(Some(serde_json::to_value(diff).expect("BUG: DiffResult must serialize"))),
                         Err(e) => ActionResult::Err(e),
                     }
@@ -292,7 +292,7 @@ pub fn execute_action(
             match ws.project(&project_id) {
                 Some(p) => {
                     let repo_path = p.path.clone();
-                    let (old, new) = crate::git::get_file_contents_for_diff(
+                    let (old, new) = crate::vcs::get_file_contents_for_diff(
                         std::path::Path::new(&repo_path),
                         &file_path,
                         mode,
@@ -350,6 +350,9 @@ pub fn execute_action(
                 }
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
             }
+        }
+        ActionRequest::AppAction { .. } => {
+            ActionResult::Err("AppAction not yet implemented".into())
         }
     }
 }

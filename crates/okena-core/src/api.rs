@@ -60,6 +60,8 @@ pub enum ApiLayoutNode {
     App {
         app_id: Option<String>,
         app_kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_state: Option<serde_json::Value>,
     },
 }
 
@@ -191,6 +193,11 @@ pub enum ActionRequest {
     CloseApp {
         project_id: String,
         app_id: String,
+    },
+    AppAction {
+        project_id: String,
+        app_id: String,
+        payload: serde_json::Value,
     },
 }
 
@@ -408,6 +415,11 @@ mod tests {
             ActionRequest::CloseApp {
                 project_id: "p1".into(),
                 app_id: "app-123".into(),
+            },
+            ActionRequest::AppAction {
+                project_id: "p1".into(),
+                app_id: "app-123".into(),
+                payload: serde_json::json!({"kind": "click", "target": "button"}),
             },
         ];
         for action in actions {
