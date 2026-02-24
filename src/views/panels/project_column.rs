@@ -2,6 +2,7 @@ use crate::git::FileDiffSummary;
 use crate::git::watcher::GitStatusWatcher;
 use crate::vcs;
 use crate::action_dispatch::ActionDispatcher;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
@@ -47,6 +48,8 @@ pub struct ProjectColumn {
     active_drag: ActiveDrag,
     /// Action dispatcher for routing terminal actions (local or remote)
     action_dispatcher: Option<ActionDispatcher>,
+    /// App state broadcaster for passing to LayoutContainer → KruhPane
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl ProjectColumn {
@@ -58,6 +61,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         git_watcher: Option<Entity<GitStatusWatcher>>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Observe git watcher for re-renders (replaces per-column polling)
@@ -79,6 +83,7 @@ impl ProjectColumn {
             git_watcher,
             active_drag,
             action_dispatcher: None,
+            app_broadcaster,
         }
     }
 
@@ -303,6 +308,7 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let action_dispatcher = self.action_dispatcher.clone();
+            let app_broadcaster = self.app_broadcaster.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
@@ -315,6 +321,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
+                    app_broadcaster,
                 )
             }));
         } else if let Some(container) = &self.layout_container {

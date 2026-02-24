@@ -8,12 +8,14 @@ pub mod status_parser;
 pub mod types;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use gpui::*;
 
 use crate::keybindings::{
     CloseTerminal, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusUp,
 };
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::views::components::simple_input::SimpleInputState;
 use crate::views::layout::navigation::{
     get_pane_map, register_pane_bounds, NavigationDirection,
@@ -80,6 +82,10 @@ pub struct KruhPane {
 
     // Async scan task
     pub _scan_task: Option<Task<()>>,
+
+    // Remote state publishing
+    pub app_broadcaster: Option<Arc<AppStateBroadcaster>>,
+    pub publish_timer: Option<Task<()>>,
 }
 
 impl KruhPane {
@@ -90,6 +96,7 @@ impl KruhPane {
         layout_path: Vec<usize>,
         app_id: Option<String>,
         config: KruhConfig,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -149,7 +156,17 @@ impl KruhPane {
             editor_fm_dangerous: None,
             editor_fm_extra: Vec::new(),
             _scan_task: None,
+            app_broadcaster,
+            publish_timer: None,
         };
+
+        // Publish state on every notify (debounced 100ms)
+        if pane.app_broadcaster.is_some() {
+            cx.observe_self(|this, cx| {
+                this.schedule_state_publish(cx);
+            })
+            .detach();
+        }
 
         pane.start_scan(cx);
         pane
@@ -794,6 +811,30 @@ impl KruhPane {
 }
 
 impl KruhPane {
+    /// Schedule a debounced (100ms) publish of the current view state to the broadcaster.
+    ///
+    /// Drops any pending timer, so rapid notify calls coalesce into a single publish.
+    fn schedule_state_publish(&mut self, cx: &mut Context<Self>) {
+        let broadcaster = match self.app_broadcaster.clone() {
+            Some(b) => b,
+            None => return,
+        };
+        let app_id = match self.app_id.clone() {
+            Some(id) => id,
+            None => return,
+        };
+
+        self.publish_timer = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(100)).await;
+            let _ = this.update(cx, |pane, cx| {
+                let state = pane.view_state(cx);
+                if let Ok(json) = serde_json::to_value(&state) {
+                    broadcaster.publish(app_id, "kruh".to_string(), json);
+                }
+            });
+        }));
+    }
+
     /// Append an output line to a specific loop's display and auto-scroll to bottom.
     pub fn add_loop_output(&mut self, loop_id: usize, text: &str, is_error: bool) {
         if let Some(instance) = self.loop_mut(loop_id) {

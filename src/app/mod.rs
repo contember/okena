@@ -4,6 +4,7 @@ mod remote_commands;
 mod update_checker;
 
 use crate::git::watcher::GitStatusWatcher;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -49,6 +50,7 @@ pub struct Okena {
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
+    pub(crate) app_broadcaster: Arc<AppStateBroadcaster>,
     pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
@@ -119,11 +121,15 @@ impl Okena {
         })
         .detach();
 
+        // Create app state broadcaster (used by KruhPane to publish state to WebSocket clients)
+        let app_broadcaster = Arc::new(AppStateBroadcaster::new());
+
         // Create root view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
         let request_broker_clone = request_broker.clone();
+        let app_broadcaster_for_root = Some(app_broadcaster.clone());
         let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, cx)
+            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, app_broadcaster_for_root, cx)
         });
 
         // Get terminals registry from root view
@@ -193,6 +199,7 @@ impl Okena {
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
+            app_broadcaster,
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
             listen_addr,

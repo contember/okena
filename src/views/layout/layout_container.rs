@@ -9,6 +9,7 @@
 use crate::action_dispatch::ActionDispatcher;
 use crate::keybindings::{CloseTerminal, ToggleFullscreen};
 use okena_core::api::ActionRequest;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, with_alpha};
 use crate::ui::ClickDetector;
@@ -61,6 +62,8 @@ pub struct LayoutContainer {
     pub(super) tab_rename_state: Option<RenameState<String>>,
     /// Action dispatcher for routing terminal actions (local or remote)
     pub(super) action_dispatcher: Option<ActionDispatcher>,
+    /// App state broadcaster for publishing KruhPane state to remote subscribers
+    pub(super) app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl LayoutContainer {
@@ -74,6 +77,7 @@ impl LayoutContainer {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         action_dispatcher: Option<ActionDispatcher>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
     ) -> Self {
         Self {
             workspace,
@@ -96,6 +100,7 @@ impl LayoutContainer {
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
             action_dispatcher,
+            app_broadcaster,
         }
     }
 
@@ -180,6 +185,7 @@ impl LayoutContainer {
             self.project_id.clone(),
             self.project_path.clone(),
             self.layout_path.clone(),
+            self.app_broadcaster.clone(),
             window,
             cx,
         );
@@ -547,6 +553,7 @@ impl LayoutContainer {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })
@@ -614,6 +621,7 @@ impl LayoutContainer {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })

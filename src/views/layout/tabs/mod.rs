@@ -284,6 +284,7 @@ impl LayoutContainer {
                             self.terminals.clone(),
                             self.active_drag.clone(),
                             self.action_dispatcher.clone(),
+                            self.app_broadcaster.clone(),
                         )
                     })
                 })
@@ -342,6 +343,7 @@ impl LayoutContainer {
                                     self.terminals.clone(),
                                     self.active_drag.clone(),
                                     self.action_dispatcher.clone(),
+                                    self.app_broadcaster.clone(),
                                 )
                             })
                         })
