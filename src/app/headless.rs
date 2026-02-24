@@ -289,6 +289,7 @@ impl HeadlessApp {
                                     terminal_names: p.terminal_names.clone(),
                                     git_status,
                                     folder_color: p.folder_color,
+                                    services: vec![],
                                 }
                             };
 

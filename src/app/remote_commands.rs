@@ -1,5 +1,6 @@
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFolder, ApiFullscreen, ApiProject, StateResponse};
+use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
+use crate::services::manager::ServiceStatus;
 use crate::terminal::backend::TerminalBackend;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 use gpui::*;
@@ -21,6 +22,7 @@ impl Okena {
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
+        let service_manager = self.service_manager.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx| {
             loop {
@@ -31,16 +33,73 @@ impl Okena {
 
                 let result = match msg.command {
                     RemoteCommand::Action(action) => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                execute_action(action, ws, &*backend, &terminals, cx)
-                                    .into_command_result()
-                            })
-                        })
+                        match action {
+                            ActionRequest::StartService { project_id, service_name } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        if let Some(path) = sm.project_path(&project_id).cloned() {
+                                            sm.start_service(&project_id, &service_name, &path, cx);
+                                            CommandResult::Ok(None)
+                                        } else {
+                                            CommandResult::Err(format!("project not found: {}", project_id))
+                                        }
+                                    })
+                                })
+                            }
+                            ActionRequest::StopService { project_id, service_name } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        sm.stop_service(&project_id, &service_name, cx);
+                                        CommandResult::Ok(None)
+                                    })
+                                })
+                            }
+                            ActionRequest::RestartService { project_id, service_name } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        if let Some(path) = sm.project_path(&project_id).cloned() {
+                                            sm.restart_service(&project_id, &service_name, &path, cx);
+                                            CommandResult::Ok(None)
+                                        } else {
+                                            CommandResult::Err(format!("project not found: {}", project_id))
+                                        }
+                                    })
+                                })
+                            }
+                            ActionRequest::StartAllServices { project_id } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        if let Some(path) = sm.project_path(&project_id).cloned() {
+                                            sm.start_all(&project_id, &path, cx);
+                                            CommandResult::Ok(None)
+                                        } else {
+                                            CommandResult::Err(format!("project not found: {}", project_id))
+                                        }
+                                    })
+                                })
+                            }
+                            ActionRequest::StopAllServices { project_id } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        sm.stop_all(&project_id, cx);
+                                        CommandResult::Ok(None)
+                                    })
+                                })
+                            }
+                            action => {
+                                cx.update(|cx| {
+                                    workspace.update(cx, |ws, cx| {
+                                        execute_action(action, ws, &*backend, &terminals, cx)
+                                            .into_command_result()
+                                    })
+                                })
+                            }
+                        }
                     }
                     RemoteCommand::GetState => {
                         cx.update(|cx| {
                             let ws = workspace.read(cx);
+                            let sm = service_manager.read(cx);
                             let sv = *state_version.borrow();
                             let git_statuses = git_status_tx.borrow().clone();
                             let data = ws.data();
@@ -55,6 +114,20 @@ impl Okena {
 
                             let build_api_project = |p: &crate::workspace::state::ProjectData| -> ApiProject {
                                 let git_status = git_statuses.get(&p.id).cloned();
+                                let services: Vec<ApiServiceInfo> = sm.services_for_project(&p.id)
+                                    .into_iter()
+                                    .map(|inst| ApiServiceInfo {
+                                        name: inst.definition.name.clone(),
+                                        status: match &inst.status {
+                                            ServiceStatus::Stopped => "stopped".to_string(),
+                                            ServiceStatus::Starting => "starting".to_string(),
+                                            ServiceStatus::Running => "running".to_string(),
+                                            ServiceStatus::Crashed { .. } => "crashed".to_string(),
+                                            ServiceStatus::Restarting => "restarting".to_string(),
+                                        },
+                                        terminal_id: inst.terminal_id.clone(),
+                                    })
+                                    .collect();
                                 ApiProject {
                                     id: p.id.clone(),
                                     name: p.name.clone(),
@@ -64,6 +137,7 @@ impl Okena {
                                     terminal_names: p.terminal_names.clone(),
                                     git_status,
                                     folder_color: p.folder_color,
+                                    services,
                                 }
                             };
 

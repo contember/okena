@@ -6,6 +6,7 @@ mod terminal_actions;
 
 use crate::git::watcher::GitStatusWatcher;
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::Terminal;
@@ -62,6 +63,8 @@ pub struct RootView {
     /// Horizontal scrollbar drag state
     hscroll_dragging: bool,
     hscroll_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// Service manager (set after creation)
+    service_manager: Option<Entity<ServiceManager>>,
     /// Remote connection manager (set after creation)
     remote_manager: Option<Entity<RemoteConnectionManager>>,
     /// Git status watcher (set by Okena after creation)
@@ -153,6 +156,7 @@ impl RootView {
             })),
             hscroll_dragging: false,
             hscroll_bounds: Rc::new(RefCell::new(None)),
+            service_manager: None,
             remote_manager: None,
             git_watcher: None,
             pane_switch_active: false,
@@ -176,6 +180,11 @@ impl RootView {
         // Drop existing local columns so they get recreated with the watcher
         self.project_columns.retain(|id, _| id.starts_with("remote:"));
         self.sync_project_columns(cx);
+    }
+
+    /// Set the service manager (called after creation by Okena).
+    pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, _cx: &mut Context<Self>) {
+        self.service_manager = Some(manager);
     }
 
     /// Set the remote connection manager (called after creation by Okena).
@@ -323,6 +332,7 @@ impl RootView {
                                 hooks: HooksConfig::default(),
                                 is_remote: true,
                                 connection_id: Some(conn_id_owned),
+                                service_terminals: std::collections::HashMap::new(),
                             });
                         }
                     });

@@ -45,6 +45,15 @@ pub struct ApiProject {
     pub git_status: Option<ApiGitStatus>,
     #[serde(default)]
     pub folder_color: FolderColor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ApiServiceInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiServiceInfo {
+    pub name: String,
+    pub status: String, // "running", "stopped", "crashed", "starting", "restarting"
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -211,6 +220,24 @@ pub enum ActionRequest {
         folder_id: String,
         color: FolderColor,
     },
+    StartService {
+        project_id: String,
+        service_name: String,
+    },
+    StopService {
+        project_id: String,
+        service_name: String,
+    },
+    RestartService {
+        project_id: String,
+        service_name: String,
+    },
+    StartAllServices {
+        project_id: String,
+    },
+    StopAllServices {
+        project_id: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -294,6 +321,7 @@ mod tests {
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
                 git_status: None,
                 folder_color: FolderColor::Blue,
+                services: vec![],
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -457,6 +485,24 @@ mod tests {
             ActionRequest::SetFolderColor {
                 folder_id: "f1".into(),
                 color: FolderColor::Purple,
+            },
+            ActionRequest::StartService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::StopService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::RestartService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::StartAllServices {
+                project_id: "p1".into(),
+            },
+            ActionRequest::StopAllServices {
+                project_id: "p1".into(),
             },
         ];
         for action in actions {

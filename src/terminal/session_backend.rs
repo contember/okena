@@ -151,8 +151,9 @@ impl ResolvedBackend {
 
     /// Build the command to create or attach to a session
     /// Returns (program, args) tuple
+    /// When `command` is Some, the session runs that command instead of the default shell.
     #[allow(dead_code)] // Used only on Unix
-    pub fn build_command(&self, session_name: &str, cwd: &str) -> Option<(String, Vec<String>)> {
+    pub fn build_command(&self, session_name: &str, cwd: &str, command: Option<&str>) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
             Self::Tmux => {
@@ -167,10 +168,15 @@ impl ResolvedBackend {
                 // set automatic-rename off: prevent shell from overwriting window name
                 // rename-window: set meaningful window name from directory
                 let window_name = extract_dir_name(cwd);
+                let initial_program = match command {
+                    Some(cmd) => format!(" 'sh' '-c' {}", shell_escape(cmd)),
+                    None => String::new(),
+                };
                 let tmux_cmd = format!(
-                    "tmux new-session -A -s {} -c {} \\; set status off \\; set mouse on \\; set-window-option automatic-rename off \\; rename-window {}",
+                    "tmux new-session -A -s {} -c {}{} \\; set status off \\; set mouse on \\; set-window-option automatic-rename off \\; rename-window {}",
                     shell_escape(session_name),
                     shell_escape(cwd),
+                    initial_program,
                     shell_escape(&window_name)
                 );
                 Some((
@@ -182,14 +188,17 @@ impl ResolvedBackend {
                 // screen -D -R <name>
                 // -D -R: reattach if exists, create if not (and detach other attached sessions)
                 // Note: screen doesn't have a direct way to set cwd, we'll handle that separately
-                Some((
-                    "screen".to_string(),
-                    vec![
-                        "-D".to_string(),
-                        "-R".to_string(),
-                        session_name.to_string(),
-                    ],
-                ))
+                let mut args = vec![
+                    "-D".to_string(),
+                    "-R".to_string(),
+                    session_name.to_string(),
+                ];
+                if let Some(cmd) = command {
+                    args.push("sh".to_string());
+                    args.push("-c".to_string());
+                    args.push(cmd.to_string());
+                }
+                Some(("screen".to_string(), args))
             }
             Self::Dtach => {
                 // dtach -A <socket> -E -r winch <shell>
@@ -200,9 +209,15 @@ impl ResolvedBackend {
                 // We use sh -c to:
                 // 1. Create the socket directory if needed
                 // 2. cd to the working directory
-                // 3. Run dtach with the user's shell
+                // 3. Run dtach with the user's shell (or custom command)
                 let socket_path = get_dtach_socket_path(session_name);
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let program = match command {
+                    Some(cmd) => format!("sh -c {}", shell_escape(cmd)),
+                    None => {
+                        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        shell_escape(&shell)
+                    }
+                };
 
                 let parent = socket_path.parent().and_then(|p| p.to_str())?;
                 let socket = socket_path.to_str()?;
@@ -211,7 +226,7 @@ impl ResolvedBackend {
                     shell_escape(parent),
                     shell_escape(cwd),
                     shell_escape(socket),
-                    shell_escape(&shell)
+                    program
                 );
                 Some(("sh".to_string(), vec!["-c".to_string(), dtach_cmd]))
             }
@@ -479,7 +494,7 @@ mod tests {
     #[test]
     fn test_dtach_build_command() {
         let backend = ResolvedBackend::Dtach;
-        let result = backend.build_command("test-session", "/home/user");
+        let result = backend.build_command("test-session", "/home/user", None);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "sh");
@@ -487,5 +502,63 @@ mod tests {
         assert_eq!(args[0], "-c");
         assert!(args[1].contains("dtach -A"));
         assert!(args[1].contains("-E -r winch"));
+    }
+
+    #[test]
+    fn test_dtach_build_command_with_custom_command() {
+        let backend = ResolvedBackend::Dtach;
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "sh");
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("dtach -A"));
+        assert!(args[1].contains("sh -c"));
+        assert!(args[1].contains("npm run dev"));
+    }
+
+    #[test]
+    fn test_tmux_build_command_with_custom_command() {
+        let backend = ResolvedBackend::Tmux;
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "sh");
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("tmux new-session -A"));
+        assert!(args[1].contains("'sh' '-c'"));
+        assert!(args[1].contains("npm run dev"));
+    }
+
+    #[test]
+    fn test_tmux_build_command_without_command() {
+        let backend = ResolvedBackend::Tmux;
+        let result = backend.build_command("test-session", "/home/user", None);
+        assert!(result.is_some());
+        let (_, args) = result.unwrap();
+        // Without a command, no 'sh' '-c' should appear after the cwd
+        assert!(!args[1].contains("'sh' '-c'"));
+    }
+
+    #[test]
+    fn test_screen_build_command_with_custom_command() {
+        let backend = ResolvedBackend::Screen;
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "screen");
+        assert_eq!(args[0], "-D");
+        assert_eq!(args[1], "-R");
+        assert_eq!(args[2], "test-session");
+        assert_eq!(args[3], "sh");
+        assert_eq!(args[4], "-c");
+        assert_eq!(args[5], "npm run dev");
+    }
+
+    #[test]
+    fn test_none_build_command() {
+        let backend = ResolvedBackend::None;
+        assert!(backend.build_command("test-session", "/home/user", None).is_none());
+        assert!(backend.build_command("test-session", "/home/user", Some("echo hi")).is_none());
     }
 }
