@@ -5,6 +5,7 @@
 
 use crate::terminal::session_backend::SessionBackend;
 use crate::terminal::shell_config::ShellType;
+use crate::theme::ThemeMode;
 use crate::views::panels::toast::ToastManager;
 use crate::workspace::persistence::{load_settings, save_settings, get_settings_path, AppSettings};
 use gpui::*;
@@ -112,6 +113,12 @@ impl SettingsState {
     /// Set auto-update enabled/disabled
     pub fn set_auto_update_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.auto_update_enabled = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the theme mode
+    pub fn set_theme_mode(&mut self, value: ThemeMode, cx: &mut Context<Self>) {
+        self.settings.theme_mode = value;
         self.save_and_notify(cx);
     }
 
