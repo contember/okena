@@ -1,4 +1,5 @@
 use crate::services::config::{load_project_config, ServiceDefinition};
+use crate::services::port_detect;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -24,6 +25,7 @@ pub struct ServiceInstance {
     pub status: ServiceStatus,
     pub terminal_id: Option<String>,
     pub restart_count: u32,
+    pub detected_ports: Vec<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +89,7 @@ impl ServiceManager {
                     status: ServiceStatus::Stopped,
                     terminal_id: None,
                     restart_count: 0,
+                    detected_ports: Vec::new(),
                 },
             );
         }
@@ -166,6 +169,7 @@ impl ServiceManager {
                     (project_id.to_string(), service_name.to_string()),
                 );
                 log::info!("Reconnected service '{}' for project {} (terminal {})", service_name, project_id, saved_terminal_id);
+                self.start_port_detection(project_id, service_name, cx);
             }
             Err(e) => {
                 log::warn!(
@@ -277,6 +281,7 @@ impl ServiceManager {
                         status: ServiceStatus::Stopped,
                         terminal_id: None,
                         restart_count: 0,
+                        detected_ports: Vec::new(),
                     },
                 );
             }
@@ -365,6 +370,11 @@ impl ServiceManager {
         }
 
         cx.notify();
+
+        // Start port detection if service is now running
+        if self.instances.get(&key).is_some_and(|i| i.status == ServiceStatus::Running) {
+            self.start_port_detection(project_id, service_name, cx);
+        }
     }
 
     /// Stop a running service.
@@ -388,6 +398,7 @@ impl ServiceManager {
 
         instance.status = ServiceStatus::Stopped;
         instance.restart_count = 0;
+        instance.detected_ports.clear();
         cx.notify();
     }
 
@@ -503,6 +514,7 @@ impl ServiceManager {
         };
 
         instance.terminal_id = None;
+        instance.detected_ports.clear();
 
         if instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT {
             instance.status = ServiceStatus::Restarting;
@@ -571,6 +583,67 @@ impl ServiceManager {
             .get(&(project_id.to_string(), service_name.to_string()))
             .and_then(|i| i.terminal_id.as_ref())
     }
+
+    /// Get detected listening ports for a service.
+    pub fn detected_ports(&self, project_id: &str, service_name: &str) -> &[u16] {
+        self.instances
+            .get(&(project_id.to_string(), service_name.to_string()))
+            .map(|i| i.detected_ports.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Start background port detection polling for a running service.
+    /// Waits 2s initial delay, then polls every 2s up to 5 times.
+    fn start_port_detection(
+        &self,
+        project_id: &str,
+        service_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (project_id.to_string(), service_name.to_string());
+        if self.instances.get(&key).and_then(|i| i.terminal_id.as_ref()).is_none() {
+            return;
+        }
+        let backend = self.backend.clone();
+
+        cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+            // Initial delay — let the service bind its port
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+
+            for _ in 0..5 {
+                // Check if service is still running
+                let pid = this.update(cx, |this, _cx| {
+                    let inst = this.instances.get(&key)?;
+                    if inst.status != ServiceStatus::Running {
+                        return None;
+                    }
+                    inst.terminal_id.as_ref()
+                        .and_then(|tid| backend.get_shell_pid(tid))
+                }).ok().flatten();
+
+                let Some(pid) = pid else { return };
+
+                let ports = cx.background_executor()
+                    .spawn(async move { port_detect::detect_ports_for_pid(pid) })
+                    .await;
+
+                if !ports.is_empty() {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(inst) = this.instances.get_mut(&key) {
+                            if inst.status == ServiceStatus::Running {
+                                inst.detected_ports = ports;
+                                cx.notify();
+                            }
+                        }
+                    });
+                    return;
+                }
+
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+            }
+        })
+        .detach();
+    }
 }
 
 /// Check if a process with the given PID is still alive.
@@ -616,6 +689,7 @@ mod tests {
                 status,
                 terminal_id: Some(format!("term-{}", name)),
                 restart_count,
+                detected_ports: Vec::new(),
             },
         )
     }

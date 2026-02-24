@@ -13,6 +13,22 @@ pub fn command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Open a URL in the default browser. Fire-and-forget (spawn, don't wait).
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = command("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = command("open").arg(url).spawn();
+    }
+    #[cfg(windows)]
+    {
+        let _ = command("cmd").args(["/c", "start", url]).spawn();
+    }
+}
+
 /// Run `Command::output()` while catching panics from the standard library's
 /// internal `read2().unwrap()`, which can panic with EBADF under rare race
 /// conditions (e.g. FD pressure during PTY shutdown). Converts the panic

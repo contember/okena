@@ -954,6 +954,7 @@ impl ProjectColumn {
                                         ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
                                     };
 
+                                    let ports = instance.detected_ports.clone();
                                     div()
                                         .id(ElementId::Name(format!("svc-tab-{}", name).into()))
                                         .cursor_pointer()
@@ -980,6 +981,33 @@ impl ProjectColumn {
                                                 .bg(rgb(status_color)),
                                         )
                                         .child(name.clone())
+                                        .children(
+                                            ports.iter().map(|port| {
+                                                let port = *port;
+                                                let url = format!("http://localhost:{}", port);
+                                                div()
+                                                    .id(ElementId::Name(format!("svc-tab-port-{}-{}", name, port).into()))
+                                                    .flex_shrink_0()
+                                                    .cursor_pointer()
+                                                    .px(px(3.0))
+                                                    .h(px(14.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .rounded(px(3.0))
+                                                    .bg(rgb(t.bg_secondary))
+                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    .text_size(px(9.0))
+                                                    .text_color(rgb(t.text_muted))
+                                                    .child(format!(":{}", port))
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                    .on_click(move |_, _, _cx| {
+                                                        crate::process::open_url(&url);
+                                                    })
+                                                    .tooltip(move |_window, cx| {
+                                                        Tooltip::new(format!("Open http://localhost:{}", port)).build(_window, cx)
+                                                    })
+                                            })
+                                        )
                                         .on_click(cx.listener(move |this, _, _window, cx| {
                                             this.show_service(&name, cx);
                                         }))
