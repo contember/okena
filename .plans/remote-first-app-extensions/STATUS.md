@@ -5,7 +5,7 @@
 - [x] 01 — Define KruhViewState and KruhAction types
 - [x] 02 — Add view_state() to KruhPane
 - [x] 03 — Add handle_action() to KruhPane
-- [ ] 04 — Extend API types for app state and actions
+- [x] 04 — Extend API types for app state and actions
 - [ ] 05 — Create AppStateBroadcaster
 - [ ] 06 — App state publishing from GPUI thread
 - [ ] 07 — App Entity Registry and Bridge commands
