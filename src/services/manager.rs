@@ -618,21 +618,28 @@ impl ServiceManager {
             let mut stable_count = 0u32;
 
             for _ in 0..10 {
-                // Check if service is still running and get root PIDs for port detection
-                let service_pids = this.update(cx, |this, _cx| {
+                // Check if service is still running (quick, main thread only)
+                let terminal_id = this.update(cx, |this, _cx| {
                     let inst = this.instances.get(&key)?;
                     if inst.status != ServiceStatus::Running {
                         return None;
                     }
-                    inst.terminal_id.as_ref()
-                        .map(|tid| backend.get_service_pids(tid))
-                        .filter(|pids| !pids.is_empty())
+                    inst.terminal_id.clone()
                 }).ok().flatten();
 
-                let Some(service_pids) = service_pids else { return };
+                let Some(terminal_id) = terminal_id else { return };
 
+                // Run PID lookup + port scanning on background thread
+                // (get_service_pids may spawn lsof/tmux subprocesses)
+                let backend_ref = backend.clone();
                 let ports = cx.background_executor()
-                    .spawn(async move { port_detect::detect_ports_for_pids(&service_pids) })
+                    .spawn(async move {
+                        let service_pids = backend_ref.get_service_pids(&terminal_id);
+                        if service_pids.is_empty() {
+                            return Vec::new();
+                        }
+                        port_detect::detect_ports_for_pids(&service_pids)
+                    })
                     .await;
 
                 if !ports.is_empty() {
