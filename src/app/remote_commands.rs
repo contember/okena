@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
 
+use crate::views::layout::app_entity_registry::AppEntityRegistry;
+
 use super::Okena;
 
 /// Shared remote command loop used by both GUI (`Okena`) and headless (`HeadlessApp`).
@@ -25,6 +27,7 @@ pub(crate) async fn remote_command_loop(
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     service_manager: Entity<ServiceManager>,
+    app_entity_registry: Arc<AppEntityRegistry>,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -244,6 +247,18 @@ pub(crate) async fn remote_command_loop(
                     }
                 })
             }
+            RemoteCommand::GetAppState { app_id } => {
+                match app_entity_registry.get_view_state(&app_id, cx) {
+                    Some(state) => CommandResult::Ok(Some(state)),
+                    None => CommandResult::Err(format!("App not found: {}", app_id)),
+                }
+            }
+            RemoteCommand::AppAction { project_id: _, app_id, action } => {
+                match app_entity_registry.handle_action(&app_id, action, cx) {
+                    Ok(()) => CommandResult::Ok(None),
+                    Err(e) => CommandResult::Err(e),
+                }
+            }
         };
 
         if let Some(reply) = msg.reply {
@@ -266,11 +281,13 @@ impl Okena {
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
         let service_manager = self.service_manager.clone();
+        let app_entity_registry = self.app_entity_registry.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
                 bridge_rx, backend, workspace, terminals,
-                state_version, git_status_tx, service_manager, cx,
+                state_version, git_status_tx, service_manager,
+                app_entity_registry, cx,
             ).await;
         })
         .detach();
