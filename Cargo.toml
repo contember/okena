@@ -46,6 +46,7 @@ env_logger = "0.11"
 anyhow = "1.0"
 thiserror = "2.0"
 regex = "1.10"
+which = "7"
 
 # Asset embedding
 rust-embed = "8.5"
