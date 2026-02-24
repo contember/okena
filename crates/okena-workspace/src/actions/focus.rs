@@ -175,4 +175,28 @@ impl Workspace {
             }
         }
     }
+
+    /// Focus an app pane by its project ID and app ID.
+    pub fn focus_app_by_id(
+        &mut self,
+        project_id: &str,
+        app_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project(project_id) {
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_app_path(app_id) {
+                    // Activate any tabs along the path so the app becomes visible
+                    if let Some(project_mut) = self.project_mut(project_id) {
+                        if let Some(ref mut layout) = project_mut.layout {
+                            layout.activate_tabs_along_path(&path);
+                        }
+                    }
+                    self.notify_data(cx);
+                    self.set_focused_project(Some(project_id.to_string()), cx);
+                    self.set_focused_terminal(project_id.to_string(), path, cx);
+                }
+            }
+        }
+    }
 }

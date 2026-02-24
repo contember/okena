@@ -9,13 +9,15 @@
 //! - Which project is zoomed/focused in the sidebar (focused_project_id)
 //! - Whether a terminal is in fullscreen/zoom mode (Fullscreen context + terminal_id)
 
-/// Identifies a focusable terminal in the workspace
+/// Identifies a focusable pane (terminal or app) in the workspace
 #[derive(Clone, Debug, PartialEq)]
 pub struct FocusTarget {
     pub project_id: String,
     pub layout_path: Vec<usize>,
     /// Terminal ID (set when entering fullscreen to track which terminal is zoomed)
     pub terminal_id: Option<String>,
+    /// App ID (set when focusing an app pane)
+    pub app_id: Option<String>,
 }
 
 impl FocusTarget {
@@ -24,6 +26,7 @@ impl FocusTarget {
             project_id,
             layout_path,
             terminal_id: None,
+            app_id: None,
         }
     }
 
@@ -32,6 +35,17 @@ impl FocusTarget {
             project_id,
             layout_path,
             terminal_id: Some(terminal_id),
+            app_id: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_app(project_id: String, layout_path: Vec<usize>, app_id: String) -> Self {
+        Self {
+            project_id,
+            layout_path,
+            terminal_id: None,
+            app_id: Some(app_id),
         }
     }
 }

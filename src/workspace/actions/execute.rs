@@ -15,6 +15,7 @@ use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::state::DropZone;
 use okena_terminal::TerminalsRegistry;
 use crate::workspace::hooks;
+use crate::views::layout::app_registry;
 use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 use std::sync::Arc;
@@ -329,6 +330,22 @@ pub fn execute_action(
             ws.set_folder_item_color(&folder_id, color, cx);
             ActionResult::Ok(None)
         }
+        ActionRequest::CreateApp { project_id, app_kind, app_config } => {
+            if app_registry::find_app(&app_kind).is_none() {
+                return ActionResult::Err(format!("Unknown app kind: {}", app_kind));
+            }
+            match ws.add_app(&project_id, app_kind, app_config, cx) {
+                Some(app_id) => ActionResult::Ok(Some(serde_json::json!({ "app_id": app_id }))),
+                None => ActionResult::Err("Failed to create app".to_string()),
+            }
+        }
+        ActionRequest::CloseApp { project_id, app_id } => {
+            if ws.close_app(&project_id, &app_id, cx) {
+                ActionResult::Ok(None)
+            } else {
+                ActionResult::Err("App not found".to_string())
+            }
+        }
         ActionRequest::ReadContent { terminal_id } => {
             match ensure_terminal(&terminal_id, terminals, backend, ws) {
                 Some(term) => {
@@ -529,7 +546,7 @@ fn collect_uninitialized_terminals_with_shell(
         } => {
             result.push((current_path, shell_type.clone()));
         }
-        LayoutNode::Terminal { .. } => {}
+        LayoutNode::Terminal { .. } | LayoutNode::App { .. } => {}
         LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
             for (i, child) in children.iter().enumerate() {
                 let mut child_path = current_path.clone();

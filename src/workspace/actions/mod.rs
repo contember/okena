@@ -4,4 +4,5 @@
 #[allow(unused_imports)]
 pub use okena_workspace::actions::{focus, folder, layout, project, terminal};
 
+mod app;
 pub mod execute;

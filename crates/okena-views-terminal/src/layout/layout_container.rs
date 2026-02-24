@@ -578,7 +578,7 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
                     self.child_containers.clear();
                 }
             }
-            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
+            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) | Some(LayoutNode::App { .. }) => {
                 if self.terminal_pane.is_some() {
                     self.terminal_pane = None;
                 }
@@ -612,6 +612,15 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
                 active_tab,
             }) => self
                 .render_tabs(children, active_tab, window, cx)
+                .into_any_element(),
+
+            Some(LayoutNode::App { app_kind, .. }) => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(t.text_muted))
+                .child(format!("App: {}", app_kind))
                 .into_any_element(),
 
             None => div()
