@@ -259,6 +259,7 @@ fn get_listening_ports_macos(pids: &HashSet<u32>) -> Vec<u16> {
     parse_lsof_output(&stdout, pids)
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn parse_lsof_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
     let mut ports = Vec::new();
     for line in stdout.lines().skip(1) {
@@ -300,6 +301,7 @@ fn get_listening_ports_windows(pids: &HashSet<u32>) -> Vec<u16> {
     parse_netstat_output(&stdout, pids)
 }
 
+#[cfg(any(windows, test))]
 pub(crate) fn parse_netstat_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
     let mut ports = Vec::new();
     for line in stdout.lines() {
