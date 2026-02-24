@@ -21,8 +21,9 @@ use crate::views::layout::navigation::{
 use crate::workspace::state::Workspace;
 use config::{KruhConfig, KruhPlanOverrides};
 use types::{
-    EditTarget, IssueDetail, IssueViewInfo, KruhPaneEvent, KruhScreen, KruhState, KruhViewState,
-    LoopInstance, LoopState, LoopViewInfo, OutputLineView, PlanInfo, PlanViewInfo, ProgressViewInfo,
+    EditTarget, IssueDetail, IssueViewInfo, KruhAction, KruhPaneEvent, KruhScreen, KruhState,
+    KruhViewState, LoopInstance, LoopState, LoopViewInfo, OutputLineView, PlanInfo, PlanViewInfo,
+    ProgressViewInfo,
 };
 
 /// Native Kruh pane — automated AI agent loop tool.
@@ -590,6 +591,179 @@ impl KruhPane {
                 );
             });
         }
+    }
+}
+
+impl KruhPane {
+    /// Dispatch a `KruhAction` to the corresponding mutation method.
+    pub fn handle_action(&mut self, action: KruhAction, cx: &mut Context<Self>) {
+        match action {
+            KruhAction::StartScan => self.start_scan(cx),
+            KruhAction::SelectPlan { index } => self.select_plan(index, cx),
+            KruhAction::OpenPlan { name } => self.open_plan(&name, cx),
+            KruhAction::BackToPlans => self.back_to_plans(cx),
+            KruhAction::StartLoop { plan_name } => self.start_loop_for_name(&plan_name, cx),
+            KruhAction::StartAllLoops => self.start_all_loops_headless(cx),
+            KruhAction::PauseLoop { loop_id } => self.pause_loop(loop_id, cx),
+            KruhAction::ResumeLoop { loop_id } => self.resume_loop(loop_id, cx),
+            KruhAction::StopLoop { loop_id } => self.stop_loop(loop_id, cx),
+            KruhAction::CloseLoops => self.close_loops(cx),
+            KruhAction::FocusLoop { index } => self.focus_loop(index, cx),
+            KruhAction::OpenEditor { file_path } => self.open_editor_for_path(&file_path, cx),
+            KruhAction::SaveEditor { content } => self.save_editor_content(&content, cx),
+            KruhAction::CloseEditor => self.close_editor(cx),
+            KruhAction::OpenSettings => self.open_settings(cx),
+            KruhAction::UpdateSettings { model, max_iterations, auto_start } => {
+                self.update_settings(model, max_iterations, auto_start, cx);
+            }
+            KruhAction::CloseSettings => self.close_settings(cx),
+            KruhAction::BrowseTasks { plan_name } => self.browse_tasks(&plan_name, cx),
+        }
+    }
+
+    /// Navigate to TaskBrowser for a plan identified by name.
+    pub fn open_plan(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self.plans.iter().position(|p| p.name == name) {
+            self.select_plan(index, cx);
+        }
+    }
+
+    /// Navigate back to PlanPicker.
+    pub fn back_to_plans(&mut self, cx: &mut Context<Self>) {
+        self.navigate_to_plan_picker(cx);
+    }
+
+    /// Start a loop for a plan identified by name (remote / windowless path).
+    pub fn start_loop_for_name(&mut self, plan_name: &str, cx: &mut Context<Self>) {
+        if self.selected_plan.as_ref().map(|p| p.name.as_str()) != Some(plan_name) {
+            if let Some(idx) = self.plans.iter().position(|p| p.name == plan_name) {
+                self.select_plan(idx, cx);
+            } else {
+                return;
+            }
+        }
+        let plan = match self.selected_plan.clone() {
+            Some(p) => p,
+            None => return,
+        };
+        self.config.plans_dir = self.plans_dir.clone();
+        let loop_id = self.next_loop_id;
+        self.next_loop_id += 1;
+        let mut config = self.config.clone();
+        config.docs_dir = plan.dir.clone();
+        let instance = LoopInstance::new(loop_id, plan, config);
+        self.active_loops.push(instance);
+        self.focused_loop_index = self.active_loops.len() - 1;
+        let task = loop_runner::start_loop(loop_id, cx);
+        self.loop_tasks.push((loop_id, task));
+        self.state = KruhState::LoopOverview;
+        cx.notify();
+    }
+
+    /// Start loops for all plans with pending tasks (remote / windowless path).
+    pub fn start_all_loops_headless(&mut self, cx: &mut Context<Self>) {
+        self.config.plans_dir = self.plans_dir.clone();
+        let plans: Vec<_> = self.plans.iter().filter(|p| p.pending > 0).cloned().collect();
+        if plans.is_empty() {
+            return;
+        }
+        for plan in plans {
+            let loop_id = self.next_loop_id;
+            self.next_loop_id += 1;
+            let mut config = self.config.clone();
+            config.docs_dir = plan.dir.clone();
+            let instance = LoopInstance::new(loop_id, plan, config);
+            self.active_loops.push(instance);
+            let task = loop_runner::start_loop(loop_id, cx);
+            self.loop_tasks.push((loop_id, task));
+        }
+        self.focused_loop_index = 0;
+        self.state = KruhState::LoopOverview;
+        cx.notify();
+    }
+
+    /// Pause a running loop by ID.
+    pub fn pause_loop(&mut self, loop_id: usize, cx: &mut Context<Self>) {
+        if let Some(instance) = self.loop_mut(loop_id) {
+            instance.paused = true;
+            instance.state = LoopState::Paused;
+        }
+        cx.notify();
+    }
+
+    /// Resume a paused loop by ID.
+    pub fn resume_loop(&mut self, loop_id: usize, cx: &mut Context<Self>) {
+        if let Some(instance) = self.loop_mut(loop_id) {
+            instance.paused = false;
+            instance.state = LoopState::Running;
+        }
+        cx.notify();
+    }
+
+    /// Request a loop to stop by ID.
+    pub fn stop_loop(&mut self, loop_id: usize, cx: &mut Context<Self>) {
+        if let Some(instance) = self.loop_mut(loop_id) {
+            instance.quit_requested = true;
+        }
+        cx.notify();
+    }
+
+    /// Set the focused loop by index.
+    pub fn focus_loop(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.active_loops.len() {
+            self.focused_loop_index = index;
+            cx.notify();
+        }
+    }
+
+    /// Open a file for editing by its absolute path (remote / windowless path).
+    pub fn open_editor_for_path(&mut self, file_path: &str, cx: &mut Context<Self>) {
+        let content = std::fs::read_to_string(file_path).unwrap_or_default();
+        let input = cx.new(|cx| {
+            SimpleInputState::new(cx).multiline().default_value(&content)
+        });
+        self.editor_input = Some(input);
+        self.editor_target = Some(EditTarget::Status);
+        self.editor_file_path = Some(file_path.to_string());
+        self.state = KruhState::Editing;
+        cx.notify();
+    }
+
+    /// Write content directly to the current editor file path.
+    pub fn save_editor_content(&mut self, content: &str, _cx: &mut Context<Self>) {
+        if let Some(path) = &self.editor_file_path {
+            let _ = std::fs::write(path, content);
+        }
+    }
+
+    /// Transition to the Settings screen.
+    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.state = KruhState::Settings;
+        cx.notify();
+    }
+
+    /// Apply new settings values.
+    pub fn update_settings(
+        &mut self,
+        model: String,
+        max_iterations: usize,
+        _auto_start: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.config.model = model;
+        self.config.max_iterations = max_iterations;
+        cx.notify();
+    }
+
+    /// Close the Settings screen and return to PlanPicker.
+    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.state = KruhState::PlanPicker;
+        cx.notify();
+    }
+
+    /// Navigate to TaskBrowser for a plan identified by name.
+    pub fn browse_tasks(&mut self, plan_name: &str, cx: &mut Context<Self>) {
+        self.open_plan(plan_name, cx);
     }
 }
 
