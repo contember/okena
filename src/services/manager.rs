@@ -21,7 +21,6 @@ pub struct ServiceManager {
 
 pub struct ServiceInstance {
     pub definition: ServiceDefinition,
-    pub project_id: String,
     pub status: ServiceStatus,
     pub terminal_id: Option<String>,
     pub restart_count: u32,
@@ -85,7 +84,6 @@ impl ServiceManager {
                 key,
                 ServiceInstance {
                     definition: def.clone(),
-                    project_id: project_id.to_string(),
                     status: ServiceStatus::Stopped,
                     terminal_id: None,
                     restart_count: 0,
@@ -277,7 +275,6 @@ impl ServiceManager {
                     key,
                     ServiceInstance {
                         definition: def.clone(),
-                        project_id: project_id.to_string(),
                         status: ServiceStatus::Stopped,
                         terminal_id: None,
                         restart_count: 0,
@@ -563,14 +560,6 @@ impl ServiceManager {
         self.project_paths.get(project_id)
     }
 
-    /// Count of services currently in Running status.
-    pub fn total_running_count(&self) -> usize {
-        self.instances
-            .values()
-            .filter(|i| i.status == ServiceStatus::Running)
-            .count()
-    }
-
     /// Whether the project has any service definitions loaded.
     pub fn has_services(&self, project_id: &str) -> bool {
         self.configs
@@ -583,14 +572,6 @@ impl ServiceManager {
         self.instances
             .get(&(project_id.to_string(), service_name.to_string()))
             .and_then(|i| i.terminal_id.as_ref())
-    }
-
-    /// Get detected listening ports for a service.
-    pub fn detected_ports(&self, project_id: &str, service_name: &str) -> &[u16] {
-        self.instances
-            .get(&(project_id.to_string(), service_name.to_string()))
-            .map(|i| i.detected_ports.as_slice())
-            .unwrap_or(&[])
     }
 
     /// Start background port detection polling for a running service.
