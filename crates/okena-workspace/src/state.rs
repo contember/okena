@@ -1747,6 +1747,7 @@ impl LayoutNode {
             okena_core::api::ApiLayoutNode::App {
                 app_id,
                 app_kind,
+                ..
             } => LayoutNode::App {
                 app_id: app_id.clone(),
                 app_kind: app_kind.clone(),
@@ -1795,6 +1796,7 @@ impl LayoutNode {
             okena_core::api::ApiLayoutNode::App {
                 app_id,
                 app_kind,
+                ..
             } => LayoutNode::App {
                 app_id: app_id.clone(),
                 app_kind: app_kind.clone(),
@@ -1839,6 +1841,7 @@ impl LayoutNode {
             } => okena_core::api::ApiLayoutNode::App {
                 app_id: app_id.clone(),
                 app_kind: app_kind.clone(),
+                app_state: None,
             },
         }
     }

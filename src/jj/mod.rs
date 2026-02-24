@@ -71,7 +71,7 @@ pub fn get_status(path: &Path) -> Option<GitStatus> {
     let lines_added: usize = diff_result.files.iter().map(|f| f.lines_added).sum();
     let lines_removed: usize = diff_result.files.iter().map(|f| f.lines_removed).sum();
 
-    Some(GitStatus { branch, lines_added, lines_removed })
+    Some(GitStatus { branch, lines_added, lines_removed, pr_info: None })
 }
 
 /// Get a per-file diff summary for a jj repository.

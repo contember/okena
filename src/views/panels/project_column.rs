@@ -1,5 +1,6 @@
-use crate::git::{self, PrStateColor, CiStatusColor};
+use crate::git::{self, PrStateColor, CiStatusColor, FileDiffSummary};
 use crate::git::watcher::GitStatusWatcher;
+use crate::vcs;
 use crate::action_dispatch::ActionDispatcher;
 use okena_views_git::git_header::GitHeader;
 use crate::services::manager::ServiceManager;
