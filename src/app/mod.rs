@@ -158,8 +158,8 @@ impl Okena {
         });
 
         // Pass git_watcher to root view so ProjectColumns can observe it
-        root_view.update(cx, |rv, _cx| {
-            rv.set_git_watcher(git_watcher.clone());
+        root_view.update(cx, |rv, cx| {
+            rv.set_git_watcher(git_watcher.clone(), cx);
         });
 
         // ── Remote control setup ────────────────────────────────────────

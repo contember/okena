@@ -171,8 +171,11 @@ impl RootView {
     }
 
     /// Set the git watcher entity (called by Okena after creation).
-    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>) {
+    pub fn set_git_watcher(&mut self, watcher: Entity<GitStatusWatcher>, cx: &mut Context<Self>) {
         self.git_watcher = Some(watcher);
+        // Drop existing local columns so they get recreated with the watcher
+        self.project_columns.retain(|id, _| id.starts_with("remote:"));
+        self.sync_project_columns(cx);
     }
 
     /// Set the remote connection manager (called after creation by Okena).
