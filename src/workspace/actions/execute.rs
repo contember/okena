@@ -359,7 +359,8 @@ pub fn execute_action(
         | ActionRequest::StopService { .. }
         | ActionRequest::RestartService { .. }
         | ActionRequest::StartAllServices { .. }
-        | ActionRequest::StopAllServices { .. } => {
+        | ActionRequest::StopAllServices { .. }
+        | ActionRequest::ReloadServices { .. } => {
             ActionResult::Err("service actions must be handled via ServiceManager".to_string())
         }
     }

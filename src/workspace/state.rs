@@ -75,6 +75,12 @@ pub struct ProjectData {
     /// Used to reconnect to persistent sessions across restarts
     #[serde(default)]
     pub service_terminals: HashMap<String, String>,
+    /// Remote service state (transient, populated during remote state sync)
+    #[serde(skip)]
+    pub remote_services: Vec<okena_core::api::ApiServiceInfo>,
+    /// Remote host address for port badge URLs (transient)
+    #[serde(skip)]
+    pub remote_host: Option<String>,
 }
 
 impl ProjectData {
@@ -1092,6 +1098,8 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            remote_services: Vec::new(),
+            remote_host: None,
         }
     }
 
@@ -1904,6 +1912,8 @@ mod workspace_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            remote_services: Vec::new(),
+            remote_host: None,
         }
     }
 
@@ -2175,6 +2185,8 @@ mod gpui_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
+            remote_services: Vec::new(),
+            remote_host: None,
         }
     }
 

@@ -6,10 +6,20 @@ use crate::theme::theme;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use okena_core::api::ActionRequest;
 
 use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo};
 
 impl Sidebar {
+    /// Dispatch a service action for a project.
+    /// Routes through ActionDispatcher (works for both local and remote).
+    /// Falls back to ServiceManager for local projects if no dispatcher is available.
+    fn dispatch_service_action(&self, project_id: &str, action: ActionRequest, cx: &mut Context<Self>) {
+        if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
+            dispatcher.dispatch(action, cx);
+        }
+    }
+
     /// Render the "Services" separator header with Start All / Stop All / Reload buttons.
     pub(super) fn render_services_header(
         &self,
@@ -69,14 +79,9 @@ impl Sidebar {
                                 let project_id = project_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(ref sm) = this.service_manager {
-                                        let path = sm.read(cx).project_path(&project_id).cloned();
-                                        if let Some(path) = path {
-                                            sm.update(cx, |sm, cx| {
-                                                sm.start_all(&project_id, &path, cx);
-                                            });
-                                        }
-                                    }
+                                    this.dispatch_service_action(&project_id, ActionRequest::StartAllServices {
+                                        project_id: project_id.clone(),
+                                    }, cx);
                                 }
                             }))
                             .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
@@ -101,11 +106,9 @@ impl Sidebar {
                                 let project_id = project_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(ref sm) = this.service_manager {
-                                        sm.update(cx, |sm, cx| {
-                                            sm.stop_all(&project_id, cx);
-                                        });
-                                    }
+                                    this.dispatch_service_action(&project_id, ActionRequest::StopAllServices {
+                                        project_id: project_id.clone(),
+                                    }, cx);
                                 }
                             }))
                             .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
@@ -130,14 +133,9 @@ impl Sidebar {
                                 let project_id = project_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(ref sm) = this.service_manager {
-                                        let path = sm.read(cx).project_path(&project_id).cloned();
-                                        if let Some(path) = path {
-                                            sm.update(cx, |sm, cx| {
-                                                sm.reload_project_services(&project_id, &path, cx);
-                                            });
-                                        }
-                                    }
+                                    this.dispatch_service_action(&project_id, ActionRequest::ReloadServices {
+                                        project_id: project_id.clone(),
+                                    }, cx);
                                 }
                             }))
                             .tooltip(|_window, cx| Tooltip::new("Reload Services").build(_window, cx)),
@@ -148,14 +146,14 @@ impl Sidebar {
     /// Render a single service item row with status dot, name, and action buttons.
     pub(super) fn render_service_item(
         &self,
-        project_id: &str,
+        project: &SidebarProjectInfo,
         service: &SidebarServiceInfo,
         left_padding: f32,
         is_cursor: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let project_id = project_id.to_string();
+        let project_id = project.id.clone();
         let service_name = service.name.clone();
         let status = service.status.clone();
 
@@ -223,31 +221,37 @@ impl Sidebar {
                     .child(service_name.clone()),
             )
             .children(
-                // Port badges
-                service.ports.iter().map(|port| {
-                    let port = *port;
-                    let url = format!("http://localhost:{}", port);
-                    div()
-                        .id(ElementId::Name(format!("svc-port-{}-{}-{}", project_id, service_name, port).into()))
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .px(px(4.0))
-                        .h(px(16.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(3.0))
-                        .bg(rgb(t.bg_secondary))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_muted))
-                        .child(format!(":{}", port))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, _cx| {
-                            process::open_url(&url);
-                        })
-                        .tooltip(move |_window, cx| {
-                            Tooltip::new(format!("Open http://localhost:{}", port)).build(_window, cx)
-                        })
+                // Port badges — host baked into SidebarServiceInfo
+                service.ports.iter().map({
+                    let project_id = project_id.clone();
+                    let service_name = service_name.clone();
+                    let port_host = service.port_host.clone();
+                    move |port| {
+                        let port = *port;
+                        let url = format!("http://{}:{}", port_host, port);
+                        let tooltip_url = url.clone();
+                        div()
+                            .id(ElementId::Name(format!("svc-port-{}-{}-{}", project_id, service_name, port).into()))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .h(px(16.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(3.0))
+                            .bg(rgb(t.bg_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(10.0))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!(":{}", port))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(move |_, _, _cx| {
+                                process::open_url(&url);
+                            })
+                            .tooltip(move |_window, cx| {
+                                Tooltip::new(tooltip_url.clone()).build(_window, cx)
+                            })
+                    }
                 })
             )
             .child(
@@ -280,14 +284,10 @@ impl Sidebar {
                                     let service_name = service_name.clone();
                                     move |this, _, _window, cx| {
                                         cx.stop_propagation();
-                                        if let Some(ref sm) = this.service_manager {
-                                            let path = sm.read(cx).project_path(&project_id).cloned();
-                                            if let Some(path) = path {
-                                                sm.update(cx, |sm, cx| {
-                                                    sm.start_service(&project_id, &service_name, &path, cx);
-                                                });
-                                            }
-                                        }
+                                        this.dispatch_service_action(&project_id, ActionRequest::StartService {
+                                            project_id: project_id.clone(),
+                                            service_name: service_name.clone(),
+                                        }, cx);
                                     }
                                 }))
                                 .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
@@ -316,14 +316,10 @@ impl Sidebar {
                                         let service_name = service_name.clone();
                                         move |this, _, _window, cx| {
                                             cx.stop_propagation();
-                                            if let Some(ref sm) = this.service_manager {
-                                                let path = sm.read(cx).project_path(&project_id).cloned();
-                                                if let Some(path) = path {
-                                                    sm.update(cx, |sm, cx| {
-                                                        sm.restart_service(&project_id, &service_name, &path, cx);
-                                                    });
-                                                }
-                                            }
+                                            this.dispatch_service_action(&project_id, ActionRequest::RestartService {
+                                                project_id: project_id.clone(),
+                                                service_name: service_name.clone(),
+                                            }, cx);
                                         }
                                     }))
                                     .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
@@ -349,11 +345,10 @@ impl Sidebar {
                                         let service_name = service_name.clone();
                                         move |this, _, _window, cx| {
                                             cx.stop_propagation();
-                                            if let Some(ref sm) = this.service_manager {
-                                                sm.update(cx, |sm, cx| {
-                                                    sm.stop_service(&project_id, &service_name, cx);
-                                                });
-                                            }
+                                            this.dispatch_service_action(&project_id, ActionRequest::StopService {
+                                                project_id: project_id.clone(),
+                                                service_name: service_name.clone(),
+                                            }, cx);
                                         }
                                     }))
                                     .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),

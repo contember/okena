@@ -317,6 +317,16 @@ impl RootView {
 
                     let project_color = api_project.folder_color;
                     let conn_id_owned = conn_id.clone();
+
+                    // Build remote services with prefixed terminal IDs
+                    let remote_services: Vec<okena_core::api::ApiServiceInfo> = api_project.services.iter().map(|s| {
+                        let mut svc = s.clone();
+                        svc.terminal_id = s.terminal_id.as_ref()
+                            .map(|tid| format!("remote:{}:{}", conn_id, tid));
+                        svc
+                    }).collect();
+                    let remote_host = Some(snap.config.host.clone());
+
                     workspace.update(cx, |ws, _cx| {
                         if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
                             existing.name = api_project.name.clone();
@@ -331,6 +341,8 @@ impl RootView {
                             };
                             existing.terminal_names = terminal_names;
                             existing.folder_color = project_color;
+                            existing.remote_services = remote_services;
+                            existing.remote_host = remote_host;
                             // Don't overwrite is_visible — it's client-side state
                             // (the user may have toggled visibility locally).
                         } else {
@@ -348,6 +360,8 @@ impl RootView {
                                 is_remote: true,
                                 connection_id: Some(conn_id_owned),
                                 service_terminals: std::collections::HashMap::new(),
+                                remote_services,
+                                remote_host,
                             });
                         }
                     });
@@ -487,6 +501,7 @@ impl RootView {
                         });
 
                         if let Some(backend) = backend {
+                            let ws_for_observe = self.workspace.clone();
                             let entity = cx.new(move |cx| {
                                 let mut col = ProjectColumn::new(
                                     workspace_clone,
@@ -499,11 +514,11 @@ impl RootView {
                                     cx,
                                 );
                                 col.set_action_dispatcher(action_dispatcher);
+                                // Observe workspace for remote service state changes
+                                // (instead of local ServiceManager which has no data for remote projects)
+                                col.observe_remote_services(ws_for_observe, cx);
                                 col
                             });
-                            if let Some(ref sm) = self.service_manager {
-                                entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
-                            }
                             self.project_columns.insert(project_id.clone(), entity);
                         }
                     }
@@ -530,6 +545,7 @@ impl RootView {
                                 workspace: workspace_for_dispatch,
                                 backend: backend_for_dispatch,
                                 terminals: terminals_for_dispatch,
+                                service_manager: None, // set later via set_service_manager
                             },
                         ));
                         col
