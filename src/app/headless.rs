@@ -236,10 +236,12 @@ impl HeadlessApp {
             let state_version = state_version.clone();
             let git_status_tx = git_status_tx.clone();
             let service_manager = service_manager.clone();
+            let app_entity_registry = Arc::new(crate::views::layout::app_entity_registry::AppEntityRegistry::new());
             async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
                 remote_command_loop(
                     bridge_rx, local_backend, workspace, terminals,
-                    state_version, git_status_tx, service_manager, cx,
+                    state_version, git_status_tx, service_manager,
+                    app_entity_registry, cx,
                 ).await;
             }
         })
