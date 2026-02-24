@@ -486,13 +486,15 @@ impl Workspace {
             None => return,
         };
 
-        // Only-terminal check: don't move if it's the only terminal
-        if layout.collect_terminal_ids().len() <= 1 {
+        // Only-leaf check: don't move if it's the only leaf (terminal or app)
+        let terminal_count = layout.collect_terminal_ids().len();
+        let app_count = layout.collect_app_ids().len();
+        if terminal_count + app_count <= 1 {
             return;
         }
 
-        // Find source path
-        let source_path = match layout.find_terminal_path(source_terminal_id) {
+        // Find source path (search both terminals and apps)
+        let source_path = match layout.find_leaf_path(source_terminal_id) {
             Some(p) => p,
             None => return,
         };
@@ -524,7 +526,7 @@ impl Workspace {
             }
 
             // Re-find target path after removal (indices may have shifted)
-            let target_path = match layout.find_terminal_path(target_terminal_id) {
+            let target_path = match layout.find_leaf_path(target_terminal_id) {
                 Some(p) => p,
                 None => return,
             };
@@ -571,12 +573,12 @@ impl Workspace {
             layout.normalize();
 
             // Find the new path for focus before releasing borrow
-            layout.find_terminal_path(source_terminal_id)
+            layout.find_leaf_path(source_terminal_id)
         };
 
         self.notify_data(cx);
 
-        // Update focus to moved terminal's new path
+        // Update focus to moved pane's new path
         if let Some(new_path) = new_focus_path {
             self.set_focused_terminal(project_id.to_string(), new_path, cx);
         }
@@ -609,8 +611,8 @@ impl Workspace {
             None => return,
         };
 
-        // Find source path
-        let source_path = match layout.find_terminal_path(terminal_id) {
+        // Find source path (search both terminals and apps)
+        let source_path = match layout.find_leaf_path(terminal_id) {
             Some(p) => p,
             None => return,
         };
@@ -640,19 +642,21 @@ impl Workspace {
             return; // Can't remove root
         }
 
-        // Find a reference terminal already in the target tab group so we can
+        // Find a reference leaf already in the target tab group so we can
         // re-locate the group after removal may have shifted paths.
-        let reference_tid = match layout.get_at_path(tabs_path) {
+        let reference_id = match layout.get_at_path(tabs_path) {
             Some(node) => {
-                let ids = node.collect_terminal_ids();
-                // Pick a terminal that isn't the one we're moving
+                // Collect all leaf IDs (terminals + apps)
+                let mut ids = node.collect_terminal_ids();
+                ids.extend(node.collect_app_ids());
+                // Pick a leaf that isn't the one we're moving
                 ids.into_iter().find(|id| id != terminal_id)
             }
             None => return,
         };
-        let reference_tid = match reference_tid {
+        let reference_id = match reference_id {
             Some(id) => id,
-            None => return, // Tab group has no other terminals
+            None => return, // Tab group has no other leaves
         };
 
         // Perform mutation
@@ -670,14 +674,14 @@ impl Workspace {
                 return;
             }
 
-            // Re-find the tabs container via the reference terminal
-            let ref_path = match layout.find_terminal_path(&reference_tid) {
+            // Re-find the tabs container via the reference leaf
+            let ref_path = match layout.find_leaf_path(&reference_id) {
                 Some(p) => p,
                 None => return,
             };
-            // The Tabs node is the parent of the reference terminal
+            // The Tabs node is the parent of the reference leaf
             let new_tabs_path = if ref_path.is_empty() {
-                // Reference terminal is at root — layout collapsed unexpectedly
+                // Reference leaf is at root — layout collapsed unexpectedly
                 return;
             } else {
                 &ref_path[..ref_path.len() - 1]
@@ -699,7 +703,7 @@ impl Workspace {
             }
 
             layout.normalize();
-            layout.find_terminal_path(terminal_id)
+            layout.find_leaf_path(terminal_id)
         };
 
         self.notify_data(cx);
