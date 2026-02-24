@@ -1,8 +1,12 @@
 use std::path::Path;
 
+use time::OffsetDateTime;
+
 use super::agent_instructions::DEFAULT_AGENT_INSTRUCTIONS;
 use super::config::KruhPlanOverrides;
 use super::types::{IssueDetail, IssueRef, PlanInfo, StatusProgress};
+
+const KNOWN_CONFIG_KEYS: &[&str] = &["agent", "model", "max_iterations", "sleep_secs", "dangerous"];
 
 pub fn parse_status(docs_dir: &str) -> std::io::Result<StatusProgress> {
     let path = Path::new(docs_dir).join("STATUS.md");
@@ -59,10 +63,22 @@ pub fn ensure_agent_md(plans_dir: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Resolve the INSTRUCTIONS.md path: per-plan first, then shared .plans/ level.
+pub fn resolve_instructions_path(docs_dir: &str, plans_dir: &str) -> String {
+    let per_plan = Path::new(docs_dir).join("INSTRUCTIONS.md");
+    if per_plan.exists() {
+        return per_plan.to_string_lossy().to_string();
+    }
+    let shared = Path::new(plans_dir).join("INSTRUCTIONS.md");
+    shared.to_string_lossy().to_string()
+}
+
 pub fn build_prompt(docs_dir: &str, plans_dir: &str) -> std::io::Result<String> {
     let has_issues_dir = Path::new(docs_dir).join("issues").is_dir();
 
     let issues_instruction = if has_issues_dir { "read its file from issues/, " } else { "" };
+
+    let instructions_path = resolve_instructions_path(docs_dir, plans_dir);
 
     let agent_md_path = Path::new(plans_dir).join("AGENT.md");
     let prefix = if !plans_dir.is_empty() && agent_md_path.exists() {
@@ -75,7 +91,7 @@ pub fn build_prompt(docs_dir: &str, plans_dir: &str) -> std::io::Result<String> 
     };
 
     Ok(format!(
-        "{prefix}ead {docs_dir}/INSTRUCTIONS.md and {docs_dir}/STATUS.md. \
+        "{prefix}ead {instructions_path} and {docs_dir}/STATUS.md. \
          Find the first pending issue, {issues_instruction}implement it, \
          verify (type-check, tests, build), and update STATUS.md. \
          If no pending issues remain, respond: <done>promise</done>"
@@ -262,8 +278,9 @@ pub fn parse_issue_overrides(docs_dir: &str, issue_number: &str) -> KruhPlanOver
 ///
 /// Looks for `---` delimited frontmatter at the top of the file and parses
 /// supported fields: `agent`, `model`, `max_iterations`, `sleep_secs`, `dangerous`.
-pub fn parse_plan_overrides(docs_dir: &str) -> KruhPlanOverrides {
-    let path = Path::new(docs_dir).join("INSTRUCTIONS.md");
+/// Uses the fallback chain: per-plan INSTRUCTIONS.md first, then shared .plans/ level.
+pub fn parse_plan_overrides(docs_dir: &str, plans_dir: &str) -> KruhPlanOverrides {
+    let path = resolve_instructions_path(docs_dir, plans_dir);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return KruhPlanOverrides::default(),
@@ -322,6 +339,121 @@ pub fn parse_plan_overrides_content(content: &str) -> KruhPlanOverrides {
     }
 
     overrides
+}
+
+/// Update or insert frontmatter key-value pairs in content.
+///
+/// If frontmatter exists, existing keys are updated in place and new keys are appended.
+/// If no frontmatter exists, a new `---` section is created at the top.
+/// Body content after the closing `---` is preserved exactly (including blank lines).
+pub fn update_frontmatter_content(content: &str, updates: &[(&str, &str)]) -> String {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with("---") {
+        let after_open = &trimmed[3..];
+        let after_open = after_open.trim_start_matches(|c: char| c == '\r' || c == '\n');
+        if let Some(pos) = after_open.find("\n---") {
+            let frontmatter_block = &after_open[..pos];
+            let suffix = &after_open[pos + 4..];
+
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for line in frontmatter_block.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    pairs.push((key.trim().to_string(), value.trim().to_string()));
+                }
+            }
+
+            for (key, value) in updates {
+                if let Some(existing) = pairs.iter_mut().find(|(k, _)| k.as_str() == *key) {
+                    existing.1 = value.to_string();
+                } else {
+                    pairs.push((key.to_string(), value.to_string()));
+                }
+            }
+
+            let mut result = String::from("---\n");
+            for (k, v) in &pairs {
+                result.push_str(&format!("{}: {}\n", k, v));
+            }
+            result.push_str("---");
+            result.push_str(suffix);
+            return result;
+        }
+    }
+
+    // No frontmatter (or unclosed): create new section
+    let mut result = String::from("---\n");
+    for (k, v) in updates {
+        result.push_str(&format!("{}: {}\n", k, v));
+    }
+    result.push_str("---\n");
+    if !content.is_empty() {
+        result.push('\n');
+        result.push_str(content);
+    }
+    result
+}
+
+/// I/O wrapper: reads file, calls `update_frontmatter_content`, writes back.
+pub fn update_issue_frontmatter(file_path: &str, updates: &[(&str, &str)]) -> std::io::Result<()> {
+    let content = std::fs::read_to_string(file_path)?;
+    let updated = update_frontmatter_content(&content, updates);
+    std::fs::write(file_path, updated)?;
+    Ok(())
+}
+
+/// Returns all frontmatter key-value pairs that are NOT known config override keys.
+///
+/// Known config keys: `agent`, `model`, `max_iterations`, `sleep_secs`, `dangerous`.
+/// Everything else (e.g. `startedAt`, `endedAt`, `exitCode`, `duration`, `iteration`) is returned.
+pub fn extract_extra_frontmatter_keys(content: &str) -> Vec<(String, String)> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return Vec::new();
+    }
+    let after_open = &trimmed[3..];
+    let after_open = after_open.trim_start_matches(|c: char| c == '\r' || c == '\n');
+    let pos = match after_open.find("\n---") {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let frontmatter_block = &after_open[..pos];
+
+    let mut extras = Vec::new();
+    for line in frontmatter_block.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            if !KNOWN_CONFIG_KEYS.contains(&key) {
+                extras.push((key.to_string(), value.trim().to_string()));
+            }
+        }
+    }
+
+    extras
+}
+
+/// Format current local time as `YYYY-MM-DDTHH:MM:SS`.
+pub fn iso_now() -> String {
+    let now = match OffsetDateTime::now_local() {
+        Ok(t) => t,
+        Err(_) => OffsetDateTime::now_utc(),
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
 }
 
 #[cfg(test)]
@@ -546,7 +678,10 @@ mod tests {
 
     #[test]
     fn test_parse_plan_overrides_missing_file() {
-        let overrides = parse_plan_overrides("/tmp/nonexistent_kruh_overrides_12345");
+        let overrides = parse_plan_overrides(
+            "/tmp/nonexistent_kruh_overrides_12345",
+            "/tmp/nonexistent_kruh_overrides_12345",
+        );
         assert!(overrides.agent.is_none());
     }
 
@@ -626,6 +761,101 @@ mod tests {
     fn test_ensure_agent_md_empty_plans_dir() {
         // Should be a no-op, not an error
         ensure_agent_md("").unwrap();
+    }
+
+    #[test]
+    fn test_update_frontmatter_add_to_existing() {
+        let content = "---\nmodel: gpt-4\n---\n\n# Issue";
+        let result = update_frontmatter_content(content, &[("startedAt", "2026-02-25T14:30:45")]);
+        assert!(result.contains("model: gpt-4"));
+        assert!(result.contains("startedAt: 2026-02-25T14:30:45"));
+    }
+
+    #[test]
+    fn test_update_frontmatter_overwrite_existing() {
+        let content = "---\nmodel: gpt-4\n---\n\n# Issue";
+        let result = update_frontmatter_content(content, &[("model", "opus")]);
+        assert!(result.contains("model: opus"));
+        assert!(!result.contains("gpt-4"));
+    }
+
+    #[test]
+    fn test_update_frontmatter_create_new() {
+        let content = "# Issue\nSome body text.";
+        let result = update_frontmatter_content(content, &[("startedAt", "2026-02-25T14:30:45")]);
+        assert!(result.starts_with("---\n"));
+        assert!(result.contains("startedAt: 2026-02-25T14:30:45"));
+        assert!(result.contains("# Issue"));
+    }
+
+    #[test]
+    fn test_update_frontmatter_preserve_body() {
+        let content = "---\nmodel: gpt-4\n---\n\n# Issue\n\nSome body.\n";
+        let result = update_frontmatter_content(content, &[("model", "opus")]);
+        assert!(result.ends_with("\n\n# Issue\n\nSome body.\n"));
+    }
+
+    #[test]
+    fn test_update_frontmatter_multiple_updates() {
+        let content = "---\nmodel: gpt-4\n---\n\n# Issue";
+        let result = update_frontmatter_content(
+            content,
+            &[("startedAt", "2026-02-25T14:30:45"), ("agent", "claude"), ("iteration", "3")],
+        );
+        assert!(result.contains("startedAt: 2026-02-25T14:30:45"));
+        assert!(result.contains("agent: claude"));
+        assert!(result.contains("iteration: 3"));
+    }
+
+    #[test]
+    fn test_update_frontmatter_empty_content() {
+        let result = update_frontmatter_content("", &[("key", "value")]);
+        assert!(result.starts_with("---\n"));
+        assert!(result.contains("key: value"));
+        assert!(result.contains("\n---\n"));
+    }
+
+    #[test]
+    fn test_extract_extra_keys_with_extras() {
+        let content =
+            "---\nmodel: gpt-4\nstartedAt: 2026-02-25T14:30:45\nexitCode: 0\n---\n\n# Issue";
+        let extras = extract_extra_frontmatter_keys(content);
+        assert_eq!(extras.len(), 2);
+        assert!(extras.iter().any(|(k, _)| k == "startedAt"));
+        assert!(extras.iter().any(|(k, _)| k == "exitCode"));
+        assert!(!extras.iter().any(|(k, _)| k == "model"));
+    }
+
+    #[test]
+    fn test_extract_extra_keys_without_extras() {
+        let content = "---\nagent: claude\nmodel: gpt-4\n---\n\n# Issue";
+        let extras = extract_extra_frontmatter_keys(content);
+        assert!(extras.is_empty());
+    }
+
+    #[test]
+    fn test_extract_extra_keys_no_frontmatter() {
+        let content = "# Issue\n\nNo frontmatter here.";
+        let extras = extract_extra_frontmatter_keys(content);
+        assert!(extras.is_empty());
+    }
+
+    #[test]
+    fn test_iso_now_format() {
+        let ts = iso_now();
+        // Expected format: YYYY-MM-DDTHH:MM:SS (19 chars)
+        assert_eq!(ts.len(), 19, "timestamp length: {}", ts);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+        let separator_positions = [4usize, 7, 10, 13, 16];
+        for (i, c) in ts.chars().enumerate() {
+            if !separator_positions.contains(&i) {
+                assert!(c.is_ascii_digit(), "Expected digit at position {i}: got '{c}' in '{ts}'");
+            }
+        }
     }
 
     #[test]
