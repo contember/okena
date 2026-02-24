@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::agent_instructions::DEFAULT_AGENT_INSTRUCTIONS;
 use super::config::KruhPlanOverrides;
 use super::types::{IssueDetail, IssueRef, PlanInfo, StatusProgress};
 
@@ -45,13 +46,36 @@ pub fn extract_issue_ref(text: &str) -> IssueRef {
     IssueRef { number: String::new(), name: text.to_string() }
 }
 
-pub fn build_prompt(docs_dir: &str) -> std::io::Result<String> {
+pub fn ensure_agent_md(plans_dir: &str) -> std::io::Result<()> {
+    if plans_dir.is_empty() {
+        return Ok(());
+    }
+    let path = Path::new(plans_dir).join("AGENT.md");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(plans_dir)?;
+    std::fs::write(&path, DEFAULT_AGENT_INSTRUCTIONS)?;
+    Ok(())
+}
+
+pub fn build_prompt(docs_dir: &str, plans_dir: &str) -> std::io::Result<String> {
     let has_issues_dir = Path::new(docs_dir).join("issues").is_dir();
 
     let issues_instruction = if has_issues_dir { "read its file from issues/, " } else { "" };
 
+    let agent_md_path = Path::new(plans_dir).join("AGENT.md");
+    let prefix = if !plans_dir.is_empty() && agent_md_path.exists() {
+        format!(
+            "First read {}/AGENT.md for general workflow guidelines. Then r",
+            plans_dir
+        )
+    } else {
+        "R".to_string()
+    };
+
     Ok(format!(
-        "Read {docs_dir}/INSTRUCTIONS.md and {docs_dir}/STATUS.md. \
+        "{prefix}ead {docs_dir}/INSTRUCTIONS.md and {docs_dir}/STATUS.md. \
          Find the first pending issue, {issues_instruction}implement it, \
          verify (type-check, tests, build), and update STATUS.md. \
          If no pending issues remain, respond: <done>promise</done>"
@@ -364,7 +388,7 @@ mod tests {
     fn test_build_prompt_with_issues_dir() {
         let dir = std::env::temp_dir().join("kruh_test_with_issues");
         let _ = std::fs::create_dir_all(dir.join("issues"));
-        let prompt = build_prompt(dir.to_str().unwrap()).unwrap();
+        let prompt = build_prompt(dir.to_str().unwrap(), "").unwrap();
         assert!(prompt.contains("read its file from issues/"));
         assert!(prompt.contains("<done>promise</done>"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -376,7 +400,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         // Make sure issues/ doesn't exist
         let _ = std::fs::remove_dir_all(dir.join("issues"));
-        let prompt = build_prompt(dir.to_str().unwrap()).unwrap();
+        let prompt = build_prompt(dir.to_str().unwrap(), "").unwrap();
         assert!(!prompt.contains("read its file from issues/"));
         assert!(prompt.contains("<done>promise</done>"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -563,5 +587,87 @@ mod tests {
         let content = "---\nagent: codex\n---\n";
         let body = strip_frontmatter(content);
         assert_eq!(body, "");
+    }
+
+    #[test]
+    fn test_ensure_agent_md_creates_file() {
+        let dir = std::env::temp_dir().join("kruh_agent_md_create");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        ensure_agent_md(dir.to_str().unwrap()).unwrap();
+
+        let path = dir.join("AGENT.md");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Agent Workflow Guidelines"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_agent_md_skips_existing() {
+        let dir = std::env::temp_dir().join("kruh_agent_md_skip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("AGENT.md");
+        std::fs::write(&path, "# My custom instructions\n").unwrap();
+
+        ensure_agent_md(dir.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# My custom instructions\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ensure_agent_md_empty_plans_dir() {
+        // Should be a no-op, not an error
+        ensure_agent_md("").unwrap();
+    }
+
+    #[test]
+    fn test_build_prompt_with_agent_md() {
+        let plans_dir = std::env::temp_dir().join("kruh_prompt_agent_md");
+        let docs_dir = plans_dir.join("my-plan");
+        let _ = std::fs::remove_dir_all(&plans_dir);
+        std::fs::create_dir_all(&docs_dir).unwrap();
+
+        // Create AGENT.md in plans_dir
+        std::fs::write(plans_dir.join("AGENT.md"), "# Guidelines").unwrap();
+
+        let prompt = build_prompt(
+            docs_dir.to_str().unwrap(),
+            plans_dir.to_str().unwrap(),
+        ).unwrap();
+
+        assert!(prompt.starts_with("First read"));
+        assert!(prompt.contains("AGENT.md"));
+        assert!(prompt.contains("ead")); // "...Then read INSTRUCTIONS.md..."
+        assert!(prompt.contains("<done>promise</done>"));
+
+        let _ = std::fs::remove_dir_all(&plans_dir);
+    }
+
+    #[test]
+    fn test_build_prompt_without_agent_md() {
+        let plans_dir = std::env::temp_dir().join("kruh_prompt_no_agent_md");
+        let docs_dir = plans_dir.join("my-plan");
+        let _ = std::fs::remove_dir_all(&plans_dir);
+        std::fs::create_dir_all(&docs_dir).unwrap();
+
+        // No AGENT.md
+        let prompt = build_prompt(
+            docs_dir.to_str().unwrap(),
+            plans_dir.to_str().unwrap(),
+        ).unwrap();
+
+        assert!(prompt.starts_with("Read"));
+        assert!(!prompt.contains("AGENT.md"));
+        assert!(prompt.contains("<done>promise</done>"));
+
+        let _ = std::fs::remove_dir_all(&plans_dir);
     }
 }
