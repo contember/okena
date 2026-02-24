@@ -1,5 +1,6 @@
 //! Service list rendering for the sidebar
 
+use crate::process;
 use crate::services::manager::ServiceStatus;
 use crate::theme::theme;
 use gpui::*;
@@ -220,6 +221,34 @@ impl Sidebar {
                     .text_color(rgb(t.text_primary))
                     .text_ellipsis()
                     .child(service_name.clone()),
+            )
+            .children(
+                // Port badges
+                service.ports.iter().map(|port| {
+                    let port = *port;
+                    let url = format!("http://localhost:{}", port);
+                    div()
+                        .id(ElementId::Name(format!("svc-port-{}-{}-{}", project_id, service_name, port).into()))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .px(px(4.0))
+                        .h(px(16.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(3.0))
+                        .bg(rgb(t.bg_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_muted))
+                        .child(format!(":{}", port))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, _cx| {
+                            process::open_url(&url);
+                        })
+                        .tooltip(move |_window, cx| {
+                            Tooltip::new(format!("Open http://localhost:{}", port)).build(_window, cx)
+                        })
+                })
             )
             .child(
                 // Action buttons - show on hover

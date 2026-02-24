@@ -884,6 +884,7 @@ impl Sidebar {
 pub(super) struct SidebarServiceInfo {
     pub name: String,
     pub status: crate::services::manager::ServiceStatus,
+    pub ports: Vec<u16>,
 }
 
 /// Lightweight projection of ProjectData for sidebar rendering.
@@ -1005,6 +1006,7 @@ impl Render for Sidebar {
                         .map(|inst| SidebarServiceInfo {
                             name: inst.definition.name.clone(),
                             status: inst.status.clone(),
+                            ports: inst.detected_ports.clone(),
                         })
                         .collect();
                     (p.id.clone(), services)
