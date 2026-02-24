@@ -48,6 +48,7 @@ impl Workspace {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -275,6 +276,7 @@ impl Workspace {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         };
 
         // Insert after parent project in order
@@ -353,6 +355,7 @@ mod tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 
@@ -474,6 +477,7 @@ mod gpui_tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 

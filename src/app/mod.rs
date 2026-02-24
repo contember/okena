@@ -10,6 +10,7 @@ use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::services::manager::ServiceManager;
 use crate::settings::GlobalSettings;
 use crate::views::panels::toast::ToastManager;
 use crate::updater::{GlobalUpdateInfo, UpdateInfo};
@@ -54,6 +55,8 @@ pub struct Okena {
     listen_addr: IpAddr,
     /// Whether the listen address was forced via CLI --listen flag
     force_remote: bool,
+    /// Service manager for project-scoped background processes
+    service_manager: Entity<ServiceManager>,
 }
 
 impl Okena {
@@ -134,6 +137,16 @@ impl Okena {
         // Get terminals registry from root view
         let terminals = root_view.read(cx).terminals().clone();
 
+        // Create service manager for project-scoped background processes
+        let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
+            Arc::new(crate::terminal::backend::LocalBackend::new(pty_manager.clone()));
+        let service_manager = cx.new(|_cx| {
+            ServiceManager::new(local_backend_for_services, terminals.clone())
+        });
+        root_view.update(cx, |rv, cx| {
+            rv.set_service_manager(service_manager.clone(), cx);
+        });
+
         // Create remote connection manager and wire to root view
         let remote_manager = cx.new(|cx| {
             RemoteConnectionManager::new(terminals.clone(), cx)
@@ -202,6 +215,7 @@ impl Okena {
             remote_info: remote_info.clone(),
             listen_addr,
             force_remote,
+            service_manager: service_manager.clone(),
         };
 
         // Start PTY event loop (centralized for all windows)
@@ -217,6 +231,78 @@ impl Okena {
             this.handle_detached_terminals_changed(workspace, cx);
         })
         .detach();
+
+        // Observe workspace to load/unload service configs when projects change
+        {
+            let service_manager = service_manager.clone();
+            let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
+                Arc::new(parking_lot::Mutex::new(HashSet::new()));
+            cx.observe(&workspace, move |_this, workspace, cx| {
+                // Snapshot project info to avoid borrow conflicts with service_manager.update()
+                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
+                    .read(cx)
+                    .data()
+                    .projects
+                    .iter()
+                    .filter(|p| !p.is_remote && p.is_visible)
+                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
+                    .collect();
+
+                let current_ids: HashSet<String> =
+                    local_projects.iter().map(|(id, _, _)| id.clone()).collect();
+
+                let mut known = known_project_ids.lock();
+
+                // Load services for new projects
+                for (id, path, saved_terminals) in &local_projects {
+                    if !known.contains(id) {
+                        service_manager.update(cx, |sm, cx| {
+                            sm.load_project_services(id, path, saved_terminals, cx);
+                        });
+                    }
+                }
+
+                // Unload services for removed projects
+                let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
+                for id in removed {
+                    service_manager.update(cx, |sm, cx| {
+                        sm.unload_project_services(&id, cx);
+                    });
+                }
+
+                *known = current_ids;
+            })
+            .detach();
+        }
+
+        // Observe service manager to sync terminal IDs back to workspace for persistence
+        {
+            let workspace_for_svc = workspace.clone();
+            cx.observe(&service_manager, move |_this, service_manager, cx| {
+                let sm = service_manager.read(cx);
+                // Collect project IDs that have services
+                let project_ids: Vec<String> = sm.instances().keys()
+                    .map(|(pid, _)| pid.clone())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                let terminal_maps: Vec<(String, HashMap<String, String>)> = project_ids
+                    .into_iter()
+                    .map(|pid| {
+                        let ids = sm.service_terminal_ids(&pid);
+                        (pid, ids)
+                    })
+                    .collect();
+
+                workspace_for_svc.update(cx, |ws, cx| {
+                    for (project_id, terminals) in terminal_maps {
+                        ws.sync_service_terminals(&project_id, terminals, cx);
+                    }
+                });
+            })
+            .detach();
+        }
 
         // Auto-start remote server if enabled in settings or forced via --remote
         let settings = cx.global::<GlobalSettings>().0.clone();
@@ -338,6 +424,9 @@ impl Okena {
                     Err(_) => break,
                 };
 
+                // Collect exit events for service manager processing
+                let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
+
                 // Process first event + broadcast to remote subscribers
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
@@ -347,8 +436,9 @@ impl Okena {
                         }
                         broadcaster.publish(terminal_id.clone(), data.clone());
                     }
-                    PtyEvent::Exit { terminal_id, .. } => {
+                    PtyEvent::Exit { terminal_id, exit_code } => {
                         terminals.lock().remove(terminal_id);
+                        exit_events.push((terminal_id.clone(), *exit_code));
                     }
                 }
 
@@ -362,14 +452,23 @@ impl Okena {
                             }
                             broadcaster.publish(terminal_id.clone(), data.clone());
                         }
-                        PtyEvent::Exit { terminal_id, .. } => {
+                        PtyEvent::Exit { terminal_id, exit_code } => {
                             terminals.lock().remove(terminal_id);
+                            exit_events.push((terminal_id.clone(), *exit_code));
                         }
                     }
                 }
 
                 // Notify main window after processing the batch
                 let _ = this.update(cx, |this, cx| {
+                    // Route exit events to service manager for crash/restart handling
+                    if !exit_events.is_empty() {
+                        this.service_manager.update(cx, |sm, cx| {
+                            for (terminal_id, exit_code) in &exit_events {
+                                sm.handle_service_exit(terminal_id, *exit_code, cx);
+                            }
+                        });
+                    }
                     this.root_view.update(cx, |_, cx| cx.notify());
                 });
             }

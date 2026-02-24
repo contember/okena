@@ -72,6 +72,8 @@ actions!(
         SidebarEscape,
         ShowPairingDialog,
         TogglePaneSwitcher,
+        StartAllServices,
+        StopAllServices,
     ]
 );
 
@@ -224,6 +226,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SidebarEscape" => Some(KeyBinding::new(keystroke, SidebarEscape, context)),
         "ShowPairingDialog" => Some(KeyBinding::new(keystroke, ShowPairingDialog, context)),
         "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
+        "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
+        "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

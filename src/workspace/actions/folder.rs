@@ -159,6 +159,7 @@ mod tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 
@@ -265,6 +266,7 @@ mod gpui_tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 

@@ -361,6 +361,9 @@ impl RootView {
                         om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
                     });
                 }
+                OverlayRequest::ShowServiceLog { .. } => {
+                    // Service log overlay — will be implemented in a later commit
+                }
             }
         }
     }
