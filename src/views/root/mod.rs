@@ -6,6 +6,7 @@ mod terminal_actions;
 
 use crate::git::watcher::GitStatusWatcher;
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
 use crate::terminal::terminal::Terminal;
@@ -70,6 +71,8 @@ pub struct RootView {
     pane_switch_active: bool,
     /// Pane switcher overlay entity (separate entity for proper focus handling)
     pane_switcher_entity: Option<Entity<pane_switcher::PaneSwitcher>>,
+    /// Service manager (set by Okena after creation)
+    service_manager: Option<Entity<ServiceManager>>,
 }
 
 impl RootView {
@@ -157,6 +160,7 @@ impl RootView {
             git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
+            service_manager: None,
         };
 
         // Initialize project columns
@@ -194,6 +198,26 @@ impl RootView {
         });
 
         self.remote_manager = Some(manager);
+    }
+
+    /// Set the service manager entity (called by Okena after creation).
+    pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
+        cx.observe(&manager, |_this, _sm, cx| {
+            cx.notify();
+        }).detach();
+
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_service_manager(manager.clone(), cx);
+        });
+
+        // Wire service manager into existing project columns
+        for col in self.project_columns.values() {
+            col.update(cx, |col, cx| {
+                col.set_service_manager(manager.clone(), cx);
+            });
+        }
+
+        self.service_manager = Some(manager);
     }
 
     /// Sync remote connection state into workspace as materialized ProjectData entries.
@@ -276,6 +300,7 @@ impl RootView {
                                 hooks: HooksConfig::default(),
                                 is_remote: true,
                                 connection_id: Some(conn_id_owned),
+                                service_terminals: std::collections::HashMap::new(),
                             });
                         }
                     });
@@ -401,6 +426,9 @@ impl RootView {
                                 col.set_action_dispatcher(action_dispatcher);
                                 col
                             });
+                            if let Some(ref sm) = self.service_manager {
+                                entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
+                            }
                             self.project_columns.insert(project_id.clone(), entity);
                         }
                     }
@@ -431,6 +459,9 @@ impl RootView {
                         ));
                         col
                     });
+                    if let Some(ref sm) = self.service_manager {
+                        entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
+                    }
                     self.project_columns.insert(project_id.clone(), entity);
                 }
             }

@@ -348,7 +348,24 @@ impl RootView {
                         om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
                     });
                 }
+                OverlayRequest::ShowServiceLog { project_id, service_name } => {
+                    self.handle_show_service_log(project_id, service_name, cx);
+                }
             }
+        }
+    }
+
+    /// Handle a ShowServiceLog request: delegate to the correct ProjectColumn.
+    fn handle_show_service_log(
+        &mut self,
+        project_id: String,
+        service_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(col) = self.project_columns.get(&project_id).cloned() {
+            col.update(cx, |col, cx| {
+                col.show_service(&service_name, cx);
+            });
         }
     }
 }
