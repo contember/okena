@@ -484,6 +484,81 @@ impl PtyManager {
             .and_then(|h| h.child.process_id())
     }
 
+    /// Get root PIDs for port detection.
+    /// With session backends (dtach/tmux), the PTY child is the attach process,
+    /// not the actual service. This method finds the real service root PID.
+    pub fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        #[cfg(unix)]
+        {
+            match self.session_backend {
+                ResolvedBackend::Dtach => {
+                    return self.get_dtach_service_pids(terminal_id);
+                }
+                ResolvedBackend::Tmux => {
+                    return self.get_tmux_service_pids(terminal_id);
+                }
+                _ => {}
+            }
+        }
+        self.get_shell_pid(terminal_id).into_iter().collect()
+    }
+
+    /// Find the dtach daemon PID via `lsof -t <socket>`, excluding the attach PID.
+    #[cfg(unix)]
+    fn get_dtach_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        let session_name = self.session_backend.session_name(terminal_id);
+        let socket_path = match self.session_backend.socket_path(&session_name) {
+            Some(p) if p.exists() => p,
+            _ => return self.get_shell_pid(terminal_id).into_iter().collect(),
+        };
+
+        let output = match crate::process::safe_output(
+            crate::process::command("lsof").arg("-t").arg(&socket_path),
+        ) {
+            Ok(o) if o.status.success() => o,
+            _ => return self.get_shell_pid(terminal_id).into_iter().collect(),
+        };
+
+        let attach_pid = self.get_shell_pid(terminal_id);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pids: Vec<u32> = stdout
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .filter(|pid| Some(*pid) != attach_pid)
+            .collect();
+
+        if pids.is_empty() {
+            self.get_shell_pid(terminal_id).into_iter().collect()
+        } else {
+            pids
+        }
+    }
+
+    /// Find the shell PID inside a tmux session pane.
+    #[cfg(unix)]
+    fn get_tmux_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        let session_name = self.session_backend.session_name(terminal_id);
+        let output = match crate::process::safe_output(
+            crate::process::command("tmux")
+                .args(["list-panes", "-t", &session_name, "-F", "#{pane_pid}"]),
+        ) {
+            Ok(o) if o.status.success() => o,
+            _ => return self.get_shell_pid(terminal_id).into_iter().collect(),
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let pids: Vec<u32> = stdout
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect();
+
+        if pids.is_empty() {
+            self.get_shell_pid(terminal_id).into_iter().collect()
+        } else {
+            pids
+        }
+    }
+
     /// Check if the session backend handles mouse events (tmux with mouse on)
     pub fn uses_mouse_backend(&self) -> bool {
         matches!(self.session_backend, ResolvedBackend::Tmux)
