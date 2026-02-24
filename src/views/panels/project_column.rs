@@ -1,11 +1,14 @@
 use crate::git::{self, FileDiffSummary};
 use crate::git::watcher::GitStatusWatcher;
 use crate::action_dispatch::ActionDispatcher;
+use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
+use crate::views::layout::terminal_pane::TerminalPane;
 use crate::views::root::TerminalsRegistry;
-use crate::views::layout::split_pane::ActiveDrag;
+use crate::elements::resize_handle::ResizeHandle;
+use crate::views::layout::split_pane::{ActiveDrag, DragState};
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::OverlayRequest;
 use crate::workspace::state::{ProjectData, Workspace};
@@ -46,6 +49,16 @@ pub struct ProjectColumn {
     active_drag: ActiveDrag,
     /// Action dispatcher for routing terminal actions (local or remote)
     action_dispatcher: Option<ActionDispatcher>,
+    /// Service manager reference (set after creation)
+    service_manager: Option<Entity<ServiceManager>>,
+    /// Whether the per-project service log panel is open
+    service_panel_open: bool,
+    /// Currently active service name in the service panel
+    active_service_name: Option<String>,
+    /// Terminal pane showing the active service's log output
+    service_terminal_pane: Option<Entity<TerminalPane>>,
+    /// Height of the service panel in pixels
+    service_panel_height: f32,
 }
 
 impl ProjectColumn {
@@ -78,12 +91,123 @@ impl ProjectColumn {
             git_watcher,
             active_drag,
             action_dispatcher: None,
+            service_manager: None,
+            service_panel_open: false,
+            active_service_name: None,
+            service_terminal_pane: None,
+            service_panel_height: 200.0,
         }
     }
 
     /// Set the action dispatcher (used for remote projects).
     pub fn set_action_dispatcher(&mut self, dispatcher: Option<ActionDispatcher>) {
         self.action_dispatcher = dispatcher;
+    }
+
+    /// Set the service manager and observe it for changes.
+    pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
+        let project_id = self.project_id.clone();
+        cx.observe(&manager, move |this, sm, cx| {
+            let Some(ref active_name) = this.active_service_name else { return };
+            let current_tid = sm.read(cx)
+                .terminal_id_for(&project_id, active_name)
+                .cloned();
+
+            match current_tid {
+                Some(new_tid) => {
+                    // Check if terminal changed (service restarted)
+                    let pane_tid = this.service_terminal_pane.as_ref()
+                        .and_then(|p| p.read(cx).terminal_id());
+                    if pane_tid.as_deref() != Some(&new_tid) {
+                        let name = active_name.clone();
+                        this.show_service(&name, cx);
+                    }
+                }
+                None => {
+                    // Service stopped — close the panel
+                    this.close_service_panel(cx);
+                }
+            }
+        }).detach();
+
+        self.service_manager = Some(manager);
+    }
+
+    /// Show a service's log output in the per-project panel.
+    pub fn show_service(&mut self, service_name: &str, cx: &mut Context<Self>) {
+        let Some(ref sm) = self.service_manager else { return };
+
+        // Look up terminal_id; if the service isn't running, start it first
+        let terminal_id = {
+            let sm_read = sm.read(cx);
+            sm_read.terminal_id_for(&self.project_id, service_name).cloned()
+        };
+
+        let terminal_id = match terminal_id {
+            Some(tid) => tid,
+            None => {
+                // Start the service, then get the terminal_id
+                let path = sm.read(cx).project_path(&self.project_id).cloned();
+                if let Some(path) = path {
+                    sm.update(cx, |sm, cx| {
+                        sm.start_service(&self.project_id, service_name, &path, cx);
+                    });
+                }
+                let tid = sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned();
+                match tid {
+                    Some(tid) => tid,
+                    None => return,
+                }
+            }
+        };
+
+        let project_path = sm.read(cx)
+            .project_path(&self.project_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let ws = self.workspace.clone();
+        let rb = self.request_broker.clone();
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        let pid = self.project_id.clone();
+        let tid = terminal_id;
+
+        let pane = cx.new(move |cx| {
+            TerminalPane::new(
+                ws,
+                rb,
+                pid,
+                project_path,
+                vec![],
+                Some(tid),
+                false,
+                false,
+                backend,
+                terminals,
+                None,
+                cx,
+            )
+        });
+
+        self.active_service_name = Some(service_name.to_string());
+        self.service_terminal_pane = Some(pane);
+        self.service_panel_open = true;
+        cx.notify();
+    }
+
+    /// Set the service panel height (called during drag resize).
+    pub fn set_service_panel_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        self.service_panel_height = height.clamp(80.0, 600.0);
+        cx.notify();
+    }
+
+    /// Close the per-project service log panel.
+    pub fn close_service_panel(&mut self, cx: &mut Context<Self>) {
+        self.service_panel_open = false;
+        self.service_terminal_pane = None;
+        self.active_service_name = None;
+        cx.notify();
     }
 
     fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -600,6 +724,8 @@ impl ProjectColumn {
                     .gap(px(8.0))
                     // Hidden terminals taskbar (minimized and detached)
                     .child(self.render_hidden_taskbar(project, t))
+                    // Service indicator (always visible when services exist)
+                    .child(self.render_service_indicator(&t, cx))
                     // Project controls
                     .child(
                         div()
@@ -744,6 +870,393 @@ impl ProjectColumn {
     }
 }
 
+impl ProjectColumn {
+    /// Render the per-project service log panel (tab header + terminal pane).
+    fn render_service_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.service_panel_open {
+            return div().into_any_element();
+        }
+
+        let t = theme(cx);
+        let Some(ref sm) = self.service_manager else {
+            return div().into_any_element();
+        };
+
+        let sm_read = sm.read(cx);
+        let services = sm_read.services_for_project(&self.project_id);
+
+        if services.is_empty() {
+            return div().into_any_element();
+        }
+
+        let active_name = self.active_service_name.clone();
+
+        // Read active service status for action buttons
+        let active_status = active_name.as_ref().and_then(|name| {
+            services.iter()
+                .find(|s| s.definition.name == *name)
+                .map(|s| s.status.clone())
+        });
+        let active_is_running = matches!(active_status, Some(ServiceStatus::Running));
+        let active_is_starting = matches!(active_status, Some(ServiceStatus::Starting | ServiceStatus::Restarting));
+        let active_is_stopped = !active_is_running && !active_is_starting;
+
+        let project_id = self.project_id.clone();
+        let active_drag = self.active_drag.clone();
+        let panel_height = self.service_panel_height;
+
+        div()
+            .id("service-panel")
+            .flex()
+            .flex_col()
+            .h(px(panel_height))
+            .flex_shrink_0()
+            .child(
+                ResizeHandle::new(
+                    true, // horizontal divider (full width, 1px tall)
+                    t.border,
+                    t.border_active,
+                    move |mouse_pos, _cx| {
+                        *active_drag.borrow_mut() = Some(DragState::ServicePanel {
+                            project_id: project_id.clone(),
+                            initial_mouse_y: f32::from(mouse_pos.y),
+                            initial_height: panel_height,
+                        });
+                    },
+                ),
+            )
+            .child(
+                // Tab header
+                div()
+                    .id("service-panel-header")
+                    .h(px(28.0))
+                    .flex_shrink_0()
+                    .bg(rgb(t.bg_header))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .flex()
+                    .items_center()
+                    .child(
+                        // Service tabs (scrollable)
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .overflow_x_hidden()
+                            .children(
+                                services.iter().map(|instance| {
+                                    let name = instance.definition.name.clone();
+                                    let is_active = active_name.as_deref() == Some(&name);
+                                    let status_color = match &instance.status {
+                                        ServiceStatus::Running => t.term_green,
+                                        ServiceStatus::Crashed { .. } => t.term_red,
+                                        ServiceStatus::Stopped => t.text_muted,
+                                        ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
+                                    };
+
+                                    div()
+                                        .id(ElementId::Name(format!("svc-tab-{}", name).into()))
+                                        .cursor_pointer()
+                                        .h_full()
+                                        .px(px(10.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .text_size(px(11.0))
+                                        .when(is_active, |d| {
+                                            d.bg(rgb(t.bg_primary))
+                                                .text_color(rgb(t.text_primary))
+                                        })
+                                        .when(!is_active, |d| {
+                                            d.text_color(rgb(t.text_secondary))
+                                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .w(px(6.0))
+                                                .h(px(6.0))
+                                                .rounded(px(3.0))
+                                                .bg(rgb(status_color)),
+                                        )
+                                        .child(name.clone())
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.show_service(&name, cx);
+                                        }))
+                                })
+                            ),
+                    )
+                    // Action buttons for active service
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(1.0))
+                            .mr(px(2.0))
+                            .border_l_1()
+                            .border_color(rgb(t.border))
+                            .pl(px(4.0))
+                            // Start button (when stopped/crashed)
+                            .when(active_is_stopped, |d| {
+                                d.child(
+                                    div()
+                                        .id("svc-panel-start")
+                                        .cursor_pointer()
+                                        .w(px(22.0))
+                                        .h(px(22.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(3.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.term_green))
+                                        .child("▶")
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
+                                                let path = sm.read(cx).project_path(&this.project_id).cloned();
+                                                if let Some(path) = path {
+                                                    let name = name.clone();
+                                                    sm.update(cx, |sm, cx| {
+                                                        sm.start_service(&this.project_id, &name, &path, cx);
+                                                    });
+                                                }
+                                            }
+                                        }))
+                                        .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
+                                )
+                            })
+                            // Restart button (when running)
+                            .when(active_is_running, |d| {
+                                d.child(
+                                    div()
+                                        .id("svc-panel-restart")
+                                        .cursor_pointer()
+                                        .w(px(22.0))
+                                        .h(px(22.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(3.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.text_secondary))
+                                        .child("⟳")
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
+                                                let path = sm.read(cx).project_path(&this.project_id).cloned();
+                                                if let Some(path) = path {
+                                                    let name = name.clone();
+                                                    sm.update(cx, |sm, cx| {
+                                                        sm.restart_service(&this.project_id, &name, &path, cx);
+                                                    });
+                                                }
+                                            }
+                                        }))
+                                        .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
+                                )
+                            })
+                            // Stop button (when running)
+                            .when(active_is_running, |d| {
+                                d.child(
+                                    div()
+                                        .id("svc-panel-stop")
+                                        .cursor_pointer()
+                                        .w(px(22.0))
+                                        .h(px(22.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(3.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.term_red))
+                                        .child("■")
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
+                                                let name = name.clone();
+                                                sm.update(cx, |sm, cx| {
+                                                    sm.stop_service(&this.project_id, &name, cx);
+                                                });
+                                            }
+                                        }))
+                                        .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
+                                )
+                            })
+                            // Separator
+                            .child(
+                                div()
+                                    .w(px(1.0))
+                                    .h(px(14.0))
+                                    .mx(px(2.0))
+                                    .bg(rgb(t.border)),
+                            )
+                            // Start All button
+                            .child(
+                                div()
+                                    .id("svc-panel-start-all")
+                                    .cursor_pointer()
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("▶▶")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(ref sm) = this.service_manager {
+                                            let path = sm.read(cx).project_path(&this.project_id).cloned();
+                                            if let Some(path) = path {
+                                                sm.update(cx, |sm, cx| {
+                                                    sm.start_all(&this.project_id, &path, cx);
+                                                });
+                                            }
+                                        }
+                                    }))
+                                    .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
+                            )
+                            // Stop All button
+                            .child(
+                                div()
+                                    .id("svc-panel-stop-all")
+                                    .cursor_pointer()
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("■■")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(ref sm) = this.service_manager {
+                                            sm.update(cx, |sm, cx| {
+                                                sm.stop_all(&this.project_id, cx);
+                                            });
+                                        }
+                                    }))
+                                    .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
+                            ),
+                    )
+                    .child(
+                        // Close button
+                        div()
+                            .id("service-panel-close")
+                            .cursor_pointer()
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .mx(px(2.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(px(12.0))
+                            .text_color(rgb(t.text_secondary))
+                            .child("✕")
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.close_service_panel(cx);
+                            })),
+                    ),
+            )
+            .child(
+                // Content area — TerminalPane
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .children(self.service_terminal_pane.clone()),
+            )
+            .into_any_element()
+    }
+
+    /// Render the service indicator button for the project header.
+    fn render_service_indicator(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(ref sm) = self.service_manager else {
+            return div().into_any_element();
+        };
+
+        if !sm.read(cx).has_services(&self.project_id) {
+            return div().into_any_element();
+        }
+
+        let services = sm.read(cx).services_for_project(&self.project_id);
+
+        // Compute aggregate status color
+        let has_running = services.iter().any(|s| s.status == ServiceStatus::Running);
+        let has_crashed = services.iter().any(|s| matches!(s.status, ServiceStatus::Crashed { .. }));
+        let has_starting = services.iter().any(|s| matches!(s.status, ServiceStatus::Starting | ServiceStatus::Restarting));
+
+        let dot_color = if has_crashed {
+            t.term_red
+        } else if has_starting {
+            t.term_yellow
+        } else if has_running {
+            t.term_green
+        } else {
+            t.text_muted
+        };
+
+        let running_count = services.iter().filter(|s| s.status == ServiceStatus::Running).count();
+        let total_count = services.len();
+        let tooltip_text = format!("{}/{} services running", running_count, total_count);
+
+        div()
+            .id("service-indicator-btn")
+            .cursor_pointer()
+            .w(px(24.0))
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(|this, _, _window, cx| {
+                cx.stop_propagation();
+                if this.service_panel_open {
+                    this.close_service_panel(cx);
+                } else {
+                    // Open panel with first service if none is active
+                    let first_service_name = this.service_manager.as_ref()
+                        .map(|sm| sm.read(cx).services_for_project(&this.project_id))
+                        .and_then(|services| services.first().map(|s| s.definition.name.clone()));
+                    if let Some(name) = this.active_service_name.clone().or(first_service_name) {
+                        this.show_service(&name, cx);
+                    }
+                }
+            }))
+            .child(
+                div()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(dot_color)),
+            )
+            .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+            .into_any_element()
+    }
+}
+
 impl Render for ProjectColumn {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -781,6 +1294,7 @@ impl Render for ProjectColumn {
                     .bg(rgb(t.bg_primary))
                     .child(self.render_header(&project, cx))
                     .child(content)
+                    .child(self.render_service_panel(cx))
                     .child(self.render_diff_popover(&t, cx))
                     .into_any_element()
             }
