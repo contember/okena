@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::agent::spawn_agent;
 use super::git::{get_diff_stat, get_snapshot};
-use super::status_parser::{build_prompt, check_done_sentinel, parse_issue_overrides, parse_status};
+use super::status_parser::{build_prompt, check_done_sentinel, ensure_agent_md, parse_issue_overrides, parse_status};
 use super::types::KruhState;
 use super::KruhPane;
 
@@ -119,9 +119,19 @@ async fn run_loop(this: WeakEntity<KruhPane>, cx: &mut AsyncApp) {
             }
         }
 
-        // 6. Build prompt
+        // 6a. Ensure AGENT.md exists in plans dir
+        let plans_dir_for_agent = config.plans_dir.clone();
+        if let Err(e) = smol::unblock(move || ensure_agent_md(&plans_dir_for_agent)).await {
+            let _ = this.update(cx, |pane, cx| {
+                pane.add_output(&format!("Warning: could not create AGENT.md: {}", e), true);
+                cx.notify();
+            });
+        }
+
+        // 6b. Build prompt
         let docs_dir = config.docs_dir.clone();
-        let prompt = match smol::unblock(move || build_prompt(&docs_dir)).await {
+        let plans_dir_for_prompt = config.plans_dir.clone();
+        let prompt = match smol::unblock(move || build_prompt(&docs_dir, &plans_dir_for_prompt)).await {
             Ok(p) => p,
             Err(e) => {
                 let _ = this.update(cx, |pane, cx| {

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_instructions;
 pub mod config;
 pub mod git;
 pub mod loop_runner;
