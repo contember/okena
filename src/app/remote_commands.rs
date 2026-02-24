@@ -86,6 +86,18 @@ impl Okena {
                                     })
                                 })
                             }
+                            ActionRequest::ReloadServices { project_id } => {
+                                cx.update(|cx| {
+                                    service_manager.update(cx, |sm, cx| {
+                                        if let Some(path) = sm.project_path(&project_id).cloned() {
+                                            sm.reload_project_services(&project_id, &path, cx);
+                                            CommandResult::Ok(None)
+                                        } else {
+                                            CommandResult::Err(format!("project not found: {}", project_id))
+                                        }
+                                    })
+                                })
+                            }
                             action => {
                                 cx.update(|cx| {
                                     workspace.update(cx, |ws, cx| {
@@ -126,6 +138,7 @@ impl Okena {
                                             ServiceStatus::Restarting => "restarting".to_string(),
                                         },
                                         terminal_id: inst.terminal_id.clone(),
+                                        ports: inst.detected_ports.clone(),
                                     })
                                     .collect();
                                 ApiProject {

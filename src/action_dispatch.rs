@@ -4,6 +4,7 @@
 //! Callers simply call `dispatcher.dispatch(action, cx)` without any conditionals.
 
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::actions::execute::execute_action;
@@ -15,7 +16,7 @@ use okena_core::client::strip_prefix;
 use gpui::{AppContext, Entity};
 use std::sync::Arc;
 
-/// Routes terminal actions to either local execution or remote HTTP.
+/// Routes terminal and service actions to either local execution or remote HTTP.
 ///
 /// Passed through the view hierarchy (ProjectColumn → LayoutContainer → TerminalPane)
 /// so all action handlers dispatch through this without knowing if the project is
@@ -27,6 +28,7 @@ pub enum ActionDispatcher {
         workspace: Entity<Workspace>,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
+        service_manager: Option<Entity<ServiceManager>>,
     },
     /// Remote project — send actions via HTTP to the remote server.
     /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
@@ -45,14 +47,71 @@ impl ActionDispatcher {
         matches!(self, Self::Remote { .. })
     }
 
-    /// Dispatch a standard action (split, close, create terminal, etc.).
+    /// Dispatch a standard action (split, close, create terminal, service action, etc.).
     pub fn dispatch(&self, action: ActionRequest, cx: &mut impl AppContext) {
         match self {
             Self::Local {
                 workspace,
                 backend,
                 terminals,
+                service_manager,
             } => {
+                // Intercept service actions — these need ServiceManager, not execute_action
+                if let Some(sm) = service_manager {
+                    match &action {
+                        ActionRequest::StartService { project_id, service_name } => {
+                            let pid = project_id.clone();
+                            let sn = service_name.clone();
+                            sm.update(cx, |sm, cx| {
+                                if let Some(path) = sm.project_path(&pid).cloned() {
+                                    sm.start_service(&pid, &sn, &path, cx);
+                                }
+                            });
+                            return;
+                        }
+                        ActionRequest::StopService { project_id, service_name } => {
+                            let pid = project_id.clone();
+                            let sn = service_name.clone();
+                            sm.update(cx, |sm, cx| sm.stop_service(&pid, &sn, cx));
+                            return;
+                        }
+                        ActionRequest::RestartService { project_id, service_name } => {
+                            let pid = project_id.clone();
+                            let sn = service_name.clone();
+                            sm.update(cx, |sm, cx| {
+                                if let Some(path) = sm.project_path(&pid).cloned() {
+                                    sm.restart_service(&pid, &sn, &path, cx);
+                                }
+                            });
+                            return;
+                        }
+                        ActionRequest::StartAllServices { project_id } => {
+                            let pid = project_id.clone();
+                            sm.update(cx, |sm, cx| {
+                                if let Some(path) = sm.project_path(&pid).cloned() {
+                                    sm.start_all(&pid, &path, cx);
+                                }
+                            });
+                            return;
+                        }
+                        ActionRequest::StopAllServices { project_id } => {
+                            let pid = project_id.clone();
+                            sm.update(cx, |sm, cx| sm.stop_all(&pid, cx));
+                            return;
+                        }
+                        ActionRequest::ReloadServices { project_id } => {
+                            let pid = project_id.clone();
+                            sm.update(cx, |sm, cx| {
+                                if let Some(path) = sm.project_path(&pid).cloned() {
+                                    sm.reload_project_services(&pid, &path, cx);
+                                }
+                            });
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 let backend = backend.clone();
                 let terminals = terminals.clone();
                 workspace.update(cx, |ws, cx| {
@@ -398,6 +457,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
         },
         ActionRequest::StopAllServices { project_id } => ActionRequest::StopAllServices {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ReloadServices { project_id } => ActionRequest::ReloadServices {
             project_id: s(&project_id),
         },
     }

@@ -21,8 +21,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use okena_core::api::ActionRequest;
+
 /// Delay before showing diff summary popover (ms)
 const HOVER_DELAY_MS: u64 = 400;
+
+/// Unified snapshot of service state from either local ServiceManager or remote ProjectData.
+struct ServiceSnapshot {
+    name: String,
+    status: ServiceStatus,
+    #[allow(dead_code)]
+    terminal_id: Option<String>,
+    ports: Vec<u16>,
+}
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
@@ -109,6 +120,10 @@ impl ProjectColumn {
 
     /// Set the service manager and observe it for changes.
     pub fn set_service_manager(&mut self, manager: Entity<ServiceManager>, cx: &mut Context<Self>) {
+        // Also update the action dispatcher so it can route service actions locally
+        if let Some(ActionDispatcher::Local { ref mut service_manager, .. }) = self.action_dispatcher {
+            *service_manager = Some(manager.clone());
+        }
         let project_id = self.project_id.clone();
         cx.observe(&manager, move |this, sm, cx| {
             let Some(ref active_name) = this.active_service_name else { return };
@@ -139,21 +154,29 @@ impl ProjectColumn {
 
     /// Show a service's log output in the per-project panel.
     pub fn show_service(&mut self, service_name: &str, cx: &mut Context<Self>) {
-        let Some(ref sm) = self.service_manager else { return };
-
-        // Look up terminal_id — if the service isn't running, show panel without terminal
-        let terminal_id = {
-            let sm_read = sm.read(cx);
-            sm_read.terminal_id_for(&self.project_id, service_name).cloned()
+        // Look up terminal_id from either ServiceManager or remote services
+        let terminal_id = if let Some(ref sm) = self.service_manager {
+            sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned()
+        } else {
+            // Fall back to remote services
+            self.workspace.read(cx).project(&self.project_id)
+                .and_then(|p| {
+                    p.remote_services.iter()
+                        .find(|s| s.name == service_name)
+                        .and_then(|s| s.terminal_id.clone())
+                })
         };
 
         self.active_service_name = Some(service_name.to_string());
         self.service_panel_open = true;
 
         if let Some(tid) = terminal_id {
-            let project_path = sm.read(cx)
-                .project_path(&self.project_id)
-                .cloned()
+            let project_path = self.service_manager.as_ref()
+                .and_then(|sm| sm.read(cx).project_path(&self.project_id).cloned())
+                .or_else(|| {
+                    self.workspace.read(cx).project(&self.project_id)
+                        .map(|p| p.path.clone())
+                })
                 .unwrap_or_default();
 
             let ws = self.workspace.clone();
@@ -199,6 +222,64 @@ impl ProjectColumn {
         self.service_terminal_pane = None;
         self.active_service_name = None;
         cx.notify();
+    }
+
+    /// Get the list of services for this project, from either ServiceManager (local)
+    /// or remote_services on ProjectData (remote).
+    fn get_service_list(&self, cx: &Context<Self>) -> Vec<ServiceSnapshot> {
+        // Try ServiceManager first (local projects)
+        if let Some(ref sm) = self.service_manager {
+            let services = sm.read(cx).services_for_project(&self.project_id);
+            if !services.is_empty() {
+                return services.iter().map(|inst| ServiceSnapshot {
+                    name: inst.definition.name.clone(),
+                    status: inst.status.clone(),
+                    terminal_id: inst.terminal_id.clone(),
+                    ports: inst.detected_ports.clone(),
+                }).collect();
+            }
+        }
+        // Fall back to remote services from ProjectData
+        let ws = self.workspace.read(cx);
+        ws.project(&self.project_id)
+            .map(|p| p.remote_services.iter().map(|api_svc| ServiceSnapshot {
+                name: api_svc.name.clone(),
+                status: ServiceStatus::from_api_str(&api_svc.status),
+                terminal_id: api_svc.terminal_id.clone(),
+                ports: api_svc.ports.clone(),
+            }).collect())
+            .unwrap_or_default()
+    }
+
+    /// Observe workspace for remote service state changes (used for remote project columns).
+    pub fn observe_remote_services(&mut self, workspace: Entity<Workspace>, cx: &mut Context<Self>) {
+        let project_id = self.project_id.clone();
+        cx.observe(&workspace, move |this, ws, cx| {
+            let Some(ref active_name) = this.active_service_name else { return };
+
+            // Look up current terminal_id from remote_services
+            let current_tid = ws.read(cx).project(&project_id)
+                .and_then(|p| {
+                    p.remote_services.iter()
+                        .find(|s| s.name == *active_name)
+                        .and_then(|s| s.terminal_id.clone())
+                });
+
+            match current_tid {
+                Some(new_tid) => {
+                    let pane_tid = this.service_terminal_pane.as_ref()
+                        .and_then(|p| p.read(cx).terminal_id());
+                    if pane_tid.as_deref() != Some(&new_tid) {
+                        let name = active_name.clone();
+                        this.show_service(&name, cx);
+                    }
+                }
+                None => {
+                    this.service_terminal_pane = None;
+                    cx.notify();
+                }
+            }
+        }).detach();
     }
 
     fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -893,6 +974,13 @@ impl ProjectColumn {
 }
 
 impl ProjectColumn {
+    /// Dispatch a service action through ActionDispatcher (handles both local and remote).
+    fn dispatch_service_action(&self, action: ActionRequest, cx: &mut Context<Self>) {
+        if let Some(ref dispatcher) = self.action_dispatcher {
+            dispatcher.dispatch(action, cx);
+        }
+    }
+
     /// Render the per-project service log panel (tab header + terminal pane).
     fn render_service_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.service_panel_open {
@@ -900,12 +988,7 @@ impl ProjectColumn {
         }
 
         let t = theme(cx);
-        let Some(ref sm) = self.service_manager else {
-            return div().into_any_element();
-        };
-
-        let sm_read = sm.read(cx);
-        let services = sm_read.services_for_project(&self.project_id);
+        let services = self.get_service_list(cx);
 
         if services.is_empty() {
             return div().into_any_element();
@@ -916,7 +999,7 @@ impl ProjectColumn {
         // Read active service status for action buttons
         let active_status = active_name.as_ref().and_then(|name| {
             services.iter()
-                .find(|s| s.definition.name == *name)
+                .find(|s| s.name == *name)
                 .map(|s| s.status.clone())
         });
         let active_is_running = matches!(active_status, Some(ServiceStatus::Running));
@@ -926,6 +1009,10 @@ impl ProjectColumn {
         let project_id = self.project_id.clone();
         let active_drag = self.active_drag.clone();
         let panel_height = self.service_panel_height;
+
+        // Determine host for port badge URLs
+        let remote_host = self.workspace.read(cx).project(&self.project_id)
+            .and_then(|p| p.remote_host.clone());
 
         div()
             .id("service-panel")
@@ -966,17 +1053,18 @@ impl ProjectColumn {
                             .flex()
                             .overflow_x_hidden()
                             .children(
-                                services.iter().map(|instance| {
-                                    let name = instance.definition.name.clone();
+                                services.iter().map(|svc| {
+                                    let name = svc.name.clone();
                                     let is_active = active_name.as_deref() == Some(&name);
-                                    let status_color = match &instance.status {
+                                    let status_color = match &svc.status {
                                         ServiceStatus::Running => t.term_green,
                                         ServiceStatus::Crashed { .. } => t.term_red,
                                         ServiceStatus::Stopped => t.text_muted,
                                         ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
                                     };
 
-                                    let ports = instance.detected_ports.clone();
+                                    let ports = svc.ports.clone();
+                                    let remote_host = remote_host.clone();
                                     div()
                                         .id(ElementId::Name(format!("svc-tab-{}", name).into()))
                                         .cursor_pointer()
@@ -1004,30 +1092,36 @@ impl ProjectColumn {
                                         )
                                         .child(name.clone())
                                         .children(
-                                            ports.iter().map(|port| {
-                                                let port = *port;
-                                                let url = format!("http://localhost:{}", port);
-                                                div()
-                                                    .id(ElementId::Name(format!("svc-tab-port-{}-{}", name, port).into()))
-                                                    .flex_shrink_0()
-                                                    .cursor_pointer()
-                                                    .px(px(3.0))
-                                                    .h(px(14.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .rounded(px(3.0))
-                                                    .bg(rgb(t.bg_secondary))
-                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    .text_size(px(9.0))
-                                                    .text_color(rgb(t.text_muted))
-                                                    .child(format!(":{}", port))
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                    .on_click(move |_, _, _cx| {
-                                                        crate::process::open_url(&url);
-                                                    })
-                                                    .tooltip(move |_window, cx| {
-                                                        Tooltip::new(format!("Open http://localhost:{}", port)).build(_window, cx)
-                                                    })
+                                            ports.iter().map({
+                                                let name = name.clone();
+                                                let remote_host = remote_host.clone();
+                                                move |port| {
+                                                    let port = *port;
+                                                    let host = remote_host.as_deref().unwrap_or("localhost");
+                                                    let url = format!("http://{}:{}", host, port);
+                                                    let tooltip_url = url.clone();
+                                                    div()
+                                                        .id(ElementId::Name(format!("svc-tab-port-{}-{}", name, port).into()))
+                                                        .flex_shrink_0()
+                                                        .cursor_pointer()
+                                                        .px(px(3.0))
+                                                        .h(px(14.0))
+                                                        .flex()
+                                                        .items_center()
+                                                        .rounded(px(3.0))
+                                                        .bg(rgb(t.bg_secondary))
+                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                        .text_size(px(9.0))
+                                                        .text_color(rgb(t.text_muted))
+                                                        .child(format!(":{}", port))
+                                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                        .on_click(move |_, _, _cx| {
+                                                            crate::process::open_url(&url);
+                                                        })
+                                                        .tooltip(move |_window, cx| {
+                                                            Tooltip::new(tooltip_url.clone()).build(_window, cx)
+                                                        })
+                                                }
                                             })
                                         )
                                         .on_click(cx.listener(move |this, _, _window, cx| {
@@ -1066,14 +1160,11 @@ impl ProjectColumn {
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(cx.listener(|this, _, _window, cx| {
                                             cx.stop_propagation();
-                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
-                                                let path = sm.read(cx).project_path(&this.project_id).cloned();
-                                                if let Some(path) = path {
-                                                    let name = name.clone();
-                                                    sm.update(cx, |sm, cx| {
-                                                        sm.start_service(&this.project_id, &name, &path, cx);
-                                                    });
-                                                }
+                                            if let Some(name) = this.active_service_name.clone() {
+                                                this.dispatch_service_action(ActionRequest::StartService {
+                                                    project_id: this.project_id.clone(),
+                                                    service_name: name,
+                                                }, cx);
                                             }
                                         }))
                                         .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
@@ -1098,14 +1189,11 @@ impl ProjectColumn {
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(cx.listener(|this, _, _window, cx| {
                                             cx.stop_propagation();
-                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
-                                                let path = sm.read(cx).project_path(&this.project_id).cloned();
-                                                if let Some(path) = path {
-                                                    let name = name.clone();
-                                                    sm.update(cx, |sm, cx| {
-                                                        sm.restart_service(&this.project_id, &name, &path, cx);
-                                                    });
-                                                }
+                                            if let Some(name) = this.active_service_name.clone() {
+                                                this.dispatch_service_action(ActionRequest::RestartService {
+                                                    project_id: this.project_id.clone(),
+                                                    service_name: name,
+                                                }, cx);
                                             }
                                         }))
                                         .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
@@ -1130,11 +1218,11 @@ impl ProjectColumn {
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                         .on_click(cx.listener(|this, _, _window, cx| {
                                             cx.stop_propagation();
-                                            if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
-                                                let name = name.clone();
-                                                sm.update(cx, |sm, cx| {
-                                                    sm.stop_service(&this.project_id, &name, cx);
-                                                });
+                                            if let Some(name) = this.active_service_name.clone() {
+                                                this.dispatch_service_action(ActionRequest::StopService {
+                                                    project_id: this.project_id.clone(),
+                                                    service_name: name,
+                                                }, cx);
                                             }
                                         }))
                                         .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
@@ -1166,14 +1254,9 @@ impl ProjectColumn {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         cx.stop_propagation();
-                                        if let Some(ref sm) = this.service_manager {
-                                            let path = sm.read(cx).project_path(&this.project_id).cloned();
-                                            if let Some(path) = path {
-                                                sm.update(cx, |sm, cx| {
-                                                    sm.start_all(&this.project_id, &path, cx);
-                                                });
-                                            }
-                                        }
+                                        this.dispatch_service_action(ActionRequest::StartAllServices {
+                                            project_id: this.project_id.clone(),
+                                        }, cx);
                                     }))
                                     .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
                             )
@@ -1195,11 +1278,9 @@ impl ProjectColumn {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                     .on_click(cx.listener(|this, _, _window, cx| {
                                         cx.stop_propagation();
-                                        if let Some(ref sm) = this.service_manager {
-                                            sm.update(cx, |sm, cx| {
-                                                sm.stop_all(&this.project_id, cx);
-                                            });
-                                        }
+                                        this.dispatch_service_action(ActionRequest::StopAllServices {
+                                            project_id: this.project_id.clone(),
+                                        }, cx);
                                     }))
                                     .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
                             ),
@@ -1273,14 +1354,11 @@ impl ProjectColumn {
                                             .child("Start"),
                                     )
                                     .on_click(cx.listener(|this, _, _window, cx| {
-                                        if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
-                                            let path = sm.read(cx).project_path(&this.project_id).cloned();
-                                            if let Some(path) = path {
-                                                let name = name.clone();
-                                                sm.update(cx, |sm, cx| {
-                                                    sm.start_service(&this.project_id, &name, &path, cx);
-                                                });
-                                            }
+                                        if let Some(name) = this.active_service_name.clone() {
+                                            this.dispatch_service_action(ActionRequest::StartService {
+                                                project_id: this.project_id.clone(),
+                                                service_name: name,
+                                            }, cx);
                                         }
                                     })),
                             )
@@ -1291,15 +1369,11 @@ impl ProjectColumn {
 
     /// Render the service indicator button for the project header.
     fn render_service_indicator(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(ref sm) = self.service_manager else {
-            return div().into_any_element();
-        };
+        let services = self.get_service_list(cx);
 
-        if !sm.read(cx).has_services(&self.project_id) {
+        if services.is_empty() {
             return div().into_any_element();
         }
-
-        let services = sm.read(cx).services_for_project(&self.project_id);
 
         // Compute aggregate status color
         let has_running = services.iter().any(|s| s.status == ServiceStatus::Running);
@@ -1339,9 +1413,9 @@ impl ProjectColumn {
                     this.close_service_panel(cx);
                 } else {
                     // Open panel with first service if none is active
-                    let first_service_name = this.service_manager.as_ref()
-                        .map(|sm| sm.read(cx).services_for_project(&this.project_id))
-                        .and_then(|services| services.first().map(|s| s.definition.name.clone()));
+                    let first_service_name = this.get_service_list(cx)
+                        .first()
+                        .map(|s| s.name.clone());
                     if let Some(name) = this.active_service_name.clone().or(first_service_name) {
                         this.show_service(&name, cx);
                     }

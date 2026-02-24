@@ -30,6 +30,7 @@ impl RootView {
             workspace: self.workspace.clone(),
             backend: self.backend.clone(),
             terminals: self.terminals.clone(),
+            service_manager: self.service_manager.clone(),
         }
     }
 }

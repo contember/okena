@@ -348,6 +348,7 @@ impl Sidebar {
                 workspace: self.workspace.clone(),
                 backend: backend.clone(),
                 terminals: self.terminals.clone(),
+                service_manager: self.service_manager.clone(),
             })
         }
     }
@@ -885,6 +886,8 @@ pub(super) struct SidebarServiceInfo {
     pub name: String,
     pub status: crate::services::manager::ServiceStatus,
     pub ports: Vec<u16>,
+    /// Host for port badge URLs ("localhost" for local, remote host for remote)
+    pub port_host: String,
 }
 
 /// Lightweight projection of ProjectData for sidebar rendering.
@@ -1007,6 +1010,7 @@ impl Render for Sidebar {
                             name: inst.definition.name.clone(),
                             status: inst.status.clone(),
                             ports: inst.detected_ports.clone(),
+                            port_host: "localhost".to_string(),
                         })
                         .collect();
                     (p.id.clone(), services)
@@ -1015,6 +1019,22 @@ impl Render for Sidebar {
         } else {
             HashMap::new()
         };
+
+        // Also populate services from remote project data (for projects not covered by local ServiceManager)
+        for project in &workspace.data().projects {
+            if !project.remote_services.is_empty() && !project_services.contains_key(&project.id) {
+                let port_host = project.remote_host.clone().unwrap_or_else(|| "localhost".to_string());
+                let services = project.remote_services.iter().map(|api_svc| {
+                    SidebarServiceInfo {
+                        name: api_svc.name.clone(),
+                        status: crate::services::manager::ServiceStatus::from_api_str(&api_svc.status),
+                        ports: api_svc.ports.clone(),
+                        port_host: port_host.clone(),
+                    }
+                }).collect();
+                project_services.insert(project.id.clone(), services);
+            }
+        }
 
         // Build sidebar items from project_order
         let mut items: Vec<SidebarItem> = Vec::new();
@@ -1138,7 +1158,7 @@ impl Render for Sidebar {
                             flat_elements.push(self.render_services_header(&project, 28.0, cx).into_any_element());
                             for service in &project.services {
                                 let is_cursor = cursor_index == Some(flat_idx);
-                                flat_elements.push(self.render_service_item(&project.id, service, 28.0, is_cursor, cx).into_any_element());
+                                flat_elements.push(self.render_service_item(&project, service, 28.0, is_cursor, cx).into_any_element());
                                 flat_idx += 1;
                             }
                         }
@@ -1227,7 +1247,7 @@ impl Render for Sidebar {
                                     flat_elements.push(self.render_services_header(fp, 48.0, cx).into_any_element());
                                     for service in &fp.services {
                                         let is_cursor = cursor_index == Some(flat_idx);
-                                        flat_elements.push(self.render_service_item(&fp.id, service, 48.0, is_cursor, cx).into_any_element());
+                                        flat_elements.push(self.render_service_item(fp, service, 48.0, is_cursor, cx).into_any_element());
                                         flat_idx += 1;
                                     }
                                 }

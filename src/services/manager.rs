@@ -36,6 +36,19 @@ pub enum ServiceStatus {
     Restarting,
 }
 
+impl ServiceStatus {
+    /// Convert an API status string (from `ApiServiceInfo.status`) into a `ServiceStatus`.
+    pub fn from_api_str(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "starting" => Self::Starting,
+            "restarting" => Self::Restarting,
+            "crashed" => Self::Crashed { exit_code: None },
+            _ => Self::Stopped,
+        }
+    }
+}
+
 const MAX_RESTART_COUNT: u32 = 5;
 
 impl ServiceManager {
@@ -807,5 +820,16 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(ids.get("web"), Some(&"term-web".to_string()));
         assert!(!ids.contains_key("api")); // No terminal_id
+    }
+
+    #[test]
+    fn from_api_str_maps_known_statuses() {
+        assert_eq!(ServiceStatus::from_api_str("running"), ServiceStatus::Running);
+        assert_eq!(ServiceStatus::from_api_str("starting"), ServiceStatus::Starting);
+        assert_eq!(ServiceStatus::from_api_str("restarting"), ServiceStatus::Restarting);
+        assert_eq!(ServiceStatus::from_api_str("crashed"), ServiceStatus::Crashed { exit_code: None });
+        assert_eq!(ServiceStatus::from_api_str("stopped"), ServiceStatus::Stopped);
+        assert_eq!(ServiceStatus::from_api_str("unknown"), ServiceStatus::Stopped);
+        assert_eq!(ServiceStatus::from_api_str(""), ServiceStatus::Stopped);
     }
 }

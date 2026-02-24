@@ -54,6 +54,8 @@ pub struct ApiServiceInfo {
     pub name: String,
     pub status: String, // "running", "stopped", "crashed", "starting", "restarting"
     pub terminal_id: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -236,6 +238,9 @@ pub enum ActionRequest {
         project_id: String,
     },
     StopAllServices {
+        project_id: String,
+    },
+    ReloadServices {
         project_id: String,
     },
 }
@@ -504,6 +509,9 @@ mod tests {
             ActionRequest::StopAllServices {
                 project_id: "p1".into(),
             },
+            ActionRequest::ReloadServices {
+                project_id: "p1".into(),
+            },
         ];
         for action in actions {
             let json = serde_json::to_string(&action).unwrap();
@@ -546,5 +554,24 @@ mod tests {
         };
         let ids = layout.collect_terminal_ids();
         assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn api_service_info_ports_round_trip() {
+        let svc = ApiServiceInfo {
+            name: "vite".into(),
+            status: "running".into(),
+            terminal_id: Some("t1".into()),
+            ports: vec![3000, 5173],
+        };
+        let json = serde_json::to_string(&svc).unwrap();
+        let parsed: ApiServiceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "vite");
+        assert_eq!(parsed.ports, vec![3000, 5173]);
+
+        // Test that ports defaults to empty when missing
+        let json_no_ports = r#"{"name":"api","status":"stopped","terminal_id":null}"#;
+        let parsed: ApiServiceInfo = serde_json::from_str(json_no_ports).unwrap();
+        assert!(parsed.ports.is_empty());
     }
 }
