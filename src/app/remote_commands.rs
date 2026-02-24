@@ -20,6 +20,7 @@ impl Okena {
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
+        let app_entity_registry = self.app_entity_registry.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx| {
             loop {
@@ -97,6 +98,18 @@ impl Okena {
                                 None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
                             }
                         })
+                    }
+                    RemoteCommand::GetAppState { app_id } => {
+                        match app_entity_registry.get_view_state(&app_id, cx) {
+                            Some(state) => CommandResult::Ok(Some(state)),
+                            None => CommandResult::Err(format!("App not found: {}", app_id)),
+                        }
+                    }
+                    RemoteCommand::AppAction { project_id: _, app_id, action } => {
+                        match app_entity_registry.handle_action(&app_id, action, cx) {
+                            Ok(()) => CommandResult::Ok(None),
+                            Err(e) => CommandResult::Err(e),
+                        }
                     }
                 };
 

@@ -324,6 +324,12 @@ impl HeadlessApp {
                             }
                         })
                     }
+                    RemoteCommand::GetAppState { app_id } => {
+                        CommandResult::Err(format!("App not found: {}", app_id))
+                    }
+                    RemoteCommand::AppAction { app_id, .. } => {
+                        CommandResult::Err(format!("App not found: {}", app_id))
+                    }
                 };
 
                 let _ = msg.reply.send(result);

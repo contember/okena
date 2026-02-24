@@ -17,6 +17,9 @@ use crate::keybindings::{
 };
 use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::views::components::simple_input::SimpleInputState;
+use crate::views::layout::app_entity_registry::{
+    AppEntityHandle, AppEntityRegistry, GlobalAppEntityRegistry,
+};
 use crate::views::layout::navigation::{
     get_pane_map, register_pane_bounds, NavigationDirection,
 };
@@ -86,6 +89,9 @@ pub struct KruhPane {
     // Remote state publishing
     pub app_broadcaster: Option<Arc<AppStateBroadcaster>>,
     pub publish_timer: Option<Task<()>>,
+
+    // App entity registry (kept for unregister in Drop)
+    pub app_registry: Option<Arc<AppEntityRegistry>>,
 }
 
 impl KruhPane {
@@ -158,6 +164,7 @@ impl KruhPane {
             _scan_task: None,
             app_broadcaster,
             publish_timer: None,
+            app_registry: None,
         };
 
         // Publish state on every notify (debounced 100ms)
@@ -169,6 +176,39 @@ impl KruhPane {
         }
 
         pane.start_scan(cx);
+
+        // Register with the app entity registry if available (enables remote control)
+        if let Some(registry) = cx.try_global::<GlobalAppEntityRegistry>().map(|g| g.0.clone()) {
+            if let Some(ref app_id) = pane.app_id {
+                let entity = cx.entity().downgrade();
+                let entity_for_action = entity.clone();
+                registry.register(
+                    app_id.clone(),
+                    AppEntityHandle {
+                        app_kind: "kruh".to_string(),
+                        view_state: Arc::new(move |cx| {
+                            entity
+                                .update(cx, |pane, cx| {
+                                    serde_json::to_value(pane.view_state(cx)).ok()
+                                })
+                                .ok()
+                                .flatten()
+                        }),
+                        handle_action: Arc::new(move |action, cx| {
+                            let action: KruhAction = serde_json::from_value(action)
+                                .map_err(|e| format!("Invalid action: {}", e))?;
+                            entity_for_action
+                                .update(cx, |pane, cx| {
+                                    pane.handle_action(action, cx);
+                                })
+                                .map_err(|_| "Entity released".to_string())
+                        }),
+                    },
+                );
+                pane.app_registry = Some(registry);
+            }
+        }
+
         pane
     }
 
@@ -1051,5 +1091,10 @@ impl Drop for KruhPane {
             l.quit_requested = true;
         }
         // loop_tasks are dropped automatically, which cancels the async tasks
+
+        // Unregister from the app entity registry
+        if let (Some(registry), Some(app_id)) = (&self.app_registry, &self.app_id) {
+            registry.unregister(app_id);
+        }
     }
 }

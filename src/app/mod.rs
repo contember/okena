@@ -5,6 +5,7 @@ mod update_checker;
 
 use crate::git::watcher::GitStatusWatcher;
 use crate::remote::app_broadcaster::AppStateBroadcaster;
+use crate::views::layout::app_entity_registry::{AppEntityRegistry, GlobalAppEntityRegistry};
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -51,6 +52,7 @@ pub struct Okena {
     pub auth_store: Arc<AuthStore>,
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
     pub(crate) app_broadcaster: Arc<AppStateBroadcaster>,
+    pub(crate) app_entity_registry: Arc<AppEntityRegistry>,
     pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
@@ -123,6 +125,10 @@ impl Okena {
 
         // Create app state broadcaster (used by KruhPane to publish state to WebSocket clients)
         let app_broadcaster = Arc::new(AppStateBroadcaster::new());
+
+        // Create app entity registry and set as GPUI global so KruhPane can register itself
+        let app_entity_registry = Arc::new(AppEntityRegistry::new());
+        cx.set_global(GlobalAppEntityRegistry(app_entity_registry.clone()));
 
         // Create root view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
@@ -200,6 +206,7 @@ impl Okena {
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
             app_broadcaster,
+            app_entity_registry,
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
             listen_addr,

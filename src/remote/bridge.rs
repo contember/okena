@@ -19,6 +19,10 @@ pub enum RemoteCommand {
     RenderSnapshot { terminal_id: String },
     /// Get current grid sizes (cols, rows) for multiple terminals.
     GetTerminalSizes { terminal_ids: Vec<String> },
+    /// Get the serialized view state for an app entity.
+    GetAppState { app_id: String },
+    /// Dispatch a serialized action to an app entity.
+    AppAction { project_id: String, app_id: String, action: serde_json::Value },
 }
 
 /// Result of processing a RemoteCommand.
