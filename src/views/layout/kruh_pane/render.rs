@@ -9,7 +9,7 @@ use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use crate::views::components::ui_helpers::*;
 
 use super::config::AGENTS;
-use super::types::{EditTarget, KruhState, PlanInfo};
+use super::types::{EditTarget, KruhState, LoopState, PlanInfo};
 use super::KruhPane;
 
 impl KruhPane {
@@ -24,7 +24,7 @@ impl KruhPane {
             KruhState::TaskBrowser => self.render_task_browser(window, cx).into_any_element(),
             KruhState::Editing => self.render_editor(cx).into_any_element(),
             KruhState::Settings => self.render_settings(window, cx).into_any_element(),
-            _ => self.render_running_view(window, cx).into_any_element(),
+            KruhState::LoopOverview => self.render_running_view(window, cx).into_any_element(),
         };
 
         div()
@@ -46,10 +46,7 @@ impl KruhPane {
             || self.state == KruhState::TaskBrowser
             || self.state == KruhState::Editing
             || self.state == KruhState::Settings
-            || matches!(
-                self.state,
-                KruhState::Running | KruhState::Paused | KruhState::WaitingForStep | KruhState::Completed
-            );
+            || self.state == KruhState::LoopOverview;
 
         if !has_context {
             return div();
@@ -889,8 +886,10 @@ impl KruhPane {
 
     fn render_progress_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let total = self.progress.total.max(1) as f32;
-        let ratio = self.progress.done as f32 / total;
+        let instance = self.focused_loop();
+        let (done, total_val) = instance.map(|l| (l.progress.done, l.progress.total)).unwrap_or((0, 1));
+        let total = total_val.max(1) as f32;
+        let ratio = done as f32 / total;
         let pct = (ratio * 100.0) as usize;
 
         let bar_color = if ratio < 0.25 {
@@ -910,7 +909,7 @@ impl KruhPane {
             .child(
                 div()
                     .text_size(TEXT_SM)
-                    .child(format!("{}/{}", self.progress.done, self.progress.total)),
+                    .child(format!("{}/{}", done, total_val)),
             )
             .child(
                 div()
@@ -933,7 +932,8 @@ impl KruhPane {
 
     fn render_iteration_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let elapsed = self.start_time.map(|t| t.elapsed()).unwrap_or_default();
+        let instance = self.focused_loop();
+        let elapsed = instance.and_then(|l| l.start_time.map(|t| t.elapsed())).unwrap_or_default();
         let mins = elapsed.as_secs() / 60;
         let secs = elapsed.as_secs() % 60;
 
@@ -949,7 +949,8 @@ impl KruhPane {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!(
                         "Iteration {}/{}",
-                        self.iteration, self.config.max_iterations
+                        instance.map(|l| l.iteration).unwrap_or(0),
+                        instance.map(|l| l.config.max_iterations).unwrap_or(self.config.max_iterations),
                     )),
             )
             .child(
@@ -965,38 +966,46 @@ impl KruhPane {
     fn render_output(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        div()
+        let mut container = div()
             .id("kruh-output")
             .flex_1()
             .overflow_y_scroll()
-            .track_scroll(&self.output_scroll)
             .px(SPACE_MD)
-            .py(SPACE_XS)
-            .children(self.output_lines.iter().map(|line| {
+            .py(SPACE_XS);
+
+        if let Some(instance) = self.focused_loop() {
+            container = container.track_scroll(&instance.output_scroll);
+            for line in &instance.output_lines {
                 let text_color = if line.is_error {
                     rgb(t.error)
                 } else {
                     rgb(t.text_primary)
                 };
-                div()
-                    .text_size(TEXT_SM)
-                    .font_family("monospace")
-                    .text_color(text_color)
-                    .child(strip_ansi(&line.text))
-            }))
+                container = container.child(
+                    div()
+                        .text_size(TEXT_SM)
+                        .font_family("monospace")
+                        .text_color(text_color)
+                        .child(strip_ansi(&line.text)),
+                );
+            }
+        }
+
+        container
     }
 
     // ── Diff Display ────────────────────────────────────────────────────
 
     fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let diff_stat = self.focused_loop().and_then(|l| l.diff_stat.as_ref());
 
         div()
             .px(SPACE_MD)
             .py(SPACE_XS)
             .border_t_1()
             .border_color(rgb(t.border))
-            .when_some(self.diff_stat.as_ref(), |el, stat| {
+            .when_some(diff_stat, |el, stat| {
                 el.children(stat.lines().map(|line| {
                     let color = if line.contains('+') && !line.contains('-') {
                         rgb(t.diff_added_fg)
@@ -1018,25 +1027,27 @@ impl KruhPane {
 
     fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let is_paused = self.paused;
-        let is_step = self.step_mode;
-        let is_waiting = self.state == KruhState::WaitingForStep;
-        let is_completed = self.state == KruhState::Completed;
+        let instance = self.focused_loop();
+        let loop_state = instance.map(|l| &l.state).cloned().unwrap_or(LoopState::Completed);
+        let is_paused = instance.map(|l| l.paused).unwrap_or(false);
+        let is_step = instance.map(|l| l.step_mode).unwrap_or(false);
+        let is_waiting = loop_state == LoopState::WaitingForStep;
+        let is_completed = loop_state == LoopState::Completed;
+        let pass_count = instance.map(|l| l.pass_count).unwrap_or(0);
+        let fail_count = instance.map(|l| l.fail_count).unwrap_or(0);
 
-        let state_label = match self.state {
-            KruhState::Running => "Running",
-            KruhState::Paused => "Paused",
-            KruhState::WaitingForStep => "Step",
-            KruhState::Completed => "Done",
-            _ => "",
+        let state_label = match loop_state {
+            LoopState::Running => "Running",
+            LoopState::Paused => "Paused",
+            LoopState::WaitingForStep => "Step",
+            LoopState::Completed => "Done",
         };
 
-        let state_color = match self.state {
-            KruhState::Running => t.success,
-            KruhState::Paused => t.warning,
-            KruhState::WaitingForStep => t.warning,
-            KruhState::Completed => t.text_muted,
-            _ => t.text_muted,
+        let state_color = match loop_state {
+            LoopState::Running => t.success,
+            LoopState::Paused => t.warning,
+            LoopState::WaitingForStep => t.warning,
+            LoopState::Completed => t.text_muted,
         };
 
         div()
@@ -1059,12 +1070,14 @@ impl KruhPane {
                 el.child(
                     toolbar_button("ctrl-pause", icon, label, &t)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.paused = !this.paused;
-                            this.state = if this.paused {
-                                KruhState::Paused
-                            } else {
-                                KruhState::Running
-                            };
+                            if let Some(instance) = this.active_loops.get_mut(this.focused_loop_index) {
+                                instance.paused = !instance.paused;
+                                instance.state = if instance.paused {
+                                    LoopState::Paused
+                                } else {
+                                    LoopState::Running
+                                };
+                            }
                             cx.notify();
                         })),
                 )
@@ -1074,7 +1087,9 @@ impl KruhPane {
                 el.child(
                     toolbar_button("ctrl-skip", "icons/skip-forward.svg", "Skip", &t)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.skip_requested = true;
+                            if let Some(instance) = this.active_loops.get_mut(this.focused_loop_index) {
+                                instance.skip_requested = true;
+                            }
                             cx.notify();
                         })),
                 )
@@ -1084,7 +1099,9 @@ impl KruhPane {
                 el.child(
                     toolbar_button_toggle("ctrl-step", "icons/step-forward.svg", "Step", is_step, &t)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.step_mode = !this.step_mode;
+                            if let Some(instance) = this.active_loops.get_mut(this.focused_loop_index) {
+                                instance.step_mode = !instance.step_mode;
+                            }
                             cx.notify();
                         })),
                 )
@@ -1094,7 +1111,9 @@ impl KruhPane {
                 el.child(
                     toolbar_button_primary("ctrl-continue", "icons/play.svg", "Continue", &t)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.step_advance_requested = true;
+                            if let Some(instance) = this.active_loops.get_mut(this.focused_loop_index) {
+                                instance.step_advance_requested = true;
+                            }
                             cx.notify();
                         })),
                 )
@@ -1107,7 +1126,9 @@ impl KruhPane {
             .child(
                 toolbar_button("ctrl-quit", "icons/close.svg", if is_completed { "Close" } else { "Quit" }, &t)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.quit_requested = true;
+                        if let Some(instance) = this.active_loops.get_mut(this.focused_loop_index) {
+                            instance.quit_requested = true;
+                        }
                         cx.notify();
                     })),
             )
@@ -1134,7 +1155,7 @@ impl KruhPane {
                                 div()
                                     .text_size(TEXT_SM)
                                     .text_color(rgb(t.text_muted))
-                                    .child(format!("{}", self.pass_count)),
+                                    .child(format!("{}", pass_count)),
                             ),
                     )
                     .child(
@@ -1152,7 +1173,7 @@ impl KruhPane {
                                 div()
                                     .text_size(TEXT_SM)
                                     .text_color(rgb(t.text_muted))
-                                    .child(format!("{}", self.fail_count)),
+                                    .child(format!("{}", fail_count)),
                             ),
                     )
                     // State label
@@ -1181,7 +1202,7 @@ impl KruhPane {
             .child(self.render_progress_bar(cx))
             .child(self.render_iteration_banner(cx))
             .child(self.render_output(cx))
-            .when(self.diff_stat.is_some(), |el| {
+            .when(self.focused_loop().and_then(|l| l.diff_stat.as_ref()).is_some(), |el| {
                 el.child(self.render_diff(cx))
             })
             .child(self.render_controls(cx))
@@ -1297,37 +1318,40 @@ impl KruhPane {
                 _ => {}
             },
 
-            KruhState::Running | KruhState::Paused | KruhState::WaitingForStep
-            | KruhState::Completed => match key {
-                "p" => {
-                    self.paused = !self.paused;
-                    self.state = if self.paused {
-                        KruhState::Paused
-                    } else {
-                        KruhState::Running
-                    };
-                    cx.notify();
-                }
-                "s" => {
-                    self.skip_requested = true;
-                    cx.notify();
-                }
-                "q" => {
-                    self.quit_requested = true;
-                    cx.notify();
-                }
-                "t" => {
-                    self.step_mode = !self.step_mode;
-                    cx.notify();
-                }
-                "enter" => {
-                    if self.state == KruhState::WaitingForStep {
-                        self.step_advance_requested = true;
-                        cx.notify();
+            KruhState::LoopOverview => {
+                if let Some(instance) = self.active_loops.get_mut(self.focused_loop_index) {
+                    match key {
+                        "p" => {
+                            instance.paused = !instance.paused;
+                            instance.state = if instance.paused {
+                                LoopState::Paused
+                            } else {
+                                LoopState::Running
+                            };
+                            cx.notify();
+                        }
+                        "s" => {
+                            instance.skip_requested = true;
+                            cx.notify();
+                        }
+                        "q" => {
+                            instance.quit_requested = true;
+                            cx.notify();
+                        }
+                        "t" => {
+                            instance.step_mode = !instance.step_mode;
+                            cx.notify();
+                        }
+                        "enter" => {
+                            if instance.state == LoopState::WaitingForStep {
+                                instance.step_advance_requested = true;
+                                cx.notify();
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            },
+            }
 
             KruhState::Scanning => {}
         }
