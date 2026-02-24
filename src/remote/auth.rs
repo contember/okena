@@ -11,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Token time-to-live in seconds (24 hours).
-pub const TOKEN_TTL_SECS: u64 = 86400;
+/// Token time-to-live in seconds (30 days).
+pub const TOKEN_TTL_SECS: u64 = 30 * 24 * 3600;
 
 /// A stored token record.
 #[allow(dead_code)]
