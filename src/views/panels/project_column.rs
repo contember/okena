@@ -5,6 +5,7 @@ use crate::vcs;
 use crate::views::components::build_file_tree;
 use crate::action_dispatch::ActionDispatcher;
 use crate::services::manager::{ServiceManager, ServiceStatus};
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
@@ -78,6 +79,8 @@ pub struct ProjectColumn {
     service_panel_height: f32,
     /// Bounds of the git diff stats badge (for popover positioning)
     diff_stats_bounds: Bounds<Pixels>,
+    /// App state broadcaster for passing to LayoutContainer → KruhPane
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl ProjectColumn {
@@ -89,6 +92,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         git_watcher: Option<Entity<GitStatusWatcher>>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Observe git watcher for re-renders (replaces per-column polling)
@@ -119,6 +123,7 @@ impl ProjectColumn {
             service_terminal_pane: None,
             service_panel_height: initial_service_height,
             diff_stats_bounds: Bounds::default(),
+            app_broadcaster,
         }
     }
 
@@ -501,6 +506,7 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let action_dispatcher = self.action_dispatcher.clone();
+            let app_broadcaster = self.app_broadcaster.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
@@ -513,6 +519,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
+                    app_broadcaster,
                 )
             }));
         } else if let Some(container) = &self.layout_container {
