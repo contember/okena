@@ -429,6 +429,7 @@ impl ServiceManager {
 
         instance.status = ServiceStatus::Restarting;
         instance.restart_count = 0;
+        instance.detected_ports.clear();
         cx.notify();
 
         // Wait for old process to die, then start the new one
@@ -593,7 +594,9 @@ impl ServiceManager {
     }
 
     /// Start background port detection polling for a running service.
-    /// Waits 2s initial delay, then polls every 2s up to 5 times.
+    /// Waits 2s initial delay, then polls every 3s up to 10 times.
+    /// Keeps polling even after finding ports, since services like Vite
+    /// bind their real port later than internal/debug ports.
     fn start_port_detection(
         &self,
         project_id: &str,
@@ -610,7 +613,11 @@ impl ServiceManager {
             // Initial delay — let the service bind its port
             cx.background_executor().timer(Duration::from_secs(2)).await;
 
-            for _ in 0..5 {
+            let mut found_any = false;
+            // After first ports found, do 2 more polls to catch late-binding ports
+            let mut stable_count = 0u32;
+
+            for _ in 0..10 {
                 // Check if service is still running
                 let pid = this.update(cx, |this, _cx| {
                     let inst = this.instances.get(&key)?;
@@ -628,18 +635,29 @@ impl ServiceManager {
                     .await;
 
                 if !ports.is_empty() {
-                    let _ = this.update(cx, |this, cx| {
+                    let changed = this.update(cx, |this, cx| {
                         if let Some(inst) = this.instances.get_mut(&key) {
-                            if inst.status == ServiceStatus::Running {
+                            if inst.status == ServiceStatus::Running && inst.detected_ports != ports {
                                 inst.detected_ports = ports;
                                 cx.notify();
+                                return true;
                             }
                         }
-                    });
-                    return;
+                        false
+                    }).unwrap_or(false);
+
+                    if found_any && !changed {
+                        stable_count += 1;
+                        if stable_count >= 2 {
+                            return; // Ports stable for 2 consecutive polls, done
+                        }
+                    } else {
+                        stable_count = 0;
+                    }
+                    found_any = true;
                 }
 
-                cx.background_executor().timer(Duration::from_secs(2)).await;
+                cx.background_executor().timer(Duration::from_secs(3)).await;
             }
         })
         .detach();

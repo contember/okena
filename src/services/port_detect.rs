@@ -1,10 +1,20 @@
 use crate::process::{command, safe_output};
 use std::collections::{HashSet, VecDeque};
 
+/// Ports to exclude from detection results.
+/// 9229 = Node.js inspector/debugger
+const IGNORED_PORTS: &[u16] = &[9229];
+
+/// Ports at or above this threshold are considered ephemeral/internal and excluded.
+/// Linux default ephemeral range starts at 32768.
+const EPHEMERAL_PORT_MIN: u16 = 32768;
+
 /// Detect TCP ports that a service process (or any of its descendants) is listening on.
+/// Filters out known debug ports and ephemeral ports.
 pub fn detect_ports_for_pid(pid: u32) -> Vec<u16> {
     let pids = get_descendant_pids(pid);
     let mut ports = get_listening_ports(&pids);
+    ports.retain(|p| *p < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(p));
     ports.sort();
     ports.dedup();
     ports
@@ -390,5 +400,15 @@ Active Connections
         let pids: HashSet<u32> = [9999].into_iter().collect();
         let ports = parse_netstat_output(output, &pids);
         assert!(ports.is_empty());
+    }
+
+    #[test]
+    fn filtering_removes_debug_and_ephemeral_ports() {
+        // Simulate what detect_ports_for_pid does after get_listening_ports
+        let mut ports = vec![5173, 9229, 36435, 37903, 3000];
+        ports.retain(|p| *p < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(p));
+        ports.sort();
+        ports.dedup();
+        assert_eq!(ports, vec![3000, 5173]);
     }
 }
