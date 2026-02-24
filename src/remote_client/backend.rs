@@ -104,4 +104,8 @@ impl TerminalBackend for RemoteBackend {
     fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
         None // Remote terminals don't expose shell PID
     }
+
+    fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+        Vec::new() // Remote terminals don't expose PIDs
+    }
 }

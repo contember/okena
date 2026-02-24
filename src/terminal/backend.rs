@@ -16,6 +16,9 @@ pub trait TerminalBackend: Send + Sync {
     fn supports_buffer_capture(&self) -> bool;
     fn is_remote(&self) -> bool;
     fn get_shell_pid(&self, terminal_id: &str) -> Option<u32>;
+    /// Get root PIDs for port detection. With session backends (dtach/tmux),
+    /// this returns the daemon/pane PID instead of the attach client PID.
+    fn get_service_pids(&self, terminal_id: &str) -> Vec<u32>;
 }
 
 /// Local backend wrapping PtyManager for local terminal processes.
@@ -60,5 +63,9 @@ impl TerminalBackend for LocalBackend {
 
     fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
         self.pty_manager.get_shell_pid(terminal_id)
+    }
+
+    fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
+        self.pty_manager.get_service_pids(terminal_id)
     }
 }

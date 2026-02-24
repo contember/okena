@@ -12,8 +12,17 @@ const EPHEMERAL_PORT_MIN: u16 = 32768;
 /// Detect TCP ports that a service process (or any of its descendants) is listening on.
 /// Filters out known debug ports and ephemeral ports.
 pub fn detect_ports_for_pid(pid: u32) -> Vec<u16> {
-    let pids = get_descendant_pids(pid);
-    let mut ports = get_listening_ports(&pids);
+    detect_ports_for_pids(&[pid])
+}
+
+/// Detect TCP ports for multiple root PIDs (e.g. session backend daemon PIDs).
+/// Walks the process tree from each root and checks for listening TCP ports.
+pub fn detect_ports_for_pids(root_pids: &[u32]) -> Vec<u16> {
+    let mut all_pids = HashSet::new();
+    for &pid in root_pids {
+        all_pids.extend(get_descendant_pids(pid));
+    }
+    let mut ports = get_listening_ports(&all_pids);
     ports.retain(|p| *p < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(p));
     ports.sort();
     ports.dedup();
