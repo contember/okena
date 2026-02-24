@@ -565,8 +565,8 @@ impl Render for LayoutContainer {
                     self.child_containers.clear();
                 }
             }
-            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
-                // When rendering split/tabs, clear any cached terminal_pane from previous terminal
+            Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) | Some(LayoutNode::App { .. }) => {
+                // When rendering split/tabs/app, clear any cached terminal_pane from previous terminal
                 if self.terminal_pane.is_some() {
                     self.terminal_pane = None;
                 }
@@ -601,6 +601,15 @@ impl Render for LayoutContainer {
                 active_tab,
             }) => self
                 .render_tabs(children, active_tab, window, cx)
+                .into_any_element(),
+
+            Some(LayoutNode::App { app_kind, .. }) => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(t.text_muted))
+                .child(format!("App: {}", app_kind))
                 .into_any_element(),
 
             None => div()
