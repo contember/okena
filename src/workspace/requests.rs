@@ -27,7 +27,7 @@ pub enum OverlayRequest {
     AddProjectDialog,
     DiffViewer { path: String, file: Option<String> },
     RemoteConnect,
-    RemoteConnectionContextMenu { connection_id: String, connection_name: String, position: gpui::Point<gpui::Pixels> },
+    RemoteConnectionContextMenu { connection_id: String, connection_name: String, is_pairing: bool, position: gpui::Point<gpui::Pixels> },
     TerminalContextMenu {
         terminal_id: String,
         project_id: String,

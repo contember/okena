@@ -102,7 +102,6 @@ impl RemoteConnection {
         self.client.connect();
     }
 
-    #[allow(dead_code)]
     pub fn pair(&mut self, code: &str) {
         self.client.pair(code);
     }

@@ -143,6 +143,18 @@ impl RootView {
                     });
                 }
             }
+            OverlayManagerEvent::RemotePair { connection_id, connection_name } => {
+                self.overlay_manager.update(cx, |om, cx| {
+                    om.show_remote_pair_dialog(connection_id.clone(), connection_name.clone(), cx);
+                });
+            }
+            OverlayManagerEvent::RemotePaired { connection_id, code } => {
+                if let Some(ref rm) = self.remote_manager {
+                    rm.update(cx, |rm, cx| {
+                        rm.pair(connection_id, code, cx);
+                    });
+                }
+            }
             OverlayManagerEvent::RemoteRemoveConnection { connection_id } => {
                 if let Some(ref rm) = self.remote_manager {
                     rm.update(cx, |rm, cx| {
@@ -331,10 +343,10 @@ impl RootView {
                         });
                     }
                 }
-                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, position } => {
+                OverlayRequest::RemoteConnectionContextMenu { connection_id, connection_name, is_pairing, position } => {
                     if !self.overlay_manager.read(cx).has_remote_context_menu() {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_remote_context_menu(connection_id, connection_name, position, cx);
+                            om.show_remote_context_menu(connection_id, connection_name, is_pairing, position, cx);
                         });
                     }
                 }

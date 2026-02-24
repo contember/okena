@@ -103,6 +103,7 @@ impl Sidebar {
 
         let conn_id_for_ctx = config.id.clone();
         let conn_name_for_ctx = config.name.clone();
+        let is_pairing = matches!(status, ConnectionStatus::Pairing | ConnectionStatus::Error(_) | ConnectionStatus::Disconnected);
 
         div()
             .id(ElementId::Name(
@@ -121,6 +122,7 @@ impl Sidebar {
                         crate::workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
                             connection_id: conn_id_for_ctx.clone(),
                             connection_name: conn_name_for_ctx.clone(),
+                            is_pairing,
                             position: event.position,
                         },
                         cx,

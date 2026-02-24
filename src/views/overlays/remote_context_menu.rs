@@ -10,6 +10,7 @@ use gpui::*;
 pub enum RemoteContextMenuEvent {
     Close,
     Reconnect { connection_id: String },
+    Pair { connection_id: String },
     RemoveConnection { connection_id: String },
 }
 
@@ -17,6 +18,7 @@ pub enum RemoteContextMenuEvent {
 pub struct RemoteContextMenu {
     connection_id: String,
     connection_name: String,
+    is_pairing: bool,
     position: Point<Pixels>,
     focus_handle: FocusHandle,
 }
@@ -25,6 +27,7 @@ impl RemoteContextMenu {
     pub fn new(
         connection_id: String,
         connection_name: String,
+        is_pairing: bool,
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -32,6 +35,7 @@ impl RemoteContextMenu {
         Self {
             connection_id,
             connection_name,
+            is_pairing,
             position,
             focus_handle,
         }
@@ -43,6 +47,12 @@ impl RemoteContextMenu {
 
     fn reconnect(&self, cx: &mut Context<Self>) {
         cx.emit(RemoteContextMenuEvent::Reconnect {
+            connection_id: self.connection_id.clone(),
+        });
+    }
+
+    fn pair(&self, cx: &mut Context<Self>) {
+        cx.emit(RemoteContextMenuEvent::Pair {
             connection_id: self.connection_id.clone(),
         });
     }
@@ -88,6 +98,14 @@ impl Render for RemoteContextMenu {
                     .snap_to_window()
                     .child(
                         context_menu_panel("remote-context-menu", &t)
+                            .when(self.is_pairing, |el| {
+                                el.child(
+                                    menu_item("remote-ctx-pair", "icons/keyboard.svg", "Pair", &t)
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.pair(cx);
+                                        })),
+                                )
+                            })
                             .child(
                                 menu_item("remote-ctx-reconnect", "icons/terminal.svg", "Reconnect", &t)
                                     .on_click(cx.listener(|this, _, _window, cx| {

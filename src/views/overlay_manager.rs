@@ -22,6 +22,7 @@ use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
 use crate::views::overlays::remote_connect_dialog::{RemoteConnectDialog, RemoteConnectDialogEvent};
+use crate::views::overlays::remote_pair_dialog::{RemotePairDialog, RemotePairDialogEvent};
 use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteContextMenuEvent};
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
 use crate::views::overlays::terminal_context_menu::{TerminalContextMenu, TerminalContextMenuEvent};
@@ -259,6 +260,12 @@ pub enum OverlayManagerEvent {
 
     /// Remote context menu: reconnect to a connection
     RemoteReconnect { connection_id: String },
+
+    /// Remote context menu: open pair dialog
+    RemotePair { connection_id: String, connection_name: String },
+
+    /// Remote pair dialog: user submitted a code
+    RemotePaired { connection_id: String, code: String },
 
     /// Remote context menu: remove a connection
     RemoteRemoveConnection { connection_id: String },
@@ -802,17 +809,19 @@ impl OverlayManager {
         &mut self,
         connection_id: String,
         connection_name: String,
+        is_pairing: bool,
         position: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
         self.close_all_context_menus();
 
+        let conn_name = connection_name.clone();
         let menu = cx.new(|cx| {
-            RemoteContextMenu::new(connection_id, connection_name, position, cx)
+            RemoteContextMenu::new(connection_id, connection_name, is_pairing, position, cx)
         });
 
-        cx.subscribe(&menu, |this, _, event: &RemoteContextMenuEvent, cx| {
+        cx.subscribe(&menu, move |this, _, event: &RemoteContextMenuEvent, cx| {
             match event {
                 RemoteContextMenuEvent::Close => {
                     this.hide_remote_context_menu(cx);
@@ -821,6 +830,13 @@ impl OverlayManager {
                     this.hide_remote_context_menu(cx);
                     cx.emit(OverlayManagerEvent::RemoteReconnect {
                         connection_id: connection_id.clone(),
+                    });
+                }
+                RemoteContextMenuEvent::Pair { connection_id } => {
+                    this.hide_remote_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::RemotePair {
+                        connection_id: connection_id.clone(),
+                        connection_name: conn_name.clone(),
                     });
                 }
                 RemoteContextMenuEvent::RemoveConnection { connection_id } => {
@@ -1103,6 +1119,37 @@ impl OverlayManager {
             .detach();
             self.open_modal(entity, cx);
         }
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Remote pair dialog (re-pair existing connection)
+    // ========================================================================
+
+    /// Show remote pair dialog for an existing connection.
+    pub fn show_remote_pair_dialog(
+        &mut self,
+        connection_id: String,
+        connection_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.new(|cx| RemotePairDialog::new(connection_id, connection_name, cx));
+        cx.subscribe(&entity, |this, _, event: &RemotePairDialogEvent, cx| {
+            match event {
+                RemotePairDialogEvent::Close => {
+                    this.close_modal(cx);
+                }
+                RemotePairDialogEvent::Pair { connection_id, code } => {
+                    cx.emit(OverlayManagerEvent::RemotePaired {
+                        connection_id: connection_id.clone(),
+                        code: code.clone(),
+                    });
+                    this.close_modal(cx);
+                }
+            }
+        })
+        .detach();
+        self.open_modal(entity, cx);
         cx.notify();
     }
 
