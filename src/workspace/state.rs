@@ -71,6 +71,10 @@ pub struct ProjectData {
     /// Connection ID for remote projects (links to RemoteConnectionManager)
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// Saved terminal IDs for services (service_name -> terminal_id)
+    /// Used to reconnect to persistent sessions across restarts
+    #[serde(default)]
+    pub service_terminals: HashMap<String, String>,
 }
 
 impl ProjectData {
@@ -259,6 +263,17 @@ impl Workspace {
     pub fn set_folder_filter(&mut self, folder_id: Option<String>, cx: &mut Context<Self>) {
         self.active_folder_filter = folder_id;
         cx.notify();
+    }
+
+    /// Update the saved service terminal IDs for a project.
+    /// Called by the ServiceManager observer to persist terminal IDs across restarts.
+    pub fn sync_service_terminals(&mut self, project_id: &str, terminals: HashMap<String, String>, cx: &mut Context<Self>) {
+        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            if project.service_terminals != terminals {
+                project.service_terminals = terminals;
+                self.notify_data(cx);
+            }
+        }
     }
 
     pub fn projects(&self) -> &[ProjectData] {
@@ -1070,6 +1085,7 @@ mod tests {
             hooks: Default::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 
@@ -1881,6 +1897,7 @@ mod workspace_tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 
@@ -2151,6 +2168,7 @@ mod gpui_tests {
             hooks: HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 

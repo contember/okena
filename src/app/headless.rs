@@ -278,6 +278,7 @@ impl HeadlessApp {
                                     layout: p.layout.as_ref().map(|l| l.to_api()),
                                     terminal_names: p.terminal_names.clone(),
                                     git_status,
+                                    services: vec![],
                                 }
                             }).collect();
 

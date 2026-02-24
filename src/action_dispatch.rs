@@ -341,5 +341,32 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             file_path,
             mode,
         },
+        ActionRequest::StartService {
+            project_id,
+            service_name,
+        } => ActionRequest::StartService {
+            project_id: s(&project_id),
+            service_name,
+        },
+        ActionRequest::StopService {
+            project_id,
+            service_name,
+        } => ActionRequest::StopService {
+            project_id: s(&project_id),
+            service_name,
+        },
+        ActionRequest::RestartService {
+            project_id,
+            service_name,
+        } => ActionRequest::RestartService {
+            project_id: s(&project_id),
+            service_name,
+        },
+        ActionRequest::StartAllServices { project_id } => ActionRequest::StartAllServices {
+            project_id: s(&project_id),
+        },
+        ActionRequest::StopAllServices { project_id } => ActionRequest::StopAllServices {
+            project_id: s(&project_id),
+        },
     }
 }

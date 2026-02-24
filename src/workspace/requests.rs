@@ -42,6 +42,7 @@ pub enum OverlayRequest {
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
     },
+    ShowServiceLog { project_id: String, service_name: String },
 }
 
 /// Requests consumed by Sidebar::render()

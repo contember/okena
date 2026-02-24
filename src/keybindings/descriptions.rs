@@ -8,8 +8,8 @@ use super::{
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
     ShowFileSearch, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, SplitHorizontal, SplitVertical, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+    ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices, StopAllServices,
+    ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -414,6 +414,26 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Show numbered overlays on panes, press a digit to focus",
             category: "Navigation",
             factory: || Box::new(TogglePaneSwitcher),
+        },
+    );
+
+    // Service actions
+    map.insert(
+        "StartAllServices",
+        ActionDescription {
+            name: "Start All Services",
+            description: "Start all services for the focused project",
+            category: "Services",
+            factory: || Box::new(StartAllServices),
+        },
+    );
+    map.insert(
+        "StopAllServices",
+        ActionDescription {
+            name: "Stop All Services",
+            description: "Stop all services for the focused project",
+            category: "Services",
+            factory: || Box::new(StopAllServices),
         },
     );
 

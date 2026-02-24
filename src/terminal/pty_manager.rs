@@ -235,27 +235,38 @@ impl PtyManager {
         // On Unix, if session backend is active, use it for persistence
         // Session backends (tmux/screen) are not available on Windows
         #[cfg(unix)]
-        let mut cmd = if let Some((program, args)) = self
-            .session_backend
-            .build_command(&self.session_backend.session_name(terminal_id), cwd)
-        {
-            let mut cmd = CommandBuilder::new(program);
-            for arg in args {
-                cmd.arg(arg);
-            }
-            // For screen, we need to set cwd separately as it doesn't have -c flag
-            if matches!(self.session_backend, ResolvedBackend::Screen) {
-                cmd.cwd(cwd);
-            }
-            cmd
-        } else {
-            // No session backend - use shell config or default
-            match shell {
-                Some(shell_type) => shell_type.build_command(cwd),
-                None => {
-                    let mut cmd = CommandBuilder::new_default_prog();
+        let mut cmd = {
+            // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
+            // so it can be passed to the session backend
+            let custom_command = match shell {
+                Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
+                    Some(args[1].as_str())
+                }
+                _ => None,
+            };
+
+            if let Some((program, args)) = self
+                .session_backend
+                .build_command(&self.session_backend.session_name(terminal_id), cwd, custom_command)
+            {
+                let mut cmd = CommandBuilder::new(program);
+                for arg in args {
+                    cmd.arg(arg);
+                }
+                // For screen, we need to set cwd separately as it doesn't have -c flag
+                if matches!(self.session_backend, ResolvedBackend::Screen) {
                     cmd.cwd(cwd);
-                    cmd
+                }
+                cmd
+            } else {
+                // No session backend - use shell config or default
+                match shell {
+                    Some(shell_type) => shell_type.build_command(cwd),
+                    None => {
+                        let mut cmd = CommandBuilder::new_default_prog();
+                        cmd.cwd(cwd);
+                        cmd
+                    }
                 }
             }
         };

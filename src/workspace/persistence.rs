@@ -52,6 +52,7 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
             if let Some(ref mut layout) = project.layout {
                 layout.clear_terminal_ids();
             }
+            project.service_terminals.clear();
         }
     }
 
@@ -229,6 +230,7 @@ pub fn default_workspace() -> WorkspaceData {
             hooks: super::settings::HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
@@ -255,6 +257,7 @@ mod tests {
             hooks: super::super::settings::HooksConfig::default(),
             is_remote: false,
             connection_id: None,
+            service_terminals: HashMap::new(),
         }
     }
 
@@ -320,6 +323,7 @@ mod tests {
             shell_type: crate::terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
         });
+        project.service_terminals.insert("web".to_string(), "svc-term-1".to_string());
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
         validate_workspace_data(&mut data, true);
 
@@ -332,6 +336,7 @@ mod tests {
             }
             _ => panic!("Expected terminal"),
         }
+        assert!(data.projects[0].service_terminals.is_empty());
     }
 
     #[test]

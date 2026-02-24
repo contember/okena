@@ -334,6 +334,14 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
             }
         }
+        // Service actions are handled by the remote command loop directly
+        ActionRequest::StartService { .. }
+        | ActionRequest::StopService { .. }
+        | ActionRequest::RestartService { .. }
+        | ActionRequest::StartAllServices { .. }
+        | ActionRequest::StopAllServices { .. } => {
+            ActionResult::Err("service actions must be handled via ServiceManager".to_string())
+        }
     }
 }
 

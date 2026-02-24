@@ -11,6 +11,7 @@ mod keybindings;
 mod process;
 mod remote;
 mod remote_client;
+mod services;
 mod settings;
 #[cfg(target_os = "linux")]
 mod simple_root;

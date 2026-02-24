@@ -38,6 +38,15 @@ pub struct ApiProject {
     pub terminal_names: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_status: Option<ApiGitStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ApiServiceInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiServiceInfo {
+    pub name: String,
+    pub status: String, // "running", "stopped", "crashed", "starting", "restarting"
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -178,6 +187,24 @@ pub enum ActionRequest {
         #[serde(default)]
         mode: DiffMode,
     },
+    StartService {
+        project_id: String,
+        service_name: String,
+    },
+    StopService {
+        project_id: String,
+        service_name: String,
+    },
+    RestartService {
+        project_id: String,
+        service_name: String,
+    },
+    StartAllServices {
+        project_id: String,
+    },
+    StopAllServices {
+        project_id: String,
+    },
 }
 
 /// POST /v1/pair request
@@ -260,6 +287,7 @@ mod tests {
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
                 git_status: None,
+                services: vec![],
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,
@@ -384,6 +412,24 @@ mod tests {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
                 mode: DiffMode::Staged,
+            },
+            ActionRequest::StartService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::StopService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::RestartService {
+                project_id: "p1".into(),
+                service_name: "vite".into(),
+            },
+            ActionRequest::StartAllServices {
+                project_id: "p1".into(),
+            },
+            ActionRequest::StopAllServices {
+                project_id: "p1".into(),
             },
         ];
         for action in actions {
