@@ -210,7 +210,7 @@ impl Sidebar {
         div()
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
             .h(px(24.0))
-            .pl(px(28.0))  // Indented to align with terminal items
+            .pl(px(20.0))  // Indented under parent project
             .pr(px(8.0))
             .flex()
             .items_center()

@@ -1037,7 +1037,7 @@ impl Render for Sidebar {
                                 let is_inactive_tab = child.inactive_tab_terminals.contains(tid.as_str());
                                 let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                 flat_elements.push(
-                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 48.0, "wt-", is_cursor, cx).into_any_element()
+                                    self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 40.0, "wt-", is_cursor, cx).into_any_element()
                                 );
                                 flat_idx += 1;
                             }
@@ -1117,7 +1117,7 @@ impl Render for Sidebar {
                                             let is_inactive_tab = child.inactive_tab_terminals.contains(tid.as_str());
                                             let is_in_tab_group = child.tab_group_terminals.contains(tid.as_str());
                                             flat_elements.push(
-                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 68.0, "wt-", is_cursor, cx).into_any_element()
+                                                self.render_terminal_item(&child.id, tid, &child.terminal_names, *is_minimized, is_inactive_tab, is_in_tab_group, 60.0, "wt-", is_cursor, cx).into_any_element()
                                             );
                                             flat_idx += 1;
                                         }
