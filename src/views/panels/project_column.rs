@@ -124,8 +124,9 @@ impl ProjectColumn {
                     }
                 }
                 None => {
-                    // Service stopped — close the panel
-                    this.close_service_panel(cx);
+                    // Service stopped — clear the terminal pane but keep panel open
+                    this.service_terminal_pane = None;
+                    cx.notify();
                 }
             }
         }).detach();
@@ -137,62 +138,49 @@ impl ProjectColumn {
     pub fn show_service(&mut self, service_name: &str, cx: &mut Context<Self>) {
         let Some(ref sm) = self.service_manager else { return };
 
-        // Look up terminal_id; if the service isn't running, start it first
+        // Look up terminal_id — if the service isn't running, show panel without terminal
         let terminal_id = {
             let sm_read = sm.read(cx);
             sm_read.terminal_id_for(&self.project_id, service_name).cloned()
         };
 
-        let terminal_id = match terminal_id {
-            Some(tid) => tid,
-            None => {
-                // Start the service, then get the terminal_id
-                let path = sm.read(cx).project_path(&self.project_id).cloned();
-                if let Some(path) = path {
-                    sm.update(cx, |sm, cx| {
-                        sm.start_service(&self.project_id, service_name, &path, cx);
-                    });
-                }
-                let tid = sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned();
-                match tid {
-                    Some(tid) => tid,
-                    None => return,
-                }
-            }
-        };
-
-        let project_path = sm.read(cx)
-            .project_path(&self.project_id)
-            .cloned()
-            .unwrap_or_default();
-
-        let ws = self.workspace.clone();
-        let rb = self.request_broker.clone();
-        let backend = self.backend.clone();
-        let terminals = self.terminals.clone();
-        let pid = self.project_id.clone();
-        let tid = terminal_id;
-
-        let pane = cx.new(move |cx| {
-            TerminalPane::new(
-                ws,
-                rb,
-                pid,
-                project_path,
-                vec![],
-                Some(tid),
-                false,
-                false,
-                backend,
-                terminals,
-                None,
-                cx,
-            )
-        });
-
         self.active_service_name = Some(service_name.to_string());
-        self.service_terminal_pane = Some(pane);
         self.service_panel_open = true;
+
+        if let Some(tid) = terminal_id {
+            let project_path = sm.read(cx)
+                .project_path(&self.project_id)
+                .cloned()
+                .unwrap_or_default();
+
+            let ws = self.workspace.clone();
+            let rb = self.request_broker.clone();
+            let backend = self.backend.clone();
+            let terminals = self.terminals.clone();
+            let pid = self.project_id.clone();
+
+            let pane = cx.new(move |cx| {
+                TerminalPane::new(
+                    ws,
+                    rb,
+                    pid,
+                    project_path,
+                    vec![],
+                    Some(tid),
+                    false,
+                    false,
+                    backend,
+                    terminals,
+                    None,
+                    cx,
+                )
+            });
+
+            self.service_terminal_pane = Some(pane);
+        } else {
+            self.service_terminal_pane = None;
+        }
+
         cx.notify();
     }
 
@@ -1204,13 +1192,65 @@ impl ProjectColumn {
                     ),
             )
             .child(
-                // Content area — TerminalPane
+                // Content area — TerminalPane or "not running" placeholder
                 div()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
-                    .children(self.service_terminal_pane.clone()),
+                    .when(self.service_terminal_pane.is_some(), |d| {
+                        d.children(self.service_terminal_pane.clone())
+                    })
+                    .when(self.service_terminal_pane.is_none(), |d| {
+                        d.flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(8.0))
+                            .bg(rgb(t.bg_primary))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child("Service not running"),
+                            )
+                            .child(
+                                div()
+                                    .id("svc-panel-start-placeholder")
+                                    .cursor_pointer()
+                                    .px(px(12.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(t.bg_secondary))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(t.term_green))
+                                            .child("▶"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(t.text_secondary))
+                                            .child("Start"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        if let (Some(sm), Some(name)) = (&this.service_manager, &this.active_service_name) {
+                                            let path = sm.read(cx).project_path(&this.project_id).cloned();
+                                            if let Some(path) = path {
+                                                let name = name.clone();
+                                                sm.update(cx, |sm, cx| {
+                                                    sm.start_service(&this.project_id, &name, &path, cx);
+                                                });
+                                            }
+                                        }
+                                    })),
+                            )
+                    }),
             )
             .into_any_element()
     }
