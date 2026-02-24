@@ -95,6 +95,8 @@ pub struct DiffViewer {
     commits: Vec<CommitLogEntry>,
     /// Current index in the commits list.
     commit_index: usize,
+    /// Detected VCS backend for the project.
+    pub(crate) vcs_backend: Option<crate::VcsBackend>,
 }
 
 impl DiffViewer {
@@ -148,6 +150,7 @@ impl DiffViewer {
             commit_message,
             commits: commits.unwrap_or_default(),
             commit_index: commit_index.unwrap_or(0),
+            vcs_backend: provider.vcs_backend(),
         };
 
         if !provider.is_git_repo() {

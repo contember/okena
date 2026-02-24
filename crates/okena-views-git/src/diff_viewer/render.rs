@@ -5,6 +5,7 @@ use super::{DiffViewer, SIDEBAR_WIDTH};
 use okena_core::theme::ThemeColors;
 use okena_ui::toggle::segmented_toggle;
 use okena_git::DiffMode;
+use crate::VcsBackend;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -171,8 +172,8 @@ impl DiffViewer {
                                 t,
                             )),
                     )
-                    // Diff mode toggle (hidden for commit/branch compare diffs)
-                    .when(!hide_mode_toggle, |d| {
+                    // Diff mode toggle (hidden for commit/branch diffs and jj repos)
+                    .when(!hide_mode_toggle && self.vcs_backend != Some(VcsBackend::Jujutsu), |d| {
                         d.child(
                             div()
                                 .id("diff-mode-toggle")
@@ -701,7 +702,7 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t))
-                    .when(!has_commits, |d| {
+                    .when(!has_commits && self.vcs_backend != Some(VcsBackend::Jujutsu), |d| {
                         d.child(self.render_hint("Tab", "staged/unstaged", t))
                     })
                     .child(self.render_hint("S", "split", t))
