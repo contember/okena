@@ -618,20 +618,21 @@ impl ServiceManager {
             let mut stable_count = 0u32;
 
             for _ in 0..10 {
-                // Check if service is still running
-                let pid = this.update(cx, |this, _cx| {
+                // Check if service is still running and get root PIDs for port detection
+                let service_pids = this.update(cx, |this, _cx| {
                     let inst = this.instances.get(&key)?;
                     if inst.status != ServiceStatus::Running {
                         return None;
                     }
                     inst.terminal_id.as_ref()
-                        .and_then(|tid| backend.get_shell_pid(tid))
+                        .map(|tid| backend.get_service_pids(tid))
+                        .filter(|pids| !pids.is_empty())
                 }).ok().flatten();
 
-                let Some(pid) = pid else { return };
+                let Some(service_pids) = service_pids else { return };
 
                 let ports = cx.background_executor()
-                    .spawn(async move { port_detect::detect_ports_for_pid(pid) })
+                    .spawn(async move { port_detect::detect_ports_for_pids(&service_pids) })
                     .await;
 
                 if !ports.is_empty() {
