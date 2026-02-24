@@ -692,7 +692,6 @@ mod tests {
             (project_id.to_string(), name.to_string()),
             ServiceInstance {
                 definition: def,
-                project_id: project_id.to_string(),
                 status,
                 terminal_id: Some(format!("term-{}", name)),
                 restart_count,
