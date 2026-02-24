@@ -8,6 +8,7 @@ mod assets;
 mod elements;
 mod git;
 mod jj;
+mod vcs;
 mod keybindings;
 mod process;
 mod remote;
