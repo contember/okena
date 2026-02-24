@@ -59,6 +59,8 @@ pub struct ProjectColumn {
     service_terminal_pane: Option<Entity<TerminalPane>>,
     /// Height of the service panel in pixels
     service_panel_height: f32,
+    /// Bounds of the git diff stats badge (for popover positioning)
+    diff_stats_bounds: Bounds<Pixels>,
 }
 
 impl ProjectColumn {
@@ -96,6 +98,7 @@ impl ProjectColumn {
             active_service_name: None,
             service_terminal_pane: None,
             service_panel_height: 200.0,
+            diff_stats_bounds: Bounds::default(),
         }
     }
 
@@ -263,7 +266,7 @@ impl ProjectColumn {
 
     fn render_diff_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.diff_popover_visible || self.diff_file_summaries.is_empty() {
-            return div().absolute().size_0().into_any_element();
+            return div().size_0().into_any_element();
         }
 
         let max_files = 15;
@@ -271,138 +274,156 @@ impl ProjectColumn {
         let show_more = total_files > max_files;
         let project_path = self.diff_popover_project_path.clone();
 
-        div()
-            .id("diff-summary-popover")
-            .absolute()
-            .top(px(30.0))
-            .left(px(12.0))
-            .min_w(px(280.0))
-            .max_w(px(400.0))
-            .max_h(px(300.0))
-            .overflow_y_scroll()
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(6.0))
-            .shadow_lg()
-            .py(px(6.0))
-            // Keep popover open when hovering over it
-            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
-                if *hovered {
-                    // Cancel any pending hide by updating token
-                    this.hover_token.fetch_add(1, Ordering::SeqCst);
-                } else {
-                    this.hide_diff_popover(cx);
-                }
-            }))
-            .children(
-                self.diff_file_summaries
-                    .iter()
-                    .take(max_files)
-                    .enumerate()
-                    .map(|(idx, summary)| {
-                        let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
-                        let dir = if summary.path.contains('/') {
-                            let parts: Vec<&str> = summary.path.rsplitn(2, '/').collect();
-                            if parts.len() > 1 { Some(parts[1]) } else { None }
-                        } else {
-                            None
-                        };
-                        let is_new = summary.is_new;
-                        let added = summary.added;
-                        let removed = summary.removed;
-                        let file_path = summary.path.clone();
-                        let project_path_for_click = project_path.clone();
+        // Position below the git-diff-stats badge
+        let bounds = self.diff_stats_bounds;
+        let position = point(
+            bounds.origin.x,
+            bounds.origin.y + bounds.size.height + px(4.0),
+        );
 
-                        div()
-                            .id(ElementId::Name(format!("diff-file-{}", idx).into()))
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .rounded(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(12.0))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.hide_diff_popover(cx);
-                                this.request_broker.update(cx, |broker, cx| {
-                                    broker.push_overlay_request(OverlayRequest::DiffViewer {
-                                        path: project_path_for_click.clone(),
-                                        file: Some(file_path.clone()),
-                                    }, cx);
-                                });
-                            }))
-                            .child(
-                                v_flex()
-                                    .overflow_hidden()
-                                    .child(
-                                        h_flex()
-                                            .gap(px(4.0))
-                                            .child(
-                                                div()
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgb(t.text_primary))
-                                                    .text_ellipsis()
-                                                    .child(filename.to_string()),
-                                            )
-                                            .when(is_new, |d| {
-                                                d.child(
-                                                    div()
-                                                        .px(px(4.0))
-                                                        .py(px(1.0))
-                                                        .rounded(px(2.0))
-                                                        .bg(rgb(t.term_green))
-                                                        .text_size(px(8.0))
-                                                        .text_color(rgb(0x000000))
-                                                        .child("new"),
-                                                )
-                                            }),
-                                    )
-                                    .when_some(dir, |d, dir| {
-                                        d.child(
-                                            div()
-                                                .text_size(px(9.0))
-                                                .text_color(rgb(t.text_muted))
-                                                .text_ellipsis()
-                                                .child(dir.to_string()),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap(px(6.0))
-                                    .flex_shrink_0()
-                                    .text_size(px(10.0))
-                                    .when(added > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.term_green))
-                                                .child(format!("+{}", added)),
-                                        )
-                                    })
-                                    .when(removed > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.term_red))
-                                                .child(format!("-{}", removed)),
-                                        )
-                                    }),
-                            )
-                    }),
-            )
-            .when(show_more, |d: Stateful<Div>| {
-                d.child(
+        deferred(
+            anchored()
+                .position(position)
+                .snap_to_window()
+                .child(
                     div()
-                        .px(px(10.0))
-                        .py(px(4.0))
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_muted))
-                        .child(format!("... and {} more files", total_files - max_files)),
-                )
-            })
-            .into_any_element()
+                        .id("diff-summary-popover")
+                        .occlude()
+                        .min_w(px(280.0))
+                        .max_w(px(400.0))
+                        .max_h(px(300.0))
+                        .overflow_y_scroll()
+                        .bg(rgb(t.bg_primary))
+                        .border_1()
+                        .border_color(rgb(t.border))
+                        .rounded(px(6.0))
+                        .shadow_lg()
+                        .py(px(6.0))
+                        // Keep popover open when hovering over it
+                        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                            if *hovered {
+                                // Cancel any pending hide by updating token
+                                this.hover_token.fetch_add(1, Ordering::SeqCst);
+                            } else {
+                                this.hide_diff_popover(cx);
+                            }
+                        }))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_scroll_wheel(|_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .children(
+                            self.diff_file_summaries
+                                .iter()
+                                .take(max_files)
+                                .enumerate()
+                                .map(|(idx, summary)| {
+                                    let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
+                                    let dir = if summary.path.contains('/') {
+                                        let parts: Vec<&str> = summary.path.rsplitn(2, '/').collect();
+                                        if parts.len() > 1 { Some(parts[1]) } else { None }
+                                    } else {
+                                        None
+                                    };
+                                    let is_new = summary.is_new;
+                                    let added = summary.added;
+                                    let removed = summary.removed;
+                                    let file_path = summary.path.clone();
+                                    let project_path_for_click = project_path.clone();
+
+                                    div()
+                                        .id(ElementId::Name(format!("diff-file-{}", idx).into()))
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .rounded(px(4.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap(px(12.0))
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.hide_diff_popover(cx);
+                                            this.request_broker.update(cx, |broker, cx| {
+                                                broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                                    path: project_path_for_click.clone(),
+                                                    file: Some(file_path.clone()),
+                                                }, cx);
+                                            });
+                                        }))
+                                        .child(
+                                            v_flex()
+                                                .overflow_hidden()
+                                                .child(
+                                                    h_flex()
+                                                        .gap(px(4.0))
+                                                        .child(
+                                                            div()
+                                                                .text_size(px(11.0))
+                                                                .text_color(rgb(t.text_primary))
+                                                                .text_ellipsis()
+                                                                .child(filename.to_string()),
+                                                        )
+                                                        .when(is_new, |d| {
+                                                            d.child(
+                                                                div()
+                                                                    .px(px(4.0))
+                                                                    .py(px(1.0))
+                                                                    .rounded(px(2.0))
+                                                                    .bg(rgb(t.term_green))
+                                                                    .text_size(px(8.0))
+                                                                    .text_color(rgb(0x000000))
+                                                                    .child("new"),
+                                                            )
+                                                        }),
+                                                )
+                                                .when_some(dir, |d, dir| {
+                                                    d.child(
+                                                        div()
+                                                            .text_size(px(9.0))
+                                                            .text_color(rgb(t.text_muted))
+                                                            .text_ellipsis()
+                                                            .child(dir.to_string()),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap(px(6.0))
+                                                .flex_shrink_0()
+                                                .text_size(px(10.0))
+                                                .when(added > 0, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_color(rgb(t.term_green))
+                                                            .child(format!("+{}", added)),
+                                                    )
+                                                })
+                                                .when(removed > 0, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_color(rgb(t.term_red))
+                                                            .child(format!("-{}", removed)),
+                                                    )
+                                                }),
+                                        )
+                                }),
+                        )
+                        .when(show_more, |d: Stateful<Div>| {
+                            d.child(
+                                div()
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(format!("... and {} more files", total_files - max_files)),
+                            )
+                        }),
+                ),
+        )
+        .into_any_element()
     }
 
     fn ensure_layout_container(&mut self, project_path: String, cx: &mut Context<Self>) {
@@ -537,6 +558,7 @@ impl ProjectColumn {
         let main_repo_path = project.worktree_info.as_ref()
             .map(|w| w.main_repo_path.clone())
             .unwrap_or_default();
+        let entity_handle = cx.entity().clone();
 
         match status {
             Some(status) if status.branch.is_some() => {
@@ -636,6 +658,18 @@ impl ProjectColumn {
                                         .text_color(rgb(t.term_red))
                                         .child(format!("-{}", lines_removed))
                                 )
+                                // Invisible canvas to capture bounds for popover positioning
+                                .child(canvas(
+                                    {
+                                        let entity_handle = entity_handle.clone();
+                                        move |bounds, _window, app| {
+                                            entity_handle.update(app, |this, _cx| {
+                                                this.diff_stats_bounds = bounds;
+                                            });
+                                        }
+                                    },
+                                    |_, _, _, _| {},
+                                ).absolute().size_full())
                         )
                     })
                     .into_any_element()
