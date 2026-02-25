@@ -89,6 +89,12 @@ impl RootView {
                     om.show_settings_for_project(project_id.clone(), cx);
                 });
             }
+            OverlayManagerEvent::ReloadServices { project_id } => {
+                let dispatcher = self.dispatcher_for_project(project_id, cx);
+                dispatcher.dispatch(okena_core::api::ActionRequest::ReloadServices {
+                    project_id: project_id.clone(),
+                }, cx);
+            }
             OverlayManagerEvent::CloseAllWorktrees { project_id } => {
                 // Collect all worktree project IDs for this parent
                 let worktree_ids: Vec<String> = self.workspace.read(cx)

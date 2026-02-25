@@ -20,6 +20,7 @@ pub enum ContextMenuEvent {
     CloseAllWorktrees { project_id: String },
     DeleteProject { project_id: String },
     ConfigureHooks { project_id: String },
+    ReloadServices { project_id: String },
     FocusParent { project_id: String },
 }
 
@@ -95,6 +96,12 @@ impl ContextMenu {
 
     fn close_all_worktrees(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::CloseAllWorktrees {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn reload_services(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::ReloadServices {
             project_id: self.request.project_id.clone(),
         });
     }
@@ -216,6 +223,13 @@ impl Render for ContextMenu {
                         menu_item("context-menu-configure-hooks", "icons/terminal.svg", "Configure Hooks...", &t)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.configure_hooks(cx);
+                            })),
+                    )
+                    // Reload Services option
+                    .child(
+                        menu_item("context-menu-reload-services", "icons/file.svg", "Reload Services", &t)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.reload_services(cx);
                             })),
                     )
                     // Focus Parent Project option (only for worktree projects)
