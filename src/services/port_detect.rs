@@ -25,7 +25,7 @@ pub fn detect_ports_for_pids(root_pids: &[u32]) -> Vec<u16> {
 
 /// Walk the process tree to find all descendant PIDs (children, grandchildren, etc.)
 /// including the root PID itself.
-fn get_descendant_pids(root_pid: u32) -> HashSet<u32> {
+pub fn get_descendant_pids(root_pid: u32) -> HashSet<u32> {
     let mut result = HashSet::new();
     result.insert(root_pid);
 
