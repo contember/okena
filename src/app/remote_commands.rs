@@ -1,5 +1,5 @@
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
+use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiLayoutNode, ApiProject, ApiServiceInfo, StateResponse};
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::root::TerminalsRegistry;
@@ -114,7 +114,7 @@ pub(crate) async fn remote_command_loop(
                 }
             }
             RemoteCommand::GetState => {
-                cx.update(|cx| {
+                let mut resp = cx.update(|cx| {
                     let ws = workspace.read(cx);
                     let sm = service_manager.read(cx);
                     let sv = *state_version.borrow();
@@ -209,17 +209,24 @@ pub(crate) async fn remote_command_loop(
                         }
                     });
 
-                    let resp = StateResponse {
+                    StateResponse {
                         state_version: sv,
                         projects,
                         focused_project_id: ws.focused_project_id().cloned(),
                         fullscreen_terminal: fullscreen,
                         project_order: data.project_order.clone(),
                         folders,
-                    };
+                    }
+                });
 
-                    CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
-                })
+                // Populate app states using the outer AsyncApp context.
+                for project in &mut resp.projects {
+                    if let Some(layout) = &mut project.layout {
+                        populate_app_states(layout, &app_entity_registry, cx);
+                    }
+                }
+
+                CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
             }
             RemoteCommand::GetTerminalSizes { terminal_ids } => {
                 cx.update(|_cx| {
@@ -294,5 +301,26 @@ impl Okena {
             ).await;
         })
         .detach();
+    }
+}
+
+/// Walk an `ApiLayoutNode` tree and populate `app_state` for each `App` node
+/// from the `AppEntityRegistry`. Nodes with no registered state are left as
+/// `None`, which serializes to `null` (omitted via `skip_serializing_if`).
+fn populate_app_states(
+    node: &mut ApiLayoutNode,
+    registry: &AppEntityRegistry,
+    cx: &mut AsyncApp,
+) {
+    match node {
+        ApiLayoutNode::App { app_id: Some(id), app_state, .. } => {
+            *app_state = registry.get_view_state(id, cx);
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                populate_app_states(child, registry, cx);
+            }
+        }
+        _ => {}
     }
 }
