@@ -13,6 +13,7 @@ pub mod kruh_pane;
 pub mod layout_container;
 pub mod navigation;
 pub mod pane_drag;
+pub mod remote_app_pane;
 pub mod split_pane;
 mod tabs;
 pub mod terminal_pane;

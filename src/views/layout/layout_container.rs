@@ -20,6 +20,7 @@ use crate::views::root::TerminalsRegistry;
 use crate::views::layout::app_pane::AppPaneEntity;
 use crate::views::layout::app_registry;
 use crate::views::layout::pane_drag::{PaneDrag, DropZone};
+use crate::views::layout::remote_app_pane::RemoteAppPane;
 use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::views::layout::terminal_pane::TerminalPane;
 use crate::workspace::request_broker::RequestBroker;
@@ -176,7 +177,49 @@ impl LayoutContainer {
             }
         }
 
-        // Create new app pane via registry
+        // For remote connections, create a RemoteAppPane driven by server-pushed state
+        if let Some(ActionDispatcher::Remote { manager, .. }) = &self.action_dispatcher {
+            let Some(app_id_str) = app_id.clone() else {
+                return;
+            };
+
+            let dispatcher = self.action_dispatcher.clone();
+            let project_id = self.project_id.clone();
+            let manager = manager.clone();
+            let app_id_for_reg = app_id_str.clone();
+            let app_kind_str = app_kind.to_string();
+
+            let pane = cx.new(|cx| {
+                RemoteAppPane::new(
+                    app_id_str.clone(),
+                    app_kind_str,
+                    None, // state arrives via WebSocket AppStateChanged events
+                    dispatcher,
+                    project_id,
+                    cx,
+                )
+            });
+
+            let focus = pane.read(cx).focus_handle.clone();
+            manager.update(cx, |m, _| {
+                m.register_app_pane(app_id_for_reg.clone(), pane.downgrade());
+            });
+
+            let (display_name, icon_path) = app_registry::find_app(app_kind)
+                .map(|d| (d.display_name, d.icon_path))
+                .unwrap_or(("App", "icons/kruh.svg"));
+
+            self.app_pane = Some(AppPaneEntity::new(
+                pane,
+                Some(app_id_for_reg),
+                display_name,
+                icon_path,
+                focus,
+            ));
+            return;
+        }
+
+        // Create new app pane via registry (local project)
         self.app_pane = app_registry::create_app_pane(
             app_kind,
             app_id,
