@@ -128,17 +128,21 @@ impl Okena {
                                 let git_status = git_statuses.get(&p.id).cloned();
                                 let services: Vec<ApiServiceInfo> = sm.services_for_project(&p.id)
                                     .into_iter()
-                                    .map(|inst| ApiServiceInfo {
-                                        name: inst.definition.name.clone(),
-                                        status: match &inst.status {
-                                            ServiceStatus::Stopped => "stopped".to_string(),
-                                            ServiceStatus::Starting => "starting".to_string(),
-                                            ServiceStatus::Running => "running".to_string(),
-                                            ServiceStatus::Crashed { .. } => "crashed".to_string(),
-                                            ServiceStatus::Restarting => "restarting".to_string(),
-                                        },
-                                        terminal_id: inst.terminal_id.clone(),
-                                        ports: inst.detected_ports.clone(),
+                                    .map(|inst| {
+                                        let (status, exit_code) = match &inst.status {
+                                            ServiceStatus::Stopped => ("stopped", None),
+                                            ServiceStatus::Starting => ("starting", None),
+                                            ServiceStatus::Running => ("running", None),
+                                            ServiceStatus::Crashed { exit_code } => ("crashed", *exit_code),
+                                            ServiceStatus::Restarting => ("restarting", None),
+                                        };
+                                        ApiServiceInfo {
+                                            name: inst.definition.name.clone(),
+                                            status: status.to_string(),
+                                            terminal_id: inst.terminal_id.clone(),
+                                            ports: inst.detected_ports.clone(),
+                                            exit_code,
+                                        }
                                     })
                                     .collect();
                                 ApiProject {

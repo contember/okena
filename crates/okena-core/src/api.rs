@@ -56,6 +56,9 @@ pub struct ApiServiceInfo {
     pub terminal_id: Option<String>,
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// Exit code when status is "crashed"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
