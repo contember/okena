@@ -633,8 +633,16 @@ impl ProjectColumn {
     }
 
     fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        // Try local git watcher first, then fall back to remote git status from server sync
         let status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned());
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                project.remote_git_status.as_ref().map(|g| git::GitStatus {
+                    branch: g.branch.clone(),
+                    lines_added: g.lines_added,
+                    lines_removed: g.lines_removed,
+                })
+            });
         let is_worktree = project.worktree_info.is_some();
         let main_repo_path = project.worktree_info.as_ref()
             .map(|w| w.main_repo_path.clone())
@@ -766,7 +774,6 @@ impl ProjectColumn {
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
         let folder_color = t.get_folder_color(project.folder_color);
-        let is_remote = project.is_remote;
 
         v_flex()
             // Colored accent bar
@@ -819,7 +826,7 @@ impl ProjectColumn {
                             .overflow_hidden()
                             .child(project.path.clone()),
                     )
-                    .when(!is_remote, |d| d.child(self.render_git_status(project, t, cx))),
+                    .child(self.render_git_status(project, t, cx)),
             )
             .child(
                 // Right side: minimized taskbar + controls
