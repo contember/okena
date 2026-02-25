@@ -6,6 +6,7 @@ pub mod state;
 pub mod stream;
 pub mod tokens;
 
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -31,6 +32,7 @@ pub struct AppState {
     pub bridge_tx: BridgeSender,
     pub auth_store: Arc<AuthStore>,
     pub broadcaster: Arc<PtyBroadcaster>,
+    pub app_broadcaster: Arc<AppStateBroadcaster>,
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -41,6 +43,7 @@ pub fn build_router(
     bridge_tx: BridgeSender,
     auth_store: Arc<AuthStore>,
     broadcaster: Arc<PtyBroadcaster>,
+    app_broadcaster: Arc<AppStateBroadcaster>,
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -49,6 +52,7 @@ pub fn build_router(
         bridge_tx,
         auth_store,
         broadcaster,
+        app_broadcaster,
         state_version,
         start_time,
         git_status,
