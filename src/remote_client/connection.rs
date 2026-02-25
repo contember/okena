@@ -31,6 +31,14 @@ impl ConnectionHandler for DesktopConnectionHandler {
         prefixed_id: &str,
         ws_sender: async_channel::Sender<WsClientMessage>,
     ) {
+        // Skip if terminal already exists — on reconnect the server re-sends
+        // CreateTerminal for every live terminal. Reusing the existing object
+        // keeps the views' Arc<Terminal> references valid and avoids leaking
+        // the old Terminal (with its ~19-48 MB scrollback grid) on every reconnect.
+        if self.terminals.lock().contains_key(prefixed_id) {
+            return;
+        }
+
         let transport = Arc::new(RemoteTransport {
             ws_tx: ws_sender,
             connection_id: connection_id.to_string(),

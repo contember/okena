@@ -41,6 +41,11 @@ impl ConnectionHandler for MobileConnectionHandler {
         prefixed_id: &str,
         _ws_sender: async_channel::Sender<WsClientMessage>,
     ) {
+        // Skip if terminal already exists — avoids leaking the old TerminalHolder
+        // (and its alacritty grid) on reconnect when the server re-sends creates.
+        if self.terminals.read().contains_key(prefixed_id) {
+            return;
+        }
         let holder = TerminalHolder::new(80, 24);
         self.terminals
             .write()
@@ -95,6 +100,28 @@ mod tests {
 
         handler.remove_terminal("remote:conn1:t1");
         assert!(!handler.terminals().read().contains_key("remote:conn1:t1"));
+    }
+
+    #[test]
+    fn create_terminal_is_idempotent() {
+        let handler = make_handler();
+        let (tx, _rx) = async_channel::bounded(1);
+
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx.clone());
+        let ptr1 = {
+            let terminals = handler.terminals().read();
+            terminals.get("remote:conn1:t1").unwrap() as *const TerminalHolder
+        };
+
+        // Second create with same prefixed_id should be a no-op
+        handler.create_terminal("conn1", "t1", "remote:conn1:t1", tx);
+        let ptr2 = {
+            let terminals = handler.terminals().read();
+            terminals.get("remote:conn1:t1").unwrap() as *const TerminalHolder
+        };
+
+        assert_eq!(ptr1, ptr2, "second create should reuse existing terminal");
+        assert_eq!(handler.terminals().read().len(), 1);
     }
 
     #[test]
