@@ -49,8 +49,13 @@ impl RateLimiter {
         // Prune old entries
         self.global.retain(|t| now.duration_since(*t) < window);
 
+        // Prune all per-IP entries and remove IPs with no recent attempts
+        self.per_ip.retain(|_, attempts| {
+            attempts.retain(|t| now.duration_since(*t) < window);
+            !attempts.is_empty()
+        });
+
         let ip_attempts = self.per_ip.entry(ip).or_default();
-        ip_attempts.retain(|t| now.duration_since(*t) < window);
 
         // Check global limit: 30/min
         if self.global.len() >= 30 {
@@ -754,6 +759,28 @@ mod tests {
     fn revoke_nonexistent_returns_false() {
         let store = test_store();
         assert!(!store.revoke_token("nonexistent-id"), "revoking nonexistent token should return false");
+    }
+
+    #[test]
+    fn rate_limiter_prunes_empty_ip_entries() {
+        let mut limiter = RateLimiter::new();
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Record attempts from two IPs
+        assert!(limiter.check(ip1).is_ok());
+        assert!(limiter.check(ip2).is_ok());
+        assert_eq!(limiter.per_ip.len(), 2);
+
+        // Manually expire ip1's timestamps so the next check prunes them
+        for t in limiter.per_ip.get_mut(&ip1).unwrap() {
+            *t = Instant::now() - Duration::from_secs(120);
+        }
+
+        // A check from ip2 triggers pruning; ip1's empty entry should be removed
+        assert!(limiter.check(ip2).is_ok());
+        assert!(!limiter.per_ip.contains_key(&ip1), "empty IP entry should be pruned");
+        assert!(limiter.per_ip.contains_key(&ip2));
     }
 
     #[test]

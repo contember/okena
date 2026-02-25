@@ -130,6 +130,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
                                     subscribed_ids.remove(id);
+                                    if let Some(sid) = stream_id_map.remove(id) {
+                                        reverse_stream_map.remove(&sid);
+                                    }
                                 }
                             }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
