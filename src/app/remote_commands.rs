@@ -117,10 +117,12 @@ impl Okena {
                         }
                     }
                     RemoteCommand::AppAction { project_id: _, app_id, action } => {
-                        match app_entity_registry.handle_action(&app_id, action, cx) {
-                            Ok(()) => CommandResult::Ok(None),
-                            Err(e) => CommandResult::Err(e),
-                        }
+                        cx.update(|cx| {
+                            match app_entity_registry.handle_action(&app_id, action, cx) {
+                                Ok(()) => CommandResult::Ok(None),
+                                Err(e) => CommandResult::Err(e),
+                            }
+                        })
                     }
                 };
 
