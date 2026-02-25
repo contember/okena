@@ -15,6 +15,7 @@ use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::state::DropZone;
 use okena_terminal::TerminalsRegistry;
 use crate::workspace::hooks;
+use crate::views::layout::app_entity_registry::GlobalAppEntityRegistry;
 use crate::views::layout::app_registry;
 use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
@@ -385,8 +386,17 @@ pub fn execute_action(
         | ActionRequest::ReloadServices { .. } => {
             ActionResult::Err("service actions must be handled via ServiceManager".to_string())
         }
-        ActionRequest::AppAction { .. } => {
-            ActionResult::Err("AppAction not yet implemented".into())
+        ActionRequest::AppAction { project_id: _, app_id, payload } => {
+            let registry = cx
+                .try_global::<GlobalAppEntityRegistry>()
+                .map(|g| g.0.clone());
+            match registry {
+                Some(registry) => match registry.handle_action(&app_id, payload, &mut *cx) {
+                    Ok(()) => ActionResult::Ok(None),
+                    Err(e) => ActionResult::Err(e),
+                },
+                None => ActionResult::Err("AppEntityRegistry not available".to_string()),
+            }
         }
     }
 }
