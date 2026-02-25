@@ -1301,24 +1301,31 @@ impl ProjectColumn {
                             ),
                     )
                     .child(
-                        // Close button
+                        // Close button — wrap in a 34px-tall container to align with tabs
                         div()
-                            .id("service-panel-close")
-                            .cursor_pointer()
-                            .w(px(26.0))
-                            .h(px(26.0))
-                            .mx(px(4.0))
+                            .flex_shrink_0()
+                            .h(px(34.0))
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("✕")
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_service_panel(cx);
-                            })),
+                            .child(
+                                div()
+                                    .id("service-panel-close")
+                                    .cursor_pointer()
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .mx(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("✕")
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.close_service_panel(cx);
+                                    })),
+                            ),
                     ),
             )
             .child(
