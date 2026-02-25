@@ -6,6 +6,7 @@
 use crate::theme::ThemeColors;
 use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
+use gpui::prelude::*;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
 ///
@@ -102,17 +103,21 @@ pub fn sidebar_name_label(
         .child(name.into())
 }
 
-/// Terminal count badge (number) or bookmark icon for terminal-less projects.
+/// Terminal count badge (number) with fixed width for vertical alignment.
+/// When there are no terminals, renders an invisible placeholder of the same size.
 pub fn sidebar_terminal_badge(
     has_layout: bool,
     count: usize,
     t: &ThemeColors,
 ) -> AnyElement {
-    if has_layout {
+    if has_layout && count > 0 {
         div()
             .flex_shrink_0()
-            .px(px(4.0))
-            .py(px(1.0))
+            .min_w(px(18.0))
+            .h(px(14.0))
+            .flex()
+            .items_center()
+            .justify_center()
             .rounded(px(4.0))
             .bg(rgb(t.bg_secondary))
             .text_size(px(10.0))
@@ -120,43 +125,67 @@ pub fn sidebar_terminal_badge(
             .child(format!("{}", count))
             .into_any_element()
     } else {
+        // Invisible placeholder to keep eye icons aligned
         div()
             .flex_shrink_0()
-            .px(px(4.0))
-            .py(px(1.0))
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_secondary))
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .child(
-                svg()
-                    .path("icons/bookmark.svg")
-                    .size(px(10.0))
-                    .text_color(rgb(t.text_muted)),
-            )
+            .min_w(px(18.0))
             .into_any_element()
     }
 }
 
-/// Worktree count badge (branch icon + count) for parent projects.
-pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement {
+/// Collapsible group header (e.g. "Terminals (3)" or "Services (2)").
+///
+/// Returns a `Stateful<Div>` so the caller can chain `.on_click()` to toggle collapse.
+pub fn sidebar_group_header(
+    id: impl Into<ElementId>,
+    label: &str,
+    count: usize,
+    is_collapsed: bool,
+    is_cursor: bool,
+    left_padding: f32,
+    t: &ThemeColors,
+) -> Stateful<Div> {
     div()
-        .flex_shrink_0()
+        .id(id)
+        .h(px(20.0))
+        .pl(px(left_padding))
+        .pr(px(8.0))
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .when(is_cursor, |d: Stateful<Div>| d.border_l_2().border_color(rgb(t.border_active)))
         .child(
+            // Expand/collapse chevron (smaller than project arrow)
             svg()
-                .path("icons/git-branch.svg")
+                .path(if is_collapsed {
+                    "icons/chevron-right.svg"
+                } else {
+                    "icons/chevron-down.svg"
+                })
                 .size(px(10.0))
                 .text_color(rgb(t.text_muted))
+                .flex_shrink_0(),
         )
         .child(
+            // Group label
             div()
                 .text_size(px(10.0))
                 .text_color(rgb(t.text_muted))
-                .child(format!("{}", count))
+                .child(label.to_string()),
+        )
+        .child(
+            // Item count badge
+            div()
+                .flex_shrink_0()
+                .px(px(3.0))
+                .py(px(0.0))
+                .rounded(px(3.0))
+                .bg(rgb(t.bg_secondary))
+                .text_size(px(9.0))
+                .text_color(rgb(t.text_muted))
+                .child(format!("{}", count)),
         )
 }
 
