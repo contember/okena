@@ -217,7 +217,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             }
         }
 
-        // Create new app pane via ActionDispatch
+        // Create new app pane via ActionDispatch (handles both local and remote)
         self.app_pane = self.action_dispatcher.as_ref().and_then(|d| {
             d.create_app_pane(
                 app_kind,
