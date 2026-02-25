@@ -11,7 +11,7 @@
 - [x] 07 — App Entity Registry and Bridge commands
 - [x] 08 — WebSocket handler for app subscriptions
 - [x] 09 — Include app state in GET /v1/state
-- [ ] 10 — Route AppAction through execute_action
+- [x] 10 — Route AppAction through execute_action
 - [ ] 11 — Desktop remote client support
 - [ ] 12 — Web client support for app panes
 
