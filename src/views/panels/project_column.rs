@@ -842,8 +842,6 @@ impl ProjectColumn {
                     .gap(px(8.0))
                     // Hidden terminals taskbar (minimized and detached)
                     .child(self.render_hidden_taskbar(project, t))
-                    // Service indicator (always visible when services exist)
-                    .child(self.render_service_indicator(&t, cx))
                     // Project controls
                     .child(
                         div()
@@ -909,7 +907,9 @@ impl ProjectColumn {
                                     )
                                     .tooltip(|_window, cx| Tooltip::new("Focus Project").build(_window, cx)),
                             ),
-                    ),
+                    )
+                    // Service indicator (rightmost)
+                    .child(self.render_service_indicator(&t, cx)),
             ))
     }
 
