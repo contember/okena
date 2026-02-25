@@ -426,9 +426,15 @@ impl ServiceManager {
             None => return,
         };
 
-        // Get PID before killing so we can wait for it
-        let old_pid = instance.terminal_id.as_ref()
-            .and_then(|tid| self.backend.get_shell_pid(tid));
+        // Collect all descendant PIDs before killing so we can wait for them.
+        // The shell PID alone isn't enough — the actual service process (child of
+        // the shell) may still hold the port after the shell exits.
+        let old_pids: Vec<u32> = instance
+            .terminal_id
+            .as_ref()
+            .and_then(|tid| self.backend.get_shell_pid(tid))
+            .map(|pid| port_detect::get_descendant_pids(pid).into_iter().collect())
+            .unwrap_or_default();
 
         // Kill old terminal
         if let Some(terminal_id) = instance.terminal_id.take() {
@@ -442,16 +448,16 @@ impl ServiceManager {
         instance.detected_ports.clear();
         cx.notify();
 
-        // Wait for old process to die, then start the new one
+        // Wait for old processes to die, then start the new one
         let pid = project_id.to_string();
         let name = service_name.to_string();
         let path = project_path.to_string();
 
         cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-            // Poll until old process exits (max ~5s)
-            if let Some(old_pid) = old_pid {
+            // Poll until ALL old processes exit (max ~5s)
+            if !old_pids.is_empty() {
                 for _ in 0..100 {
-                    if !is_process_alive(old_pid) {
+                    if old_pids.iter().all(|&p| !is_process_alive(p)) {
                         break;
                     }
                     cx.background_executor().timer(Duration::from_millis(50)).await;
