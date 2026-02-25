@@ -1,12 +1,13 @@
 use crate::remote_client::connection::RemoteConnection;
 use crate::terminal::backend::TerminalBackend;
+use crate::views::layout::remote_app_pane::RemoteAppPane;
 use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
 use crate::workspace::settings::{load_settings, update_remote_connections};
 
 use okena_core::api::{ActionRequest, StateResponse};
 use okena_core::client::{
-    ConnectionEvent, ConnectionStatus, RemoteConnectionConfig,
+    ConnectionEvent, ConnectionStatus, RemoteConnectionConfig, WsClientMessage,
 };
 use okena_core::client::connection::try_refresh_token;
 
@@ -26,6 +27,9 @@ pub struct RemoteConnectionManager {
     /// Channel for events coming from tokio tasks
     event_tx: async_channel::Sender<ConnectionEvent>,
 
+    /// Registered remote app panes, keyed by app_id.
+    /// Weak references so dropped panes are cleaned up automatically.
+    app_panes: HashMap<String, WeakEntity<RemoteAppPane>>,
 }
 
 impl RemoteConnectionManager {
@@ -64,6 +68,7 @@ impl RemoteConnectionManager {
             terminals,
             runtime,
             event_tx,
+            app_panes: HashMap::new(),
         }
     }
 
@@ -249,6 +254,28 @@ impl RemoteConnectionManager {
         });
     }
 
+    /// Register a `RemoteAppPane` entity so it receives state updates.
+    ///
+    /// Called from `LayoutContainer` when it creates a `RemoteAppPane` for a remote project.
+    pub fn register_app_pane(&mut self, app_id: String, pane: WeakEntity<RemoteAppPane>) {
+        self.app_panes.insert(app_id, pane);
+    }
+
+    /// Send a WebSocket app action to the server for the given connection.
+    pub fn send_ws_app_action(
+        &self,
+        connection_id: &str,
+        app_id: &str,
+        action: serde_json::Value,
+    ) {
+        if let Some(conn) = self.connections.get(connection_id) {
+            conn.send_ws_message(WsClientMessage::AppAction {
+                app_id: app_id.to_string(),
+                action,
+            });
+        }
+    }
+
     /// Handle an event from a connection's tokio task.
     fn handle_event(&mut self, event: ConnectionEvent, cx: &mut Context<Self>) {
         match event {
@@ -345,6 +372,21 @@ impl RemoteConnectionManager {
                         saved.token_obtained_at = Some(now);
                     }
                 });
+            }
+            ConnectionEvent::AppStateChanged {
+                connection_id: _,
+                app_id,
+                app_kind: _,
+                state,
+            } => {
+                if let Some(weak) = self.app_panes.get(&app_id) {
+                    if let Some(entity) = weak.upgrade() {
+                        entity.update(cx, |pane, cx| pane.update_state_value(state, cx));
+                    } else {
+                        // Entity was dropped — clean up the stale entry
+                        self.app_panes.remove(&app_id);
+                    }
+                }
             }
         }
     }

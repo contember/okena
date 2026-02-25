@@ -1,7 +1,7 @@
 use crate::api::StateResponse;
 use crate::client::config::RemoteConnectionConfig;
 use crate::client::id::make_prefixed_id;
-use crate::client::state::{collect_state_terminal_ids, diff_states};
+use crate::client::state::{collect_all_app_ids, collect_state_terminal_ids, diff_states};
 use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, WsClientMessage, TOKEN_REFRESH_AGE_SECS,
 };
@@ -592,6 +592,21 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             .map_err(|e| SessionError::Transient(format!("Failed to send subscribe: {}", e)))?;
         }
 
+        // Step 5b: Subscribe to all app state streams
+        let initial_app_ids: Vec<String> = collect_all_app_ids(&state).into_iter().collect();
+        if !initial_app_ids.is_empty() {
+            let subscribe_apps_msg = serde_json::json!({
+                "type": "subscribe_apps",
+                "app_ids": initial_app_ids,
+            });
+            futures::SinkExt::send(
+                &mut ws_write,
+                tungstenite::Message::Text(subscribe_apps_msg.to_string().into()),
+            )
+            .await
+            .map_err(|e| SessionError::Transient(format!("Failed to send subscribe_apps: {}", e)))?;
+        }
+
         // Notify connected
         let _ = event_tx
             .send(ConnectionEvent::StatusChanged {
@@ -674,6 +689,25 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                         serde_json::json!({
                             "type": "unsubscribe",
                             "terminal_ids": terminal_ids,
+                        })
+                    }
+                    WsClientMessage::SubscribeApps { app_ids } => {
+                        serde_json::json!({
+                            "type": "subscribe_apps",
+                            "app_ids": app_ids,
+                        })
+                    }
+                    WsClientMessage::UnsubscribeApps { app_ids } => {
+                        serde_json::json!({
+                            "type": "unsubscribe_apps",
+                            "app_ids": app_ids,
+                        })
+                    }
+                    WsClientMessage::AppAction { app_id, action } => {
+                        serde_json::json!({
+                            "type": "app_action",
+                            "app_id": app_id,
+                            "action": action,
                         })
                     }
                 };
@@ -825,6 +859,24 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                                     );
                                                 }
 
+                                                // Subscribe to new app streams
+                                                if !diff.added_apps.is_empty() {
+                                                    let _ = ws_tx_clone.try_send(
+                                                        WsClientMessage::SubscribeApps {
+                                                            app_ids: diff.added_apps.clone(),
+                                                        },
+                                                    );
+                                                }
+
+                                                // Unsubscribe from removed app streams
+                                                if !diff.removed_apps.is_empty() {
+                                                    let _ = ws_tx_clone.try_send(
+                                                        WsClientMessage::UnsubscribeApps {
+                                                            app_ids: diff.removed_apps.clone(),
+                                                        },
+                                                    );
+                                                }
+
                                                 cached_state = new_state.clone();
 
                                                 let _ = event_tx_clone
@@ -869,6 +921,22 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             ),
                                         })
                                         .await;
+                                }
+                                "app_state_changed" => {
+                                    if let (Some(app_id), Some(app_kind), Some(state)) = (
+                                        value.get("app_id").and_then(|v| v.as_str()),
+                                        value.get("app_kind").and_then(|v| v.as_str()),
+                                        value.get("state"),
+                                    ) {
+                                        let _ = event_tx_clone
+                                            .send(ConnectionEvent::AppStateChanged {
+                                                connection_id: config_id.clone(),
+                                                app_id: app_id.to_string(),
+                                                app_kind: app_kind.to_string(),
+                                                state: state.clone(),
+                                            })
+                                            .await;
+                                    }
                                 }
                                 "error" => {
                                     let error = value

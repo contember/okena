@@ -36,6 +36,12 @@ pub enum WsClientMessage {
     Subscribe { terminal_ids: Vec<String> },
     /// Unsubscribe from terminal output streams
     Unsubscribe { terminal_ids: Vec<String> },
+    /// Subscribe to app state update streams
+    SubscribeApps { app_ids: Vec<String> },
+    /// Unsubscribe from app state update streams
+    UnsubscribeApps { app_ids: Vec<String> },
+    /// Dispatch an action to a remote app entity
+    AppAction { app_id: String, action: serde_json::Value },
 }
 
 /// Error type distinguishing auth failures from transient network errors.
@@ -77,6 +83,13 @@ pub enum ConnectionEvent {
     TokenRefreshed {
         connection_id: String,
         token: String,
+    },
+    /// Remote app entity state changed
+    AppStateChanged {
+        connection_id: String,
+        app_id: String,
+        app_kind: String,
+        state: serde_json::Value,
     },
 }
 

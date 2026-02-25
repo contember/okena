@@ -140,6 +140,13 @@ impl RemoteConnection {
         self.client.update_shared_token(token);
     }
 
+    /// Send a raw WebSocket message to the server.
+    pub fn send_ws_message(&self, msg: WsClientMessage) {
+        if let Some(tx) = self.client.ws_sender() {
+            let _ = tx.try_send(msg);
+        }
+    }
+
     /// Get a TerminalBackend for this connection.
     pub fn backend(&self) -> Arc<dyn TerminalBackend> {
         let ws_tx = self.client.ws_sender().cloned().unwrap_or_else(|| {
