@@ -16,6 +16,40 @@ use okena_core::client::strip_prefix;
 use gpui::{AppContext, Entity};
 use std::sync::Arc;
 
+/// Build an ActionDispatcher for the given project.
+///
+/// Returns `Remote` variant for remote projects, `Local` for local ones.
+/// Returns `None` if required dependencies (backend, remote manager) are unavailable.
+pub fn dispatcher_for_project(
+    project_id: &str,
+    workspace: &Entity<Workspace>,
+    backend: &Option<Arc<dyn TerminalBackend>>,
+    terminals: &TerminalsRegistry,
+    service_manager: &Option<Entity<ServiceManager>>,
+    remote_manager: &Option<Entity<RemoteConnectionManager>>,
+    cx: &gpui::App,
+) -> Option<ActionDispatcher> {
+    let ws = workspace.read(cx);
+    let project = ws.project(project_id)?;
+    if project.is_remote {
+        let connection_id = project.connection_id.as_ref()?;
+        let manager = remote_manager.as_ref()?;
+        Some(ActionDispatcher::Remote {
+            connection_id: connection_id.clone(),
+            manager: manager.clone(),
+            workspace: workspace.clone(),
+        })
+    } else {
+        let backend = backend.as_ref()?;
+        Some(ActionDispatcher::Local {
+            workspace: workspace.clone(),
+            backend: backend.clone(),
+            terminals: terminals.clone(),
+            service_manager: service_manager.clone(),
+        })
+    }
+}
+
 /// Routes terminal and service actions to either local execution or remote HTTP.
 ///
 /// Passed through the view hierarchy (ProjectColumn → LayoutContainer → TerminalPane)

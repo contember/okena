@@ -14,24 +14,21 @@ impl RootView {
     /// Returns Remote variant if the project is a remote project,
     /// otherwise returns Local variant.
     fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> ActionDispatcher {
-        let ws = self.workspace.read(cx);
-        if let Some(project) = ws.project(project_id) {
-            if project.is_remote {
-                if let (Some(conn_id), Some(rm)) = (&project.connection_id, &self.remote_manager) {
-                    return ActionDispatcher::Remote {
-                        connection_id: conn_id.clone(),
-                        manager: rm.clone(),
-                        workspace: self.workspace.clone(),
-                    };
-                }
-            }
-        }
-        ActionDispatcher::Local {
+        let backend = Some(self.backend.clone());
+        crate::action_dispatch::dispatcher_for_project(
+            project_id,
+            &self.workspace,
+            &backend,
+            &self.terminals,
+            &self.service_manager,
+            &self.remote_manager,
+            cx,
+        ).unwrap_or_else(|| ActionDispatcher::Local {
             workspace: self.workspace.clone(),
             backend: self.backend.clone(),
             terminals: self.terminals.clone(),
             service_manager: self.service_manager.clone(),
-        }
+        })
     }
 }
 
