@@ -332,25 +332,15 @@ impl Sidebar {
     /// Build an ActionDispatcher for the given project.
     /// Returns Remote dispatcher for remote projects, Local for local ones.
     fn dispatcher_for_project(&self, project_id: &str, cx: &Context<Self>) -> Option<ActionDispatcher> {
-        let ws = self.workspace.read(cx);
-        let project = ws.project(project_id)?;
-        if project.is_remote {
-            let connection_id = project.connection_id.as_ref()?;
-            let manager = self.remote_manager.as_ref()?;
-            Some(ActionDispatcher::Remote {
-                connection_id: connection_id.clone(),
-                manager: manager.clone(),
-                workspace: self.workspace.clone(),
-            })
-        } else {
-            let backend = self.backend.as_ref()?;
-            Some(ActionDispatcher::Local {
-                workspace: self.workspace.clone(),
-                backend: backend.clone(),
-                terminals: self.terminals.clone(),
-                service_manager: self.service_manager.clone(),
-            })
-        }
+        crate::action_dispatch::dispatcher_for_project(
+            project_id,
+            &self.workspace,
+            &self.backend,
+            &self.terminals,
+            &self.service_manager,
+            &self.remote_manager,
+            cx,
+        )
     }
 
     pub fn set_remote_manager(&mut self, manager: Entity<RemoteConnectionManager>, cx: &mut Context<Self>) {

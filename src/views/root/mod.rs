@@ -343,6 +343,7 @@ impl RootView {
                             existing.folder_color = project_color;
                             existing.remote_services = remote_services;
                             existing.remote_host = remote_host;
+                            existing.remote_git_status = api_project.git_status.clone();
                             // Don't overwrite is_visible — it's client-side state
                             // (the user may have toggled visibility locally).
                         } else {
@@ -362,6 +363,7 @@ impl RootView {
                                 service_terminals: std::collections::HashMap::new(),
                                 remote_services,
                                 remote_host,
+                                remote_git_status: api_project.git_status.clone(),
                             });
                         }
                     });
@@ -480,83 +482,105 @@ impl RootView {
         // Create columns for new projects
         for (project_id, is_remote, connection_id) in &visible_projects {
             if !self.project_columns.contains_key(project_id) {
-                let workspace_clone = self.workspace.clone();
-                let request_broker_clone = self.request_broker.clone();
-                let terminals_clone = self.terminals.clone();
-                let active_drag_clone = self.active_drag.clone();
-                let id = project_id.clone();
-
-                if *is_remote {
-                    // Remote project: use remote backend and action dispatcher
-                    if let Some(conn_id) = connection_id {
-                        let backend = self.remote_manager.as_ref()
-                            .and_then(|rm| rm.read(cx).backend_for(conn_id));
-                        let workspace_for_dispatch = self.workspace.clone();
-                        let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
-                            crate::action_dispatch::ActionDispatcher::Remote {
-                                connection_id: conn_id.clone(),
-                                manager: rm.clone(),
-                                workspace: workspace_for_dispatch,
-                            }
-                        });
-
-                        if let Some(backend) = backend {
-                            let ws_for_observe = self.workspace.clone();
-                            let entity = cx.new(move |cx| {
-                                let mut col = ProjectColumn::new(
-                                    workspace_clone,
-                                    request_broker_clone,
-                                    id,
-                                    backend,
-                                    terminals_clone,
-                                    active_drag_clone,
-                                    None, // remote projects don't get git watcher
-                                    cx,
-                                );
-                                col.set_action_dispatcher(action_dispatcher);
-                                // Observe workspace for remote service state changes
-                                // (instead of local ServiceManager which has no data for remote projects)
-                                col.observe_remote_services(ws_for_observe, cx);
-                                col
-                            });
-                            self.project_columns.insert(project_id.clone(), entity);
-                        }
-                    }
+                let entity = if *is_remote {
+                    self.create_remote_column(project_id, connection_id.as_deref(), cx)
                 } else {
-                    // Local project: use local backend
-                    let backend_clone = self.backend.clone();
-                    let workspace_for_dispatch = self.workspace.clone();
-                    let backend_for_dispatch = self.backend.clone();
-                    let terminals_for_dispatch = self.terminals.clone();
-                    let git_watcher = self.git_watcher.clone();
-                    let entity = cx.new(move |cx| {
-                        let mut col = ProjectColumn::new(
-                            workspace_clone,
-                            request_broker_clone,
-                            id,
-                            backend_clone,
-                            terminals_clone,
-                            active_drag_clone,
-                            git_watcher,
-                            cx,
-                        );
-                        col.set_action_dispatcher(Some(
-                            crate::action_dispatch::ActionDispatcher::Local {
-                                workspace: workspace_for_dispatch,
-                                backend: backend_for_dispatch,
-                                terminals: terminals_for_dispatch,
-                                service_manager: None, // set later via set_service_manager
-                            },
-                        ));
-                        col
-                    });
-                    if let Some(ref sm) = self.service_manager {
-                        entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
-                    }
+                    Some(self.create_local_column(project_id, cx))
+                };
+                if let Some(entity) = entity {
                     self.project_columns.insert(project_id.clone(), entity);
                 }
             }
         }
+    }
+
+    /// Create a ProjectColumn for a remote project.
+    fn create_remote_column(
+        &self,
+        project_id: &str,
+        connection_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ProjectColumn>> {
+        let conn_id = connection_id?;
+        let backend = self.remote_manager.as_ref()
+            .and_then(|rm| rm.read(cx).backend_for(conn_id))?;
+
+        let workspace_clone = self.workspace.clone();
+        let request_broker_clone = self.request_broker.clone();
+        let terminals_clone = self.terminals.clone();
+        let active_drag_clone = self.active_drag.clone();
+        let id = project_id.to_string();
+        let workspace_for_dispatch = self.workspace.clone();
+        let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
+            crate::action_dispatch::ActionDispatcher::Remote {
+                connection_id: conn_id.to_string(),
+                manager: rm.clone(),
+                workspace: workspace_for_dispatch,
+            }
+        });
+        let ws_for_observe = self.workspace.clone();
+
+        Some(cx.new(move |cx| {
+            let mut col = ProjectColumn::new(
+                workspace_clone,
+                request_broker_clone,
+                id,
+                backend,
+                terminals_clone,
+                active_drag_clone,
+                None, // remote projects don't get git watcher
+                cx,
+            );
+            col.set_action_dispatcher(action_dispatcher);
+            // Observe workspace for remote service state changes
+            // (instead of local ServiceManager which has no data for remote projects)
+            col.observe_remote_services(ws_for_observe, cx);
+            col
+        }))
+    }
+
+    /// Create a ProjectColumn for a local project.
+    fn create_local_column(
+        &self,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Entity<ProjectColumn> {
+        let workspace_clone = self.workspace.clone();
+        let request_broker_clone = self.request_broker.clone();
+        let terminals_clone = self.terminals.clone();
+        let active_drag_clone = self.active_drag.clone();
+        let id = project_id.to_string();
+        let backend_clone = self.backend.clone();
+        let workspace_for_dispatch = self.workspace.clone();
+        let backend_for_dispatch = self.backend.clone();
+        let terminals_for_dispatch = self.terminals.clone();
+        let git_watcher = self.git_watcher.clone();
+
+        let entity = cx.new(move |cx| {
+            let mut col = ProjectColumn::new(
+                workspace_clone,
+                request_broker_clone,
+                id,
+                backend_clone,
+                terminals_clone,
+                active_drag_clone,
+                git_watcher,
+                cx,
+            );
+            col.set_action_dispatcher(Some(
+                crate::action_dispatch::ActionDispatcher::Local {
+                    workspace: workspace_for_dispatch,
+                    backend: backend_for_dispatch,
+                    terminals: terminals_for_dispatch,
+                    service_manager: None, // set later via set_service_manager
+                },
+            ));
+            col
+        });
+        if let Some(ref sm) = self.service_manager {
+            entity.update(cx, |col, cx| col.set_service_manager(sm.clone(), cx));
+        }
+        entity
     }
 }
 
