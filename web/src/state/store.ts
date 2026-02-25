@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { StateResponse, WsOutbound } from "../api/types";
+import type { KruhViewState, StateResponse, WsOutbound } from "../api/types";
 import { WsManager, type WsStatus } from "../api/websocket";
 
 // ── Terminal Registry ───────────────────────────────────────────────────────
@@ -55,6 +55,8 @@ export interface AppState {
   wsStatus: WsStatus;
   /** terminalId → streamId mapping from WS subscribe */
   streamMappings: Record<string, number>;
+  /** appId → latest KruhViewState from WS app_state_changed */
+  appStates: Record<string, KruhViewState>;
 }
 
 export type AppAction =
@@ -64,7 +66,8 @@ export type AppAction =
   | { type: "set_sidebar_open"; open: boolean }
   | { type: "set_ws_status"; status: WsStatus }
   | { type: "set_stream_mappings"; mappings: Record<string, number> }
-  | { type: "clear_stream_mappings" };
+  | { type: "clear_stream_mappings" }
+  | { type: "set_app_state"; appId: string; state: KruhViewState };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -82,6 +85,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, streamMappings: { ...state.streamMappings, ...action.mappings } };
     case "clear_stream_mappings":
       return { ...state, streamMappings: {} };
+    case "set_app_state":
+      return { ...state, appStates: { ...state.appStates, [action.appId]: action.state } };
   }
 }
 
@@ -92,6 +97,7 @@ export const initialState: AppState = {
   sidebarOpen: false,
   wsStatus: "disconnected",
   streamMappings: {},
+  appStates: {},
 };
 
 // ── Context ─────────────────────────────────────────────────────────────────

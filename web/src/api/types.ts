@@ -37,7 +37,8 @@ export type DiffMode = "working_tree" | "staged";
 export type ApiLayoutNode =
   | { type: "terminal"; terminal_id: string | null; minimized: boolean; detached: boolean }
   | { type: "split"; direction: SplitDirection; sizes: number[]; children: ApiLayoutNode[] }
-  | { type: "tabs"; children: ApiLayoutNode[]; active_tab: number };
+  | { type: "tabs"; children: ApiLayoutNode[]; active_tab: number }
+  | { type: "app"; app_id: string | null; app_kind: string; app_config: unknown; app_state?: KruhViewState };
 
 // serde(rename_all = "lowercase")
 export type SplitDirection = "horizontal" | "vertical";
@@ -46,6 +47,65 @@ export interface ApiFullscreen {
   project_id: string;
   terminal_id: string;
 }
+
+// ── App pane types ───────────────────────────────────────────────────────────
+
+export interface KruhViewState {
+  app_id: string | null;
+  screen: KruhScreen;
+}
+
+export type KruhScreen =
+  | { screen: "Scanning" }
+  | { screen: "PlanPicker"; plans: PlanViewInfo[]; selected_index: number }
+  | { screen: "TaskBrowser"; plan_name: string; issues: IssueViewInfo[] }
+  | { screen: "Editing"; file_path: string; content: string; is_new: boolean }
+  | { screen: "Settings"; model: string; max_iterations: number; auto_start: boolean }
+  | { screen: "LoopOverview"; loops: LoopViewInfo[]; focused_index: number };
+
+export interface PlanViewInfo {
+  name: string;
+  path: string;
+  issue_count: number;
+  completed_count: number;
+}
+
+export interface IssueViewInfo {
+  number: string;
+  title: string;
+  status: string;
+  priority: string | null;
+}
+
+export interface LoopViewInfo {
+  loop_id: number;
+  plan_name: string;
+  phase: string;
+  state: string;
+  current_issue: string | null;
+  progress: { completed: number; total: number };
+  output_lines: { text: string; is_error: boolean }[];
+}
+
+export type KruhAction =
+  | { action: "StartScan" }
+  | { action: "SelectPlan"; index: number }
+  | { action: "OpenPlan"; name: string }
+  | { action: "BackToPlans" }
+  | { action: "StartLoop"; plan_name: string }
+  | { action: "StartAllLoops" }
+  | { action: "PauseLoop"; loop_id: number }
+  | { action: "ResumeLoop"; loop_id: number }
+  | { action: "StopLoop"; loop_id: number }
+  | { action: "CloseLoops" }
+  | { action: "FocusLoop"; index: number }
+  | { action: "OpenEditor"; file_path: string }
+  | { action: "SaveEditor"; content: string }
+  | { action: "CloseEditor" }
+  | { action: "OpenSettings" }
+  | { action: "UpdateSettings"; model: string; max_iterations: number; auto_start: boolean }
+  | { action: "CloseSettings" }
+  | { action: "BrowseTasks"; plan_name: string };
 
 // serde(tag = "action", rename_all = "snake_case")
 export type ActionRequest =
@@ -88,7 +148,10 @@ export type WsInbound =
   | { type: "send_text"; terminal_id: string; text: string }
   | { type: "send_special_key"; terminal_id: string; key: SpecialKey }
   | { type: "resize"; terminal_id: string; cols: number; rows: number }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "subscribe_apps"; app_ids: string[] }
+  | { type: "unsubscribe_apps"; app_ids: string[] }
+  | { type: "app_action"; app_id: string; action: KruhAction };
 
 // serde(tag = "type", rename_all = "snake_case")
 export type WsOutbound =
@@ -99,7 +162,8 @@ export type WsOutbound =
   | { type: "dropped"; count: number }
   | { type: "pong" }
   | { type: "error"; error: string }
-  | { type: "git_status_changed"; projects: Record<string, ApiGitStatus> };
+  | { type: "git_status_changed"; projects: Record<string, ApiGitStatus> }
+  | { type: "app_state_changed"; app_id: string; app_kind: string; state: KruhViewState };
 
 // Default PascalCase serialization
 export type SpecialKey =
