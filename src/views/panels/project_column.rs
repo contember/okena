@@ -1053,20 +1053,19 @@ impl ProjectColumn {
                 // Tab header
                 div()
                     .id("service-panel-header")
-                    .h(px(34.0))
                     .flex_shrink_0()
                     .bg(rgb(t.bg_header))
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .flex()
-                    .items_center()
+                    .items_start()
                     .child(
-                        // Service tabs (scrollable)
+                        // Service tabs (wrapping)
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
-                            .overflow_x_hidden()
+                            .flex_wrap()
                             .children(
                                 services.iter().map(|svc| {
                                     let name = svc.name.clone();
@@ -1083,7 +1082,7 @@ impl ProjectColumn {
                                     div()
                                         .id(ElementId::Name(format!("svc-tab-{}", name).into()))
                                         .cursor_pointer()
-                                        .h_full()
+                                        .h(px(34.0))
                                         .px(px(12.0))
                                         .flex()
                                         .items_center()
@@ -1150,6 +1149,7 @@ impl ProjectColumn {
                         div()
                             .flex()
                             .flex_shrink_0()
+                            .h(px(34.0))
                             .items_center()
                             .gap(px(2.0))
                             .mr(px(4.0))
