@@ -1017,7 +1017,7 @@ impl Render for Sidebar {
                 let services = project.remote_services.iter().map(|api_svc| {
                     SidebarServiceInfo {
                         name: api_svc.name.clone(),
-                        status: crate::services::manager::ServiceStatus::from_api_str(&api_svc.status),
+                        status: crate::services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
                         ports: api_svc.ports.clone(),
                         port_host: port_host.clone(),
                     }

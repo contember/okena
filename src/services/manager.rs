@@ -38,12 +38,12 @@ pub enum ServiceStatus {
 
 impl ServiceStatus {
     /// Convert an API status string (from `ApiServiceInfo.status`) into a `ServiceStatus`.
-    pub fn from_api_str(s: &str) -> Self {
-        match s {
+    pub fn from_api(status: &str, exit_code: Option<u32>) -> Self {
+        match status {
             "running" => Self::Running,
             "starting" => Self::Starting,
             "restarting" => Self::Restarting,
-            "crashed" => Self::Crashed { exit_code: None },
+            "crashed" => Self::Crashed { exit_code },
             _ => Self::Stopped,
         }
     }
@@ -823,13 +823,14 @@ mod tests {
     }
 
     #[test]
-    fn from_api_str_maps_known_statuses() {
-        assert_eq!(ServiceStatus::from_api_str("running"), ServiceStatus::Running);
-        assert_eq!(ServiceStatus::from_api_str("starting"), ServiceStatus::Starting);
-        assert_eq!(ServiceStatus::from_api_str("restarting"), ServiceStatus::Restarting);
-        assert_eq!(ServiceStatus::from_api_str("crashed"), ServiceStatus::Crashed { exit_code: None });
-        assert_eq!(ServiceStatus::from_api_str("stopped"), ServiceStatus::Stopped);
-        assert_eq!(ServiceStatus::from_api_str("unknown"), ServiceStatus::Stopped);
-        assert_eq!(ServiceStatus::from_api_str(""), ServiceStatus::Stopped);
+    fn from_api_maps_known_statuses() {
+        assert_eq!(ServiceStatus::from_api("running", None), ServiceStatus::Running);
+        assert_eq!(ServiceStatus::from_api("starting", None), ServiceStatus::Starting);
+        assert_eq!(ServiceStatus::from_api("restarting", None), ServiceStatus::Restarting);
+        assert_eq!(ServiceStatus::from_api("crashed", None), ServiceStatus::Crashed { exit_code: None });
+        assert_eq!(ServiceStatus::from_api("crashed", Some(1)), ServiceStatus::Crashed { exit_code: Some(1) });
+        assert_eq!(ServiceStatus::from_api("stopped", None), ServiceStatus::Stopped);
+        assert_eq!(ServiceStatus::from_api("unknown", None), ServiceStatus::Stopped);
+        assert_eq!(ServiceStatus::from_api("", None), ServiceStatus::Stopped);
     }
 }

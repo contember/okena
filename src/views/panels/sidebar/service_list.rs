@@ -200,15 +200,25 @@ impl Sidebar {
                     });
                 }
             }))
-            .child(
-                // Status dot
-                div()
+            .child({
+                // Status dot with tooltip for crashed state
+                let dot = div()
+                    .id(ElementId::Name(format!("svc-dot-{}-{}", project_id, service_name).into()))
                     .flex_shrink_0()
                     .w(px(6.0))
                     .h(px(6.0))
                     .rounded(px(3.0))
-                    .bg(rgb(status_color)),
-            )
+                    .bg(rgb(status_color));
+                if let ServiceStatus::Crashed { exit_code } = &status {
+                    let tip = match exit_code {
+                        Some(code) => format!("Exited with code {}", code),
+                        None => "Crashed".to_string(),
+                    };
+                    dot.tooltip(move |_window, cx| Tooltip::new(tip.clone()).build(_window, cx))
+                } else {
+                    dot
+                }
+            })
             .child(
                 // Service name
                 div()

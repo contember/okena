@@ -252,7 +252,7 @@ impl ProjectColumn {
         ws.project(&self.project_id)
             .map(|p| p.remote_services.iter().map(|api_svc| ServiceSnapshot {
                 name: api_svc.name.clone(),
-                status: ServiceStatus::from_api_str(&api_svc.status),
+                status: ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
                 terminal_id: api_svc.terminal_id.clone(),
                 ports: api_svc.ports.clone(),
             }).collect())
