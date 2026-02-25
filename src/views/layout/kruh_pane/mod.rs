@@ -71,6 +71,7 @@ pub struct KruhPane {
 
     // Editor state
     pub editor_scroll: ScrollHandle,
+    pub loop_cards_scroll: ScrollHandle,
     pub editor_input: Option<Entity<SimpleInputState>>,
     pub editor_target: Option<EditTarget>,
     pub editor_file_path: Option<String>,
@@ -152,6 +153,7 @@ impl KruhPane {
             settings_scroll: ScrollHandle::new(),
             setup_path_input,
             editor_scroll: ScrollHandle::new(),
+            loop_cards_scroll: ScrollHandle::new(),
             editor_input: None,
             editor_target: None,
             editor_file_path: None,
@@ -194,7 +196,7 @@ impl KruhPane {
                                 .ok()
                                 .flatten()
                         }),
-                        handle_action: Arc::new(move |action, cx| {
+                        handle_action: Arc::new(move |action, cx: &mut gpui::App| {
                             let action: KruhAction = serde_json::from_value(action)
                                 .map_err(|e| format!("Invalid action: {}", e))?;
                             entity_for_action
