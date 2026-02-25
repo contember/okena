@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use gpui::{AsyncApp, Global};
+use gpui::{App, AsyncApp, Global};
 use serde_json::Value;
 
 /// Type-erased handle to an app entity.
@@ -9,8 +9,8 @@ pub struct AppEntityHandle {
     pub app_kind: String,
     /// Get serialized view state — called from async context.
     pub view_state: Arc<dyn Fn(&mut AsyncApp) -> Option<Value> + Send + Sync>,
-    /// Dispatch a serialized action — called from async context.
-    pub handle_action: Arc<dyn Fn(Value, &mut AsyncApp) -> Result<(), String> + Send + Sync>,
+    /// Dispatch a serialized action — called from sync App context.
+    pub handle_action: Arc<dyn Fn(Value, &mut App) -> Result<(), String> + Send + Sync>,
 }
 
 /// Registry of all active app entities, keyed by app_id.
@@ -51,7 +51,7 @@ impl AppEntityRegistry {
         &self,
         app_id: &str,
         action: Value,
-        cx: &mut AsyncApp,
+        cx: &mut App,
     ) -> Result<(), String> {
         let handle_action = {
             let apps = self.apps.lock().unwrap();
