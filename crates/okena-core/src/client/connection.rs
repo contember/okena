@@ -1,7 +1,7 @@
 use crate::api::StateResponse;
 use crate::client::config::RemoteConnectionConfig;
 use crate::client::id::make_prefixed_id;
-use crate::client::state::{collect_state_terminal_ids, diff_states};
+use crate::client::state::{collect_all_terminal_ids, collect_state_terminal_ids, diff_states};
 use crate::client::types::{
     ConnectionEvent, ConnectionStatus, SessionError, WsClientMessage, TOKEN_REFRESH_AGE_SECS,
 };
@@ -33,6 +33,10 @@ pub trait ConnectionHandler: Send + Sync + 'static {
     fn resize_terminal(&self, prefixed_id: &str, cols: u16, rows: u16);
     /// Connection is disconnecting — remove ALL terminals for this connection.
     fn remove_all_terminals(&self, connection_id: &str);
+    /// Remove terminals for this connection that are NOT in the given set of
+    /// (unprefixed) terminal IDs.  Called on reconnect to clean up terminals
+    /// that disappeared on the server while the client was offline.
+    fn remove_terminals_except(&self, connection_id: &str, keep_ids: &std::collections::HashSet<String>);
 }
 
 /// Generic remote client state machine, parameterized by a platform handler.
@@ -562,9 +566,15 @@ impl<H: ConnectionHandler> RemoteClient<H> {
             .await
             .map_err(|e| SessionError::Transient(format!("Failed to parse state: {}", e)))?;
 
-        // Step 4: Create terminal objects for all remote terminals
-        let terminal_ids = collect_state_terminal_ids(&state);
+        // Step 4: Sync terminal objects.
+        // On reconnect, remove terminals that no longer exist on the server,
+        // and create terminals that are new.  Existing terminals are kept
+        // (create_terminal is idempotent) so that views holding Arc<Terminal>
+        // continue to work without going stale.
+        let current_ids = collect_all_terminal_ids(&state);
+        handler.remove_terminals_except(&config.id, &current_ids);
 
+        let terminal_ids = collect_state_terminal_ids(&state);
         for tid in &terminal_ids {
             let prefixed = make_prefixed_id(&config.id, tid);
             handler.create_terminal(&config.id, tid, &prefixed, ws_tx.clone());
