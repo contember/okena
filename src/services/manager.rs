@@ -280,10 +280,12 @@ impl ServiceManager {
             self.instances.remove(&key);
         }
 
-        // Add new services (ones not already present)
+        // Add new services or update definitions for existing ones
         for def in &new_config.services {
             let key = (project_id.to_string(), def.name.clone());
-            if !self.instances.contains_key(&key) {
+            if let Some(instance) = self.instances.get_mut(&key) {
+                instance.definition = def.clone();
+            } else {
                 self.instances.insert(
                     key,
                     ServiceInstance {
