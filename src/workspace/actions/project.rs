@@ -203,6 +203,12 @@ impl Workspace {
         self.notify_data(cx);
     }
 
+    /// Update service panel height for a project
+    pub fn update_service_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
+        self.data.service_panel_heights.insert(project_id.to_string(), height);
+        self.notify_data(cx);
+    }
+
     /// Get project width or default equal distribution
     pub fn get_project_width(&self, project_id: &str, visible_count: usize) -> f32 {
         self.data.project_widths
@@ -364,6 +370,7 @@ mod tests {
             projects: vec![],
             project_order: vec![],
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }
@@ -458,6 +465,7 @@ mod gpui_tests {
             projects: vec![],
             project_order: vec![],
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }
