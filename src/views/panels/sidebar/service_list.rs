@@ -8,7 +8,8 @@ use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
 
-use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo};
+use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
+use super::item_widgets::sidebar_group_header;
 
 impl Sidebar {
     /// Dispatch a service action for a project.
@@ -20,127 +21,129 @@ impl Sidebar {
         }
     }
 
-    /// Render the "Services" separator header with Start All / Stop All / Reload buttons.
-    pub(super) fn render_services_header(
+    /// Render the "Services" group header with collapse chevron + Start All / Stop All / Reload buttons.
+    pub(super) fn render_services_group_header(
         &self,
         project: &SidebarProjectInfo,
+        is_collapsed: bool,
+        is_cursor: bool,
         left_padding: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
         let project_id = project.id.clone();
 
-        div()
-            .h(px(20.0))
-            .pl(px(left_padding))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .group("services-header")
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(t.text_muted))
-                    .child("Services"),
-            )
-            .child(
-                // Separator line
-                div()
-                    .flex_1()
-                    .h(px(1.0))
-                    .bg(rgb(t.border)),
-            )
-            .child(
-                // Action buttons - visible on hover
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .gap(px(2.0))
-                    .opacity(0.0)
-                    .group_hover("services-header", |s| s.opacity(1.0))
-                    .child(
-                        // Start All button
-                        div()
-                            .id(ElementId::Name(format!("svc-start-all-{}", project_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("▶")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.dispatch_service_action(&project_id, ActionRequest::StartAllServices {
-                                        project_id: project_id.clone(),
-                                    }, cx);
-                                }
-                            }))
-                            .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
-                    )
-                    .child(
-                        // Stop All button
-                        div()
-                            .id(ElementId::Name(format!("svc-stop-all-{}", project_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("■")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.dispatch_service_action(&project_id, ActionRequest::StopAllServices {
-                                        project_id: project_id.clone(),
-                                    }, cx);
-                                }
-                            }))
-                            .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
-                    )
-                    .child(
-                        // Reload button
-                        div()
-                            .id(ElementId::Name(format!("svc-reload-{}", project_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_secondary))
-                            .child("⟳")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.dispatch_service_action(&project_id, ActionRequest::ReloadServices {
-                                        project_id: project_id.clone(),
-                                    }, cx);
-                                }
-                            }))
-                            .tooltip(|_window, cx| Tooltip::new("Reload Services").build(_window, cx)),
-                    ),
-            )
+        sidebar_group_header(
+            ElementId::Name(format!("svc-group-{}", project_id).into()),
+            GroupKind::Services.label(),
+            project.services.len(),
+            is_collapsed,
+            is_cursor,
+            left_padding,
+            &t,
+        )
+        .group("services-header")
+        .child(
+            // Spacer to push action buttons to the right
+            div().flex_1(),
+        )
+        .child(
+            // Action buttons - visible on hover
+            div()
+                .flex()
+                .flex_shrink_0()
+                .gap(px(2.0))
+                .opacity(0.0)
+                .group_hover("services-header", |s| s.opacity(1.0))
+                .child(
+                    // Start All button
+                    div()
+                        .id(ElementId::Name(format!("svc-start-all-{}", project_id).into()))
+                        .cursor_pointer()
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_secondary))
+                        .child("▶")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.dispatch_service_action(&project_id, ActionRequest::StartAllServices {
+                                    project_id: project_id.clone(),
+                                }, cx);
+                            }
+                        }))
+                        .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
+                )
+                .child(
+                    // Stop All button
+                    div()
+                        .id(ElementId::Name(format!("svc-stop-all-{}", project_id).into()))
+                        .cursor_pointer()
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_secondary))
+                        .child("■")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.dispatch_service_action(&project_id, ActionRequest::StopAllServices {
+                                    project_id: project_id.clone(),
+                                }, cx);
+                            }
+                        }))
+                        .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
+                )
+                .child(
+                    // Reload button
+                    div()
+                        .id(ElementId::Name(format!("svc-reload-{}", project_id).into()))
+                        .cursor_pointer()
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_secondary))
+                        .child("⟳")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.dispatch_service_action(&project_id, ActionRequest::ReloadServices {
+                                    project_id: project_id.clone(),
+                                }, cx);
+                            }
+                        }))
+                        .tooltip(|_window, cx| Tooltip::new("Reload Services").build(_window, cx)),
+                ),
+        )
+        .on_click(cx.listener({
+            let project_id = project_id.clone();
+            move |this, _, _window, cx| {
+                this.toggle_group(&project_id, GroupKind::Services);
+                cx.notify();
+            }
+        }))
     }
 
     /// Render a single service item row with status dot, name, and action buttons.

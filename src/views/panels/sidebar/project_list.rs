@@ -34,6 +34,7 @@ impl Sidebar {
         // Project row
         div()
             .id(ElementId::Name(format!("project-row-{}", project.id).into()))
+            .group("project-item")
             .h(px(24.0))
             .pl(px(8.0))
             .pr(px(8.0))
@@ -160,31 +161,31 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
-            .when(project.worktree_count > 0, |d| {
-                d.child(sidebar_worktree_badge(project.worktree_count, &t))
-            })
             .child(
-                {
-                    let is_visible = project.is_visible;
-                    let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
-                    sidebar_visibility_toggle(
-                        ElementId::Name(format!("visibility-{}", project.id).into()),
-                        is_visible,
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.toggle_project_visibility(&project_id, cx);
-                            });
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                },
+                div()
+                    .when(!project.is_visible, |d| d.opacity(0.0))
+                    .group_hover("project-item", |s| s.opacity(1.0))
+                    .child({
+                        let is_visible = project.is_visible;
+                        let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                        sidebar_visibility_toggle(
+                            ElementId::Name(format!("visibility-{}", project.id).into()),
+                            is_visible,
+                            &t,
+                        )
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.toggle_project_visibility(&project_id, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                    }),
             )
+            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
     }
 
     /// Renders a worktree project nested under its parent
@@ -209,6 +210,7 @@ impl Sidebar {
         // Worktree project row - indented under parent
         div()
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
+            .group("worktree-item")
             .h(px(24.0))
             .pl(px(20.0))  // Indented under parent project
             .pr(px(8.0))
@@ -310,28 +312,31 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .child(
-                {
-                    let is_visible = project.is_visible;
-                    let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
-                    sidebar_visibility_toggle(
-                        ElementId::Name(format!("visibility-wt-{}", project.id).into()),
-                        is_visible,
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.toggle_project_visibility(&project_id, cx);
-                            });
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                },
+                div()
+                    .when(!project.is_visible, |d| d.opacity(0.0))
+                    .group_hover("worktree-item", |s| s.opacity(1.0))
+                    .child({
+                        let is_visible = project.is_visible;
+                        let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                        sidebar_visibility_toggle(
+                            ElementId::Name(format!("visibility-wt-{}", project.id).into()),
+                            is_visible,
+                            &t,
+                        )
+                        .on_click(cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, _, _window, cx| {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.toggle_project_visibility(&project_id, cx);
+                                });
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                    }),
             )
+            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
     }
 
     pub(super) fn render_terminal_item(
