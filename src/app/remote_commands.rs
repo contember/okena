@@ -100,9 +100,12 @@ impl Okena {
                         })
                     }
                     RemoteCommand::GetAppState { app_id } => {
-                        match app_entity_registry.get_view_state(&app_id, cx) {
-                            Some(state) => CommandResult::Ok(Some(state)),
-                            None => CommandResult::Err(format!("App not found: {}", app_id)),
+                        let app_kind = app_entity_registry.app_kind(&app_id);
+                        match (app_entity_registry.get_view_state(&app_id, cx), app_kind) {
+                            (Some(state), Some(app_kind)) => CommandResult::Ok(Some(
+                                serde_json::json!({ "app_kind": app_kind, "state": state }),
+                            )),
+                            _ => CommandResult::Err(format!("App not found: {}", app_id)),
                         }
                     }
                     RemoteCommand::AppAction { project_id: _, app_id, action } => {

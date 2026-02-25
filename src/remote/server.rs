@@ -1,3 +1,4 @@
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -25,6 +26,7 @@ impl RemoteServer {
         bridge_tx: BridgeSender,
         auth_store: Arc<AuthStore>,
         broadcaster: Arc<PtyBroadcaster>,
+        app_broadcaster: Arc<AppStateBroadcaster>,
         state_version: Arc<watch::Sender<u64>>,
         bind_addr: IpAddr,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -71,6 +73,7 @@ impl RemoteServer {
                 bridge_tx,
                 auth_store,
                 broadcaster,
+                app_broadcaster,
                 state_version,
                 start_time,
                 git_status,

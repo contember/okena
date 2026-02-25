@@ -301,6 +301,7 @@ impl Okena {
             bridge_tx,
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
+            self.app_broadcaster.clone(),
             self.state_version.clone(),
             self.listen_addr,
             self.git_status_tx.clone(),

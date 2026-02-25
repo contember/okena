@@ -1,3 +1,4 @@
+use crate::remote::app_broadcaster::AppBroadcastEvent;
 use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::remote::routes::AppState;
 use crate::remote::types::{
@@ -61,7 +62,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
 
     // ── Main loop ───────────────────────────────────────────────────────
     let mut pty_rx = state.broadcaster.subscribe();
+    let mut app_rx = state.app_broadcaster.subscribe();
     let mut subscribed_ids: HashSet<String> = HashSet::new();
+    let mut subscribed_app_ids: HashSet<String> = HashSet::new();
     let mut stream_id_map: HashMap<String, u32> = HashMap::new();
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
@@ -168,10 +171,50 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             Ok(WsInbound::Auth { .. }) => {
                                 // Already authenticated, ignore
                             }
-                            Ok(WsInbound::SubscribeApps { .. })
-                            | Ok(WsInbound::UnsubscribeApps { .. })
-                            | Ok(WsInbound::AppAction { .. }) => {
-                                // Not yet implemented — handled in a later issue
+                            Ok(WsInbound::SubscribeApps { app_ids }) => {
+                                subscribed_app_ids.extend(app_ids.iter().cloned());
+                                // Send current state for each newly subscribed app
+                                for app_id in &app_ids {
+                                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                    if state.bridge_tx.send(BridgeMessage {
+                                        command: RemoteCommand::GetAppState { app_id: app_id.clone() },
+                                        reply: reply_tx,
+                                    }).await.is_ok() {
+                                        if let Ok(CommandResult::Ok(Some(val))) = reply_rx.await {
+                                            if let (Some(app_kind), Some(app_state)) = (
+                                                val.get("app_kind").and_then(|v| v.as_str()).map(String::from),
+                                                val.get("state").cloned(),
+                                            ) {
+                                                let msg = WsOutbound::AppStateChanged {
+                                                    app_id: app_id.clone(),
+                                                    app_kind,
+                                                    state: app_state,
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&msg) {
+                                                    let _ = socket.send(Message::Text(json.into())).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(WsInbound::UnsubscribeApps { app_ids }) => {
+                                for id in &app_ids {
+                                    subscribed_app_ids.remove(id);
+                                }
+                            }
+                            Ok(WsInbound::AppAction { app_id, action }) => {
+                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                                if state.bridge_tx.send(BridgeMessage {
+                                    command: RemoteCommand::AppAction {
+                                        project_id: String::new(),
+                                        app_id,
+                                        action,
+                                    },
+                                    reply: reply_tx,
+                                }).await.is_ok() {
+                                    let _ = reply_rx.await;
+                                }
                             }
                             Err(_) => {
                                 let resp = serde_json::to_string(&WsOutbound::Error {
@@ -261,6 +304,26 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     if socket.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }
+                }
+            }
+
+            // App state broadcast
+            event = app_rx.recv() => {
+                match event {
+                    Ok(AppBroadcastEvent { app_id, app_kind, state: app_state }) => {
+                        if subscribed_app_ids.contains(&app_id) {
+                            let msg = WsOutbound::AppStateChanged { app_id, app_kind, state: app_state };
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("App broadcast lagged by {} events", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }

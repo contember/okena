@@ -1,4 +1,5 @@
 use crate::git::watcher::GitStatusWatcher;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -36,6 +37,7 @@ pub struct HeadlessApp {
     remote_server: Option<RemoteServer>,
     auth_store: Arc<AuthStore>,
     pty_broadcaster: Arc<PtyBroadcaster>,
+    app_broadcaster: Arc<AppStateBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     #[allow(dead_code)]
@@ -99,6 +101,7 @@ impl HeadlessApp {
         // Remote control setup
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
+        let app_broadcaster = Arc::new(AppStateBroadcaster::new());
         let (state_version_tx, _) = tokio_watch::channel(0u64);
         let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();
@@ -130,6 +133,7 @@ impl HeadlessApp {
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
+            app_broadcaster: app_broadcaster.clone(),
             state_version: state_version.clone(),
             git_status_tx: git_status_tx.clone(),
             git_watcher,
@@ -161,6 +165,7 @@ impl HeadlessApp {
             bridge_tx,
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
+            self.app_broadcaster.clone(),
             self.state_version.clone(),
             listen_addr,
             self.git_status_tx.clone(),
