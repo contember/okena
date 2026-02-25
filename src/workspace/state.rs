@@ -31,6 +31,9 @@ pub struct WorkspaceData {
     /// Folders for grouping projects
     #[serde(default)]
     pub folders: Vec<FolderData>,
+    /// Service panel heights in pixels (project_id -> height)
+    #[serde(default)]
+    pub service_panel_heights: HashMap<String, f32>,
 }
 
 /// Metadata for worktree projects
@@ -1928,6 +1931,7 @@ mod workspace_tests {
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: Vec::new(),
         }
     }
@@ -2202,6 +2206,7 @@ mod gpui_tests {
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }

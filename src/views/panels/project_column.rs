@@ -90,6 +90,9 @@ impl ProjectColumn {
             cx.observe(watcher, |_, _, cx| cx.notify()).detach();
         }
 
+        let initial_service_height = workspace.read(cx).data.service_panel_heights
+            .get(&project_id).copied().unwrap_or(200.0);
+
         Self {
             workspace,
             request_broker,
@@ -108,7 +111,7 @@ impl ProjectColumn {
             service_panel_open: false,
             active_service_name: None,
             service_terminal_pane: None,
-            service_panel_height: 200.0,
+            service_panel_height: initial_service_height,
             diff_stats_bounds: Bounds::default(),
         }
     }
@@ -213,6 +216,11 @@ impl ProjectColumn {
     /// Set the service panel height (called during drag resize).
     pub fn set_service_panel_height(&mut self, height: f32, cx: &mut Context<Self>) {
         self.service_panel_height = height.clamp(80.0, 600.0);
+        let project_id = self.project_id.clone();
+        let h = self.service_panel_height;
+        self.workspace.update(cx, |ws, cx| {
+            ws.update_service_panel_height(&project_id, h, cx);
+        });
         cx.notify();
     }
 

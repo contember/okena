@@ -174,6 +174,10 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
                 .filter(|(id, _)| !remote_project_ids.contains(id.as_str()))
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            service_panel_heights: data.service_panel_heights.iter()
+                .filter(|(id, _)| !remote_project_ids.contains(id.as_str()))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
             folders: data.folders.iter()
                 .filter(|f| !f.id.starts_with("remote-folder:"))
                 .cloned()
@@ -270,6 +274,7 @@ pub fn default_workspace() -> WorkspaceData {
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
+        service_panel_heights: HashMap::new(),
         folders: Vec::new(),
     }
 }
@@ -306,6 +311,7 @@ mod tests {
             projects,
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders,
         }
     }
@@ -430,6 +436,7 @@ mod tests {
             projects: vec![],
             project_order: vec![],
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: vec![],
         };
         let migrated = migrate_workspace(data);
@@ -443,6 +450,7 @@ mod tests {
             projects: vec![],
             project_order: vec![],
             project_widths: HashMap::new(),
+            service_panel_heights: HashMap::new(),
             folders: vec![],
         };
         let migrated = migrate_workspace(data);
