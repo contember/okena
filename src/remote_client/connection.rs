@@ -31,14 +31,14 @@ impl ConnectionHandler for DesktopConnectionHandler {
         prefixed_id: &str,
         ws_sender: async_channel::Sender<WsClientMessage>,
     ) {
+        let mut terminals = self.terminals.lock();
         // Skip if terminal already exists — on reconnect the server re-sends
         // CreateTerminal for every live terminal. Reusing the existing object
         // keeps the views' Arc<Terminal> references valid and avoids leaking
         // the old Terminal (with its ~19-48 MB scrollback grid) on every reconnect.
-        if self.terminals.lock().contains_key(prefixed_id) {
+        if terminals.contains_key(prefixed_id) {
             return;
         }
-
         let transport = Arc::new(RemoteTransport {
             ws_tx: ws_sender,
             connection_id: connection_id.to_string(),
@@ -49,7 +49,7 @@ impl ConnectionHandler for DesktopConnectionHandler {
             transport,
             String::new(),
         ));
-        self.terminals.lock().insert(prefixed_id.to_string(), terminal);
+        terminals.insert(prefixed_id.to_string(), terminal);
     }
 
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
@@ -75,6 +75,29 @@ impl ConnectionHandler for DesktopConnectionHandler {
             .filter(|k| is_remote_terminal(k, connection_id))
             .cloned()
             .collect();
+        for key in to_remove {
+            terminals.remove(&key);
+        }
+    }
+
+    fn remove_terminals_except(
+        &self,
+        connection_id: &str,
+        keep_ids: &std::collections::HashSet<String>,
+    ) {
+        use okena_core::client::strip_prefix;
+        let mut terminals = self.terminals.lock();
+        let to_remove: Vec<String> = terminals
+            .keys()
+            .filter(|k| {
+                is_remote_terminal(k, connection_id)
+                    && !keep_ids.contains(&strip_prefix(k, connection_id))
+            })
+            .cloned()
+            .collect();
+        for key in &to_remove {
+            log::info!("Removing stale remote terminal: {}", key);
+        }
         for key in to_remove {
             terminals.remove(&key);
         }
