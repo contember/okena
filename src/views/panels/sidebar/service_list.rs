@@ -201,13 +201,13 @@ impl Sidebar {
                 }
             }))
             .child({
-                // Status dot with tooltip for crashed state
+                // Status indicator (rounded square to distinguish from project's circle)
                 let dot = div()
                     .id(ElementId::Name(format!("svc-dot-{}-{}", project_id, service_name).into()))
                     .flex_shrink_0()
                     .w(px(6.0))
                     .h(px(6.0))
-                    .rounded(px(3.0))
+                    .rounded(px(1.5))
                     .bg(rgb(status_color));
                 if let ServiceStatus::Crashed { exit_code } = &status {
                     let tip = match exit_code {
