@@ -13,7 +13,7 @@
 - [x] 09 — Include app state in GET /v1/state
 - [x] 10 — Route AppAction through execute_action
 - [x] 11 — Desktop remote client support
-- [ ] 12 — Web client support for app panes
+- [x] 12 — Web client support for app panes
 
 ## In Progress
 
