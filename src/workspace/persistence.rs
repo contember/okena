@@ -266,6 +266,7 @@ pub fn default_workspace() -> WorkspaceData {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
@@ -295,6 +296,7 @@ mod tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 

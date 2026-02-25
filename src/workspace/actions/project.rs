@@ -51,6 +51,7 @@ impl Workspace {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -271,6 +272,7 @@ impl Workspace {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         };
 
         // Insert after parent project in order
@@ -352,6 +354,7 @@ mod tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 
@@ -476,6 +479,7 @@ mod gpui_tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 

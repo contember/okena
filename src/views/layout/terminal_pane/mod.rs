@@ -393,7 +393,8 @@ impl TerminalPane {
 
     /// Create new terminal.
     fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
-        // Remote terminals are created by the server; skip local PTY creation.
+        // Remote terminals arrive via state sync with terminal_id already set.
+        // Local PTY creation would fail for remote backends, so bail out early.
         if self.backend.is_remote() {
             return;
         }

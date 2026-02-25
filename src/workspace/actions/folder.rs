@@ -162,6 +162,7 @@ mod tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 
@@ -271,6 +272,7 @@ mod gpui_tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 

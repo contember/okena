@@ -81,6 +81,9 @@ pub struct ProjectData {
     /// Remote host address for port badge URLs (transient)
     #[serde(skip)]
     pub remote_host: Option<String>,
+    /// Remote git status (transient, populated during remote state sync)
+    #[serde(skip)]
+    pub remote_git_status: Option<okena_core::api::ApiGitStatus>,
 }
 
 impl ProjectData {
@@ -1100,6 +1103,7 @@ mod tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 
@@ -1914,6 +1918,7 @@ mod workspace_tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 
@@ -2187,6 +2192,7 @@ mod gpui_tests {
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
+            remote_git_status: None,
         }
     }
 

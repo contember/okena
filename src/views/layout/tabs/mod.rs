@@ -108,7 +108,6 @@ impl LayoutContainer {
         let ctx_close = ctx.clone();
 
         let standalone = ctx.standalone;
-        let is_remote = self.backend.is_remote();
 
         div()
             .flex()
@@ -216,23 +215,21 @@ impl LayoutContainer {
                     }),
             )
             // Detach
-            .when(!is_remote, |el| {
-                el.child(
-                    header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
-                        .on_click(move |_, _window, cx| {
-                            let full_path = if ctx_detach.standalone {
-                                ctx_detach.layout_path.clone()
-                            } else {
-                                let mut p = ctx_detach.layout_path.clone();
-                                p.push(ctx_detach.active_tab);
-                                p
-                            };
-                            ctx_detach.workspace.update(cx, |ws, cx| {
-                                ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
-                            });
-                        }),
-                )
-            })
+            .child(
+                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    .on_click(move |_, _window, cx| {
+                        let full_path = if ctx_detach.standalone {
+                            ctx_detach.layout_path.clone()
+                        } else {
+                            let mut p = ctx_detach.layout_path.clone();
+                            p.push(ctx_detach.active_tab);
+                            p
+                        };
+                        ctx_detach.workspace.update(cx, |ws, cx| {
+                            ws.detach_terminal(&ctx_detach.project_id, &full_path, cx);
+                        });
+                    }),
+            )
             // Close Tab
             .child({
                 header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }))
