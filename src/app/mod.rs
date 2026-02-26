@@ -416,6 +416,7 @@ impl Okena {
     ) {
         let terminals = self.terminals.clone();
         let broadcaster = self.pty_broadcaster.clone();
+        let pty_manager = self.pty_manager.clone();
 
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
             loop {
@@ -437,7 +438,10 @@ impl Okena {
                         broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
-                        terminals.lock().remove(terminal_id);
+                        // Clean up the PtyHandle (reader/writer threads) but don't
+                        // remove the UI Terminal yet — service manager may keep it
+                        // so users can see crash output.
+                        pty_manager.cleanup_exited(terminal_id);
                         exit_events.push((terminal_id.clone(), *exit_code));
                     }
                 }
@@ -453,7 +457,7 @@ impl Okena {
                             broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
-                            terminals.lock().remove(terminal_id);
+                            pty_manager.cleanup_exited(terminal_id);
                             exit_events.push((terminal_id.clone(), *exit_code));
                         }
                     }
@@ -461,13 +465,29 @@ impl Okena {
 
                 // Notify main window after processing the batch
                 let _ = this.update(cx, |this, cx| {
-                    // Route exit events to service manager for crash/restart handling
                     if !exit_events.is_empty() {
-                        this.service_manager.update(cx, |sm, cx| {
-                            for (terminal_id, exit_code) in &exit_events {
-                                sm.handle_service_exit(terminal_id, *exit_code, cx);
+                        // Let service manager handle service terminals (may keep
+                        // their UI Terminal for viewing crash output)
+                        let service_tids: std::collections::HashSet<String> =
+                            this.service_manager.update(cx, |sm, cx| {
+                                let mut handled = std::collections::HashSet::new();
+                                for (terminal_id, exit_code) in &exit_events {
+                                    if sm.handle_service_exit(terminal_id, *exit_code, cx) {
+                                        handled.insert(terminal_id.clone());
+                                    }
+                                }
+                                handled
+                            });
+
+                        // Remove UI Terminals for non-service terminals
+                        {
+                            let mut reg = this.terminals.lock();
+                            for (terminal_id, _) in &exit_events {
+                                if !service_tids.contains(terminal_id) {
+                                    reg.remove(terminal_id);
+                                }
                             }
-                        });
+                        }
                     }
                     this.root_view.update(cx, |_, cx| cx.notify());
                 });

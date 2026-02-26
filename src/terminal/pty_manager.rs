@@ -22,7 +22,6 @@ pub enum PtyEvent {
     /// PTY process exited
     Exit {
         terminal_id: String,
-        #[allow(dead_code)] // Exit code available for future use
         exit_code: Option<u32>,
     },
 }
@@ -167,6 +166,7 @@ impl PtyManager {
         let writer = pair.master.take_writer()?;
 
         let shutdown = Arc::new(PtyShutdownState::new(terminal_id.to_string()));
+        let child_pid = child.process_id();
 
         // Spawn reader thread with panic guard
         let tx = self.event_tx.clone();
@@ -179,7 +179,7 @@ impl PtyManager {
                 let shutdown_panic = Arc::clone(&reader_shutdown);
                 let id_panic = id.clone();
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::read_loop(id, reader, tx, reader_shutdown);
+                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid);
                 })) {
                     log::error!("PTY reader thread panicked: {}", format_panic(&*panic));
                     shutdown_panic.mark_broken();
@@ -310,6 +310,7 @@ impl PtyManager {
         mut reader: Box<dyn Read + Send>,
         tx: Sender<PtyEvent>,
         shutdown: Arc<PtyShutdownState>,
+        child_pid: Option<u32>,
     ) {
         // Use larger buffer like alacritty (they use 1MB, we use 64KB)
         let mut buf = [0u8; 65536];
@@ -320,10 +321,11 @@ impl PtyManager {
             }
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    // EOF - process exited
+                    // EOF - process exited, try to get exit code
+                    let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
-                        exit_code: None,
+                        exit_code,
                     });
                     break;
                 }
@@ -345,9 +347,10 @@ impl PtyManager {
                     if !shutdown.is_broken() {
                         log::error!("PTY read error: {}", e);
                     }
+                    let exit_code = child_pid.and_then(wait_for_exit_code);
                     let _ = tx.send_blocking(PtyEvent::Exit {
                         terminal_id,
-                        exit_code: None,
+                        exit_code,
                     });
                     break;
                 }
@@ -613,6 +616,23 @@ impl PtyManager {
     pub fn supports_buffer_capture(&self) -> bool {
         matches!(self.session_backend, ResolvedBackend::Tmux)
     }
+
+    /// Clean up a PtyHandle after the process exited naturally (reader got EOF).
+    /// Removes the handle from the internal map and joins threads in the background.
+    pub fn cleanup_exited(&self, terminal_id: &str) {
+        let handle = self.terminals.lock().remove(terminal_id);
+        if let Some(handle) = handle {
+            let short_id = terminal_id[..8.min(terminal_id.len())].to_string();
+            if let Err(e) = std::thread::Builder::new()
+                .name(format!("pty-cleanup-{}", short_id))
+                .spawn(move || {
+                    Self::shutdown_handle(handle);
+                })
+            {
+                log::error!("Failed to spawn cleanup thread: {}", e);
+            }
+        }
+    }
 }
 
 impl crate::terminal::terminal::TerminalTransport for PtyManager {
@@ -634,6 +654,39 @@ impl Drop for PtyManager {
         // On drop, just detach - don't kill sessions
         // This allows sessions to persist across app restarts
         self.detach_all();
+    }
+}
+
+/// Try to retrieve the exit code for a process that has exited.
+/// Uses `waitpid` on Unix to get the actual exit status.
+fn wait_for_exit_code(pid: u32) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // The process should have exited by now (reader got EOF).
+        // Try a few times with small delays in case it hasn't fully terminated yet.
+        for _ in 0..10 {
+            let mut status: libc::c_int = 0;
+            let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+            if result > 0 {
+                if libc::WIFEXITED(status) {
+                    return Some(libc::WEXITSTATUS(status) as u32);
+                }
+                // Killed by signal — no exit code
+                return None;
+            }
+            if result < 0 {
+                // ECHILD — already reaped by someone else
+                return None;
+            }
+            // result == 0: not exited yet, wait briefly
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
     }
 }
 
