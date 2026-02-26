@@ -1020,6 +1020,11 @@ impl ProjectColumn {
         let active_is_running = matches!(active_status, Some(ServiceStatus::Running));
         let active_is_starting = matches!(active_status, Some(ServiceStatus::Starting | ServiceStatus::Restarting));
         let active_is_stopped = !active_is_running && !active_is_starting;
+        let active_exit_code = match &active_status {
+            Some(ServiceStatus::Crashed { exit_code }) => *exit_code,
+            _ => None,
+        };
+        let active_is_crashed = matches!(active_status, Some(ServiceStatus::Crashed { .. }));
 
         let project_id = self.project_id.clone();
         let active_drag = self.active_drag.clone();
@@ -1156,6 +1161,22 @@ impl ProjectColumn {
                             .border_l_1()
                             .border_color(rgb(t.border))
                             .pl(px(6.0))
+                            // Exit code label (when crashed)
+                            .when(active_is_crashed, |d| {
+                                let label = match active_exit_code {
+                                    Some(code) => format!("exit {}", code),
+                                    None => "crashed".to_string(),
+                                };
+                                d.child(
+                                    div()
+                                        .px(px(5.0))
+                                        .py(px(1.0))
+                                        .rounded(px(3.0))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(t.term_red))
+                                        .child(label),
+                                )
+                            })
                             // Start button (when stopped/crashed)
                             .when(active_is_stopped, |d| {
                                 d.child(

@@ -330,6 +330,12 @@ impl ServiceManager {
             return;
         }
 
+        // Clean up old terminal from a previous crash (kept for viewing crash output)
+        if let Some(old_tid) = instance.terminal_id.take() {
+            self.terminals.lock().remove(&old_tid);
+            self.terminal_to_service.remove(&old_tid);
+        }
+
         let command = instance.definition.command.clone();
         let cwd_relative = instance.definition.cwd.clone();
         let cwd = Path::new(project_path)
@@ -513,29 +519,31 @@ impl ServiceManager {
     }
 
     /// Handle a terminal exit event. If the terminal belongs to a service,
-    /// handle crash/restart logic. Returns early for non-service terminals.
+    /// handle crash/restart logic. Returns `true` if this was a service terminal.
     pub fn handle_service_exit(
         &mut self,
         terminal_id: &str,
         exit_code: Option<u32>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let key = match self.terminal_to_service.remove(terminal_id) {
             Some(key) => key,
-            None => return, // Not a service terminal
+            None => return false, // Not a service terminal
         };
 
         let (project_id, service_name) = key.clone();
 
         let instance = match self.instances.get_mut(&key) {
             Some(i) => i,
-            None => return,
+            None => return true,
         };
 
-        instance.terminal_id = None;
         instance.detected_ports.clear();
 
         if instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT {
+            // Auto-restart: clean up old terminal, will create new one
+            instance.terminal_id = None;
+            self.terminals.lock().remove(terminal_id);
             instance.status = ServiceStatus::Restarting;
             instance.restart_count += 1;
 
@@ -551,10 +559,13 @@ impl ServiceManager {
             })
             .detach();
         } else {
+            // Crash without restart: keep terminal_id and Terminal in registry
+            // so the user can see the crash output until they manually restart.
             instance.status = ServiceStatus::Crashed { exit_code };
         }
 
         cx.notify();
+        true
     }
 
     /// Get all service instances for a project (in config order).
@@ -723,11 +734,13 @@ mod tests {
 
     /// Simulates the exit-handling state transition logic from handle_service_exit.
     fn simulate_exit(instance: &mut ServiceInstance, exit_code: Option<u32>) {
-        instance.terminal_id = None;
         if instance.definition.restart_on_crash && instance.restart_count < MAX_RESTART_COUNT {
+            // Auto-restart: clear terminal
+            instance.terminal_id = None;
             instance.status = ServiceStatus::Restarting;
             instance.restart_count += 1;
         } else {
+            // Crash without restart: keep terminal_id for viewing crash output
             instance.status = ServiceStatus::Crashed { exit_code };
         }
     }
@@ -769,6 +782,17 @@ mod tests {
             ServiceStatus::Crashed { exit_code: None }
         );
         assert_eq!(instance.restart_count, 0);
+        // Terminal should be preserved for viewing crash output
+        assert!(instance.terminal_id.is_some());
+    }
+
+    #[test]
+    fn handle_exit_restart_clears_terminal() {
+        let (_key, mut instance) = make_instance("proj1", "svc1", true, 0, ServiceStatus::Running);
+        simulate_exit(&mut instance, Some(1));
+        assert_eq!(instance.status, ServiceStatus::Restarting);
+        // Terminal should be cleared for auto-restart
+        assert!(instance.terminal_id.is_none());
     }
 
     #[test]
