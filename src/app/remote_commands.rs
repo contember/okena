@@ -136,12 +136,17 @@ impl Okena {
                                             ServiceStatus::Crashed { exit_code } => ("crashed", *exit_code),
                                             ServiceStatus::Restarting => ("restarting", None),
                                         };
+                                        let kind = match &inst.kind {
+                                            crate::services::manager::ServiceKind::Okena => "okena",
+                                            crate::services::manager::ServiceKind::DockerCompose { .. } => "docker_compose",
+                                        };
                                         ApiServiceInfo {
                                             name: inst.definition.name.clone(),
                                             status: status.to_string(),
                                             terminal_id: inst.terminal_id.clone(),
                                             ports: inst.detected_ports.clone(),
                                             exit_code,
+                                            kind: kind.to_string(),
                                         }
                                     })
                                     .collect();

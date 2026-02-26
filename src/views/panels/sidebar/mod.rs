@@ -1026,6 +1026,8 @@ pub(super) struct SidebarServiceInfo {
     pub ports: Vec<u16>,
     /// Host for port badge URLs ("localhost" for local, remote host for remote)
     pub port_host: String,
+    /// Whether this service is a Docker Compose service
+    pub is_docker: bool,
 }
 
 /// Lightweight projection of ProjectData for sidebar rendering.
@@ -1146,6 +1148,7 @@ impl Render for Sidebar {
                             status: inst.status.clone(),
                             ports: inst.detected_ports.clone(),
                             port_host: "localhost".to_string(),
+                            is_docker: matches!(inst.kind, crate::services::manager::ServiceKind::DockerCompose { .. }),
                         })
                         .collect();
                     (p.id.clone(), services)
@@ -1165,6 +1168,7 @@ impl Render for Sidebar {
                         status: crate::services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
                         ports: api_svc.ports.clone(),
                         port_host: port_host.clone(),
+                        is_docker: api_svc.kind == "docker_compose",
                     }
                 }).collect();
                 project_services.insert(project.id.clone(), services);

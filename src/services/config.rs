@@ -6,6 +6,21 @@ use std::path::Path;
 pub struct OkenaProjectConfig {
     #[serde(default)]
     pub services: Vec<ServiceDefinition>,
+    #[serde(default)]
+    pub docker_compose: Option<DockerComposeConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DockerComposeConfig {
+    /// Explicit compose file path (default: auto-detect)
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Set to false to disable Docker Compose integration (default: auto-detect)
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Filter to specific services (default: all)
+    #[serde(default)]
+    pub services: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +117,51 @@ services:
         let yaml = "services: []\n";
         let config: OkenaProjectConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.services.is_empty());
+    }
+
+    #[test]
+    fn parse_config_with_docker_compose() {
+        let yaml = r#"
+services:
+  - name: "Vite Dev"
+    command: "npm run dev"
+docker_compose:
+  file: "docker-compose.prod.yml"
+  enabled: true
+  services:
+    - web
+    - db
+"#;
+        let config: OkenaProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.services.len(), 1);
+        let dc = config.docker_compose.unwrap();
+        assert_eq!(dc.file.unwrap(), "docker-compose.prod.yml");
+        assert_eq!(dc.enabled, Some(true));
+        assert_eq!(dc.services, vec!["web", "db"]);
+    }
+
+    #[test]
+    fn backward_compat_no_docker_compose() {
+        let yaml = r#"
+services:
+  - name: "test"
+    command: "echo hi"
+"#;
+        let config: OkenaProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.docker_compose.is_none());
+    }
+
+    #[test]
+    fn docker_compose_minimal() {
+        let yaml = r#"
+services: []
+docker_compose: {}
+"#;
+        let config: OkenaProjectConfig = serde_yaml::from_str(yaml).unwrap();
+        let dc = config.docker_compose.unwrap();
+        assert!(dc.file.is_none());
+        assert!(dc.enabled.is_none());
+        assert!(dc.services.is_empty());
     }
 
     #[test]

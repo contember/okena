@@ -222,6 +222,21 @@ impl Sidebar {
                     dot
                 }
             })
+            .when(service.is_docker, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .px(px(3.0))
+                        .h(px(14.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(2.0))
+                        .bg(rgb(t.bg_secondary))
+                        .text_size(px(9.0))
+                        .text_color(rgb(t.text_muted))
+                        .child("docker"),
+                )
+            })
             .child(
                 // Service name
                 div()

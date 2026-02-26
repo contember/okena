@@ -145,9 +145,24 @@ impl ProjectColumn {
                     }
                 }
                 None => {
-                    // Service stopped — clear the terminal pane but keep panel open
-                    this.service_terminal_pane = None;
-                    cx.notify();
+                    // For Docker services that are still running/restarting,
+                    // re-open the log viewer instead of showing "not running".
+                    let is_active_docker = sm.read(cx)
+                        .instances()
+                        .get(&(project_id.clone(), active_name.clone()))
+                        .is_some_and(|i| {
+                            matches!(i.kind, crate::services::manager::ServiceKind::DockerCompose { .. })
+                                && matches!(i.status, ServiceStatus::Running | ServiceStatus::Restarting)
+                        });
+
+                    if is_active_docker {
+                        let name = active_name.clone();
+                        this.show_service(&name, cx);
+                    } else {
+                        // Service stopped — clear the terminal pane but keep panel open
+                        this.service_terminal_pane = None;
+                        cx.notify();
+                    }
                 }
             }
         }).detach();
@@ -157,6 +172,21 @@ impl ProjectColumn {
 
     /// Show a service's log output in the per-project panel.
     pub fn show_service(&mut self, service_name: &str, cx: &mut Context<Self>) {
+        // For Docker services with no terminal_id, spawn a log viewer PTY on demand
+        if let Some(ref sm) = self.service_manager {
+            let is_docker = sm.read(cx).instances()
+                .get(&(self.project_id.clone(), service_name.to_string()))
+                .is_some_and(|i| matches!(i.kind, crate::services::manager::ServiceKind::DockerCompose { .. }));
+            let has_terminal = sm.read(cx).terminal_id_for(&self.project_id, service_name).is_some();
+            if is_docker && !has_terminal {
+                let pid = self.project_id.clone();
+                let name = service_name.to_string();
+                sm.update(cx, |sm, cx| {
+                    sm.open_docker_logs(&pid, &name, cx);
+                });
+            }
+        }
+
         // Look up terminal_id from either ServiceManager or remote services
         let terminal_id = if let Some(ref sm) = self.service_manager {
             sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned()

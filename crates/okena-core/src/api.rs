@@ -59,6 +59,13 @@ pub struct ApiServiceInfo {
     /// Exit code when status is "crashed"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u32>,
+    /// Service kind: "okena" or "docker_compose"
+    #[serde(default = "default_service_kind")]
+    pub kind: String,
+}
+
+fn default_service_kind() -> String {
+    "okena".to_string()
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -566,6 +573,7 @@ mod tests {
             status: "running".into(),
             terminal_id: Some("t1".into()),
             ports: vec![3000, 5173],
+            kind: "okena".into(),
         };
         let json = serde_json::to_string(&svc).unwrap();
         let parsed: ApiServiceInfo = serde_json::from_str(&json).unwrap();
