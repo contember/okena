@@ -240,31 +240,29 @@ impl FocusManager {
     ///
     /// Modal contexts temporarily take focus away from terminals.
     /// The previous focus is saved for restoration when the modal closes.
+    /// Note: focused_project_id is NOT saved — modals don't change it,
+    /// and actions dispatched from modals (e.g. command palette) may
+    /// intentionally modify it.
     pub fn enter_modal(&mut self) {
-        // Save current focus to stack (including focused_project_id)
-        self.push_focus(self.current_focus.clone(), self.context.clone(), self.focused_project_id.clone());
-
-        // Don't clear current_focus - we just change context
-        // This allows the visual indicator to remain while modal is open
+        self.push_focus(self.current_focus.clone(), self.context.clone(), None);
         self.context = FocusContext::Modal;
     }
 
     /// Exit modal context, restoring previous focus.
     ///
     /// Returns the target that should be focused after exiting the modal.
+    /// Only restores current_focus and context — focused_project_id is left as-is.
     pub fn exit_modal(&mut self) -> Option<FocusTarget> {
         if self.context != FocusContext::Modal {
             return self.current_focus.clone();
         }
 
-        // Pop and restore previous focus + focused_project_id
         if let Some(entry) = self.pop_focus() {
             self.current_focus = entry.target.clone();
             self.context = entry.context;
-            self.focused_project_id = entry.focused_project_id;
+            // Don't restore focused_project_id — leave whatever is current
             entry.target
         } else {
-            // No saved focus - restore to terminal context but keep current
             self.context = FocusContext::Terminal;
             self.current_focus.clone()
         }

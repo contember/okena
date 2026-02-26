@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -385,6 +385,13 @@ impl Render for RootView {
             // Handle toggle sidebar auto-hide action
             .on_action(cx.listener(|this, _: &ToggleSidebarAutoHide, _window, cx| {
                 this.toggle_sidebar_auto_hide(cx);
+            }))
+            // Handle clear focus action (show all projects)
+            .on_action(cx.listener(|this, _: &ClearFocus, _window, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(None, cx);
+                    ws.set_folder_filter(None, cx);
+                });
             }))
             // Handle focus sidebar action (keyboard navigation)
             .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
