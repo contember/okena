@@ -128,6 +128,13 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 
         Ok(data)
     } else {
+        // Config dir exists but workspace.json doesn't — possible data loss
+        if path.parent().is_some_and(|p| p.exists()) {
+            log::warn!(
+                "Workspace file not found at {:?} (config dir exists). Starting with default workspace.",
+                path,
+            );
+        }
         Ok(default_workspace())
     }
 }
@@ -174,10 +181,36 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
         serde_json::to_string_pretty(&filtered_data)?
     };
 
-    // Atomic write: write to a temp file first, then rename over the target.
+    // Safety backup: if the existing file has more projects than what we're about
+    // to save, create a .bak copy first. This protects against accidental data loss
+    // if a bad load caused us to start with a near-empty workspace.
+    let new_local_project_count = data.projects.iter().filter(|p| !p.is_remote).count();
+    if path.exists() && new_local_project_count <= 1 {
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            if let Ok(existing_data) = serde_json::from_str::<WorkspaceData>(&existing) {
+                if existing_data.projects.len() > new_local_project_count {
+                    let backup_path = path.with_extension("json.bak");
+                    log::warn!(
+                        "Saving workspace with {} project(s) over existing file with {} project(s). \
+                         Creating safety backup at {:?}.",
+                        new_local_project_count,
+                        existing_data.projects.len(),
+                        backup_path,
+                    );
+                    if let Err(e) = std::fs::copy(&path, &backup_path) {
+                        log::error!("Failed to create safety backup: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Atomic write: write to a temp file first, fsync, then rename over the target.
     // This ensures the file is either fully old or fully new, never partial.
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &filtered)?;
+    // fsync to ensure data is durable on disk before rename
+    std::fs::File::open(&tmp_path)?.sync_all()?;
     std::fs::rename(&tmp_path, &path)?;
 
     Ok(())

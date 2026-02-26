@@ -107,13 +107,18 @@ impl Okena {
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
-                    if let Err(e) = persistence::save_workspace(&data) {
-                        log::error!("Failed to save workspace: {}", e);
-                        let _ = cx.update(|cx| {
-                            ToastManager::error(format!("Failed to save workspace: {}", e), cx);
-                        });
+                    match persistence::save_workspace(&data) {
+                        Ok(()) => {
+                            last_saved.store(version, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to save workspace: {}", e);
+                            let _ = cx.update(|cx| {
+                                ToastManager::error(format!("Failed to save workspace: {}", e), cx);
+                            });
+                            // Don't update last_saved — next mutation will retry the save
+                        }
                     }
-                    last_saved.store(version, Ordering::Relaxed);
                 }
             }).detach();
         })

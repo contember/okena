@@ -463,5 +463,23 @@ fn main() {
             },
         )
         .expect("Failed to create main window");
+
+        // Flush pending saves on ALL quit paths (including window X button).
+        // The Quit action handler only runs for Ctrl+Q / menu quit, not for
+        // QuitMode::LastWindowClosed. on_app_quit fires for every exit path.
+        let _quit_sub = cx.on_app_quit(|cx| {
+            // Flush pending settings save
+            if let Some(gs) = cx.try_global::<GlobalSettings>() {
+                gs.0.read(cx).flush_pending_save();
+            }
+
+            // Flush pending workspace save
+            if let Some(gw) = cx.try_global::<GlobalWorkspace>() {
+                if let Err(e) = persistence::save_workspace(gw.0.read(cx).data()) {
+                    log::error!("Failed to flush workspace on quit: {}", e);
+                }
+            }
+            async {}
+        });
     });
 }
