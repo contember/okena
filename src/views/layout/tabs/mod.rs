@@ -325,7 +325,7 @@ impl LayoutContainer {
             .child(self.render_tab_bar(children, active_tab, false, cx))
             .child(
                 // Active tab content
-                div().flex_1().child({
+                div().flex_1().min_h_0().child({
                     let mut child_path = self.layout_path.clone();
                     child_path.push(active_tab);
 

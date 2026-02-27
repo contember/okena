@@ -283,6 +283,8 @@ impl LayoutContainer {
         let mut content = div()
             .flex_1()
             .min_h_0()
+            .flex()
+            .flex_col()
             .relative()
             .on_action(cx.listener(move |_this, _: &CloseTerminal, _window, cx| {
                 if let Some(ref aid) = app_id_for_close {

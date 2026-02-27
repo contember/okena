@@ -107,7 +107,9 @@ impl Render for RemoteAppPane {
                     let mut list = div()
                         .id("remote-plan-list")
                         .flex_col()
-                        .size_full()
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
                         .overflow_y_scroll();
                     for (i, plan) in plans.iter().enumerate() {
                         let is_selected = i == *selected_index;
@@ -151,7 +153,13 @@ impl Render for RemoteAppPane {
 
                 KruhScreen::TaskBrowser { plan_name, issues } => {
                     let plan_name = plan_name.clone();
-                    let mut list = div().flex_col().size_full();
+                    let mut list = div()
+                        .id("remote-task-list")
+                        .flex_col()
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
+                        .overflow_y_scroll();
                     list = list.child(
                         div()
                             .px(SPACE_MD)
@@ -198,7 +206,9 @@ impl Render for RemoteAppPane {
                     let mut list = div()
                         .id("remote-loop-list")
                         .flex_col()
-                        .size_full()
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
                         .overflow_y_scroll();
                     for (i, lp) in loops.iter().enumerate() {
                         let is_focused = i == *focused_index;
@@ -253,7 +263,9 @@ impl Render for RemoteAppPane {
 
                 KruhScreen::Settings { model, max_iterations, auto_start } => div()
                     .flex_col()
-                    .size_full()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
                     .px(SPACE_MD)
                     .py(SPACE_MD)
                     .gap(SPACE_SM)
@@ -282,11 +294,14 @@ impl Render for RemoteAppPane {
                     let content = content.clone();
                     div()
                         .flex_col()
-                        .size_full()
+                        .flex_1()
+                        .w_full()
+                        .min_h_0()
                         .child(
                             div()
                                 .px(SPACE_MD)
                                 .py(SPACE_SM)
+                                .flex_shrink_0()
                                 .border_b_1()
                                 .border_color(rgb(t.border))
                                 .child(
@@ -317,7 +332,8 @@ impl Render for RemoteAppPane {
         };
 
         div()
-            .size_full()
+            .flex_1()
+            .w_full()
             .min_h_0()
             .flex()
             .flex_col()

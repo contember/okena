@@ -750,6 +750,8 @@ impl Render for RootView {
                                     .flex_1()
                                     .min_h_0()
                                     .min_w_0()
+                                    .flex()
+                                    .flex_col()
                                     .child(self.render_projects_grid(cx)),
                             ),
                     ),

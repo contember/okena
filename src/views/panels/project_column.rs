@@ -823,6 +823,8 @@ impl Render for ProjectColumn {
                         .id("project-column-content")
                         .flex_1()
                         .min_h_0()
+                        .flex()
+                        .flex_col()
                         .overflow_hidden()
                         .child(self.layout_container.clone().unwrap())
                         .into_any_element()
