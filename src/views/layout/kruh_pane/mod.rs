@@ -1020,8 +1020,11 @@ impl Render for KruhPane {
 
         div()
             .id("kruh-pane-root")
-            .size_full()
+            .flex_1()
+            .w_full()
             .min_h_0()
+            .flex()
+            .flex_col()
             .track_focus(&focus_handle)
             .key_context("TerminalPane")
             // Register bounds for spatial navigation
