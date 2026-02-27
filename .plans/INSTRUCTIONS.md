@@ -1,4 +1,4 @@
-pub const DEFAULT_AGENT_INSTRUCTIONS: &str = r#"# Agent Workflow Guidelines
+# Agent Workflow Guidelines
 
 ## Iteration Protocol
 
@@ -43,4 +43,3 @@ This sentinel tells Kruh the plan is complete. Do not emit it if any issues rema
 - Do not introduce unnecessary dependencies.
 - Keep changes minimal and focused on the current issue.
 - Do not refactor unrelated code unless the issue specifically asks for it.
-"#;
