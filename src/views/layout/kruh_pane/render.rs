@@ -9,7 +9,7 @@ use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use crate::views::components::ui_helpers::*;
 
 use super::config::AGENTS;
-use super::types::{EditTarget, KruhState, PlanInfo};
+use super::types::{EditTarget, KruhState, LoopInstance, LoopPhase, LoopState, PlanInfo};
 use super::KruhPane;
 
 impl KruhPane {
@@ -24,12 +24,14 @@ impl KruhPane {
             KruhState::TaskBrowser => self.render_task_browser(window, cx).into_any_element(),
             KruhState::Editing => self.render_editor(cx).into_any_element(),
             KruhState::Settings => self.render_settings(window, cx).into_any_element(),
-            _ => self.render_running_view(window, cx).into_any_element(),
+            KruhState::LoopOverview => self.render_loop_overview(window, cx).into_any_element(),
         };
 
         div()
-            .size_full()
+            .flex_1()
+            .w_full()
             .min_h_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(rgb(t.bg_primary))
@@ -46,33 +48,53 @@ impl KruhPane {
             || self.state == KruhState::TaskBrowser
             || self.state == KruhState::Editing
             || self.state == KruhState::Settings
-            || matches!(
-                self.state,
-                KruhState::Running | KruhState::Paused | KruhState::WaitingForStep | KruhState::Completed
-            );
+            || self.state == KruhState::LoopOverview;
 
         if !has_context {
             return div();
         }
 
-        div()
+        let mut header = div()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .px(SPACE_MD)
             .py(SPACE_XS)
             .gap(SPACE_MD)
             .border_b_1()
-            .border_color(rgb(t.border))
+            .border_color(rgb(t.border));
+
+        if self.state == KruhState::LoopOverview {
+            // Show focused loop's plan name
+            if let Some(l) = self.focused_loop() {
+                header = header.child(
+                    div()
+                        .text_size(TEXT_SM)
+                        .text_color(rgb(t.text_muted))
+                        .child(l.plan.name.clone()),
+                );
+            }
+            // Badge: N loops
+            let running_count = self.active_loops.iter()
+                .filter(|l| l.state != LoopState::Completed)
+                .count();
+            let total = self.active_loops.len();
+            header = header.child(
+                badge(&format!("{}/{} loops", running_count, total), &t),
+            );
+        } else {
             // Breadcrumb: plan name
-            .when_some(self.selected_plan.as_ref().map(|p| p.name.clone()), |el, name| {
-                let t = theme(cx);
-                el.child(
+            if let Some(name) = self.selected_plan.as_ref().map(|p| p.name.clone()) {
+                header = header.child(
                     div()
                         .text_size(TEXT_SM)
                         .text_color(rgb(t.text_muted))
                         .child(name),
-                )
-            })
+                );
+            }
+        }
+
+        header = header
             // Spacer
             .child(div().flex_1())
             // Agent/model label
@@ -81,7 +103,9 @@ impl KruhPane {
                     .text_size(TEXT_SM)
                     .text_color(rgb(t.text_muted))
                     .child(format!("{} / {}", self.config.agent, self.config.model)),
-            )
+            );
+
+        header
     }
 
     // ── Scanning ────────────────────────────────────────────────────────
@@ -122,21 +146,20 @@ impl KruhPane {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
+            .child(with_scrollbar(
+                "plan-list",
+                &self.plan_scroll,
                 div()
-                    .id("plan-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.plan_scroll)
                     .p(SPACE_LG)
                     .flex()
                     .flex_col()
                     .gap(SPACE_SM)
                     .children(plan_cards),
-            )
+                &t,
+            ))
             .child(
                 div()
+                    .flex_shrink_0()
                     .px(SPACE_MD)
                     .py(SPACE_SM)
                     .border_t_1()
@@ -145,6 +168,24 @@ impl KruhPane {
                     .flex_wrap()
                     .items_center()
                     .gap(SPACE_XS)
+                    // Show "Running" button when loops are active
+                    .when(!self.active_loops.is_empty(), |el| {
+                        let running = self.active_loops.iter()
+                            .filter(|l| l.state != LoopState::Completed)
+                            .count();
+                        let label = if running > 0 {
+                            format!("Running ({})", running)
+                        } else {
+                            "Loops".to_string()
+                        };
+                        el.child(
+                            toolbar_button_primary("pp-loops", "icons/play.svg", &label, &t)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state = KruhState::LoopOverview;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         toolbar_button("pp-settings", "icons/edit.svg", "Settings", &t)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -172,7 +213,21 @@ impl KruhPane {
                                     .text_size(TEXT_SM)
                                     .text_color(rgb(t.text_muted))
                                     .child("Select"),
+                            )
+                            .child(div().w(SPACE_MD))
+                            .child(kbd("a", &t))
+                            .child(
+                                div()
+                                    .text_size(TEXT_SM)
+                                    .text_color(rgb(t.text_muted))
+                                    .child("Run All"),
                             ),
+                    )
+                    .child(
+                        toolbar_button_primary("pp-run-all", "icons/play.svg", "Run All", &t)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_all_loops(window, cx);
+                            })),
                     ),
             )
     }
@@ -287,23 +342,22 @@ impl KruhPane {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
+            .child(with_scrollbar(
+                "issue-list",
+                &self.issue_scroll,
                 div()
-                    .id("issue-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.issue_scroll)
                     .px(SPACE_LG)
                     .py(SPACE_SM)
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
                     .children(issue_rows),
-            )
+                &t,
+            ))
             // Footer: icon button toolbar
             .child(
                 div()
+                    .flex_shrink_0()
                     .px(SPACE_MD)
                     .py(SPACE_SM)
                     .border_t_1()
@@ -479,155 +533,154 @@ impl KruhPane {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(
+            .child(with_scrollbar(
+                "settings-scroll",
+                &self.settings_scroll,
                 div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.settings_scroll)
                     .p(SPACE_LG)
                     .flex()
                     .flex_col()
                     .max_w(px(500.0))
-                    // ── PLANS section ──
-                    .child(settings_section_header("Plans", &t))
-                    .child(
-                        settings_section_container(&t)
+                            // ── PLANS section ──
+                            .child(settings_section_header("Plans", &t))
                             .child(
-                                settings_row("settings-plans-dir", "Plans Directory", &t, false)
+                                settings_section_container(&t)
                                     .child(
-                                        div()
-                                            .w(px(220.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .border_1()
-                                            .border_color(rgb(t.border))
-                                            .rounded(px(4.0))
-                                            .child(SimpleInput::new(&self.setup_path_input).text_size(px(12.0))),
-                                    ),
-                            ),
-                    )
-                    // ── AGENT section ──
-                    .child(settings_section_header("Agent", &t))
-                    .child(
-                        settings_section_container(&t)
-                            // Agent dropdown row
-                            .child(
-                                settings_row("settings-agent", "Agent", &t, true)
-                                    .child(
-                                        dropdown_button(
-                                            "agent-dropdown-btn",
-                                            &current_agent,
-                                            agent_open,
-                                            &t,
-                                            {
-                                                let entity = cx.entity().downgrade();
-                                                move |bounds: Bounds<Pixels>, _, cx: &mut App| {
-                                                    if let Some(entity) = entity.upgrade() {
-                                                        entity.update(cx, |this, _| {
-                                                            this.agent_button_bounds = Some(bounds);
-                                                        });
-                                                    }
-                                                }
-                                            },
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.agent_dropdown_open = !this.agent_dropdown_open;
-                                            cx.notify();
-                                        })),
+                                        settings_row("settings-plans-dir", "Plans Directory", &t, false)
+                                            .child(
+                                                div()
+                                                    .w(px(220.0))
+                                                    .bg(rgb(t.bg_secondary))
+                                                    .border_1()
+                                                    .border_color(rgb(t.border))
+                                                    .rounded(px(4.0))
+                                                    .child(SimpleInput::new(&self.setup_path_input).text_size(px(12.0))),
+                                            ),
                                     ),
                             )
-                            // Model input row
+                            // ── AGENT section ──
+                            .child(settings_section_header("Agent", &t))
                             .child(
-                                settings_row("settings-model", "Model", &t, false)
+                                settings_section_container(&t)
+                                    // Agent dropdown row
                                     .child(
-                                        div()
-                                            .w(px(200.0))
-                                            .bg(rgb(t.bg_secondary))
-                                            .border_1()
-                                            .border_color(rgb(t.border))
-                                            .rounded(px(4.0))
-                                            .child(SimpleInput::new(&self.model_input).text_size(px(12.0))),
-                                    ),
-                            ),
-                    )
-                    // ── EXECUTION section ──
-                    .child(settings_section_header("Execution", &t))
-                    .child(
-                        settings_section_container(&t)
-                            // Max Iterations stepper
-                            .child(
-                                settings_row("settings-max-iter", "Max Iterations", &t, true)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.0))
+                                        settings_row("settings-agent", "Agent", &t, true)
                                             .child(
-                                                settings_stepper_button("max-iter-dec", "-", &t)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        if this.config.max_iterations > 1 {
-                                                            this.config.max_iterations -= 10;
-                                                            if this.config.max_iterations == 0 {
-                                                                this.config.max_iterations = 1;
+                                                dropdown_button(
+                                                    "agent-dropdown-btn",
+                                                    &current_agent,
+                                                    agent_open,
+                                                    &t,
+                                                    {
+                                                        let entity = cx.entity().downgrade();
+                                                        move |bounds: Bounds<Pixels>, _, cx: &mut App| {
+                                                            if let Some(entity) = entity.upgrade() {
+                                                                entity.update(cx, |this, _| {
+                                                                    this.agent_button_bounds = Some(bounds);
+                                                                });
                                                             }
                                                         }
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(settings_value_display(max_iterations.to_string(), 50.0, &t))
+                                                    },
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.agent_dropdown_open = !this.agent_dropdown_open;
+                                                    cx.notify();
+                                                })),
+                                            ),
+                                    )
+                                    // Model input row
+                                    .child(
+                                        settings_row("settings-model", "Model", &t, false)
                                             .child(
-                                                settings_stepper_button("max-iter-inc", "+", &t)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.config.max_iterations += 10;
-                                                        cx.notify();
-                                                    })),
+                                                div()
+                                                    .w(px(200.0))
+                                                    .bg(rgb(t.bg_secondary))
+                                                    .border_1()
+                                                    .border_color(rgb(t.border))
+                                                    .rounded(px(4.0))
+                                                    .child(SimpleInput::new(&self.model_input).text_size(px(12.0))),
                                             ),
                                     ),
                             )
-                            // Sleep stepper
+                            // ── EXECUTION section ──
+                            .child(settings_section_header("Execution", &t))
                             .child(
-                                settings_row("settings-sleep", "Sleep (seconds)", &t, true)
+                                settings_section_container(&t)
+                                    // Max Iterations stepper
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(4.0))
+                                        settings_row("settings-max-iter", "Max Iterations", &t, true)
                                             .child(
-                                                settings_stepper_button("sleep-dec", "-", &t)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        if this.config.sleep_secs > 0 {
-                                                            this.config.sleep_secs -= 1;
-                                                        }
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(settings_value_display(sleep_secs.to_string(), 40.0, &t))
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        settings_stepper_button("max-iter-dec", "-", &t)
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                if this.config.max_iterations > 1 {
+                                                                    this.config.max_iterations -= 10;
+                                                                    if this.config.max_iterations == 0 {
+                                                                        this.config.max_iterations = 1;
+                                                                    }
+                                                                }
+                                                                cx.notify();
+                                                            })),
+                                                    )
+                                                    .child(settings_value_display(max_iterations.to_string(), 50.0, &t))
+                                                    .child(
+                                                        settings_stepper_button("max-iter-inc", "+", &t)
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.config.max_iterations += 10;
+                                                                cx.notify();
+                                                            })),
+                                                    ),
+                                            ),
+                                    )
+                                    // Sleep stepper
+                                    .child(
+                                        settings_row("settings-sleep", "Sleep (seconds)", &t, true)
                                             .child(
-                                                settings_stepper_button("sleep-inc", "+", &t)
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(4.0))
+                                                    .child(
+                                                        settings_stepper_button("sleep-dec", "-", &t)
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                if this.config.sleep_secs > 0 {
+                                                                    this.config.sleep_secs -= 1;
+                                                                }
+                                                                cx.notify();
+                                                            })),
+                                                    )
+                                                    .child(settings_value_display(sleep_secs.to_string(), 40.0, &t))
+                                                    .child(
+                                                        settings_stepper_button("sleep-inc", "+", &t)
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.config.sleep_secs += 1;
+                                                                cx.notify();
+                                                            })),
+                                                    ),
+                                            ),
+                                    )
+                                    // Dangerous toggle
+                                    .child(
+                                        settings_row("settings-dangerous", "Dangerous Mode", &t, false)
+                                            .child(
+                                                settings_toggle_switch("dangerous-toggle", dangerous, &t)
                                                     .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.config.sleep_secs += 1;
+                                                        this.config.dangerous = !this.config.dangerous;
                                                         cx.notify();
                                                     })),
                                             ),
-                                    ),
-                            )
-                            // Dangerous toggle
-                            .child(
-                                settings_row("settings-dangerous", "Dangerous Mode", &t, false)
-                                    .child(
-                                        settings_toggle_switch("dangerous-toggle", dangerous, &t)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.config.dangerous = !this.config.dangerous;
-                                                cx.notify();
-                                            })),
                                     ),
                             ),
-                    ),
-            )
+                &t,
+            ))
             // Footer
             .child(
                 div()
+                    .flex_shrink_0()
                     .px(SPACE_MD)
                     .py(SPACE_SM)
                     .border_t_1()
@@ -739,13 +792,28 @@ impl KruhPane {
         };
 
         let editor_el: AnyElement = if let Some(input) = &self.editor_input {
-            div()
-                .id("kruh-editor")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .p(SPACE_MD)
-                .child(SimpleInput::new(input).text_size(TEXT_MD))
+            let mut inner_content = div()
+                .flex()
+                .flex_col()
+                .p(SPACE_MD);
+
+            // Frontmatter inside the scroll area so it scrolls with the text
+            if is_issue {
+                inner_content = inner_content.child(
+                    div()
+                        .flex_shrink_0()
+                        .child(self.render_editor_frontmatter(cx)),
+                );
+            }
+
+            inner_content = inner_content
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(SimpleInput::new(input).text_size(TEXT_MD)),
+                );
+
+            with_scrollbar("kruh-editor", &self.editor_scroll, inner_content, &t)
                 .into_any_element()
         } else {
             div()
@@ -770,6 +838,7 @@ impl KruhPane {
             // File name bar
             .child(
                 div()
+                    .flex_shrink_0()
                     .px(SPACE_MD)
                     .py(SPACE_XS)
                     .border_b_1()
@@ -791,15 +860,12 @@ impl KruhPane {
                             .child(file_label),
                     ),
             )
-            // Frontmatter overrides panel (issue files only)
-            .when(is_issue, |el| {
-                el.child(self.render_editor_frontmatter(cx))
-            })
             // Editor area
             .child(editor_el)
             // Footer with icon buttons
             .child(
                 div()
+                    .flex_shrink_0()
                     .px(SPACE_MD)
                     .py(SPACE_SM)
                     .border_t_1()
@@ -885,12 +951,357 @@ impl KruhPane {
             )
     }
 
-    // ── Progress Bar ────────────────────────────────────────────────────
+    // ── Loop Overview ─────────────────────────────────────────────────
 
-    fn render_progress_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_loop_overview(
+        &self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
-        let total = self.progress.total.max(1) as f32;
-        let ratio = self.progress.done as f32 / total;
+
+        // Build loop cards
+        let loop_cards: Vec<_> = self.active_loops.iter().enumerate().map(|(i, l)| {
+            self.render_loop_card(i, l, i == self.focused_loop_index, cx).into_any_element()
+        }).collect();
+
+        let all_done = self.all_loops_completed();
+
+        // Focused loop detail
+        let detail: AnyElement = if let Some(l) = self.focused_loop() {
+            self.render_loop_detail(l, cx).into_any_element()
+        } else {
+            div().into_any_element()
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // Loop cards strip
+            .child(
+                div()
+                    .id("loop-cards")
+                    .max_h(px(160.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.loop_cards_scroll)
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(SPACE_XS)
+                            .px(SPACE_MD)
+                            .py(SPACE_XS)
+                            .children(loop_cards),
+                    ),
+            )
+            // Focused loop detail
+            .child(detail)
+            // Controls
+            .child(self.render_overview_controls(all_done, cx))
+    }
+
+    fn render_loop_card(
+        &self,
+        index: usize,
+        l: &LoopInstance,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+        let total = l.progress.total.max(1) as f32;
+        let ratio = l.progress.done as f32 / total;
+
+        let state_color = match l.state {
+            LoopState::Running => rgb(t.success),
+            LoopState::Paused | LoopState::WaitingForStep => rgb(t.warning),
+            LoopState::Completed => rgb(t.text_muted),
+        };
+
+        let state_label = match l.state {
+            LoopState::Running => "Running",
+            LoopState::Paused => "Paused",
+            LoopState::WaitingForStep => "Step",
+            LoopState::Completed => "Done",
+        };
+
+        let mut card = div()
+            .id(ElementId::Name(format!("loop-card-{index}").into()))
+            .cursor_pointer()
+            .px(SPACE_MD)
+            .py(SPACE_XS)
+            .rounded(RADIUS_STD)
+            .border_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .min_w(px(140.0));
+
+        if focused {
+            card = card
+                .border_color(rgb(t.border_active))
+                .bg(rgb(t.bg_secondary));
+        } else {
+            card = card
+                .border_color(rgb(t.border))
+                .hover(|s| s.bg(rgb(t.bg_hover)));
+        }
+
+        card = card.on_click(cx.listener(move |this, _, _, cx| {
+            this.focused_loop_index = index;
+            cx.notify();
+        }));
+
+        // Plan name + state
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(SPACE_MD)
+                .child(
+                    div()
+                        .text_size(TEXT_SM)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .overflow_x_hidden()
+                        .text_ellipsis()
+                        .child(l.plan.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(state_color)
+                        .child(state_label),
+                ),
+        );
+
+        // Iteration + pass/fail
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(SPACE_SM)
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.text_muted))
+                        .child(format!("iter {}", l.iteration)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.success))
+                        .child(format!("{}\u{2713}", l.pass_count)),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(t.error))
+                        .child(format!("{}\u{2717}", l.fail_count)),
+                ),
+        );
+
+        // Mini progress bar
+        card = card.child(
+            div()
+                .h(px(3.0))
+                .w_full()
+                .rounded(px(2.0))
+                .bg(rgb(t.bg_hover))
+                .child(
+                    div()
+                        .h_full()
+                        .rounded(px(2.0))
+                        .bg(rgb(t.success))
+                        .w(relative(ratio)),
+                ),
+        );
+
+        card
+    }
+
+    fn render_loop_detail(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.render_instance_progress_bar(l, cx))
+            .child(self.render_instance_iteration_banner(l, cx))
+            .child(self.render_instance_phase_indicator(l, cx))
+            .child(self.render_instance_output(l, cx))
+            .when(l.diff_stat.is_some(), |el| {
+                el.child(self.render_instance_diff(l, cx))
+            })
+    }
+
+    fn render_overview_controls(&self, all_done: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let focused = self.focused_loop();
+        let is_paused = focused.map(|l| l.paused).unwrap_or(false);
+        let is_step = focused.map(|l| l.step_mode).unwrap_or(false);
+        let is_waiting = focused.map(|l| l.state == LoopState::WaitingForStep).unwrap_or(false);
+        let is_completed = focused.map(|l| l.state == LoopState::Completed).unwrap_or(false);
+        let focused_idx = self.focused_loop_index;
+
+        let multi_loop = self.active_loops.len() > 1;
+
+        let state_label = if all_done {
+            "All Done"
+        } else {
+            match focused.map(|l| &l.state) {
+                Some(LoopState::Running) => "Running",
+                Some(LoopState::Paused) => "Paused",
+                Some(LoopState::WaitingForStep) => "Step",
+                Some(LoopState::Completed) => "Done",
+                None => "",
+            }
+        };
+
+        let state_color = if all_done {
+            t.text_muted
+        } else {
+            match focused.map(|l| &l.state) {
+                Some(LoopState::Running) => t.success,
+                Some(LoopState::Paused) | Some(LoopState::WaitingForStep) => t.warning,
+                _ => t.text_muted,
+            }
+        };
+
+        div()
+            .flex_shrink_0()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(SPACE_XS)
+            .px(SPACE_MD)
+            .py(SPACE_SM)
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            // Back to plans list (non-destructive — loops keep running)
+            .child(
+                toolbar_button("ov-back", "icons/chevron-left.svg", "Back", &t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected_plan = None;
+                        this.state = KruhState::PlanPicker;
+                        cx.notify();
+                    })),
+            )
+            .child(toolbar_separator(&t))
+            // Per-loop Pause/Resume
+            .when(!is_completed && focused.is_some(), |el| {
+                let (icon, label) = if is_paused {
+                    ("icons/play.svg", "Resume")
+                } else {
+                    ("icons/pause.svg", "Pause")
+                };
+                el.child(
+                    toolbar_button("ov-pause", icon, label, &t)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(l) = this.active_loops.get_mut(focused_idx) {
+                                l.paused = !l.paused;
+                                l.state = if l.paused {
+                                    LoopState::Paused
+                                } else {
+                                    LoopState::Running
+                                };
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            // Per-loop Skip
+            .when(!is_completed && focused.is_some(), |el| {
+                el.child(
+                    toolbar_button("ov-skip", "icons/skip-forward.svg", "Skip", &t)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(l) = this.active_loops.get_mut(focused_idx) {
+                                l.skip_requested = true;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            // Per-loop Step toggle
+            .when(!is_completed && focused.is_some(), |el| {
+                el.child(
+                    toolbar_button_toggle("ov-step", "icons/step-forward.svg", "Step", is_step, &t)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(l) = this.active_loops.get_mut(focused_idx) {
+                                l.step_mode = !l.step_mode;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            // Continue button (when waiting for step)
+            .when(is_waiting, |el| {
+                el.child(
+                    toolbar_button_primary("ov-continue", "icons/play.svg", "Continue", &t)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(l) = this.active_loops.get_mut(focused_idx) {
+                                l.step_advance_requested = true;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            // Separator
+            .child(toolbar_separator(&t))
+            // Quit focused loop (only when multiple loops — otherwise the global button handles it)
+            .when(multi_loop && focused.is_some() && !is_completed, |el| {
+                el.child(
+                    toolbar_button("ov-quit-one", "icons/close.svg", "Quit", &t)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(l) = this.active_loops.get_mut(focused_idx) {
+                                l.quit_requested = true;
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            // Quit All / Stop / Back — single button that adapts
+            .child({
+                let (icon, label) = if all_done {
+                    ("icons/chevron-left.svg", "Back")
+                } else if multi_loop {
+                    ("icons/close.svg", "Quit All")
+                } else {
+                    ("icons/close.svg", "Quit")
+                };
+                toolbar_button("ov-quit-all", icon, label, &t)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_loops(cx);
+                    }))
+            })
+            // Spacer
+            .child(div().flex_1().min_w(SPACE_SM))
+            // Status
+            .child(
+                div()
+                    .flex()
+                    .gap(SPACE_MD)
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(TEXT_SM)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(state_color))
+                            .child(state_label),
+                    ),
+            )
+    }
+
+    // ── Instance-level renderers (read from LoopInstance) ───────────────
+
+    fn render_instance_progress_bar(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let total = l.progress.total.max(1) as f32;
+        let ratio = l.progress.done as f32 / total;
         let pct = (ratio * 100.0) as usize;
 
         let bar_color = if ratio < 0.25 {
@@ -910,7 +1321,7 @@ impl KruhPane {
             .child(
                 div()
                     .text_size(TEXT_SM)
-                    .child(format!("{}/{}", self.progress.done, self.progress.total)),
+                    .child(format!("{}/{}", l.progress.done, l.progress.total)),
             )
             .child(
                 div()
@@ -929,66 +1340,137 @@ impl KruhPane {
             .child(div().text_size(TEXT_SM).child(format!("{}%", pct)))
     }
 
-    // ── Iteration Banner ────────────────────────────────────────────────
-
-    fn render_iteration_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_instance_iteration_banner(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let elapsed = self.start_time.map(|t| t.elapsed()).unwrap_or_default();
+        let elapsed = l.start_time.map(|t| t.elapsed()).unwrap_or_default();
         let mins = elapsed.as_secs() / 60;
         let secs = elapsed.as_secs() % 60;
+
+        let iter_elapsed = l.iteration_start_time.map(|t| t.elapsed()).unwrap_or_default();
+        let iter_mins = iter_elapsed.as_secs() / 60;
+        let iter_secs = iter_elapsed.as_secs() % 60;
 
         div()
             .px(SPACE_MD)
             .py(SPACE_XS)
             .flex()
-            .justify_between()
+            .flex_col()
+            .gap(px(2.0))
             .bg(rgb(t.bg_secondary))
             .child(
                 div()
-                    .text_size(TEXT_MD)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(format!(
-                        "Iteration {}/{}",
-                        self.iteration, self.config.max_iterations
-                    )),
+                    .flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(TEXT_MD)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!(
+                                "Iteration {}/{}",
+                                l.iteration, l.config.max_iterations
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_size(TEXT_MD)
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("{:02}:{:02}", mins, secs)),
+                    ),
+            )
+            .when_some(l.current_issue_name.clone(), |el, name| {
+                el.child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(rgb(t.text_muted))
+                                .child(format!("Working on: {}", name)),
+                        )
+                        .child(
+                            div()
+                                .text_size(TEXT_SM)
+                                .text_color(rgb(t.text_muted))
+                                .child(format!("({}:{:02})", iter_mins, iter_secs)),
+                        ),
+                )
+            })
+    }
+
+    fn render_instance_phase_indicator(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let phase = &l.loop_phase;
+        if *phase == LoopPhase::Idle {
+            return div();
+        }
+
+        let dot_color = match phase {
+            LoopPhase::AgentRunning => rgb(t.success),
+            LoopPhase::Sleeping(_) | LoopPhase::WaitingForExit => rgb(t.warning),
+            _ => rgb(t.term_blue),
+        };
+
+        div()
+            .px(SPACE_MD)
+            .py(px(3.0))
+            .flex()
+            .items_center()
+            .gap(SPACE_SM)
+            .child(
+                div()
+                    .size(px(6.0))
+                    .rounded(px(3.0))
+                    .bg(dot_color),
             )
             .child(
                 div()
-                    .text_size(TEXT_MD)
+                    .text_size(TEXT_SM)
                     .text_color(rgb(t.text_muted))
-                    .child(format!("{:02}:{:02}", mins, secs)),
+                    .child(phase.to_string()),
             )
     }
 
-    // ── Output Display ──────────────────────────────────────────────────
-
-    fn render_output(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_instance_output(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        div()
-            .id("kruh-output")
-            .flex_1()
-            .overflow_y_scroll()
-            .track_scroll(&self.output_scroll)
-            .px(SPACE_MD)
-            .py(SPACE_XS)
-            .children(self.output_lines.iter().map(|line| {
-                let text_color = if line.is_error {
-                    rgb(t.error)
-                } else {
-                    rgb(t.text_primary)
-                };
-                div()
-                    .text_size(TEXT_SM)
-                    .font_family("monospace")
-                    .text_color(text_color)
-                    .child(strip_ansi(&line.text))
-            }))
+        with_scrollbar(
+            "loop-output",
+            &l.output_scroll,
+            div()
+                .px(SPACE_MD)
+                .py(SPACE_XS)
+                .children(l.output_lines.iter().map(|line| {
+                    let is_iteration_marker = line.text.starts_with("--- Iteration ");
+
+                    if is_iteration_marker {
+                        div()
+                            .mt(SPACE_MD)
+                            .pt(SPACE_SM)
+                            .border_t_1()
+                            .border_color(rgb(t.border))
+                            .text_size(TEXT_SM)
+                            .font_family("monospace")
+                            .text_color(rgb(t.text_muted))
+                            .child(strip_ansi(&line.text))
+                    } else {
+                        let text_color = if line.is_error {
+                            rgb(t.error)
+                        } else {
+                            rgb(t.text_primary)
+                        };
+                        div()
+                            .text_size(TEXT_SM)
+                            .font_family("monospace")
+                            .text_color(text_color)
+                            .child(strip_ansi(&line.text))
+                    }
+                })),
+            &t,
+        )
     }
 
-    // ── Diff Display ────────────────────────────────────────────────────
-
-    fn render_diff(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_instance_diff(&self, l: &LoopInstance, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
         div()
@@ -996,7 +1478,7 @@ impl KruhPane {
             .py(SPACE_XS)
             .border_t_1()
             .border_color(rgb(t.border))
-            .when_some(self.diff_stat.as_ref(), |el, stat| {
+            .when_some(l.diff_stat.as_ref(), |el, stat| {
                 el.children(stat.lines().map(|line| {
                     let color = if line.contains('+') && !line.contains('-') {
                         rgb(t.diff_added_fg)
@@ -1014,178 +1496,6 @@ impl KruhPane {
             })
     }
 
-    // ── Controls ────────────────────────────────────────────────────────
-
-    fn render_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let is_paused = self.paused;
-        let is_step = self.step_mode;
-        let is_waiting = self.state == KruhState::WaitingForStep;
-        let is_completed = self.state == KruhState::Completed;
-
-        let state_label = match self.state {
-            KruhState::Running => "Running",
-            KruhState::Paused => "Paused",
-            KruhState::WaitingForStep => "Step",
-            KruhState::Completed => "Done",
-            _ => "",
-        };
-
-        let state_color = match self.state {
-            KruhState::Running => t.success,
-            KruhState::Paused => t.warning,
-            KruhState::WaitingForStep => t.warning,
-            KruhState::Completed => t.text_muted,
-            _ => t.text_muted,
-        };
-
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(SPACE_XS)
-            .px(SPACE_MD)
-            .py(SPACE_SM)
-            .border_t_1()
-            .border_color(rgb(t.border))
-            .bg(rgb(t.bg_secondary))
-            // Pause/Resume button
-            .when(!is_completed, |el| {
-                let (icon, label) = if is_paused {
-                    ("icons/play.svg", "Resume")
-                } else {
-                    ("icons/pause.svg", "Pause")
-                };
-                el.child(
-                    toolbar_button("ctrl-pause", icon, label, &t)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.paused = !this.paused;
-                            this.state = if this.paused {
-                                KruhState::Paused
-                            } else {
-                                KruhState::Running
-                            };
-                            cx.notify();
-                        })),
-                )
-            })
-            // Skip button
-            .when(!is_completed, |el| {
-                el.child(
-                    toolbar_button("ctrl-skip", "icons/skip-forward.svg", "Skip", &t)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.skip_requested = true;
-                            cx.notify();
-                        })),
-                )
-            })
-            // Step mode toggle
-            .when(!is_completed, |el| {
-                el.child(
-                    toolbar_button_toggle("ctrl-step", "icons/step-forward.svg", "Step", is_step, &t)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.step_mode = !this.step_mode;
-                            cx.notify();
-                        })),
-                )
-            })
-            // Continue button (when waiting for step)
-            .when(is_waiting, |el| {
-                el.child(
-                    toolbar_button_primary("ctrl-continue", "icons/play.svg", "Continue", &t)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.step_advance_requested = true;
-                            cx.notify();
-                        })),
-                )
-            })
-            // Separator before quit
-            .when(!is_completed, |el| {
-                el.child(toolbar_separator(&t))
-            })
-            // Quit button
-            .child(
-                toolbar_button("ctrl-quit", "icons/close.svg", if is_completed { "Close" } else { "Quit" }, &t)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.quit_requested = true;
-                        cx.notify();
-                    })),
-            )
-            // Spacer
-            .child(div().flex_1().min_w(SPACE_SM))
-            // Pass/Fail counters
-            .child(
-                div()
-                    .flex()
-                    .gap(SPACE_MD)
-                    .items_center()
-                    .child(
-                        div()
-                            .flex()
-                            .gap(SPACE_XS)
-                            .items_center()
-                            .child(
-                                svg()
-                                    .path("icons/check.svg")
-                                    .size(ICON_SM)
-                                    .text_color(rgb(t.success)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(TEXT_SM)
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("{}", self.pass_count)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(SPACE_XS)
-                            .items_center()
-                            .child(
-                                svg()
-                                    .path("icons/close.svg")
-                                    .size(ICON_SM)
-                                    .text_color(rgb(t.error)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(TEXT_SM)
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("{}", self.fail_count)),
-                            ),
-                    )
-                    // State label
-                    .child(
-                        div()
-                            .text_size(TEXT_SM)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(state_color))
-                            .child(state_label),
-                    ),
-            )
-    }
-
-    // ── Running View ────────────────────────────────────────────────────
-
-    fn render_running_view(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(self.render_progress_bar(cx))
-            .child(self.render_iteration_banner(cx))
-            .child(self.render_output(cx))
-            .when(self.diff_stat.is_some(), |el| {
-                el.child(self.render_diff(cx))
-            })
-            .child(self.render_controls(cx))
-    }
 
     // ── Keyboard Handler ────────────────────────────────────────────────
 
@@ -1198,7 +1508,78 @@ impl KruhPane {
         let key = event.keystroke.key.as_str();
 
         match self.state {
+            KruhState::LoopOverview => match key {
+                "left" | "tab" if event.keystroke.modifiers.shift => {
+                    if !self.active_loops.is_empty() {
+                        if self.focused_loop_index > 0 {
+                            self.focused_loop_index -= 1;
+                        } else {
+                            self.focused_loop_index = self.active_loops.len() - 1;
+                        }
+                        cx.notify();
+                    }
+                }
+                "right" | "tab" => {
+                    if !self.active_loops.is_empty() {
+                        self.focused_loop_index = (self.focused_loop_index + 1) % self.active_loops.len();
+                        cx.notify();
+                    }
+                }
+                "p" => {
+                    if let Some(l) = self.active_loops.get_mut(self.focused_loop_index) {
+                        l.paused = !l.paused;
+                        l.state = if l.paused {
+                            LoopState::Paused
+                        } else {
+                            LoopState::Running
+                        };
+                    }
+                    cx.notify();
+                }
+                "s" => {
+                    if let Some(l) = self.active_loops.get_mut(self.focused_loop_index) {
+                        l.skip_requested = true;
+                    }
+                    cx.notify();
+                }
+                "q" => {
+                    if event.keystroke.modifiers.shift {
+                        // Shift+Q: quit all
+                        self.close_loops(cx);
+                    } else {
+                        // q: quit focused loop
+                        if let Some(l) = self.active_loops.get_mut(self.focused_loop_index) {
+                            l.quit_requested = true;
+                        }
+                        cx.notify();
+                    }
+                }
+                "t" => {
+                    if let Some(l) = self.active_loops.get_mut(self.focused_loop_index) {
+                        l.step_mode = !l.step_mode;
+                    }
+                    cx.notify();
+                }
+                "enter" => {
+                    if let Some(l) = self.active_loops.get_mut(self.focused_loop_index) {
+                        if l.state == LoopState::WaitingForStep {
+                            l.step_advance_requested = true;
+                        }
+                    }
+                    cx.notify();
+                }
+                "escape" => {
+                    if self.all_loops_completed() {
+                        self.close_loops(cx);
+                    }
+                }
+                _ => {}
+            },
+
             KruhState::PlanPicker => match key {
+                "a" => {
+                    self.start_all_loops(window, cx);
+                }
                 "up" => {
                     if self.selected_plan_index > 0 {
                         self.selected_plan_index -= 1;
@@ -1291,38 +1672,6 @@ impl KruhPane {
                         } else {
                             self.state = KruhState::PlanPicker;
                         }
-                        cx.notify();
-                    }
-                }
-                _ => {}
-            },
-
-            KruhState::Running | KruhState::Paused | KruhState::WaitingForStep
-            | KruhState::Completed => match key {
-                "p" => {
-                    self.paused = !self.paused;
-                    self.state = if self.paused {
-                        KruhState::Paused
-                    } else {
-                        KruhState::Running
-                    };
-                    cx.notify();
-                }
-                "s" => {
-                    self.skip_requested = true;
-                    cx.notify();
-                }
-                "q" => {
-                    self.quit_requested = true;
-                    cx.notify();
-                }
-                "t" => {
-                    self.step_mode = !self.step_mode;
-                    cx.notify();
-                }
-                "enter" => {
-                    if self.state == KruhState::WaitingForStep {
-                        self.step_advance_requested = true;
                         cx.notify();
                     }
                 }
@@ -1542,6 +1891,80 @@ fn settings_toggle_switch(id: impl Into<SharedString>, enabled: bool, t: &ThemeC
                 .bg(rgb(t.text_primary))
                 .ml(if enabled { px(20.0) } else { px(2.0) }),
         )
+}
+
+// ── Scrollbar Helpers ────────────────────────────────────────────────
+
+/// Wrap a scroll view with a thin scrollbar thumb overlay.
+/// Returns a flex_1 div containing the scroll container (absolute, fills parent)
+/// and a canvas-painted scrollbar thumb.
+fn with_scrollbar(
+    scroll_id: &str,
+    scroll: &ScrollHandle,
+    content: impl IntoElement,
+    t: &ThemeColors,
+) -> Div {
+    div()
+        .flex_1()
+        .min_h_0()
+        .relative()
+        .child(
+            div()
+                .id(SharedString::from(scroll_id.to_string()))
+                .absolute()
+                .inset_0()
+                .overflow_y_scroll()
+                .track_scroll(scroll)
+                .child(content),
+        )
+        .child(scrollbar_thumb(scroll, t))
+}
+
+/// Render a thin scrollbar thumb overlay using canvas painting.
+/// Absolute-positioned; place inside a `relative()` container.
+fn scrollbar_thumb(scroll: &ScrollHandle, t: &ThemeColors) -> impl IntoElement {
+    let scroll = scroll.clone();
+    let color = rgb(t.scrollbar);
+
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _cx| {
+            let max_y = f32::from(scroll.max_offset().height);
+            if max_y < 1.0 {
+                return;
+            }
+            let vh = f32::from(bounds.size.height);
+            if vh < 1.0 {
+                return;
+            }
+            let oy = -f32::from(scroll.offset().y);
+            let ch = vh + max_y;
+
+            let th = (vh / ch * vh).max(24.0);
+            let st = vh - th;
+            let ratio = (oy / max_y).clamp(0.0, 1.0);
+            let ty = ratio * st;
+
+            window.paint_quad(
+                fill(
+                    Bounds {
+                        origin: point(
+                            bounds.origin.x + bounds.size.width - px(5.0),
+                            bounds.origin.y + px(ty),
+                        ),
+                        size: size(px(3.0), px(th)),
+                    },
+                    color,
+                )
+                .corner_radii(px(1.5)),
+            );
+        },
+    )
+    .absolute()
+    .top_0()
+    .bottom_0()
+    .right_0()
+    .w(px(8.0))
 }
 
 /// Remove ANSI escape sequences from a string.
