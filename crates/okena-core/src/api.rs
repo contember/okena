@@ -62,6 +62,9 @@ pub struct ApiServiceInfo {
     /// Service kind: "okena" or "docker_compose"
     #[serde(default = "default_service_kind")]
     pub kind: String,
+    /// Docker service not listed in okena.yaml filter
+    #[serde(default)]
+    pub is_extra: bool,
 }
 
 fn default_service_kind() -> String {

@@ -34,6 +34,8 @@ struct ServiceSnapshot {
     terminal_id: Option<String>,
     ports: Vec<u16>,
     is_docker: bool,
+    /// Docker service not listed in okena.yaml — shown in "Other" section.
+    is_extra: bool,
 }
 
 /// A single project column with header and layout
@@ -284,6 +286,7 @@ impl ProjectColumn {
                     terminal_id: inst.terminal_id.clone(),
                     ports: inst.detected_ports.clone(),
                     is_docker: matches!(inst.kind, crate::services::manager::ServiceKind::DockerCompose { .. }),
+                    is_extra: inst.is_extra,
                 }).collect();
             }
         }
@@ -296,6 +299,7 @@ impl ProjectColumn {
                 terminal_id: api_svc.terminal_id.clone(),
                 ports: api_svc.ports.clone(),
                 is_docker: api_svc.kind == "docker_compose",
+                is_extra: api_svc.is_extra,
             }).collect())
             .unwrap_or_default()
     }
@@ -1134,9 +1138,9 @@ impl ProjectColumn {
                                         this.show_overview(cx);
                                     }))
                             )
-                            // Service tabs (no port badges)
+                            // Service tabs (exclude extra Docker services unless active)
                             .children(
-                                services.iter().map(|svc| {
+                                services.iter().filter(|svc| !svc.is_extra || active_name.as_deref() == Some(&svc.name)).map(|svc| {
                                     let name = svc.name.clone();
                                     let is_active = active_name.as_deref() == Some(&name);
                                     let status_color = match &svc.status {
@@ -1553,251 +1557,309 @@ impl ProjectColumn {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(
-                        services.iter().enumerate().map(|(idx, svc)| {
-                            let name = svc.name.clone();
-                            let status = svc.status.clone();
-                            let is_docker = svc.is_docker;
-                            let ports = svc.ports.clone();
-                            let remote_host = remote_host.clone();
+                    .children({
+                        let has_extras = services.iter().any(|s| s.is_extra);
+                        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                        let mut separator_added = false;
 
-                            let is_running = matches!(status, ServiceStatus::Running);
-                            let is_starting = matches!(status, ServiceStatus::Starting | ServiceStatus::Restarting);
+                        for (idx, svc) in services.iter().enumerate() {
+                            // Insert separator before the first extra service
+                            if has_extras && svc.is_extra && !separator_added {
+                                separator_added = true;
+                                rows.push(
+                                    div()
+                                        .id("svc-overview-extra-separator")
+                                        .h(px(24.0))
+                                        .px(px(12.0))
+                                        .mt(px(4.0))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .h(px(1.0))
+                                                .bg(rgb(t.border))
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_size(px(9.0))
+                                                .text_color(rgb(t.text_muted))
+                                                .child("OTHER DOCKER SERVICES")
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .h(px(1.0))
+                                                .bg(rgb(t.border))
+                                        )
+                                        .into_any_element(),
+                                );
+                            }
 
-                            let status_color = match &status {
-                                ServiceStatus::Running => t.term_green,
-                                ServiceStatus::Crashed { .. } => t.term_red,
-                                ServiceStatus::Stopped => t.text_muted,
-                                ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
-                            };
+                            rows.push(self.render_overview_row(idx, svc, has_docker, has_ports, remote_host.as_deref(), &t, cx));
+                        }
+                        rows
+                    }),
+            )
+    }
 
-                            let status_label = match &status {
-                                ServiceStatus::Running => "running",
-                                ServiceStatus::Crashed { exit_code } => {
-                                    if exit_code.is_some() { "exited" } else { "crashed" }
+    /// Render a single service row in the overview table.
+    fn render_overview_row(
+        &self,
+        idx: usize,
+        svc: &ServiceSnapshot,
+        has_docker: bool,
+        has_ports: bool,
+        remote_host: Option<&str>,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let name = svc.name.clone();
+        let status = svc.status.clone();
+        let is_docker = svc.is_docker;
+        let is_extra = svc.is_extra;
+        let ports = svc.ports.clone();
+        let remote_host = remote_host.map(|s| s.to_string());
+
+        let is_running = matches!(status, ServiceStatus::Running);
+        let is_starting = matches!(status, ServiceStatus::Starting | ServiceStatus::Restarting);
+
+        let status_color = match &status {
+            ServiceStatus::Running => t.term_green,
+            ServiceStatus::Crashed { .. } => t.term_red,
+            ServiceStatus::Stopped => t.text_muted,
+            ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
+        };
+
+        let status_label = match &status {
+            ServiceStatus::Running => "running",
+            ServiceStatus::Crashed { exit_code } => {
+                if exit_code.is_some() { "exited" } else { "crashed" }
+            }
+            ServiceStatus::Stopped => "stopped",
+            ServiceStatus::Starting => "starting",
+            ServiceStatus::Restarting => "restarting",
+        };
+
+        let project_id = self.project_id.clone();
+        let name_color = if is_extra { t.text_muted } else { t.text_primary };
+
+        div()
+            .id(ElementId::Name(format!("svc-overview-{}", idx).into()))
+            .group(SharedString::from(format!("svc-row-{}", idx)))
+            .h(px(32.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .when(is_extra, |d| d.opacity(0.55))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            // Status dot
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded(px(3.5))
+                    .bg(rgb(status_color)),
+            )
+            // Service name (clickable)
+            .child(
+                div()
+                    .id(ElementId::Name(format!("svc-overview-name-{}", idx).into()))
+                    .cursor_pointer()
+                    .flex_1()
+                    .min_w(px(80.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(name_color))
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .hover(|s| s.text_color(rgb(t.border_active)))
+                    .child(name.clone())
+                    .on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, _window, cx| {
+                            this.show_service(&name, cx);
+                        }
+                    })),
+            )
+            // Status text
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(70.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(status_color))
+                    .child(status_label),
+            )
+            // Type column
+            .when(has_docker, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(56.0))
+                        .when(is_docker, |d| {
+                            d.child(
+                                div()
+                                    .px(px(3.0))
+                                    .h(px(14.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(2.0))
+                                    .bg(rgb(t.bg_secondary))
+                                    .text_size(px(9.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .child("docker"),
+                            )
+                        })
+                )
+            })
+            // Ports column
+            .when(has_ports, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(100.0))
+                        .flex()
+                        .gap(px(4.0))
+                        .overflow_hidden()
+                        .children(
+                            ports.iter().map({
+                                let name = name.clone();
+                                let project_id = project_id.clone();
+                                let remote_host = remote_host.clone();
+                                move |port| {
+                                    let port = *port;
+                                    let host = remote_host.as_deref().unwrap_or("localhost");
+                                    let url = format!("http://{}:{}", host, port);
+                                    let tooltip_url = url.clone();
+                                    div()
+                                        .id(ElementId::Name(format!("svc-overview-port-{}-{}-{}", project_id, name, port).into()))
+                                        .flex_shrink_0()
+                                        .cursor_pointer()
+                                        .px(px(4.0))
+                                        .h(px(16.0))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(3.0))
+                                        .bg(rgb(t.bg_secondary))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)).underline())
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!(":{}", port))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        .on_click(move |_, _, _cx| {
+                                            crate::process::open_url(&url);
+                                        })
+                                        .tooltip(move |_window, cx| {
+                                            Tooltip::new(tooltip_url.clone()).build(_window, cx)
+                                        })
                                 }
-                                ServiceStatus::Stopped => "stopped",
-                                ServiceStatus::Starting => "starting",
-                                ServiceStatus::Restarting => "restarting",
-                            };
-
-                            let project_id = self.project_id.clone();
-
+                            })
+                        ),
+                )
+            })
+            // Action buttons (show on hover)
+            .child({
+                let group_name = SharedString::from(format!("svc-row-{}", idx));
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .w(px(52.0))
+                    .justify_end()
+                    .gap(px(2.0))
+                    .opacity(0.0)
+                    .group_hover(group_name, |s| s.opacity(1.0))
+                    .when(!is_running && !is_starting, |d| {
+                        d.child(
                             div()
-                                .id(ElementId::Name(format!("svc-overview-{}", idx).into()))
-                                .group(SharedString::from(format!("svc-row-{}", idx)))
-                                .h(px(32.0))
-                                .px(px(12.0))
+                                .id(ElementId::Name(format!("svc-overview-play-{}", idx).into()))
+                                .cursor_pointer()
+                                .w(px(22.0))
+                                .h(px(22.0))
                                 .flex()
                                 .items_center()
-                                .gap(px(8.0))
+                                .justify_center()
+                                .rounded(px(3.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                                // Status dot
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(7.0))
-                                        .h(px(7.0))
-                                        .rounded(px(3.5))
-                                        .bg(rgb(status_color)),
-                                )
-                                // Service name (clickable)
-                                .child(
-                                    div()
-                                        .id(ElementId::Name(format!("svc-overview-name-{}", idx).into()))
-                                        .cursor_pointer()
-                                        .flex_1()
-                                        .min_w(px(80.0))
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_primary))
-                                        .text_ellipsis()
-                                        .overflow_hidden()
-                                        .hover(|s| s.text_color(rgb(t.border_active)))
-                                        .child(name.clone())
-                                        .on_click(cx.listener({
-                                            let name = name.clone();
-                                            move |this, _, _window, cx| {
-                                                this.show_service(&name, cx);
-                                            }
-                                        })),
-                                )
-                                // Status text
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .w(px(70.0))
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(status_color))
-                                        .child(status_label),
-                                )
-                                // Type column
-                                .when(has_docker, |d| {
-                                    d.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .w(px(56.0))
-                                            .when(is_docker, |d| {
-                                                d.child(
-                                                    div()
-                                                        .px(px(3.0))
-                                                        .h(px(14.0))
-                                                        .flex()
-                                                        .items_center()
-                                                        .rounded(px(2.0))
-                                                        .bg(rgb(t.bg_secondary))
-                                                        .text_size(px(9.0))
-                                                        .text_color(rgb(t.text_muted))
-                                                        .child("docker"),
-                                                )
-                                            })
-                                    )
-                                })
-                                // Ports column
-                                .when(has_ports, |d| {
-                                    d.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .w(px(100.0))
-                                            .flex()
-                                            .gap(px(4.0))
-                                            .overflow_hidden()
-                                            .children(
-                                                ports.iter().map({
-                                                    let name = name.clone();
-                                                    let project_id = project_id.clone();
-                                                    let remote_host = remote_host.clone();
-                                                    move |port| {
-                                                        let port = *port;
-                                                        let host = remote_host.as_deref().unwrap_or("localhost");
-                                                        let url = format!("http://{}:{}", host, port);
-                                                        let tooltip_url = url.clone();
-                                                        div()
-                                                            .id(ElementId::Name(format!("svc-overview-port-{}-{}-{}", project_id, name, port).into()))
-                                                            .flex_shrink_0()
-                                                            .cursor_pointer()
-                                                            .px(px(4.0))
-                                                            .h(px(16.0))
-                                                            .flex()
-                                                            .items_center()
-                                                            .rounded(px(3.0))
-                                                            .bg(rgb(t.bg_secondary))
-                                                            .hover(|s| s.bg(rgb(t.bg_hover)).underline())
-                                                            .text_size(px(10.0))
-                                                            .text_color(rgb(t.text_muted))
-                                                            .child(format!(":{}", port))
-                                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                            .on_click(move |_, _, _cx| {
-                                                                crate::process::open_url(&url);
-                                                            })
-                                                            .tooltip(move |_window, cx| {
-                                                                Tooltip::new(tooltip_url.clone()).build(_window, cx)
-                                                            })
-                                                    }
-                                                })
-                                            ),
-                                    )
-                                })
-                                // Action buttons (show on hover)
-                                .child({
-                                    let group_name = SharedString::from(format!("svc-row-{}", idx));
-                                    div()
-                                        .flex()
-                                        .flex_shrink_0()
-                                        .w(px(52.0))
-                                        .justify_end()
-                                        .gap(px(2.0))
-                                        .opacity(0.0)
-                                        .group_hover(group_name, |s| s.opacity(1.0))
-                                        .when(!is_running && !is_starting, |d| {
-                                            d.child(
-                                                div()
-                                                    .id(ElementId::Name(format!("svc-overview-play-{}", idx).into()))
-                                                    .cursor_pointer()
-                                                    .w(px(22.0))
-                                                    .h(px(22.0))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded(px(3.0))
-                                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    .text_size(px(10.0))
-                                                    .text_color(rgb(t.term_green))
-                                                    .child("▶")
-                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                    .on_click(cx.listener({
-                                                        let name = name.clone();
-                                                        move |this, _, _window, cx| {
-                                                            cx.stop_propagation();
-                                                            this.dispatch_service_action(ActionRequest::StartService {
-                                                                project_id: this.project_id.clone(),
-                                                                service_name: name.clone(),
-                                                            }, cx);
-                                                        }
-                                                    }))
-                                                    .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
-                                            )
-                                        })
-                                        .when(is_running, |d| {
-                                            d
-                                                .child(
-                                                    div()
-                                                        .id(ElementId::Name(format!("svc-overview-restart-{}", idx).into()))
-                                                        .cursor_pointer()
-                                                        .w(px(22.0))
-                                                        .h(px(22.0))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .rounded(px(3.0))
-                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                        .text_size(px(10.0))
-                                                        .text_color(rgb(t.text_secondary))
-                                                        .child("⟳")
-                                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                        .on_click(cx.listener({
-                                                            let name = name.clone();
-                                                            move |this, _, _window, cx| {
-                                                                cx.stop_propagation();
-                                                                this.dispatch_service_action(ActionRequest::RestartService {
-                                                                    project_id: this.project_id.clone(),
-                                                                    service_name: name.clone(),
-                                                                }, cx);
-                                                            }
-                                                        }))
-                                                        .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id(ElementId::Name(format!("svc-overview-stop-{}", idx).into()))
-                                                        .cursor_pointer()
-                                                        .w(px(22.0))
-                                                        .h(px(22.0))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .rounded(px(3.0))
-                                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                        .text_size(px(10.0))
-                                                        .text_color(rgb(t.term_red))
-                                                        .child("■")
-                                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                        .on_click(cx.listener({
-                                                            let name = name.clone();
-                                                            move |this, _, _window, cx| {
-                                                                cx.stop_propagation();
-                                                                this.dispatch_service_action(ActionRequest::StopService {
-                                                                    project_id: this.project_id.clone(),
-                                                                    service_name: name.clone(),
-                                                                }, cx);
-                                                            }
-                                                        }))
-                                                        .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
-                                                )
-                                        })
-                                })
-                        })
-                    ),
-            )
+                                .text_size(px(10.0))
+                                .text_color(rgb(t.term_green))
+                                .child("▶")
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener({
+                                    let name = name.clone();
+                                    move |this, _, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.dispatch_service_action(ActionRequest::StartService {
+                                            project_id: this.project_id.clone(),
+                                            service_name: name.clone(),
+                                        }, cx);
+                                    }
+                                }))
+                                .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
+                        )
+                    })
+                    .when(is_running, |d| {
+                        d
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("svc-overview-restart-{}", idx).into()))
+                                    .cursor_pointer()
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child("⟳")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        move |this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.dispatch_service_action(ActionRequest::RestartService {
+                                                project_id: this.project_id.clone(),
+                                                service_name: name.clone(),
+                                            }, cx);
+                                        }
+                                    }))
+                                    .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
+                            )
+                            .child(
+                                div()
+                                    .id(ElementId::Name(format!("svc-overview-stop-{}", idx).into()))
+                                    .cursor_pointer()
+                                    .w(px(22.0))
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.term_red))
+                                    .child("■")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .on_click(cx.listener({
+                                        let name = name.clone();
+                                        move |this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.dispatch_service_action(ActionRequest::StopService {
+                                                project_id: this.project_id.clone(),
+                                                service_name: name.clone(),
+                                            }, cx);
+                                        }
+                                    }))
+                                    .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
+                            )
+                    })
+            })
+            .into_any_element()
     }
 
     /// Render the service indicator button for the project header.

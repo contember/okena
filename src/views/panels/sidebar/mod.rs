@@ -1143,6 +1143,7 @@ impl Render for Sidebar {
                 .map(|p| {
                     let services = sm.services_for_project(&p.id)
                         .into_iter()
+                        .filter(|inst| !inst.is_extra)
                         .map(|inst| SidebarServiceInfo {
                             name: inst.definition.name.clone(),
                             status: inst.status.clone(),
@@ -1162,15 +1163,17 @@ impl Render for Sidebar {
         for project in &workspace.data().projects {
             if !project.remote_services.is_empty() && !project_services.contains_key(&project.id) {
                 let port_host = project.remote_host.clone().unwrap_or_else(|| "localhost".to_string());
-                let services = project.remote_services.iter().map(|api_svc| {
-                    SidebarServiceInfo {
-                        name: api_svc.name.clone(),
-                        status: crate::services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
-                        ports: api_svc.ports.clone(),
-                        port_host: port_host.clone(),
-                        is_docker: api_svc.kind == "docker_compose",
-                    }
-                }).collect();
+                let services = project.remote_services.iter()
+                    .filter(|api_svc| !api_svc.is_extra)
+                    .map(|api_svc| {
+                        SidebarServiceInfo {
+                            name: api_svc.name.clone(),
+                            status: crate::services::manager::ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
+                            ports: api_svc.ports.clone(),
+                            port_host: port_host.clone(),
+                            is_docker: api_svc.kind == "docker_compose",
+                        }
+                    }).collect();
                 project_services.insert(project.id.clone(), services);
             }
         }

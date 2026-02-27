@@ -37,6 +37,8 @@ pub struct ServiceInstance {
     pub terminal_id: Option<String>,
     pub restart_count: u32,
     pub detected_ports: Vec<u16>,
+    /// Docker service not listed in okena.yaml filter — shown in "Other" section.
+    pub is_extra: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,6 +124,7 @@ impl ServiceManager {
                     terminal_id: None,
                     restart_count: 0,
                     detected_ports: Vec::new(),
+                    is_extra: false,
                 },
             );
         }
@@ -330,6 +333,7 @@ impl ServiceManager {
                         terminal_id: None,
                         restart_count: 0,
                         detected_ports: Vec::new(),
+                        is_extra: false,
                     },
                 );
             }
@@ -735,7 +739,7 @@ impl ServiceManager {
             }
         }
 
-        // Docker services (sorted by name for stable order)
+        // Docker services (sorted by name, non-extra before extra)
         let mut docker: Vec<&ServiceInstance> = self.instances.iter()
             .filter(|((pid, name), inst)| {
                 pid == project_id
@@ -744,7 +748,10 @@ impl ServiceManager {
             })
             .map(|(_, inst)| inst)
             .collect();
-        docker.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
+        docker.sort_by(|a, b| {
+            a.is_extra.cmp(&b.is_extra)
+                .then_with(|| a.definition.name.cmp(&b.definition.name))
+        });
         result.extend(docker);
 
         result
@@ -888,17 +895,13 @@ impl ServiceManager {
             }
         };
 
-        // Filter if configured
+        // Determine which services are explicitly listed in the okena.yaml filter
         let filter: Option<&Vec<String>> = docker_config
             .map(|dc| &dc.services)
             .filter(|s| !s.is_empty());
 
         for name in &service_names {
-            if let Some(filter) = filter {
-                if !filter.contains(name) {
-                    continue;
-                }
-            }
+            let is_extra = filter.is_some_and(|f| !f.contains(name));
 
             let key = (project_id.to_string(), name.clone());
             if !self.instances.contains_key(&key) {
@@ -919,6 +922,7 @@ impl ServiceManager {
                         terminal_id: None,
                         restart_count: 0,
                         detected_ports: Vec::new(),
+                        is_extra,
                     },
                 );
             }
@@ -1162,6 +1166,7 @@ mod tests {
                 terminal_id: Some(format!("term-{}", name)),
                 restart_count,
                 detected_ports: Vec::new(),
+                is_extra: false,
             },
         )
     }
@@ -1323,6 +1328,7 @@ mod tests {
                 terminal_id: Some(format!("term-{}", name)),
                 restart_count: 0,
                 detected_ports: Vec::new(),
+                is_extra: false,
             },
         )
     }

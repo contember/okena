@@ -147,6 +147,7 @@ impl Okena {
                                             ports: inst.detected_ports.clone(),
                                             exit_code,
                                             kind: kind.to_string(),
+                                            is_extra: inst.is_extra,
                                         }
                                     })
                                     .collect();
