@@ -1,3 +1,7 @@
+---
+model: claude-sonnet-4-6
+---
+
 # Issue 06: Verify build and run all tests
 
 **Priority:** medium
