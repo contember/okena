@@ -36,6 +36,38 @@ pub struct WorkspaceData {
     pub service_panel_heights: HashMap<String, f32>,
 }
 
+impl WorkspaceData {
+    /// Return a copy with all remote projects, remote folders, and their
+    /// associated widths/heights stripped out (for saving to disk).
+    pub fn without_remote_projects(&self) -> Self {
+        let remote_ids: std::collections::HashSet<&str> = self.projects.iter()
+            .filter(|p| p.is_remote)
+            .map(|p| p.id.as_str())
+            .collect();
+
+        if remote_ids.is_empty() {
+            return self.clone();
+        }
+
+        Self {
+            version: self.version,
+            projects: self.projects.iter().filter(|p| !p.is_remote).cloned().collect(),
+            project_order: self.project_order.iter()
+                .filter(|id| !id.starts_with("remote-folder:") && !remote_ids.contains(id.as_str()))
+                .cloned().collect(),
+            project_widths: self.project_widths.iter()
+                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
+                .map(|(k, v)| (k.clone(), *v)).collect(),
+            service_panel_heights: self.service_panel_heights.iter()
+                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
+                .map(|(k, v)| (k.clone(), *v)).collect(),
+            folders: self.folders.iter()
+                .filter(|f| !f.id.starts_with("remote-folder:"))
+                .cloned().collect(),
+        }
+    }
+}
+
 /// Metadata for worktree projects
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorktreeMetadata {

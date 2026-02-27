@@ -5,6 +5,11 @@ use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// When true, the workspace was loaded from a fallback default (load failed).
+/// Auto-save MUST NOT overwrite the real workspace.json in this state.
+static LOADED_FROM_DEFAULT: AtomicBool = AtomicBool::new(false);
 
 // Re-export from settings module for backward compatibility
 #[allow(unused_imports)]
@@ -33,14 +38,75 @@ pub fn get_config_dir() -> PathBuf {
         .join("okena")
 }
 
+/// Alias for `get_config_dir` (used by remote/auth, remote/server, session manager UI)
+pub fn config_dir() -> PathBuf {
+    get_config_dir()
+}
+
 /// Get the workspace file path
 pub fn get_workspace_path() -> PathBuf {
     get_config_dir().join("workspace.json")
 }
 
-/// Get the config directory path (public for UI display)
-pub fn config_dir() -> PathBuf {
-    get_config_dir()
+/// Acquire a lock file to prevent multiple instances from running simultaneously.
+/// Returns a held `LockGuard` that releases the lock on drop.
+/// If another instance is already running, returns an error with its PID.
+pub fn acquire_instance_lock() -> Result<LockGuard> {
+    let lock_path = get_config_dir().join("okena.lock");
+
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Check if a lock file already exists with a live process
+    if lock_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                if is_process_alive(pid) {
+                    anyhow::bail!(
+                        "Another Okena instance is already running (PID {pid}). \
+                         If this is incorrect, delete {lock_path:?} and try again."
+                    );
+                }
+                // Stale lock file from a crashed process — safe to take over
+                log::info!("Removing stale lock file from PID {pid}");
+            }
+        }
+    }
+
+    let my_pid = std::process::id();
+    std::fs::write(&lock_path, my_pid.to_string())?;
+
+    Ok(LockGuard { path: lock_path })
+}
+
+/// Guard that removes the lock file on drop
+pub struct LockGuard {
+    path: PathBuf,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Check whether a process with the given PID is still alive
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // kill(pid, 0) checks existence without sending a signal
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, try tasklist to check if PID exists
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
 }
 
 /// Validate and fix workspace data consistency.
@@ -102,11 +168,20 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
 
 /// Load workspace from disk.
 /// If the file is corrupted, backs it up as `workspace.json.bak` and returns an error.
+/// On error, the caller should fall back to `default_workspace()` — auto-save is
+/// automatically blocked to prevent overwriting valid data on disk.
 pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                // I/O error reading the file — block auto-save to protect the file on disk
+                LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
+                return Err(e.into());
+            }
+        };
         let mut data: WorkspaceData = match serde_json::from_str(&content) {
             Ok(data) => data,
             Err(e) => {
@@ -117,6 +192,8 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
                 } else {
                     log::error!("Workspace file is corrupted, backed up to {:?}", backup_path);
                 }
+                // Block auto-save so the default workspace doesn't overwrite the real file
+                LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
                 return Err(e.into());
             }
         };
@@ -127,6 +204,8 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids);
 
+        // Successful load — allow saving
+        LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
         Ok(data)
     } else {
         // Config dir exists but workspace.json doesn't — possible data loss
@@ -140,81 +219,25 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     }
 }
 
-/// Save workspace to disk using atomic write (write to temp file + rename)
-/// to prevent data loss if the app crashes mid-write.
-/// Remote projects are excluded from persistence (they're materialized from remote state).
+/// Save workspace to disk using atomic write (write to temp file + rename).
+/// Remote projects are excluded. Refuses to save after a load failure.
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
-    let path = get_workspace_path();
+    if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
+        log::warn!("Skipping workspace save — loaded from fallback default, protecting file on disk.");
+        return Ok(());
+    }
 
+    let path = get_workspace_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Filter out remote projects before saving
-    let remote_project_ids: std::collections::HashSet<&str> = data.projects.iter()
-        .filter(|p| p.is_remote)
-        .map(|p| p.id.as_str())
-        .collect();
+    let local_data = data.without_remote_projects();
+    let json = serde_json::to_string_pretty(&local_data)?;
 
-    let filtered = if remote_project_ids.is_empty() {
-        // Fast path: no remote projects, save as-is
-        serde_json::to_string_pretty(data)?
-    } else {
-        let filtered_data = WorkspaceData {
-            version: data.version,
-            projects: data.projects.iter()
-                .filter(|p| !p.is_remote)
-                .cloned()
-                .collect(),
-            project_order: data.project_order.iter()
-                .filter(|id| !id.starts_with("remote-folder:") && !remote_project_ids.contains(id.as_str()))
-                .cloned()
-                .collect(),
-            project_widths: data.project_widths.iter()
-                .filter(|(id, _)| !remote_project_ids.contains(id.as_str()))
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            service_panel_heights: data.service_panel_heights.iter()
-                .filter(|(id, _)| !remote_project_ids.contains(id.as_str()))
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            folders: data.folders.iter()
-                .filter(|f| !f.id.starts_with("remote-folder:"))
-                .cloned()
-                .collect(),
-        };
-        serde_json::to_string_pretty(&filtered_data)?
-    };
-
-    // Safety backup: if the existing file has more projects than what we're about
-    // to save, create a .bak copy first. This protects against accidental data loss
-    // if a bad load caused us to start with a near-empty workspace.
-    let new_local_project_count = data.projects.iter().filter(|p| !p.is_remote).count();
-    if path.exists() && new_local_project_count <= 1 {
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            if let Ok(existing_data) = serde_json::from_str::<WorkspaceData>(&existing) {
-                if existing_data.projects.len() > new_local_project_count {
-                    let backup_path = path.with_extension("json.bak");
-                    log::warn!(
-                        "Saving workspace with {} project(s) over existing file with {} project(s). \
-                         Creating safety backup at {:?}.",
-                        new_local_project_count,
-                        existing_data.projects.len(),
-                        backup_path,
-                    );
-                    if let Err(e) = std::fs::copy(&path, &backup_path) {
-                        log::error!("Failed to create safety backup: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Atomic write: write to a temp file first, fsync, then rename over the target.
-    // This ensures the file is either fully old or fully new, never partial.
+    // Atomic write: tmp + fsync + rename ensures the file is never partial.
     let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &filtered)?;
-    // fsync to ensure data is durable on disk before rename
+    std::fs::write(&tmp_path, &json)?;
     std::fs::File::open(&tmp_path)?.sync_all()?;
     std::fs::rename(&tmp_path, &path)?;
 

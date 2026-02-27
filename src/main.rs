@@ -330,6 +330,16 @@ fn main() {
     let has_display = std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
     let headless = explicit_headless || (cfg!(target_os = "linux") && listen_addr.is_some() && !has_display);
 
+    // Acquire instance lock to prevent multiple Okena processes from
+    // clobbering each other's workspace.json.
+    let _instance_lock = match persistence::acquire_instance_lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
     if headless {
         if listen_addr.is_none() {
             eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
@@ -376,8 +386,13 @@ fn main() {
             log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
             let backup_path = persistence::get_workspace_path().with_extension("json.bak");
             ToastManager::post(
-                Toast::warning(format!("Workspace file was corrupted. A backup was saved to {}. Starting with default workspace.", backup_path.display()))
-                    .with_ttl(std::time::Duration::from_secs(15)),
+                Toast::error(format!(
+                    "Workspace file was corrupted. A backup was saved to {}. \
+                     Starting with default workspace. Auto-save is disabled to protect your data — \
+                     restart the app after fixing the file.",
+                    backup_path.display()
+                ))
+                    .with_ttl(std::time::Duration::from_secs(30)),
                 cx,
             );
             persistence::default_workspace()
