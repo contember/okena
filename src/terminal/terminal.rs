@@ -145,6 +145,9 @@ pub struct DetectedLink {
     pub file_line: Option<u32>,
     pub file_col: Option<u32>,
     pub is_url: bool,
+    /// Segments of the same wrapped URL share the same wrap_group.
+    /// Different occurrences of the same URL get different wrap_groups.
+    pub wrap_group: usize,
 }
 
 /// Trim trailing punctuation from a URL/path, handling balanced parentheses.
@@ -825,6 +828,7 @@ impl Terminal {
         };
 
         let mut matches = Vec::new();
+        let mut next_wrap_group = 0usize;
 
         self.with_content(|term| {
             let grid = term.grid();
@@ -909,6 +913,11 @@ impl Terminal {
                         continue;
                     }
 
+                    // Each regex match gets a unique wrap_group.
+                    // Segments of a wrapped URL (same match, multiple rows) share it.
+                    let wrap_group = next_wrap_group;
+                    next_wrap_group += 1;
+
                     let match_start = mat.start();
                     let trimmed_end = match_start + trimmed.len();
 
@@ -950,6 +959,7 @@ impl Terminal {
                                 file_line,
                                 file_col,
                                 is_url,
+                                wrap_group,
                             });
                         }
                     }

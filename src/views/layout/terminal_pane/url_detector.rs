@@ -75,19 +75,10 @@ impl UrlDetector {
             let detected = terminal.detect_urls();
             let cwd = terminal.initial_cwd();
 
-            let mut group_id = 0usize;
-            let mut last_text: Option<String> = None;
-
             self.matches = detected
                 .into_iter()
                 .filter_map(|link| {
-                    // Assign group: consecutive links with the same text share a group
-                    let same_as_last = last_text.as_ref() == Some(&link.text);
-                    if !same_as_last {
-                        group_id += 1;
-                    }
-                    last_text = Some(link.text.clone());
-                    let current_group = group_id;
+                    let current_group = link.wrap_group;
 
                     if link.is_url {
                         Some(URLMatch {
