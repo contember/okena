@@ -12,8 +12,8 @@ use std::sync::Arc;
 pub struct UrlDetector {
     /// Detected URL matches
     matches: Vec<URLMatch>,
-    /// Currently hovered URL index
-    hovered_index: Option<usize>,
+    /// Currently hovered URL group
+    hovered_group: Option<usize>,
     /// Cache of path existence checks to avoid repeated syscalls
     path_exists_cache: HashMap<String, bool>,
 }
@@ -28,7 +28,7 @@ impl UrlDetector {
     pub fn new() -> Self {
         Self {
             matches: Vec::new(),
-            hovered_index: None,
+            hovered_group: None,
             path_exists_cache: HashMap::new(),
         }
     }
@@ -75,9 +75,20 @@ impl UrlDetector {
             let detected = terminal.detect_urls();
             let cwd = terminal.initial_cwd();
 
+            let mut group_id = 0usize;
+            let mut last_text: Option<String> = None;
+
             self.matches = detected
                 .into_iter()
                 .filter_map(|link| {
+                    // Assign group: consecutive links with the same text share a group
+                    let same_as_last = last_text.as_ref() == Some(&link.text);
+                    if !same_as_last {
+                        group_id += 1;
+                    }
+                    last_text = Some(link.text.clone());
+                    let current_group = group_id;
+
                     if link.is_url {
                         Some(URLMatch {
                             line: link.line,
@@ -85,6 +96,7 @@ impl UrlDetector {
                             len: link.len,
                             url: link.text,
                             kind: LinkKind::Url,
+                            link_group: current_group,
                         })
                     } else {
                         // File path: verify existence before showing
@@ -98,6 +110,7 @@ impl UrlDetector {
                                     line: link.file_line,
                                     col: link.file_col,
                                 },
+                                link_group: current_group,
                             })
                         } else {
                             None
@@ -119,13 +132,14 @@ impl UrlDetector {
     /// Update hover state based on mouse position.
     /// Returns true if the hover state changed.
     pub fn update_hover(&mut self, col: usize, row: i32) -> bool {
-        let new_hovered = self
+        let new_group = self
             .matches
             .iter()
-            .position(|url| url.line == row && col >= url.col && col < url.col + url.len);
+            .find(|url| url.line == row && col >= url.col && col < url.col + url.len)
+            .map(|url| url.link_group);
 
-        if new_hovered != self.hovered_index {
-            self.hovered_index = new_hovered;
+        if new_group != self.hovered_group {
+            self.hovered_group = new_group;
             true
         } else {
             false
@@ -134,17 +148,17 @@ impl UrlDetector {
 
     /// Clear hover state. Returns true if state changed.
     pub fn clear_hover(&mut self) -> bool {
-        if self.hovered_index.is_some() {
-            self.hovered_index = None;
+        if self.hovered_group.is_some() {
+            self.hovered_group = None;
             true
         } else {
             false
         }
     }
 
-    /// Get the currently hovered URL index.
-    pub fn hovered_index(&self) -> Option<usize> {
-        self.hovered_index
+    /// Get the currently hovered URL group.
+    pub fn hovered_group(&self) -> Option<usize> {
+        self.hovered_group
     }
 
     /// Get an Arc of the current matches for rendering.

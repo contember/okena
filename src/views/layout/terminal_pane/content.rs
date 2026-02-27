@@ -463,7 +463,7 @@ impl Render for TerminalContent {
                             .with_search(self.search_matches.clone(), self.search_current_index)
                             .with_urls(
                                 self.url_detector.matches_arc(),
-                                self.url_detector.hovered_index(),
+                                self.url_detector.hovered_group(),
                             )
                             .with_cursor_visible(self.cursor_visible)
                             .with_cursor_style(settings_entity(cx).read(cx).settings.cursor_style),

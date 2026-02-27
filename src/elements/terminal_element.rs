@@ -39,6 +39,8 @@ pub struct URLMatch {
     pub len: usize,
     pub url: String,
     pub kind: LinkKind,
+    /// Group ID: segments of the same wrapped URL share the same group
+    pub link_group: usize,
 }
 
 /// Custom GPUI element for rendering a terminal
@@ -48,7 +50,7 @@ pub struct TerminalElement {
     search_matches: Arc<Vec<SearchMatch>>,
     current_match_index: Option<usize>,
     url_matches: Arc<Vec<URLMatch>>,
-    hovered_url_index: Option<usize>,
+    hovered_url_group: Option<usize>,
     cursor_visible: bool,
     cursor_style: CursorShape,
     zoom_level: f32,
@@ -62,7 +64,7 @@ impl TerminalElement {
             search_matches: Arc::new(Vec::new()),
             current_match_index: None,
             url_matches: Arc::new(Vec::new()),
-            hovered_url_index: None,
+            hovered_url_group: None,
             cursor_visible: true,
             cursor_style: CursorShape::Block,
             zoom_level: 1.0,
@@ -87,10 +89,10 @@ impl TerminalElement {
     pub fn with_urls(
         mut self,
         url_matches: Arc<Vec<URLMatch>>,
-        hovered_url_index: Option<usize>,
+        hovered_url_group: Option<usize>,
     ) -> Self {
         self.url_matches = url_matches;
-        self.hovered_url_index = hovered_url_index;
+        self.hovered_url_group = hovered_url_group;
         self
     }
 
@@ -527,9 +529,9 @@ impl Element for TerminalElement {
             }
 
             // Phase 2.6: Paint URL underlines
-            for (idx, url_match) in self.url_matches.iter().enumerate() {
-                // Only highlight the specific hovered URL instance, not all instances of the same URL
-                let is_hovered = self.hovered_url_index == Some(idx);
+            for url_match in self.url_matches.iter() {
+                // Highlight all segments of the hovered URL group (handles wrapped URLs)
+                let is_hovered = self.hovered_url_group == Some(url_match.link_group);
 
                 // Only draw visible URLs (within screen bounds)
                 if url_match.line < 0 || url_match.line >= screen_lines as i32 {
