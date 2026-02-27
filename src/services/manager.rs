@@ -582,11 +582,18 @@ impl ServiceManager {
             }
             ServiceKind::Okena => {
                 // Collect all descendant PIDs before killing so we can wait for them.
+                // Use get_service_pids() to find the real service root PIDs
+                // (with session backends like dtach/tmux, get_shell_pid() returns
+                // the attach client PID, not the actual service process).
                 let old_pids: Vec<u32> = instance
                     .terminal_id
                     .as_ref()
-                    .and_then(|tid| self.backend.get_shell_pid(tid))
-                    .map(|pid| port_detect::get_descendant_pids(pid).into_iter().collect())
+                    .map(|tid| {
+                        self.backend.get_service_pids(tid)
+                            .into_iter()
+                            .flat_map(|pid| port_detect::get_descendant_pids(pid))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 // Kill old terminal
