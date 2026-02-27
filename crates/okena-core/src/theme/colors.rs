@@ -346,7 +346,7 @@ pub const HIGH_CONTRAST_THEME: ThemeColors = ThemeColors {
     term_bright_white: 0xffffff,
     term_foreground: 0xffffff,
     term_background: 0x000000,
-    term_background_unfocused: 0x111111,
+    term_background_unfocused: 0x1a1a1a,
     cursor: 0xffffff,
     scrollbar: 0x808080,
     scrollbar_hover: 0xa0a0a0,
