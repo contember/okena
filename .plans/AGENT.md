@@ -1,4 +1,7 @@
-pub const DEFAULT_AGENT_INSTRUCTIONS: &str = r#"# Agent Workflow Guidelines
+# Agent Workflow Guidelines
+
+These are the default workflow guidelines for Kruh agents. You can customize
+this file — edits will be preserved across runs.
 
 ## Iteration Protocol
 
@@ -43,4 +46,3 @@ This sentinel tells Kruh the plan is complete. Do not emit it if any issues rema
 - Do not introduce unnecessary dependencies.
 - Keep changes minimal and focused on the current issue.
 - Do not refactor unrelated code unless the issue specifically asks for it.
-"#;
