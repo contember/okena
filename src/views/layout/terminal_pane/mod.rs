@@ -9,7 +9,7 @@
 //!
 //! Each component is a proper GPUI Entity implementing Render.
 
-mod url_detector;
+pub(crate) mod url_detector;
 mod scrollbar;
 mod search_bar;
 mod content;
@@ -184,7 +184,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TerminalContentEvent::RequestContextMenu { position, has_selection } => {
+            TerminalContentEvent::RequestContextMenu { position, has_selection, link_url } => {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
@@ -194,6 +194,7 @@ impl TerminalPane {
                                 layout_path: self.layout_path.clone(),
                                 position: *position,
                                 has_selection: *has_selection,
+                                link_url: link_url.clone(),
                             },
                             cx,
                         );

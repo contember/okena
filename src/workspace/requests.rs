@@ -34,6 +34,7 @@ pub enum OverlayRequest {
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
         has_selection: bool,
+        link_url: Option<String>,
     },
     TabContextMenu {
         tab_index: usize,
