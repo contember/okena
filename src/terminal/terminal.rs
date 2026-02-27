@@ -838,12 +838,11 @@ impl Terminal {
             let mut visual_row = 0i32;
             while visual_row < screen_lines {
                 let mut combined_text = String::new();
-                let mut row_offsets: Vec<(i32, usize)> = Vec::new();
+                // (visual_row, offset_in_combined, leading_spaces_stripped)
+                let mut row_offsets: Vec<(i32, usize, usize)> = Vec::new();
 
                 // Collect wrapped lines into one logical line
                 loop {
-                    row_offsets.push((visual_row, combined_text.len()));
-
                     // Buffer line accounts for scroll offset
                     let buffer_line = visual_row - display_offset;
 
@@ -853,17 +852,45 @@ impl Terminal {
                         let cell = &grid[cell_point];
                         row_text.push(cell.c);
                     }
-                    combined_text.push_str(&row_text);
+
+                    // Trim trailing spaces — URLs/paths never end with spaces,
+                    // and this allows the regex to match across padded line breaks.
+                    let rtrimmed = row_text.trim_end_matches(' ');
+
+                    // For continuation rows, also strip leading spaces (TUI padding)
+                    let (text_to_add, leading_stripped) = if combined_text.is_empty() {
+                        (rtrimmed, 0usize)
+                    } else {
+                        let ltrimmed = rtrimmed.trim_start_matches(' ');
+                        (ltrimmed, rtrimmed.len() - ltrimmed.len())
+                    };
+
+                    row_offsets.push((visual_row, combined_text.len(), leading_stripped));
+                    combined_text.push_str(text_to_add);
 
                     let last_cell = &grid[Point::new(Line(buffer_line), last_col)];
                     let has_wrapline_flag = last_cell.flags.contains(Flags::WRAPLINE);
 
-                    let last_char = last_cell.c;
+                    // Visual wrap detection: check last non-space char of current row
+                    // and first non-space char of next row. This handles TUI padding
+                    // where spaces fill the rest of the line around a wrapped URL.
                     let next_visual = visual_row + 1;
-                    let visual_wrap = if next_visual < screen_lines && url_char(last_char) {
-                        let next_buffer = next_visual - display_offset;
-                        let first_cell_next = &grid[Point::new(Line(next_buffer), Column(0))];
-                        url_char(first_cell_next.c)
+                    let visual_wrap = if !has_wrapline_flag && next_visual < screen_lines {
+                        let last_nonspace_url = rtrimmed.chars().last().map_or(false, |c| url_char(c));
+                        if last_nonspace_url {
+                            let next_buffer = next_visual - display_offset;
+                            let mut first_is_url = false;
+                            for col_idx in 0..cols {
+                                let cell = &grid[Point::new(Line(next_buffer), Column(col_idx))];
+                                if cell.c != ' ' {
+                                    first_is_url = url_char(cell.c);
+                                    break;
+                                }
+                            }
+                            first_is_url
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     };
@@ -897,7 +924,7 @@ impl Terminal {
 
                     // Map back to physical rows
                     for i in 0..row_offsets.len() {
-                        let (phys_row, row_start_offset) = row_offsets[i];
+                        let (phys_row, row_start_offset, leading_stripped) = row_offsets[i];
                         let row_end_offset = if i + 1 < row_offsets.len() {
                             row_offsets[i + 1].1
                         } else {
@@ -911,7 +938,7 @@ impl Terminal {
                         let seg_start = match_start.max(row_start_offset);
                         let seg_end = trimmed_end.min(row_end_offset);
 
-                        let col_start = combined_text[row_start_offset..seg_start].chars().count();
+                        let col_start = combined_text[row_start_offset..seg_start].chars().count() + leading_stripped;
                         let len = combined_text[seg_start..seg_end].chars().count();
 
                         if len > 0 {
@@ -1342,5 +1369,62 @@ mod tests {
         assert!(!transport.resize_called.load(Ordering::Relaxed));
         assert_eq!(terminal.resize_state.lock().size.cols, 120);
         assert_eq!(terminal.resize_state.lock().size.rows, 40);
+    }
+
+    /// Helper: create a terminal and write text to it, returns detected URLs
+    fn detect_urls_in(text: &str, cols: u16) -> Vec<DetectedLink> {
+        let transport = Arc::new(NullTransport);
+        let size = TerminalSize { cols, rows: 24, cell_width: 8.0, cell_height: 16.0 };
+        let terminal = Terminal::new("test".into(), size, transport, "/tmp".into());
+        terminal.process_output(text.as_bytes());
+        terminal.detect_urls()
+    }
+
+    #[test]
+    fn detect_url_wrapped_with_padding() {
+        // TUI writes a URL that doesn't fill the row, then continues on next line.
+        // No WRAPLINE flag — the TUI manages wrapping itself.
+        // Row 1: "https://claude.ai/code/sess_ABC" + spaces (padding)
+        // Row 2: "DEF123" + spaces
+        let links = detect_urls_in(
+            "https://claude.ai/code/sess_ABC\r\nDEF123\r\n",
+            50,
+        );
+        assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
+        assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
+        assert_eq!(links[0].col, 0);
+        assert_eq!(links[1].text, "https://claude.ai/code/sess_ABCDEF123");
+        assert_eq!(links[1].col, 0);
+        assert_eq!(links[1].line, 1);
+    }
+
+    #[test]
+    fn detect_url_wrapped_with_leading_padding() {
+        // TUI adds leading spaces on the continuation line for alignment
+        // Row 1: "  https://claude.ai/code/sess_ABC" + spaces
+        // Row 2: "  DEF123" + spaces
+        let links = detect_urls_in(
+            "  https://claude.ai/code/sess_ABC\r\n  DEF123\r\n",
+            50,
+        );
+        assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
+        assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
+        assert_eq!(links[0].col, 2); // starts after 2 spaces
+        assert_eq!(links[1].text, "https://claude.ai/code/sess_ABCDEF123");
+        assert_eq!(links[1].col, 2); // continuation also at col 2
+        assert_eq!(links[1].line, 1);
+    }
+
+    #[test]
+    fn detect_url_single_line_not_affected() {
+        // Single-line URL should still work normally
+        let links = detect_urls_in(
+            "visit https://example.com/path here\r\n",
+            80,
+        );
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].text, "https://example.com/path");
+        assert_eq!(links[0].col, 6);
+        assert_eq!(links[0].line, 0);
     }
 }
