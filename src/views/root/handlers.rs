@@ -355,9 +355,9 @@ impl RootView {
                         });
                     }
                 }
-                OverlayRequest::TerminalContextMenu { terminal_id, project_id, layout_path, position, has_selection } => {
+                OverlayRequest::TerminalContextMenu { terminal_id, project_id, layout_path, position, has_selection, link_url } => {
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, cx);
+                        om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, link_url, cx);
                     });
                 }
                 OverlayRequest::TabContextMenu { tab_index, num_tabs, project_id, layout_path, position } => {

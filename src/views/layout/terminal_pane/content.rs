@@ -18,7 +18,12 @@ use super::url_detector::UrlDetector;
 /// Events emitted by terminal content.
 pub enum TerminalContentEvent {
     /// Request to show context menu at a position.
-    RequestContextMenu { position: Point<Pixels>, has_selection: bool },
+    RequestContextMenu {
+        position: Point<Pixels>,
+        has_selection: bool,
+        /// URL at the click position (if any), for "Open in Browser" / "Copy Link".
+        link_url: Option<String>,
+    },
 }
 
 /// Terminal content view handling display and mouse interactions.
@@ -433,9 +438,16 @@ impl Render for TerminalContent {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
+                    // Detect URL at click position for context menu link actions
+                    let link_url = this.pixel_to_cell(event.position).and_then(|(col, row)| {
+                        this.url_detector.find_at(col, row)
+                            .filter(|m| m.kind == LinkKind::Url)
+                            .map(|m| m.url)
+                    });
                     cx.emit(TerminalContentEvent::RequestContextMenu {
                         position: event.position,
                         has_selection,
+                        link_url,
                     });
                 }),
             )

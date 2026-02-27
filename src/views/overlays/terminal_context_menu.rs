@@ -18,6 +18,8 @@ pub enum TerminalContextMenuEvent {
     SelectAll { terminal_id: String },
     Split { project_id: String, layout_path: Vec<usize>, direction: SplitDirection },
     CloseTerminal { project_id: String, terminal_id: String },
+    OpenLink { url: String },
+    CopyLink { url: String },
 }
 
 /// Context menu for terminal content
@@ -27,6 +29,8 @@ pub struct TerminalContextMenu {
     layout_path: Vec<usize>,
     position: Point<Pixels>,
     has_selection: bool,
+    /// URL at the right-click position (if any).
+    link_url: Option<String>,
     focus_handle: FocusHandle,
 }
 
@@ -37,6 +41,7 @@ impl TerminalContextMenu {
         layout_path: Vec<usize>,
         position: Point<Pixels>,
         has_selection: bool,
+        link_url: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
@@ -46,6 +51,7 @@ impl TerminalContextMenu {
             layout_path,
             position,
             has_selection,
+            link_url,
             focus_handle,
         }
     }
@@ -68,6 +74,7 @@ impl Render for TerminalContextMenu {
 
         let position = self.position;
         let has_selection = self.has_selection;
+        let link_url = self.link_url.clone();
 
         div()
             .track_focus(&self.focus_handle)
@@ -90,6 +97,29 @@ impl Render for TerminalContextMenu {
                     .snap_to_window()
                     .child(
                         context_menu_panel("terminal-context-menu", &t)
+                            // Open in Browser (conditional - requires URL at click position)
+                            .when(link_url.is_some(), |el| {
+                                let url = link_url.clone().unwrap();
+                                let url2 = url.clone();
+                                el.child(
+                                    menu_item("ctx-open-link", "icons/external-link.svg", "Open in Browser", &t)
+                                        .on_click(cx.listener(move |_this, _, _window, cx| {
+                                            cx.emit(TerminalContextMenuEvent::OpenLink {
+                                                url: url.clone(),
+                                            });
+                                        })),
+                                )
+                                // Copy Link
+                                .child(
+                                    menu_item("ctx-copy-link", "icons/link.svg", "Copy Link", &t)
+                                        .on_click(cx.listener(move |_this, _, _window, cx| {
+                                            cx.emit(TerminalContextMenuEvent::CopyLink {
+                                                url: url2.clone(),
+                                            });
+                                        })),
+                                )
+                                .child(menu_separator(&t))
+                            })
                             // Copy (conditional - requires selection)
                             .child(
                                 menu_item_conditional("ctx-copy", "icons/copy.svg", "Copy", has_selection, &t)

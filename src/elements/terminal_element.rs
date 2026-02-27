@@ -20,7 +20,7 @@ pub struct SearchMatch {
 }
 
 /// The kind of link detected in the terminal
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LinkKind {
     /// A web URL (http/https)
     Url,

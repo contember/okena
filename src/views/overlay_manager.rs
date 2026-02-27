@@ -889,13 +889,14 @@ impl OverlayManager {
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
         has_selection: bool,
+        link_url: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.close_modal(cx);
         self.close_all_context_menus();
 
         let menu = cx.new(|cx| {
-            TerminalContextMenu::new(terminal_id, project_id, layout_path, position, has_selection, cx)
+            TerminalContextMenu::new(terminal_id, project_id, layout_path, position, has_selection, link_url, cx)
         });
 
         cx.subscribe(&menu, |this, _, event: &TerminalContextMenuEvent, cx| {
@@ -933,6 +934,14 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                         terminal_id: terminal_id.clone(),
                     });
+                }
+                TerminalContextMenuEvent::OpenLink { url } => {
+                    this.hide_terminal_context_menu(cx);
+                    crate::views::layout::terminal_pane::url_detector::UrlDetector::open_url(url);
+                }
+                TerminalContextMenuEvent::CopyLink { url } => {
+                    this.hide_terminal_context_menu(cx);
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
                 }
             }
         })
