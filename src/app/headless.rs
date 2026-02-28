@@ -4,6 +4,7 @@ use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
+use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::TerminalsRegistry;
@@ -13,21 +14,21 @@ use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
 
-use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ApiFolder, ApiFullscreen, ApiProject, StateResponse};
 use crate::terminal::backend::LocalBackend;
-use crate::workspace::actions::execute::{ensure_terminal, execute_action};
+
+use super::remote_commands::remote_command_loop;
 
 /// Headless application entity — runs workspace, PTY management, and remote
 /// server without any GUI windows. Used when running over SSH or on machines
 /// without a display server.
 pub struct HeadlessApp {
+    #[allow(dead_code)]
     workspace: Entity<Workspace>,
     #[allow(dead_code)]
     pty_manager: Arc<PtyManager>,
@@ -42,6 +43,8 @@ pub struct HeadlessApp {
     git_watcher: Entity<GitStatusWatcher>,
     #[allow(dead_code)]
     save_pending: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    service_manager: Entity<ServiceManager>,
 }
 
 impl HeadlessApp {
@@ -120,13 +123,97 @@ impl HeadlessApp {
             |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
         });
 
+        // Create service manager for project-scoped background processes
+        let local_backend_for_services: Arc<dyn TerminalBackend> =
+            Arc::new(LocalBackend::new(pty_manager.clone()));
+        let service_manager = cx.new(|_cx| {
+            ServiceManager::new(local_backend_for_services, terminals.clone())
+        });
+
+        // Bump state_version on service manager changes
+        let sv = state_version.clone();
+        cx.observe(&service_manager, move |_this, _sm, _cx| {
+            sv.send_modify(|v| *v += 1);
+        })
+        .detach();
+
+        // Observe workspace to load/unload service configs when projects change
+        {
+            let service_manager = service_manager.clone();
+            let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
+                Arc::new(parking_lot::Mutex::new(HashSet::new()));
+            cx.observe(&workspace, move |_this, workspace, cx| {
+                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
+                    .read(cx)
+                    .data()
+                    .projects
+                    .iter()
+                    .filter(|p| !p.is_remote && p.is_visible)
+                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
+                    .collect();
+
+                let current_ids: HashSet<String> =
+                    local_projects.iter().map(|(id, _, _)| id.clone()).collect();
+
+                let mut known = known_project_ids.lock();
+
+                // Load services for new projects
+                for (id, path, saved_terminals) in &local_projects {
+                    if !known.contains(id) {
+                        service_manager.update(cx, |sm, cx| {
+                            sm.load_project_services(id, path, saved_terminals, cx);
+                        });
+                    }
+                }
+
+                // Unload services for removed projects
+                let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
+                for id in removed {
+                    service_manager.update(cx, |sm, cx| {
+                        sm.unload_project_services(&id, cx);
+                    });
+                }
+
+                *known = current_ids;
+            })
+            .detach();
+        }
+
+        // Observe service manager to sync terminal IDs back to workspace for persistence
+        {
+            let workspace_for_svc = workspace.clone();
+            cx.observe(&service_manager, move |_this, service_manager, cx| {
+                let sm = service_manager.read(cx);
+                let project_ids: Vec<String> = sm.instances().keys()
+                    .map(|(pid, _)| pid.clone())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                let terminal_maps: Vec<(String, HashMap<String, String>)> = project_ids
+                    .into_iter()
+                    .map(|pid| {
+                        let ids = sm.service_terminal_ids(&pid);
+                        (pid, ids)
+                    })
+                    .collect();
+
+                workspace_for_svc.update(cx, |ws, cx| {
+                    for (project_id, terminals) in terminal_maps {
+                        ws.sync_service_terminals(&project_id, terminals, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+
         // Create bridge channel
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         let mut app = Self {
-            workspace,
+            workspace: workspace.clone(),
             pty_manager: pty_manager.clone(),
-            terminals,
+            terminals: terminals.clone(),
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
@@ -134,15 +221,29 @@ impl HeadlessApp {
             git_status_tx: git_status_tx.clone(),
             git_watcher,
             save_pending,
+            service_manager: service_manager.clone(),
         };
 
         // Start PTY event loop
         app.start_pty_event_loop(pty_events, cx);
 
-        // Start remote command bridge loop
+        // Start remote command bridge loop (shared with GUI)
         let local_backend: Arc<dyn TerminalBackend> =
             Arc::new(LocalBackend::new(pty_manager));
-        app.start_remote_command_loop(bridge_rx, local_backend, cx);
+        cx.spawn({
+            let workspace = workspace.clone();
+            let terminals = terminals.clone();
+            let state_version = state_version.clone();
+            let git_status_tx = git_status_tx.clone();
+            let service_manager = service_manager.clone();
+            async move |_this: WeakEntity<HeadlessApp>, cx: &mut AsyncApp| {
+                remote_command_loop(
+                    bridge_rx, local_backend, workspace, terminals,
+                    state_version, git_status_tx, service_manager, cx,
+                ).await;
+            }
+        })
+        .detach();
 
         // Start remote server
         app.start_remote_server(bridge_tx, listen_addr, &remote_info);
@@ -186,7 +287,7 @@ impl HeadlessApp {
     }
 
     /// PTY event loop — processes terminal data and broadcasts to web clients.
-    /// Unlike the GUI version, this does not notify any root view.
+    /// Handles service exit events via ServiceManager, matching the GUI version.
     fn start_pty_event_loop(
         &mut self,
         pty_events: Receiver<PtyEvent>,
@@ -194,14 +295,21 @@ impl HeadlessApp {
     ) {
         let terminals = self.terminals.clone();
         let broadcaster = self.pty_broadcaster.clone();
+        let pty_manager = self.pty_manager.clone();
+        let service_manager = self.service_manager.clone();
+        let state_version = self.state_version.clone();
 
-        cx.spawn(async move |_this: WeakEntity<HeadlessApp>, _cx| {
+        cx.spawn(async move |_this: WeakEntity<HeadlessApp>, cx| {
             loop {
                 let event = match pty_events.recv().await {
                     Ok(event) => event,
                     Err(_) => break,
                 };
 
+                // Collect exit events for service manager processing
+                let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
+
+                // Process first event + broadcast to remote subscribers
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
@@ -210,12 +318,13 @@ impl HeadlessApp {
                         }
                         broadcaster.publish(terminal_id.clone(), data.clone());
                     }
-                    PtyEvent::Exit { terminal_id, .. } => {
-                        terminals.lock().remove(terminal_id);
+                    PtyEvent::Exit { terminal_id, exit_code } => {
+                        pty_manager.cleanup_exited(terminal_id);
+                        exit_events.push((terminal_id.clone(), *exit_code));
                     }
                 }
 
-                // Drain pending events (batch processing)
+                // Drain any additional pending events (batch processing)
                 while let Ok(event) = pty_events.try_recv() {
                     match &event {
                         PtyEvent::Data { terminal_id, data } => {
@@ -225,155 +334,40 @@ impl HeadlessApp {
                             }
                             broadcaster.publish(terminal_id.clone(), data.clone());
                         }
-                        PtyEvent::Exit { terminal_id, .. } => {
-                            terminals.lock().remove(terminal_id);
+                        PtyEvent::Exit { terminal_id, exit_code } => {
+                            pty_manager.cleanup_exited(terminal_id);
+                            exit_events.push((terminal_id.clone(), *exit_code));
                         }
                     }
                 }
-            }
-        })
-        .detach();
-    }
 
-    /// Process commands from the remote API bridge.
-    fn start_remote_command_loop(
-        &mut self,
-        bridge_rx: BridgeReceiver,
-        backend: Arc<dyn TerminalBackend>,
-        cx: &mut Context<Self>,
-    ) {
-        let workspace = self.workspace.clone();
-        let terminals = self.terminals.clone();
-        let state_version = self.state_version.clone();
-        let git_status_tx = self.git_status_tx.clone();
-
-        cx.spawn(async move |_this: WeakEntity<HeadlessApp>, cx| {
-            loop {
-                let msg: BridgeMessage = match bridge_rx.recv().await {
-                    Ok(msg) => msg,
-                    Err(_) => break,
-                };
-
-                let result = match msg.command {
-                    RemoteCommand::Action(action) => {
-                        cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                execute_action(action, ws, &*backend, &terminals, cx)
-                                    .into_command_result()
-                            })
-                        })
-                    }
-                    RemoteCommand::GetState => {
-                        cx.update(|cx| {
-                            let ws = workspace.read(cx);
-                            let sv = *state_version.borrow();
-                            let git_statuses = git_status_tx.borrow().clone();
-                            let data = ws.data();
-
-                            // Build a lookup map for projects
-                            let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
-                                data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
-
-                            // Build ordered projects following project_order + folder expansion
-                            let mut projects: Vec<ApiProject> = Vec::new();
-                            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-                            let build_api_project = |p: &crate::workspace::state::ProjectData| -> ApiProject {
-                                let git_status = git_statuses.get(&p.id).cloned();
-                                ApiProject {
-                                    id: p.id.clone(),
-                                    name: p.name.clone(),
-                                    path: p.path.clone(),
-                                    is_visible: p.is_visible,
-                                    layout: p.layout.as_ref().map(|l| l.to_api()),
-                                    terminal_names: p.terminal_names.clone(),
-                                    git_status,
-                                    folder_color: p.folder_color,
-                                    services: vec![],
-                                }
-                            };
-
-                            for id in &data.project_order {
-                                if let Some(folder) = data.folders.iter().find(|f| &f.id == id) {
-                                    for pid in &folder.project_ids {
-                                        if seen.insert(pid.clone()) {
-                                            if let Some(p) = project_map.get(pid.as_str()) {
-                                                projects.push(build_api_project(p));
-                                            }
-                                        }
-                                    }
-                                } else if seen.insert(id.clone()) {
-                                    if let Some(p) = project_map.get(id.as_str()) {
-                                        projects.push(build_api_project(p));
+                if !exit_events.is_empty() {
+                    let _ = cx.update(|cx| {
+                        // Let service manager handle service terminals
+                        let service_tids: HashSet<String> =
+                            service_manager.update(cx, |sm, cx| {
+                                let mut handled = HashSet::new();
+                                for (terminal_id, exit_code) in &exit_events {
+                                    if sm.handle_service_exit(terminal_id, *exit_code, cx) {
+                                        handled.insert(terminal_id.clone());
                                     }
                                 }
-                            }
-
-                            // Append orphan projects not in any order
-                            for p in &data.projects {
-                                if seen.insert(p.id.clone()) {
-                                    projects.push(build_api_project(p));
-                                }
-                            }
-
-                            // Build folders for response
-                            let folders: Vec<ApiFolder> = data.folders.iter().map(|f| {
-                                ApiFolder {
-                                    id: f.id.clone(),
-                                    name: f.name.clone(),
-                                    project_ids: f.project_ids.clone(),
-                                    folder_color: f.folder_color,
-                                }
-                            }).collect();
-
-                            let fullscreen = ws.focus_manager.fullscreen_state().map(|(pid, tid)| {
-                                ApiFullscreen {
-                                    project_id: pid.to_string(),
-                                    terminal_id: tid.to_string(),
-                                }
+                                handled
                             });
 
-                            let resp = StateResponse {
-                                state_version: sv,
-                                projects,
-                                focused_project_id: ws.focused_project_id().cloned(),
-                                fullscreen_terminal: fullscreen,
-                                project_order: data.project_order.clone(),
-                                folders,
-                            };
-
-                            CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
-                        })
-                    }
-                    RemoteCommand::GetTerminalSizes { terminal_ids } => {
-                        cx.update(|_cx| {
-                            let terms = terminals.lock();
-                            let mut sizes = std::collections::HashMap::new();
-                            for id in &terminal_ids {
-                                if let Some(term) = terms.get(id) {
-                                    let s = term.resize_state.lock().size;
-                                    sizes.insert(id.clone(), (s.cols, s.rows));
+                        // Remove UI Terminals for non-service terminals
+                        {
+                            let mut reg = terminals.lock();
+                            for (terminal_id, _) in &exit_events {
+                                if !service_tids.contains(terminal_id) {
+                                    reg.remove(terminal_id);
                                 }
                             }
-                            let val = serde_json::to_value(sizes).expect("BUG: sizes must serialize");
-                            CommandResult::Ok(Some(val))
-                        })
-                    }
-                    RemoteCommand::RenderSnapshot { terminal_id } => {
-                        cx.update(|cx| {
-                            let ws = workspace.read(cx);
-                            match ensure_terminal(&terminal_id, &terminals, &*backend, ws) {
-                                Some(term) => {
-                                    let snapshot = term.render_snapshot();
-                                    CommandResult::OkBytes(snapshot)
-                                }
-                                None => CommandResult::Err(format!("terminal not found: {}", terminal_id)),
-                            }
-                        })
-                    }
-                };
+                        }
 
-                let _ = msg.reply.send(result);
+                        state_version.send_modify(|v| *v += 1);
+                    });
+                }
             }
         })
         .detach();
