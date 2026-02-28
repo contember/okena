@@ -158,6 +158,10 @@ impl RemoteConnection {
         self.client.remote_state()
     }
 
+    pub fn remote_state_mut(&mut self) -> Option<&mut StateResponse> {
+        self.client.remote_state_mut()
+    }
+
     pub fn set_remote_state(&mut self, state: Option<StateResponse>) {
         self.client.set_remote_state(state);
     }

@@ -73,6 +73,11 @@ pub enum ConnectionEvent {
         connection_id: String,
         message: String,
     },
+    /// Git status changed for remote projects
+    GitStatusChanged {
+        connection_id: String,
+        statuses: HashMap<String, crate::api::ApiGitStatus>,
+    },
     /// Token was refreshed — save new token and update timestamp
     TokenRefreshed {
         connection_id: String,

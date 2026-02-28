@@ -102,6 +102,10 @@ impl<H: ConnectionHandler> RemoteClient<H> {
         self.remote_state.as_ref()
     }
 
+    pub fn remote_state_mut(&mut self) -> Option<&mut StateResponse> {
+        self.remote_state.as_mut()
+    }
+
     pub fn set_remote_state(&mut self, state: Option<StateResponse>) {
         self.remote_state = state;
     }
@@ -892,6 +896,20 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                             message: format!("Server error: {}", error),
                                         })
                                         .await;
+                                }
+                                "git_status_changed" => {
+                                    if let Some(projects) = value.get("projects") {
+                                        if let Ok(statuses) = serde_json::from_value::<
+                                            HashMap<String, crate::api::ApiGitStatus>,
+                                        >(projects.clone()) {
+                                            let _ = event_tx_clone
+                                                .send(ConnectionEvent::GitStatusChanged {
+                                                    connection_id: config_id.clone(),
+                                                    statuses,
+                                                })
+                                                .await;
+                                        }
+                                    }
                                 }
                                 _ => {
                                     log::debug!("Unknown WS message type: {}", msg_type);

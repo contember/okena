@@ -315,6 +315,19 @@ impl RemoteConnectionManager {
                     conn.update_stream_mappings(mappings);
                 }
             }
+            ConnectionEvent::GitStatusChanged {
+                connection_id,
+                statuses,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&connection_id) {
+                    if let Some(state) = conn.remote_state_mut() {
+                        for project in &mut state.projects {
+                            project.git_status = statuses.get(&project.id).cloned();
+                        }
+                    }
+                }
+                cx.notify();
+            }
             ConnectionEvent::ServerWarning {
                 connection_id,
                 message,
