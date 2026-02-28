@@ -878,20 +878,45 @@ impl Terminal {
                     // Visual wrap detection: check last non-space char of current row
                     // and first non-space char of next row. This handles TUI padding
                     // where spaces fill the rest of the line around a wrapped URL.
+                    // Skip if the next line starts with a URL scheme — that's a new
+                    // URL, not a continuation of the current one.
                     let next_visual = visual_row + 1;
                     let visual_wrap = if !has_wrapline_flag && next_visual < screen_lines {
                         let last_nonspace_url = rtrimmed.chars().last().map_or(false, |c| url_char(c));
                         if last_nonspace_url {
                             let next_buffer = next_visual - display_offset;
                             let mut first_is_url = false;
+                            let mut next_line_start = String::new();
                             for col_idx in 0..cols {
                                 let cell = &grid[Point::new(Line(next_buffer), Column(col_idx))];
-                                if cell.c != ' ' {
+                                if cell.c == ' ' {
+                                    if next_line_start.is_empty() {
+                                        continue; // skip leading spaces
+                                    }
+                                    break; // stop at first space after content
+                                }
+                                if next_line_start.is_empty() {
                                     first_is_url = url_char(cell.c);
+                                }
+                                next_line_start.push(cell.c);
+                                if next_line_start.len() >= 10 {
                                     break;
                                 }
                             }
-                            first_is_url
+                            // If the next line starts with a URL scheme, it's an
+                            // independent URL — don't merge.
+                            if first_is_url && (
+                                next_line_start.starts_with("http://")
+                                || next_line_start.starts_with("https://")
+                                || next_line_start.starts_with("ftp://")
+                                || next_line_start.starts_with("file://")
+                                || next_line_start.starts_with("ssh://")
+                                || next_line_start.starts_with("git://")
+                            ) {
+                                false
+                            } else {
+                                first_is_url
+                            }
                         } else {
                             false
                         }
@@ -1436,5 +1461,93 @@ mod tests {
         assert_eq!(links[0].text, "https://example.com/path");
         assert_eq!(links[0].col, 6);
         assert_eq!(links[0].line, 0);
+    }
+
+    #[test]
+    fn detect_duplicate_urls_get_different_wrap_groups() {
+        // Same URL on two separate lines should get different wrap_groups
+        // so hovering one doesn't highlight the other.
+        let links = detect_urls_in(
+            "https://github.com/org/repo/pull/381\r\n\
+             https://github.com/org/repo/pull/381\r\n",
+            80,
+        );
+        assert_eq!(links.len(), 2, "Should detect two URLs: {:?}", links);
+        assert_ne!(
+            links[0].wrap_group, links[1].wrap_group,
+            "Duplicate URLs must have different wrap_groups for independent hover"
+        );
+    }
+
+    #[test]
+    fn detect_duplicate_urls_separated_by_blank_line() {
+        // Same URL separated by a blank line
+        let links = detect_urls_in(
+            "https://github.com/org/repo/pull/381\r\n\
+             \r\n\
+             https://github.com/org/repo/pull/381\r\n",
+            80,
+        );
+        assert_eq!(links.len(), 2, "Should detect two URLs: {:?}", links);
+        assert_ne!(
+            links[0].wrap_group, links[1].wrap_group,
+            "Duplicate URLs must have different wrap_groups"
+        );
+    }
+
+    #[test]
+    fn detect_duplicate_url_wrapped_then_whole() {
+        // First URL wraps across two lines (TUI-style padding),
+        // second URL appears whole on a later line.
+        // This reproduces the real scenario from PR creation output.
+        let url = "https://github.com/contember/webmaster/pull/381";
+        let links = detect_urls_in(
+            &format!(
+                "Summary\r\n\
+                 prefix {url}\r\n\
+                 \r\n\
+                 PR created:\r\n\
+                 {url}\r\n"
+            ),
+            50,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == url)
+            .collect();
+        // Wrapped URL produces 2 segments + standalone URL = 3 total
+        assert!(url_links.len() >= 3, "Expected wrapped (2 segments) + standalone (1): {:?}", url_links);
+        let wrapped_group = url_links[0].wrap_group;
+        // All wrapped segments share the same group
+        assert_eq!(url_links[0].wrap_group, url_links[1].wrap_group,
+            "Wrapped segments should share wrap_group");
+        // Standalone URL has a different group
+        let standalone = url_links.last().unwrap();
+        assert_ne!(wrapped_group, standalone.wrap_group,
+            "Standalone URL must have different wrap_group than wrapped one");
+    }
+
+    #[test]
+    fn detect_duplicate_url_after_colon_prefix() {
+        // "PR created:" ends with ':' which is a url_char.
+        // The next line starts with a URL. Visual wrap detection should NOT
+        // merge them — or if it does, they must still get different wrap_groups.
+        let url = "https://github.com/org/repo/pull/381";
+        let links = detect_urls_in(
+            &format!(
+                "{url}\r\n\
+                 \r\n\
+                 PR created:\r\n\
+                 {url}\r\n"
+            ),
+            80,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == url)
+            .collect();
+        assert_eq!(url_links.len(), 2, "Should have exactly 2 URL matches: {:?}", url_links);
+        assert_ne!(
+            url_links[0].wrap_group, url_links[1].wrap_group,
+            "URLs must have different wrap_groups even when preceded by colon"
+        );
     }
 }
