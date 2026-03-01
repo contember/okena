@@ -78,6 +78,8 @@ impl RateLimiter {
 /// Manages pairing codes, token validation, and rate limiting.
 pub struct AuthStore {
     inner: Mutex<AuthStoreInner>,
+    tokens_path: PathBuf,
+    pair_code_path: PathBuf,
 }
 
 struct AuthStoreInner {
@@ -98,7 +100,8 @@ impl AuthStore {
     /// Previously issued tokens are loaded from disk so clients survive restarts.
     pub fn new() -> Self {
         let app_secret = load_or_create_secret();
-        let tokens = load_tokens();
+        let t_path = tokens_path();
+        let tokens = load_tokens_from(&t_path);
 
         Self {
             inner: Mutex::new(AuthStoreInner {
@@ -108,12 +111,23 @@ impl AuthStore {
                 tokens,
                 rate_limiter: RateLimiter::new(),
             }),
+            tokens_path: t_path,
+            pair_code_path: pair_code_path(),
         }
     }
 
-    /// Create an AuthStore with a given secret (for testing).
+    /// Create an AuthStore with a given secret and isolated temp directory (for testing).
     #[cfg(test)]
     fn with_secret(secret: Vec<u8>) -> Self {
+        let test_dir = std::env::temp_dir().join(format!(
+            "okena-auth-test-{:?}-{}",
+            std::thread::current().id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&test_dir).expect("create test temp dir");
         Self {
             inner: Mutex::new(AuthStoreInner {
                 app_secret: secret,
@@ -122,6 +136,8 @@ impl AuthStore {
                 tokens: Vec::new(),
                 rate_limiter: RateLimiter::new(),
             }),
+            tokens_path: test_dir.join("remote_tokens.json"),
+            pair_code_path: test_dir.join("pair_code"),
         }
     }
 
@@ -192,7 +208,7 @@ impl AuthStore {
         };
 
         let file_valid = if !in_memory_valid {
-            check_file_pair_code(code)
+            check_file_pair_code(code, &self.pair_code_path)
         } else {
             false
         };
@@ -233,10 +249,10 @@ impl AuthStore {
             inner.current_code = None;
         }
         if file_valid {
-            let _ = std::fs::remove_file(pair_code_path());
+            let _ = std::fs::remove_file(&self.pair_code_path);
         }
 
-        save_tokens(&inner.tokens);
+        save_tokens_to(&self.tokens_path, &inner.tokens);
 
         Ok(token)
     }
@@ -307,7 +323,7 @@ impl AuthStore {
         inner.tokens.retain(|r| r.id != id);
         let removed = inner.tokens.len() < before;
         if removed {
-            save_tokens(&inner.tokens);
+            save_tokens_to(&self.tokens_path, &inner.tokens);
         }
         removed
     }
@@ -356,7 +372,7 @@ impl AuthStore {
             inner.tokens.drain(0..count - MAX_TOKENS);
         }
 
-        save_tokens(&inner.tokens);
+        save_tokens_to(&self.tokens_path, &inner.tokens);
 
         Ok(new_token)
     }
@@ -381,9 +397,8 @@ pub enum PairError {
 
 /// Check a pairing code against the file-based code written by `okena pair` CLI.
 /// Returns true if the file exists, was modified within 60s, and the code matches.
-fn check_file_pair_code(code: &str) -> bool {
-    let path = pair_code_path();
-    let metadata = match std::fs::metadata(&path) {
+fn check_file_pair_code(code: &str, path: &std::path::Path) -> bool {
+    let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -400,7 +415,7 @@ fn check_file_pair_code(code: &str) -> bool {
         return false;
     }
 
-    let file_code = match std::fs::read_to_string(&path) {
+    let file_code = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -503,7 +518,7 @@ fn tokens_path() -> PathBuf {
 }
 
 /// Save token records to disk, filtering out expired tokens.
-fn save_tokens(tokens: &[TokenRecord]) {
+fn save_tokens_to(path: &std::path::Path, tokens: &[TokenRecord]) {
     let now = SystemTime::now();
     let persisted: Vec<PersistedToken> = tokens
         .iter()
@@ -533,26 +548,24 @@ fn save_tokens(tokens: &[TokenRecord]) {
         }
     };
 
-    let path = tokens_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&path, json.as_bytes()) {
+    if let Err(e) = std::fs::write(path, json.as_bytes()) {
         log::error!("Failed to write remote_tokens.json: {}", e);
     } else {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(&path, perms);
+            let _ = std::fs::set_permissions(path, perms);
         }
     }
 }
 
 /// Load token records from disk, filtering out expired tokens.
-fn load_tokens() -> Vec<TokenRecord> {
-    let path = tokens_path();
-    let data = match std::fs::read_to_string(&path) {
+fn load_tokens_from(path: &std::path::Path) -> Vec<TokenRecord> {
+    let data = match std::fs::read_to_string(path) {
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
@@ -593,11 +606,6 @@ fn load_tokens() -> Vec<TokenRecord> {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::LazyLock;
-
-    /// Serialize tests that read/write the shared remote_tokens.json file.
-    static TOKEN_FILE_LOCK: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
 
     fn test_store() -> AuthStore {
         AuthStore::with_secret(vec![42u8; 32])
@@ -615,7 +623,6 @@ mod tests {
 
     #[test]
     fn refresh_valid_token_returns_new_different_token() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let original = pair_token(&store);
 
@@ -632,7 +639,6 @@ mod tests {
 
     #[test]
     fn both_tokens_valid_after_refresh() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let original = pair_token(&store);
 
@@ -644,46 +650,36 @@ mod tests {
 
     #[test]
     fn file_based_pair_succeeds_and_deletes_file() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let code = generate_pairing_code();
 
-        // Write code to a temp file and override pair_code_path by writing directly
-        let path = pair_code_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        std::fs::write(&path, &code).expect("write pair_code");
+        // Write code to the store's isolated pair_code_path
+        std::fs::write(&store.pair_code_path, &code).expect("write pair_code");
 
         let result = store.try_pair(&code, test_ip());
         assert!(result.is_ok(), "file-based pairing should succeed");
-        assert!(!path.exists(), "pair_code file should be deleted after successful pairing");
+        assert!(!store.pair_code_path.exists(), "pair_code file should be deleted after successful pairing");
     }
 
     #[test]
     fn no_in_memory_code_and_no_file_returns_invalid() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
-        // No in-memory code, no file
-        let _ = std::fs::remove_file(pair_code_path());
-
+        // No in-memory code, no file (temp dir is empty by default)
         let result = store.try_pair("ABCD-EFGH", test_ip());
         assert!(matches!(result, Err(PairError::InvalidCode)));
     }
 
     #[test]
     fn persisted_tokens_survive_reload() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = vec![99u8; 32];
 
-        // Create a store, pair a token (which saves to disk)
+        // Create a store, pair a token (which saves to the store's temp dir)
         let store = AuthStore::with_secret(secret.clone());
         let token = pair_token(&store);
         assert!(store.validate_token(&token));
 
-        // The try_pair call saved tokens to disk. Now load them back
-        // into a fresh store with the same secret.
-        let loaded_tokens = load_tokens();
+        // Load tokens back from the same temp path into a fresh store
+        let loaded_tokens = load_tokens_from(&store.tokens_path);
         assert!(!loaded_tokens.is_empty(), "tokens should load from disk");
 
         let store2 = AuthStore {
@@ -694,6 +690,8 @@ mod tests {
                 tokens: loaded_tokens,
                 rate_limiter: RateLimiter::new(),
             }),
+            tokens_path: store.tokens_path.clone(),
+            pair_code_path: store.pair_code_path.clone(),
         };
 
         assert!(
@@ -704,7 +702,6 @@ mod tests {
 
     #[test]
     fn list_tokens_returns_non_expired() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let _token1 = pair_token(&store);
         // Generate a fresh code for second pairing
@@ -729,7 +726,6 @@ mod tests {
 
     #[test]
     fn revoke_token_removes_by_id() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let store = test_store();
         let token1 = pair_token(&store);
         let code2 = store.generate_fresh_code();
@@ -785,7 +781,7 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_filters_expired() {
-        let _lock = TOKEN_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = test_store();
         let now = SystemTime::now();
         let expired_time = now - Duration::from_secs(TOKEN_TTL_SECS + 1);
         let valid_time = now - Duration::from_secs(100);
@@ -807,8 +803,8 @@ mod tests {
             },
         ];
 
-        save_tokens(&tokens);
-        let loaded = load_tokens();
+        save_tokens_to(&store.tokens_path, &tokens);
+        let loaded = load_tokens_from(&store.tokens_path);
 
         assert_eq!(loaded.len(), 1, "only non-expired token should survive");
         assert_eq!(loaded[0].id, "valid");
