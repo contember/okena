@@ -305,8 +305,8 @@ pub fn execute_action(
             }
         }
         ActionRequest::AddProject { name, path } => {
-            ws.add_project(name, path, true, cx);
-            ActionResult::Ok(None)
+            let project_id = ws.add_project(name, path, true, cx);
+            spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::ReorderProjectInFolder {
             folder_id,

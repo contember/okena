@@ -32,7 +32,7 @@ impl Workspace {
 
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) {
+    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) -> String {
         let path = expand_tilde(&path);
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
@@ -59,6 +59,7 @@ impl Workspace {
         self.notify_data(cx);
 
         hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        id
     }
 
     /// Add a new terminal to a project by splitting the root layout
