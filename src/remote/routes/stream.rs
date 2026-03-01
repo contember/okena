@@ -7,8 +7,9 @@ use crate::remote::types::{
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use std::collections::{HashMap, HashSet};
-use tokio::sync::broadcast;
+use futures::{SinkExt, StreamExt};
+use std::collections::HashMap;
+use tokio::sync::{broadcast, mpsc};
 
 #[derive(serde::Deserialize)]
 pub struct WsQuery {
@@ -59,41 +60,48 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
         return;
     }
 
-    // ── Main loop ───────────────────────────────────────────────────────
+    // ── Split socket into reader/writer ─────────────────────────────────
+    let (ws_write, mut ws_read) = socket.split();
+    let (out_tx, out_rx) = mpsc::channel::<Message>(512);
+
+    // Writer task: pumps messages from out_rx to the WebSocket sink.
+    // Exits when out_rx is closed (reader dropped out_tx) or on write error.
+    let writer_handle = tokio::spawn(ws_writer(ws_write, out_rx));
+
+    // ── Main loop state ─────────────────────────────────────────────────
     let mut pty_rx = state.broadcaster.subscribe();
-    let mut subscribed_ids: HashSet<String> = HashSet::new();
-    let mut stream_id_map: HashMap<String, u32> = HashMap::new();
+    let mut subscribed_ids: HashMap<String, u32> = HashMap::new(); // terminal_id -> stream_id
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
 
-    // Subscribe to state_version changes (immediate push, no polling)
+    // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
-
-    // Subscribe to git status changes
     let mut git_rx = state.git_status.subscribe();
+
+    // Pin the writer handle for use in select!
+    tokio::pin!(writer_handle);
 
     loop {
         tokio::select! {
             // Incoming messages from client
-            msg = socket.recv() => {
+            msg = ws_read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let parsed = serde_json::from_str::<WsInbound>(&text);
                         match parsed {
                             Ok(WsInbound::Subscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
-                                    if !stream_id_map.contains_key(id) {
+                                    if !subscribed_ids.contains_key(id) {
                                         let sid = next_stream_id;
-                                        stream_id_map.insert(id.clone(), sid);
+                                        subscribed_ids.insert(id.clone(), sid);
                                         reverse_stream_map.insert(sid, id.clone());
                                         next_stream_id += 1;
                                     }
-                                    subscribed_ids.insert(id.clone());
                                 }
                                 let mappings: HashMap<String, u32> = terminal_ids
                                     .iter()
                                     .filter_map(|id| {
-                                        stream_id_map.get(id).map(|sid| (id.clone(), *sid))
+                                        subscribed_ids.get(id).map(|sid| (id.clone(), *sid))
                                     })
                                     .collect();
                                 // Query terminal sizes so client can pre-resize before snapshot
@@ -102,7 +110,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     let ids = terminal_ids.clone();
                                     if state.bridge_tx.send(BridgeMessage {
                                         command: RemoteCommand::GetTerminalSizes { terminal_ids: ids },
-                                        reply: reply_tx,
+                                        reply: Some(reply_tx),
                                     }).await.is_ok() {
                                         match reply_rx.await {
                                             Ok(CommandResult::Ok(Some(val))) => {
@@ -115,12 +123,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     }
                                 };
                                 let resp = serde_json::to_string(&WsOutbound::Subscribed { mappings, sizes }).expect("BUG: WsOutbound must serialize");
-                                if socket.send(Message::Text(resp.into())).await.is_err() {
+                                if out_tx.send(Message::Text(resp.into())).await.is_err() {
                                     break;
                                 }
 
                                 // Send initial snapshots for all subscribed terminals
-                                if send_snapshots(&mut socket, &state, &terminal_ids, &stream_id_map).await.is_err() {
+                                if send_snapshots(&out_tx, &state, &terminal_ids, &subscribed_ids).await.is_err() {
                                     break;
                                 }
                                 // Drain PTY events that accumulated before/during snapshot generation.
@@ -129,42 +137,32 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             }
                             Ok(WsInbound::Unsubscribe { terminal_ids }) => {
                                 for id in &terminal_ids {
-                                    subscribed_ids.remove(id);
-                                    if let Some(sid) = stream_id_map.remove(id) {
+                                    if let Some(sid) = subscribed_ids.remove(id) {
                                         reverse_stream_map.remove(&sid);
                                     }
                                 }
                             }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
-                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                                if state.bridge_tx.send(BridgeMessage {
+                                let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::Action(ActionRequest::SendText { terminal_id, text }),
-                                    reply: reply_tx,
-                                }).await.is_ok() {
-                                    let _ = reply_rx.await;
-                                }
+                                    reply: None,
+                                }).await;
                             }
                             Ok(WsInbound::SendSpecialKey { terminal_id, key }) => {
-                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                                if state.bridge_tx.send(BridgeMessage {
+                                let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::Action(ActionRequest::SendSpecialKey { terminal_id, key }),
-                                    reply: reply_tx,
-                                }).await.is_ok() {
-                                    let _ = reply_rx.await;
-                                }
+                                    reply: None,
+                                }).await;
                             }
                             Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
-                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                                if state.bridge_tx.send(BridgeMessage {
+                                let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::Action(ActionRequest::Resize { terminal_id, cols, rows }),
-                                    reply: reply_tx,
-                                }).await.is_ok() {
-                                    let _ = reply_rx.await;
-                                }
+                                    reply: None,
+                                }).await;
                             }
                             Ok(WsInbound::Ping) => {
                                 let resp = serde_json::to_string(&WsOutbound::Pong).expect("BUG: WsOutbound must serialize");
-                                if socket.send(Message::Text(resp.into())).await.is_err() {
+                                if out_tx.send(Message::Text(resp.into())).await.is_err() {
                                     break;
                                 }
                             }
@@ -175,25 +173,22 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 let resp = serde_json::to_string(&WsOutbound::Error {
                                     error: "invalid message".into(),
                                 }).expect("BUG: WsOutbound must serialize");
-                                let _ = socket.send(Message::Text(resp.into())).await;
+                                let _ = out_tx.send(Message::Text(resp.into())).await;
                             }
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // Binary input frame from client
+                        // Binary input frame from client — fire-and-forget
                         if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data) {
                             if let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
                                 let text = String::from_utf8_lossy(payload).to_string();
-                                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                                if state.bridge_tx.send(BridgeMessage {
+                                let _ = state.bridge_tx.send(BridgeMessage {
                                     command: RemoteCommand::Action(ActionRequest::SendText {
                                         terminal_id: terminal_id.clone(),
                                         text,
                                     }),
-                                    reply: reply_tx,
-                                }).await.is_ok() {
-                                    let _ = reply_rx.await;
-                                }
+                                    reply: None,
+                                }).await;
                             }
                         }
                     }
@@ -202,28 +197,74 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                 }
             }
 
-            // PTY output broadcast
+            // PTY output broadcast — coalesce pending events
             result = pty_rx.recv() => {
                 match result {
                     Ok(event) => {
-                        if subscribed_ids.contains(&event.terminal_id) {
-                            if let Some(&stream_id) = stream_id_map.get(&event.terminal_id) {
-                                let frame = build_pty_frame(stream_id, &event.data);
-                                if socket.send(Message::Binary(frame.into())).await.is_err() {
+                        // Start a batch with the first event
+                        let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
+                        if let Some(&stream_id) = subscribed_ids.get(&event.terminal_id) {
+                            batch.entry(stream_id).or_default().extend_from_slice(&event.data);
+                        }
+
+                        // Drain additional pending events (coalescing)
+                        let mut channel_closed = false;
+                        loop {
+                            match pty_rx.try_recv() {
+                                Ok(ev) => {
+                                    if let Some(&sid) = subscribed_ids.get(&ev.terminal_id) {
+                                        batch.entry(sid).or_default().extend_from_slice(&ev.data);
+                                    }
+                                }
+                                Err(broadcast::error::TryRecvError::Empty) => break,
+                                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                    // Batch is stale — clear it and send snapshots instead
+                                    batch.clear();
+                                    let resp = serde_json::to_string(&WsOutbound::Dropped { count: n })
+                                        .expect("BUG: WsOutbound must serialize");
+                                    if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                                        channel_closed = true;
+                                        break;
+                                    }
+                                    let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
+                                    if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
+                                        channel_closed = true;
+                                        break;
+                                    }
+                                    while pty_rx.try_recv().is_ok() {}
+                                    break;
+                                }
+                                Err(broadcast::error::TryRecvError::Closed) => {
+                                    channel_closed = true;
                                     break;
                                 }
                             }
                         }
+                        if channel_closed {
+                            break;
+                        }
+
+                        // Send coalesced frames
+                        for (stream_id, data) in batch {
+                            let frame = build_pty_frame(stream_id, &data);
+                            if out_tx.send(Message::Binary(frame.into())).await.is_err() {
+                                channel_closed = true;
+                                break;
+                            }
+                        }
+                        if channel_closed {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         let resp = serde_json::to_string(&WsOutbound::Dropped { count: n }).expect("BUG: WsOutbound must serialize");
-                        if socket.send(Message::Text(resp.into())).await.is_err() {
+                        if out_tx.send(Message::Text(resp.into())).await.is_err() {
                             break;
                         }
 
                         // Auto-resync: send fresh snapshot for all subscribed terminals
-                        let ids: Vec<String> = subscribed_ids.iter().cloned().collect();
-                        if send_snapshots(&mut socket, &state, &ids, &stream_id_map).await.is_err() {
+                        let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
+                        if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
                             break;
                         }
                         // Drain stale PTY events — snapshot already includes their effects.
@@ -233,14 +274,14 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                 }
             }
 
-            // Immediate state version push (no polling)
+            // Immediate state version push
             result = state_rx.changed() => {
                 if result.is_ok() {
                     let current = *state_rx.borrow_and_update();
                     let resp = serde_json::to_string(&WsOutbound::StateChanged {
                         state_version: current,
                     }).expect("BUG: WsOutbound must serialize");
-                    if socket.send(Message::Text(resp.into())).await.is_err() {
+                    if out_tx.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }
                 } else {
@@ -256,25 +297,46 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     let resp = serde_json::to_string(&WsOutbound::GitStatusChanged {
                         projects: statuses,
                     }).expect("BUG: WsOutbound must serialize");
-                    if socket.send(Message::Text(resp.into())).await.is_err() {
+                    if out_tx.send(Message::Text(resp.into())).await.is_err() {
                         break;
                     }
                 }
             }
+
+            // Writer task died (socket write error) — stop the reader too
+            _ = &mut writer_handle => {
+                break;
+            }
+        }
+    }
+
+    // Shutdown: dropping out_tx closes the writer's channel → writer exits.
+    drop(out_tx);
+    let _ = writer_handle.await;
+}
+
+/// Writer task: pumps messages from the mpsc channel to the WebSocket sink.
+async fn ws_writer(
+    mut ws_write: futures::stream::SplitSink<WebSocket, Message>,
+    mut out_rx: mpsc::Receiver<Message>,
+) {
+    while let Some(msg) = out_rx.recv().await {
+        if ws_write.send(msg).await.is_err() {
+            break;
         }
     }
 }
 
-/// Send snapshot frames for the given terminal IDs.
-/// Returns Err if the socket write fails (caller should break).
+/// Send snapshot frames for the given terminal IDs via the mpsc channel.
+/// Returns Err if the channel send fails (caller should break).
 async fn send_snapshots(
-    socket: &mut WebSocket,
+    out_tx: &mpsc::Sender<Message>,
     state: &AppState,
     terminal_ids: &[String],
-    stream_id_map: &HashMap<String, u32>,
+    subscribed_ids: &HashMap<String, u32>,
 ) -> Result<(), ()> {
     for id in terminal_ids {
-        if let Some(&stream_id) = stream_id_map.get(id) {
+        if let Some(&stream_id) = subscribed_ids.get(id) {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if state
                 .bridge_tx
@@ -282,14 +344,14 @@ async fn send_snapshots(
                     command: RemoteCommand::RenderSnapshot {
                         terminal_id: id.clone(),
                     },
-                    reply: reply_tx,
+                    reply: Some(reply_tx),
                 })
                 .await
                 .is_ok()
             {
                 if let Ok(CommandResult::OkBytes(snapshot)) = reply_rx.await {
                     let frame = build_binary_frame(FRAME_TYPE_SNAPSHOT, stream_id, &snapshot);
-                    if socket.send(Message::Binary(frame.into())).await.is_err() {
+                    if out_tx.send(Message::Binary(frame.into())).await.is_err() {
                         return Err(());
                     }
                 }

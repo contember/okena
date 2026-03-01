@@ -15,7 +15,7 @@ pub async fn post_actions(
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let msg = BridgeMessage {
         command,
-        reply: reply_tx,
+        reply: Some(reply_tx),
     };
 
     if state.bridge_tx.send(msg).await.is_err() {

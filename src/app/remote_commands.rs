@@ -246,7 +246,9 @@ pub(crate) async fn remote_command_loop(
             }
         };
 
-        let _ = msg.reply.send(result);
+        if let Some(reply) = msg.reply {
+            let _ = reply.send(result);
+        }
     }
 }
 

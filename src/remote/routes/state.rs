@@ -10,7 +10,7 @@ pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
 
     let msg = BridgeMessage {
         command: RemoteCommand::GetState,
-        reply: reply_tx,
+        reply: Some(reply_tx),
     };
 
     if state.bridge_tx.send(msg).await.is_err() {

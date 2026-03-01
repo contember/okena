@@ -2,10 +2,11 @@ use crate::remote::types::ActionRequest;
 use tokio::sync::oneshot;
 
 /// Commands sent from the axum server to the GPUI main thread.
-/// Each command carries a oneshot sender for the reply.
+/// Fire-and-forget commands (SendText, Resize, etc.) set `reply` to `None`
+/// to skip the oneshot allocation and avoid blocking the sender.
 pub struct BridgeMessage {
     pub command: RemoteCommand,
-    pub reply: oneshot::Sender<CommandResult>,
+    pub reply: Option<oneshot::Sender<CommandResult>>,
 }
 
 /// All operations the remote API can request.
