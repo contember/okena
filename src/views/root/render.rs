@@ -3,6 +3,7 @@ use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
+use crate::workspace::requests::OverlayRequest;
 use gpui::*;
 use gpui::prelude::*;
 use std::future::Future;
@@ -664,24 +665,20 @@ impl Render for RootView {
             }))
             // Handle show diff viewer action (from keybinding or command palette - no path data)
             .on_action(cx.listener({
-                let overlay_manager = overlay_manager.clone();
                 let workspace = workspace.clone();
-                move |_this, _: &ShowDiffViewer, _window, cx| {
-                    // Get the focused or first visible project path
-                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                move |this, _: &ShowDiffViewer, _window, cx| {
+                    // Get the focused or first visible project ID
+                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
                         .map(|f| f.project_id.clone())
                         .or_else(|| {
                             workspace.read(cx).visible_projects()
                                 .first()
                                 .map(|p| p.id.clone())
-                        })
-                        .and_then(|id| {
-                            workspace.read(cx).project(&id).map(|p| p.path.clone())
                         });
 
-                    if let Some(path) = project_path {
-                        overlay_manager.update(cx, |om, cx| {
-                            om.show_diff_viewer(path, None, cx);
+                    if let Some(project_id) = project_id {
+                        this.request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(OverlayRequest::DiffViewer { project_id, file: None }, cx);
                         });
                     }
                 }

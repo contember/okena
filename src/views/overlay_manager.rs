@@ -1095,8 +1095,8 @@ impl OverlayManager {
     // ========================================================================
 
     /// Show diff viewer for a project, optionally selecting a specific file.
-    pub fn show_diff_viewer(&mut self, project_path: String, select_file: Option<String>, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| DiffViewer::new(project_path, select_file, cx));
+    pub fn show_diff_viewer(&mut self, provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::DiffProvider>, select_file: Option<String>, cx: &mut Context<Self>) {
+        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, cx));
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {

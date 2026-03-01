@@ -1,13 +1,12 @@
 //! Syntax highlighting for the diff viewer.
 
 use super::types::{DiffDisplayFile, DisplayLine, HighlightedSpan};
-use crate::git::{get_file_contents_for_diff, DiffLineType, DiffMode, FileDiff};
+use crate::git::{DiffLineType, FileDiff};
 use crate::views::components::syntax::{
     default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
 };
 use gpui::Rgba;
 use std::collections::HashMap;
-use std::path::Path;
 use syntect::easy::HighlightLines;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
@@ -51,8 +50,8 @@ pub fn process_file(
     file: &FileDiff,
     max_line_num: &mut usize,
     syntax_set: &SyntaxSet,
-    repo_path: &Path,
-    diff_mode: DiffMode,
+    old_content: Option<String>,
+    new_content: Option<String>,
     is_dark: bool,
 ) -> DiffDisplayFile {
     let t_total = std::time::Instant::now();
@@ -60,19 +59,8 @@ pub fn process_file(
     let path = file.display_name();
 
     // Get syntax highlighter for this file
-    let syntax = get_syntax_for_path(Path::new(path), syntax_set);
+    let syntax = get_syntax_for_path(std::path::Path::new(path), syntax_set);
     let theme = load_syntax_theme(is_dark);
-
-    // Fetch and pre-highlight the full file content for both old and new versions.
-    // This ensures correct syntax state for all hunks, even those starting mid-file.
-    let t0 = std::time::Instant::now();
-    let (old_content, new_content) = get_file_contents_for_diff(repo_path, path, diff_mode);
-    log::debug!("[process_file] get_file_contents_for_diff: {:?}, old: {} bytes, new: {} bytes, file: {}",
-        t0.elapsed(),
-        old_content.as_ref().map(|c| c.len()).unwrap_or(0),
-        new_content.as_ref().map(|c| c.len()).unwrap_or(0),
-        path,
-    );
 
     let t1 = std::time::Instant::now();
     let old_highlighted = match old_content.as_ref() {

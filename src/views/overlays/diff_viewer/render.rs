@@ -172,6 +172,7 @@ impl DiffViewer {
     pub(super) fn render_content(
         &mut self,
         t: &ThemeColors,
+        loading: bool,
         has_error: bool,
         error_message: Option<String>,
         has_files: bool,
@@ -187,7 +188,22 @@ impl DiffViewer {
             .flex_1()
             .flex()
             .min_h_0()
-            .when(has_error, |d| {
+            .when(loading, |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .text_color(rgb(t.text_muted))
+                                .child("Loading..."),
+                        ),
+                )
+            })
+            .when(!loading && has_error, |d| {
                 d.child(
                     div()
                         .flex_1()
@@ -202,7 +218,7 @@ impl DiffViewer {
                         ),
                 )
             })
-            .when(!has_error && has_files, |d| {
+            .when(!loading && !has_error && has_files, |d| {
                 d.child(self.render_sidebar(t, tree_elements)).child(
                     self.render_diff_pane(
                         t,

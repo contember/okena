@@ -406,7 +406,6 @@ impl ProjectColumn {
         let max_files = 15;
         let total_files = self.diff_file_summaries.len();
         let show_more = total_files > max_files;
-        let project_path = self.diff_popover_project_path.clone();
 
         // Position below the git-diff-stats badge
         let bounds = self.diff_stats_bounds;
@@ -465,7 +464,6 @@ impl ProjectColumn {
                                     let added = summary.added;
                                     let removed = summary.removed;
                                     let file_path = summary.path.clone();
-                                    let project_path_for_click = project_path.clone();
 
                                     div()
                                         .id(ElementId::Name(format!("diff-file-{}", idx).into()))
@@ -480,9 +478,10 @@ impl ProjectColumn {
                                         .gap(px(12.0))
                                         .on_click(cx.listener(move |this, _, _window, cx| {
                                             this.hide_diff_popover(cx);
+                                            let pid = this.project_id.clone();
                                             this.request_broker.update(cx, |broker, cx| {
                                                 broker.push_overlay_request(OverlayRequest::DiffViewer {
-                                                    path: project_path_for_click.clone(),
+                                                    project_id: pid,
                                                     file: Some(file_path.clone()),
                                                 }, cx);
                                             });
@@ -708,7 +707,6 @@ impl ProjectColumn {
                 let lines_added = status.lines_added;
                 let lines_removed = status.lines_removed;
                 let project_id = self.project_id.clone();
-                let project_path = project.path.clone();
                 let project_path_for_hover = project.path.clone();
 
                 h_flex()
@@ -778,9 +776,10 @@ impl ProjectColumn {
                                 .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
+                                    let pid = this.project_id.clone();
                                     this.request_broker.update(cx, |broker, cx| {
                                         broker.push_overlay_request(OverlayRequest::DiffViewer {
-                                            path: project_path.clone(),
+                                            project_id: pid,
                                             file: None,
                                         }, cx);
                                     });

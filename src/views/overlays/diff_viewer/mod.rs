@@ -4,12 +4,13 @@
 //! file tree sidebar, syntax highlighting, and selection support.
 
 mod line_render;
+pub mod provider;
 mod render;
 mod scrollbar;
 mod syntax;
 mod types;
 
-use crate::git::{get_diff_with_options, is_git_repo, DiffMode, DiffResult, FileDiff};
+use crate::git::{DiffMode, DiffResult, FileDiff};
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::{theme, theme_entity};
@@ -41,7 +42,10 @@ pub struct DiffViewer {
     view_mode: DiffViewMode,
     /// Ignore whitespace changes in diff.
     ignore_whitespace: bool,
-    project_path: String,
+    /// Provider for fetching diff data (local or remote).
+    provider: Arc<dyn provider::DiffProvider>,
+    /// Whether diff data is currently being loaded.
+    loading: bool,
     /// Raw diff data for all files (not syntax highlighted).
     raw_files: Vec<FileDiff>,
     /// Lightweight file stats for sidebar display.
@@ -74,12 +78,15 @@ pub struct DiffViewer {
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting).
     is_dark: bool,
+    /// Cached old file content for re-highlighting on theme change.
+    current_file_old_content: Option<String>,
+    /// Cached new file content for re-highlighting on theme change.
+    current_file_new_content: Option<String>,
 }
 
 impl DiffViewer {
-    /// Create a new diff viewer for the given project path, optionally selecting a specific file.
-    pub fn new(project_path: String, select_file: Option<String>, cx: &mut Context<Self>) -> Self {
-        let t_new = std::time::Instant::now();
+    /// Create a new diff viewer with the given provider, optionally selecting a specific file.
+    pub fn new(provider: Arc<dyn provider::DiffProvider>, select_file: Option<String>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let settings = settings_entity(cx).read(cx);
         let file_font_size = settings.settings.file_font_size;
@@ -87,13 +94,13 @@ impl DiffViewer {
         let ignore_whitespace = settings.settings.diff_ignore_whitespace;
         let is_dark = theme(cx).is_dark();
 
-        // Re-highlight when theme changes
+        // Re-highlight when theme changes (use cached content to avoid re-fetching)
         let te = theme_entity(cx);
         cx.observe(&te, |this: &mut Self, _, cx| {
             let new_is_dark = theme(cx).is_dark();
             if new_is_dark != this.is_dark {
                 this.is_dark = new_is_dark;
-                this.process_current_file();
+                this.rehighlight_current_file();
                 this.update_side_by_side_cache();
                 cx.notify();
             }
@@ -104,7 +111,8 @@ impl DiffViewer {
             diff_mode: DiffMode::WorkingTree,
             view_mode,
             ignore_whitespace,
-            project_path: project_path.clone(),
+            provider: provider.clone(),
+            loading: false,
             raw_files: Vec::new(),
             file_stats: Vec::new(),
             current_file: None,
@@ -126,40 +134,28 @@ impl DiffViewer {
             selection_side: None,
             measured_char_width: file_font_size * 0.6,
             is_dark,
+            current_file_old_content: None,
+            current_file_new_content: None,
         };
 
-        if !is_git_repo(std::path::Path::new(&project_path)) {
+        if !provider.is_git_repo() {
             viewer.error_message = Some("Not a git repository".to_string());
             return viewer;
         }
 
-        viewer.load_diff(DiffMode::WorkingTree);
-
-        // If no unstaged changes, auto-switch to staged mode
-        if viewer.file_stats.is_empty() && viewer.error_message.is_some() {
-            viewer.load_diff(DiffMode::Staged);
-        }
-
-        // Select specific file if requested
-        if let Some(file_path) = select_file {
-            if let Some(index) = viewer.file_stats.iter().position(|f| f.path == file_path) {
-                viewer.selected_file_index = index;
-                viewer.process_current_file();
-                viewer.update_side_by_side_cache();
-            }
-        }
-
-        log::debug!("[DiffViewer::new] total: {:?}, files: {}", t_new.elapsed(), viewer.file_stats.len());
+        viewer.load_diff_async(DiffMode::WorkingTree, select_file, cx);
         viewer
     }
 
-    fn load_diff(&mut self, mode: DiffMode) {
-        let t_load = std::time::Instant::now();
+    fn load_diff_async(&mut self, mode: DiffMode, select_file: Option<String>, cx: &mut Context<Self>) {
         self.diff_mode = mode;
+        self.loading = true;
         self.error_message = None;
         self.raw_files.clear();
         self.file_stats.clear();
         self.current_file = None;
+        self.current_file_old_content = None;
+        self.current_file_new_content = None;
         self.file_tree = FileTreeNode::default();
         self.selected_file_index = 0;
         self.selection.clear();
@@ -167,39 +163,48 @@ impl DiffViewer {
         self.side_by_side_lines.clear();
         self.scroll_x = 0.0;
         self.max_line_chars = 0;
+        cx.notify();
 
-        let path = std::path::Path::new(&self.project_path);
-        let t0 = std::time::Instant::now();
-        match get_diff_with_options(path, mode, self.ignore_whitespace) {
-            Ok(result) => {
-                log::debug!("[load_diff] get_diff_with_options: {:?}, files: {}", t0.elapsed(), result.files.len());
-                if result.is_empty() {
-                    self.error_message =
-                        Some(format!("No {} changes", mode.display_name().to_lowercase()));
-                } else {
-                    let t1 = std::time::Instant::now();
-                    self.store_diff_result(result);
-                    log::debug!("[load_diff] store_diff_result: {:?}", t1.elapsed());
+        let provider = self.provider.clone();
+        let ignore_whitespace = self.ignore_whitespace;
 
-                    let t2 = std::time::Instant::now();
-                    self.build_file_tree();
-                    log::debug!("[load_diff] build_file_tree: {:?}", t2.elapsed());
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                provider.get_diff(mode, ignore_whitespace)
+            }).await;
 
-                    let t3 = std::time::Instant::now();
-                    self.process_current_file();
-                    log::debug!("[load_diff] process_current_file: {:?}", t3.elapsed());
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match result {
+                    Ok(diff_result) => {
+                        if diff_result.is_empty() {
+                            // Auto-fallback: if WorkingTree is empty, try Staged
+                            if mode == DiffMode::WorkingTree {
+                                this.load_diff_async(DiffMode::Staged, select_file, cx);
+                                return;
+                            }
+                            this.error_message = Some(format!("No {} changes", mode.display_name().to_lowercase()));
+                        } else {
+                            this.store_diff_result(diff_result);
+                            this.build_file_tree();
 
-                    let t4 = std::time::Instant::now();
-                    self.update_side_by_side_cache();
-                    log::debug!("[load_diff] update_side_by_side_cache: {:?}", t4.elapsed());
+                            // Select specific file if requested
+                            if let Some(ref file_path) = select_file {
+                                if let Some(index) = this.file_stats.iter().position(|f| f.path == *file_path) {
+                                    this.selected_file_index = index;
+                                }
+                            }
+
+                            this.process_current_file_async(cx);
+                        }
+                    }
+                    Err(e) => {
+                        this.error_message = Some(e);
+                    }
                 }
-            }
-            Err(e) => {
-                log::debug!("[load_diff] get_diff_with_options error: {:?}", t0.elapsed());
-                self.error_message = Some(e);
-            }
-        }
-        log::debug!("[load_diff] total: {:?}", t_load.elapsed());
+                cx.notify();
+            });
+        }).detach();
     }
 
     /// Store raw diff data and extract lightweight stats (no syntax highlighting).
@@ -210,32 +215,77 @@ impl DiffViewer {
         }
     }
 
-    /// Process the currently selected file with syntax highlighting.
-    fn process_current_file(&mut self) {
-        if let Some(raw_file) = self.raw_files.get(self.selected_file_index) {
-            let repo_path = std::path::Path::new(&self.project_path);
-            let mut max_line_num = 0usize;
-
-            let display_file = process_file(
-                raw_file,
-                &mut max_line_num,
-                &self.syntax_set,
-                repo_path,
-                self.diff_mode,
-                self.is_dark,
-            );
-
-            self.line_num_width = max_line_num.to_string().len().max(3);
-            self.max_line_chars = display_file
-                .lines
-                .iter()
-                .map(|l| l.plain_text.chars().count())
-                .max()
-                .unwrap_or(0);
-            self.current_file = Some(display_file);
-        } else {
+    /// Process the currently selected file with syntax highlighting (async).
+    fn process_current_file_async(&mut self, cx: &mut Context<Self>) {
+        let Some(raw_file) = self.raw_files.get(self.selected_file_index).cloned() else {
             self.current_file = None;
-        }
+            self.current_file_old_content = None;
+            self.current_file_new_content = None;
+            return;
+        };
+
+        let provider = self.provider.clone();
+        let file_path = raw_file.display_name().to_string();
+        let diff_mode = self.diff_mode;
+        let syntax_set = self.syntax_set.clone();
+        let is_dark = self.is_dark;
+
+        cx.spawn(async move |this, cx| {
+            let (old_content, new_content, display_file, max_line_num) = smol::unblock(move || {
+                let (old_content, new_content) = provider.get_file_contents(&file_path, diff_mode);
+                let mut max_line_num = 0usize;
+                let display_file = process_file(
+                    &raw_file,
+                    &mut max_line_num,
+                    &syntax_set,
+                    old_content.clone(),
+                    new_content.clone(),
+                    is_dark,
+                );
+                (old_content, new_content, display_file, max_line_num)
+            }).await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.current_file_old_content = old_content;
+                this.current_file_new_content = new_content;
+                this.line_num_width = max_line_num.to_string().len().max(3);
+                this.max_line_chars = display_file
+                    .lines
+                    .iter()
+                    .map(|l| l.plain_text.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                this.current_file = Some(display_file);
+                this.update_side_by_side_cache();
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Re-highlight current file using cached content (for theme changes).
+    fn rehighlight_current_file(&mut self) {
+        let Some(raw_file) = self.raw_files.get(self.selected_file_index) else {
+            return;
+        };
+
+        let mut max_line_num = 0usize;
+        let display_file = process_file(
+            raw_file,
+            &mut max_line_num,
+            &self.syntax_set,
+            self.current_file_old_content.clone(),
+            self.current_file_new_content.clone(),
+            self.is_dark,
+        );
+
+        self.line_num_width = max_line_num.to_string().len().max(3);
+        self.max_line_chars = display_file
+            .lines
+            .iter()
+            .map(|l| l.plain_text.chars().count())
+            .max()
+            .unwrap_or(0);
+        self.current_file = Some(display_file);
     }
 
     fn build_file_tree(&mut self) {
@@ -246,8 +296,7 @@ impl DiffViewer {
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
         let new_mode = self.diff_mode.toggle();
-        self.load_diff(new_mode);
-        cx.notify();
+        self.load_diff_async(new_mode, None, cx);
     }
 
     fn toggle_view_mode(&mut self, cx: &mut Context<Self>) {
@@ -264,12 +313,12 @@ impl DiffViewer {
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.ignore_whitespace = !self.ignore_whitespace;
-        self.load_diff(self.diff_mode);
+        let mode = self.diff_mode;
+        self.load_diff_async(mode, None, cx);
         // Save to global settings
         settings_entity(cx).update(cx, |settings, cx| {
             settings.set_diff_ignore_whitespace(self.ignore_whitespace, cx);
         });
-        cx.notify();
     }
 
     fn update_side_by_side_cache(&mut self) {
@@ -286,22 +335,14 @@ impl DiffViewer {
 
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.file_stats.len() {
-            let t_select = std::time::Instant::now();
-            let file_path = self.file_stats.get(index).map(|f| f.path.clone()).unwrap_or_else(|| "?".into());
             self.selected_file_index = index;
             self.selection.clear();
             self.selection_side = None;
             self.scroll_x = 0.0;
+            self.current_file = None;
+            self.side_by_side_lines.clear();
 
-            let t0 = std::time::Instant::now();
-            self.process_current_file();
-            log::debug!("[select_file] process_current_file: {:?}", t0.elapsed());
-
-            let t1 = std::time::Instant::now();
-            self.update_side_by_side_cache();
-            log::debug!("[select_file] update_side_by_side_cache: {:?}", t1.elapsed());
-
-            log::debug!("[select_file] total: {:?}, file: {}", t_select.elapsed(), file_path);
+            self.process_current_file_async(cx);
             cx.notify();
         }
     }
@@ -531,7 +572,7 @@ impl Render for DiffViewer {
                     .h(relative(0.88))
                     .max_h(px(950.0))
                     .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, is_working, self.ignore_whitespace, cx))
-                    .child(self.render_content(&t, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
+                    .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
                     .child(self.render_footer(&t)),
             )
     }

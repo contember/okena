@@ -335,10 +335,32 @@ impl RootView {
                         om.toggle_add_project_dialog(rm, cx);
                     });
                 }
-                OverlayRequest::DiffViewer { path, file } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_diff_viewer(path, file, cx);
-                    });
+                OverlayRequest::DiffViewer { project_id, file } => {
+                    use crate::views::overlays::diff_viewer::provider::{DiffProvider, LocalDiffProvider, RemoteDiffProvider};
+                    let ws = self.workspace.read(cx);
+                    if let Some(project) = ws.project(&project_id) {
+                        let provider: std::sync::Arc<dyn DiffProvider> = if project.is_remote {
+                            if let Some(conn_id) = &project.connection_id {
+                                if let Some(ref rm) = self.remote_manager {
+                                    let rm = rm.read(cx);
+                                    if let Some((config, _, _)) = rm.connections().iter()
+                                        .find(|(c, _, _)| c.id == *conn_id) {
+                                        if let Some(token) = &config.saved_token {
+                                            std::sync::Arc::new(RemoteDiffProvider::new(
+                                                config.host.clone(), config.port,
+                                                token.clone(), project_id.clone(),
+                                            ))
+                                        } else { continue; }
+                                    } else { continue; }
+                                } else { continue; }
+                            } else { continue; }
+                        } else {
+                            std::sync::Arc::new(LocalDiffProvider::new(project.path.clone()))
+                        };
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_diff_viewer(provider, file, cx);
+                        });
+                    }
                 }
                 OverlayRequest::RemoteConnect => {
                     if let Some(ref rm) = self.remote_manager {
