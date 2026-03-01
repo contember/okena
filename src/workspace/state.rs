@@ -1003,7 +1003,7 @@ impl LayoutNode {
     /// - **Terminal** with same ID → keep local `minimized` and `detached`
     /// - **Split** with same direction + child count → keep local `sizes`, recurse children
     /// - **Tabs** with same child count → keep local `active_tab`, recurse children
-    /// - **Mismatch** → use server's version (structure changed on server)
+    /// - **Mismatch** → use server's structure but apply visual state from matching terminals
     pub fn merge_visual_state(server: &LayoutNode, local: &LayoutNode) -> LayoutNode {
         match (server, local) {
             // Terminal with matching ID: preserve local visual flags
@@ -1048,8 +1048,48 @@ impl LayoutNode {
                     active_tab: *l_active,
                 }
             }
-            // Structure mismatch: use server's version
-            _ => server.clone(),
+            // Structure mismatch: use server's structure but preserve visual state
+            // from local terminals that still exist in the new structure
+            _ => {
+                let mut visual_states = HashMap::new();
+                local.collect_terminal_visual_state(&mut visual_states);
+                let mut result = server.clone();
+                result.apply_terminal_visual_state(&visual_states);
+                result
+            }
+        }
+    }
+
+    /// Collect visual state (minimized, detached) from all terminals in this tree.
+    fn collect_terminal_visual_state(&self, states: &mut HashMap<String, (bool, bool)>) {
+        match self {
+            LayoutNode::Terminal { terminal_id: Some(id), minimized, detached, .. } => {
+                states.insert(id.clone(), (*minimized, *detached));
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.collect_terminal_visual_state(states);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply visual state from a map of terminal_id → (minimized, detached) to matching terminals.
+    fn apply_terminal_visual_state(&mut self, states: &HashMap<String, (bool, bool)>) {
+        match self {
+            LayoutNode::Terminal { terminal_id: Some(id), minimized, detached, .. } => {
+                if let Some(&(m, d)) = states.get(id) {
+                    *minimized = m;
+                    *detached = d;
+                }
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.apply_terminal_visual_state(states);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1913,6 +1953,76 @@ mod tests {
                 match &children[1] {
                     LayoutNode::Tabs { active_tab, .. } => assert_eq!(*active_tab, 1),
                     _ => panic!("Expected tabs"),
+                }
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    #[test]
+    fn merge_split_from_terminal_preserves_minimized() {
+        // Scenario: client has minimized terminal, server splits it into two
+        let server = hsplit(vec![terminal("t1"), terminal("t2")]);
+        let local = terminal_minimized("t1");
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        match &merged {
+            LayoutNode::Split { children, .. } => {
+                assert_eq!(children.len(), 2);
+                match &children[0] {
+                    LayoutNode::Terminal { terminal_id, minimized, .. } => {
+                        assert_eq!(terminal_id.as_deref(), Some("t1"));
+                        assert!(*minimized, "minimized state should be preserved after split");
+                    }
+                    _ => panic!("Expected terminal"),
+                }
+                match &children[1] {
+                    LayoutNode::Terminal { terminal_id, minimized, .. } => {
+                        assert_eq!(terminal_id.as_deref(), Some("t2"));
+                        assert!(!*minimized, "new terminal should not be minimized");
+                    }
+                    _ => panic!("Expected terminal"),
+                }
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    #[test]
+    fn merge_structure_change_preserves_detached() {
+        let server = hsplit(vec![terminal("t1"), terminal("t2")]);
+        let local = terminal_detached("t1");
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        match &merged {
+            LayoutNode::Split { children, .. } => {
+                match &children[0] {
+                    LayoutNode::Terminal { detached, .. } => {
+                        assert!(*detached, "detached state should be preserved");
+                    }
+                    _ => panic!("Expected terminal"),
+                }
+            }
+            _ => panic!("Expected split"),
+        }
+    }
+
+    #[test]
+    fn merge_split_child_count_change_preserves_visual_state() {
+        // Split with 2 children → server adds a third child
+        let server = hsplit(vec![terminal("t1"), terminal("t2"), terminal("t3")]);
+        let local = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![30.0, 70.0],
+            children: vec![terminal_minimized("t1"), terminal("t2")],
+        };
+        let merged = LayoutNode::merge_visual_state(&server, &local);
+        match &merged {
+            LayoutNode::Split { children, .. } => {
+                assert_eq!(children.len(), 3);
+                match &children[0] {
+                    LayoutNode::Terminal { minimized, .. } => {
+                        assert!(*minimized, "t1 minimized should be preserved");
+                    }
+                    _ => panic!("Expected terminal"),
                 }
             }
             _ => panic!("Expected split"),
