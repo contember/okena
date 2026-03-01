@@ -217,20 +217,47 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                             config.host,
                             config.port
                         );
+                        // Only 401 means the token is actually invalid → need pairing
+                        let _ = event_tx
+                            .send(ConnectionEvent::StatusChanged {
+                                connection_id: config.id.clone(),
+                                status: ConnectionStatus::Pairing,
+                            })
+                            .await;
+                        return;
                     }
                     Ok(resp) => {
-                        log::warn!(
-                            "Token validation got unexpected status: {}",
+                        // Transient server error (e.g. 500 during startup) —
+                        // token may still be valid, don't discard it.
+                        let msg = format!(
+                            "Token validation: unexpected HTTP {}",
                             resp.status()
                         );
+                        log::warn!("{}", msg);
+                        let _ = event_tx
+                            .send(ConnectionEvent::StatusChanged {
+                                connection_id: config.id.clone(),
+                                status: ConnectionStatus::Error(msg),
+                            })
+                            .await;
+                        return;
                     }
                     Err(e) => {
-                        log::warn!("Token validation failed: {}", e);
+                        // Network error — token may still be valid, don't discard it.
+                        let msg = format!("Token validation failed: {}", e);
+                        log::warn!("{}", msg);
+                        let _ = event_tx
+                            .send(ConnectionEvent::StatusChanged {
+                                connection_id: config.id.clone(),
+                                status: ConnectionStatus::Error(msg),
+                            })
+                            .await;
+                        return;
                     }
                 }
             }
 
-            // Step 3: Need pairing
+            // No saved token → need pairing
             let _ = event_tx
                 .send(ConnectionEvent::StatusChanged {
                     connection_id: config.id.clone(),
