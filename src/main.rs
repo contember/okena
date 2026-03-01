@@ -32,6 +32,25 @@ use std::sync::Arc;
 
 use std::net::IpAddr;
 
+/// Writes to both stderr and a log file simultaneously.
+struct TeeWriter {
+    stderr: std::io::Stderr,
+    file: std::fs::File,
+}
+
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.stderr.write_all(buf);
+        self.file.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.stderr.flush();
+        self.file.flush()
+    }
+}
+
 use crate::app::Okena;
 use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
@@ -293,8 +312,29 @@ fn main() {
         std::process::exit(cli_pair());
     }
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .init();
+    // Set up file logging: rotate previous log, write to both stderr and file
+    let log_target = (|| -> Option<env_logger::fmt::Target> {
+        let config_dir = persistence::get_config_dir();
+        std::fs::create_dir_all(&config_dir).ok()?;
+        let log_path = config_dir.join("okena.log");
+        let prev_path = config_dir.join("okena.log.1");
+        if log_path.exists() {
+            let _ = std::fs::rename(&log_path, &prev_path);
+        }
+        let file = std::fs::File::create(&log_path).ok()?;
+        Some(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
+            stderr: std::io::stderr(),
+            file,
+        })))
+    })();
+
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    );
+    if let Some(target) = log_target {
+        builder.target(target);
+    }
+    builder.init();
 
     let args: Vec<String> = std::env::args().collect();
 
