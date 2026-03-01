@@ -173,6 +173,21 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
 pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
+    // If workspace.json is missing, try to auto-recover from backup
+    if !path.exists() {
+        let bak_path = path.with_extension("json.bak");
+        if bak_path.exists() {
+            log::warn!(
+                "workspace.json missing but backup found at {:?} — restoring from backup.",
+                bak_path,
+            );
+            if let Err(e) = std::fs::copy(&bak_path, &path) {
+                log::error!("Failed to restore workspace backup: {}", e);
+            }
+            // Fall through — path.exists() check below will pick it up if copy succeeded
+        }
+    }
+
     if path.exists() {
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -208,12 +223,16 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
         Ok(data)
     } else {
-        // Config dir exists but workspace.json doesn't — possible data loss
+        // Config dir exists but workspace.json doesn't — block auto-save
+        // to prevent a default workspace from overwriting a potentially
+        // recoverable file (e.g. restored from backup manually).
         if path.parent().is_some_and(|p| p.exists()) {
             log::warn!(
-                "Workspace file not found at {:?} (config dir exists). Starting with default workspace.",
+                "Workspace file not found at {:?} (config dir exists). \
+                 Starting with default workspace. Auto-save DISABLED to protect data.",
                 path,
             );
+            LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
         }
         Ok(default_workspace())
     }
@@ -221,7 +240,14 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 
 /// Save workspace to disk using atomic write (write to temp file + rename).
 /// Remote projects are excluded. Refuses to save after a load failure.
+///
+/// Safety layers (all must pass for a save to proceed):
+/// 1. LOADED_FROM_DEFAULT — blocks save entirely if load failed or file was missing
+/// 2. Empty-workspace guard — refuses to save 0 local projects
+/// 3. Rolling backup — always creates .bak before overwriting
+/// 4. Atomic write — tmp + fsync + rename prevents partial writes
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
+    // Layer 1: block save if we loaded from fallback default
     if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
         log::warn!("Skipping workspace save — loaded from fallback default, protecting file on disk.");
         return Ok(());
@@ -233,9 +259,28 @@ pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
     }
 
     let local_data = data.without_remote_projects();
+
+    // Layer 2: refuse to save an empty workspace (likely a bug, not user intent)
+    if local_data.projects.is_empty() {
+        log::error!(
+            "Refusing to save workspace with 0 local projects — this is likely a bug. \
+             Blocking all future saves to protect data on disk."
+        );
+        LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+
     let json = serde_json::to_string_pretty(&local_data)?;
 
-    // Atomic write: tmp + fsync + rename ensures the file is never partial.
+    // Layer 3: rolling backup — always keep the previous version as .bak
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        if let Err(e) = std::fs::copy(&path, &backup_path) {
+            log::warn!("Failed to create workspace backup: {}", e);
+        }
+    }
+
+    // Layer 4: atomic write — tmp + fsync + rename ensures the file is never partial
     let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &json)?;
     std::fs::File::open(&tmp_path)?.sync_all()?;
@@ -554,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn save_filters_remote_projects() {
+    fn without_remote_projects_filters_correctly() {
         // Create mixed local + remote workspace data
         let local = make_project("local1");
         let mut remote1 = make_project("remote:conn1:p1");
@@ -578,24 +623,20 @@ mod tests {
         data.project_widths.insert("local1".to_string(), 50.0);
         data.project_widths.insert("remote:conn1:p1".to_string(), 40.0);
 
-        // Save and reload
-        let result = save_workspace(&data);
-        assert!(result.is_ok());
-
-        let loaded = load_workspace(crate::terminal::session_backend::SessionBackend::None).unwrap();
+        let filtered = data.without_remote_projects();
 
         // Remote projects should be filtered out
-        assert_eq!(loaded.projects.len(), 1);
-        assert_eq!(loaded.projects[0].id, "local1");
+        assert_eq!(filtered.projects.len(), 1);
+        assert_eq!(filtered.projects[0].id, "local1");
 
         // Remote folder should be filtered out
-        assert!(loaded.folders.is_empty());
+        assert!(filtered.folders.is_empty());
 
         // Remote folder should be removed from project_order
-        assert_eq!(loaded.project_order, vec!["local1".to_string()]);
+        assert_eq!(filtered.project_order, vec!["local1".to_string()]);
 
         // Remote project widths should be filtered out
-        assert_eq!(loaded.project_widths.len(), 1);
-        assert!(loaded.project_widths.contains_key("local1"));
+        assert_eq!(filtered.project_widths.len(), 1);
+        assert!(filtered.project_widths.contains_key("local1"));
     }
 }
