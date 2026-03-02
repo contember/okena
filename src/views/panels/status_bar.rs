@@ -211,7 +211,7 @@ impl Render for StatusBar {
                             .child(
                                 div()
                                     .text_color(rgb(cpu_color))
-                                    .child(format!("{:.0}%", stats.cpu_usage))
+                                    .child(format!("{:02.0}%", stats.cpu_usage))
                             )
                     )
                     // Memory
