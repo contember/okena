@@ -333,8 +333,8 @@ impl ClaudeUsage {
                                                             .text_color(rgb(t.text_primary))
                                                             .child(format!(
                                                                 "${:.2} / ${:.2}",
-                                                                extra.used_credits,
-                                                                extra.monthly_limit
+                                                                extra.used_credits / 100.0,
+                                                                extra.monthly_limit / 100.0
                                                             )),
                                                     ),
                                             )
