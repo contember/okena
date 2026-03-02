@@ -398,11 +398,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id,
             target_path,
             position,
+            target_project_id,
         } => ActionRequest::MoveTerminalToTabGroup {
             project_id: s(&project_id),
             terminal_id: s(&terminal_id),
             target_path,
             position,
+            target_project_id: target_project_id.map(|id| s(&id)),
         },
         ActionRequest::MovePaneTo {
             project_id,

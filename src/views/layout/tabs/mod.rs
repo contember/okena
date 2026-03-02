@@ -612,14 +612,14 @@ impl LayoutContainer {
                             if active_drag.borrow().is_some() {
                                 return;
                             }
-                            if drag.project_id != project_id_for_drop {
-                                return;
-                            }
 
                             let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
                             let drag_tab_index = drag.layout_path.last().copied();
 
-                            if drag_parent == layout_path_for_drop.as_slice() {
+                            // Same project + same tab group → reorder
+                            if drag.project_id == project_id_for_drop
+                                && drag_parent == layout_path_for_drop.as_slice()
+                            {
                                 if let Some(from_index) = drag_tab_index {
                                     if from_index != i {
                                         let target_index = if from_index < i { i - 1 } else { i };
@@ -641,6 +641,7 @@ impl LayoutContainer {
                                         terminal_id: drag.terminal_id.clone(),
                                         target_path: layout_path_for_drop.clone(),
                                         position: Some(i),
+                                        target_project_id: Some(project_id_for_drop.clone()),
                                     }, cx);
                                 }
                             }
@@ -746,14 +747,14 @@ impl LayoutContainer {
                     if active_drag_for_end_drop.borrow().is_some() {
                         return;
                     }
-                    if drag.project_id != project_id_for_end {
-                        return;
-                    }
 
                     let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
                     let drag_tab_index = drag.layout_path.last().copied();
 
-                    if drag_parent == layout_path_for_end.as_slice() {
+                    // Same project + same tab group → reorder
+                    if drag.project_id == project_id_for_end
+                        && drag_parent == layout_path_for_end.as_slice()
+                    {
                         if let Some(from_index) = drag_tab_index {
                             let target_index = num_children;
                             if from_index != target_index - 1 {
@@ -775,6 +776,7 @@ impl LayoutContainer {
                                 terminal_id: drag.terminal_id.clone(),
                                 target_path: layout_path_for_end.clone(),
                                 position: None,
+                                target_project_id: Some(project_id_for_end.clone()),
                             }, cx);
                         }
                     }

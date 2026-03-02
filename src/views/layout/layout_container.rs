@@ -331,10 +331,6 @@ impl LayoutContainer {
                         if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
                             return;
                         }
-                        // Same project check (v1)
-                        if drag.project_id != pid {
-                            return;
-                        }
                         if let Some(ref target_id) = this_tid {
                             if let Some(ref dispatcher) = dispatcher {
                                 dispatcher.dispatch(ActionRequest::MovePaneTo {

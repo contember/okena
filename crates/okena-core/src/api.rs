@@ -188,6 +188,8 @@ pub enum ActionRequest {
         terminal_id: String,
         target_path: Vec<usize>,
         position: Option<usize>,
+        #[serde(default)]
+        target_project_id: Option<String>,
     },
     MovePaneTo {
         project_id: String,
@@ -460,6 +462,7 @@ mod tests {
                 terminal_id: "t1".into(),
                 target_path: vec![1],
                 position: Some(0),
+                target_project_id: Some("p2".into()),
             },
             ActionRequest::MovePaneTo {
                 project_id: "p1".into(),

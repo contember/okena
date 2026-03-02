@@ -223,8 +223,10 @@ pub fn execute_action(
             terminal_id,
             target_path,
             position,
+            target_project_id,
         } => {
-            ws.move_terminal_to_tab_group(&project_id, &terminal_id, &target_path, position, cx);
+            let target_pid = target_project_id.as_deref().unwrap_or(&project_id);
+            ws.move_terminal_to_tab_group(&project_id, &terminal_id, target_pid, &target_path, position, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::MovePaneTo {
