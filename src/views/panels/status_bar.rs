@@ -1,4 +1,5 @@
 use crate::keybindings::ToggleSidebar;
+use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
@@ -9,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
+
+use super::claude_status::ClaudeStatus;
+use super::claude_usage::ClaudeUsage;
 
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -67,6 +71,8 @@ impl SystemInfoCache {
 pub struct StatusBar {
     workspace: Entity<Workspace>,
     cache: Arc<Mutex<SystemInfoCache>>,
+    claude_status: Entity<ClaudeStatus>,
+    claude_usage: Entity<ClaudeUsage>,
     sidebar_open: bool,
 }
 
@@ -97,10 +103,13 @@ impl StatusBar {
             }
         }).detach();
 
+        let claude_status = cx.new(|cx| ClaudeStatus::new(cx));
+        let claude_usage = cx.new(|cx| ClaudeUsage::new(cx));
+
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        Self { workspace, cache, sidebar_open: true }
+        Self { workspace, cache, claude_status, claude_usage, sidebar_open: true }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -220,6 +229,11 @@ impl Render for StatusBar {
                                     .child(memory_str)
                             )
                     )
+                    // Claude Code status + usage
+                    .when(settings_entity(cx).read(cx).settings.claude_code_integration, |d| {
+                        d.child(self.claude_status.clone())
+                            .child(self.claude_usage.clone())
+                    })
             })
             // Right side - remote info + version + time
             .child({

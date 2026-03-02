@@ -63,6 +63,10 @@ impl SettingsPanel {
                         "auto-update", "Auto Update", s.auto_update_enabled, true,
                         |state, val, cx| state.set_auto_update_enabled(val, cx), cx,
                     ))
+                    .child(self.render_toggle(
+                        "claude-code-integration", "Claude Code Status", s.claude_code_integration, true,
+                        |state, val, cx| state.set_claude_code_integration(val, cx), cx,
+                    ))
                     .child(self.render_number_stepper(
                         "min-col-width", "Min Column Width", s.min_column_width,
                         "{}px", 50.0, 60.0, false,

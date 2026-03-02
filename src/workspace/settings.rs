@@ -252,6 +252,10 @@ pub struct AppSettings {
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
 
+    /// Show Claude Code status indicator in the status bar (default: false)
+    #[serde(default)]
+    pub claude_code_integration: bool,
+
     /// Idle timeout in seconds for "waiting for input" detection (default: 5, 0 = disabled)
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u32,
@@ -292,6 +296,7 @@ impl Default for AppSettings {
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            claude_code_integration: false,
             idle_timeout_secs: default_idle_timeout_secs(),
             worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),

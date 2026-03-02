@@ -116,6 +116,8 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    setting_setter!(set_claude_code_integration, claude_code_integration, bool);
+
     /// Set the theme mode
     pub fn set_theme_mode(&mut self, value: ThemeMode, cx: &mut Context<Self>) {
         self.settings.theme_mode = value;
