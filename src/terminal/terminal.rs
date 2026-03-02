@@ -844,6 +844,10 @@ impl Terminal {
                 let mut combined_text = String::new();
                 // (visual_row, offset_in_combined, leading_spaces_stripped)
                 let mut row_offsets: Vec<(i32, usize, usize)> = Vec::new();
+                // Leading spaces of the first row in this group — used to
+                // distinguish TUI padding from real indentation on
+                // continuation lines.
+                let mut first_row_leading: usize = 0;
 
                 // Collect wrapped lines into one logical line
                 loop {
@@ -863,6 +867,7 @@ impl Terminal {
 
                     // For continuation rows, also strip leading spaces (TUI padding)
                     let (text_to_add, leading_stripped) = if combined_text.is_empty() {
+                        first_row_leading = rtrimmed.len() - rtrimmed.trim_start_matches(' ').len();
                         (rtrimmed, 0usize)
                     } else {
                         let ltrimmed = rtrimmed.trim_start_matches(' ');
@@ -887,10 +892,12 @@ impl Terminal {
                             let next_buffer = next_visual - display_offset;
                             let mut first_is_url = false;
                             let mut next_line_start = String::new();
+                            let mut next_leading_spaces = 0usize;
                             for col_idx in 0..cols {
                                 let cell = &grid[Point::new(Line(next_buffer), Column(col_idx))];
                                 if cell.c == ' ' {
                                     if next_line_start.is_empty() {
+                                        next_leading_spaces += 1;
                                         continue; // skip leading spaces
                                     }
                                     break; // stop at first space after content
@@ -913,6 +920,12 @@ impl Terminal {
                                 || next_line_start.starts_with("ssh://")
                                 || next_line_start.starts_with("git://")
                             ) {
+                                false
+                            } else if next_leading_spaces > first_row_leading {
+                                // Next line is indented further than the first
+                                // line of this group — the extra spaces are real
+                                // content (e.g. sub-item indentation), not TUI
+                                // padding for a wrapped URL.
                                 false
                             } else {
                                 first_is_url
@@ -1448,6 +1461,19 @@ mod tests {
         assert_eq!(links[1].text, "https://claude.ai/code/sess_ABCDEF123");
         assert_eq!(links[1].col, 2); // continuation also at col 2
         assert_eq!(links[1].line, 1);
+    }
+
+    #[test]
+    fn detect_url_not_wrapped_when_next_line_more_indented() {
+        // Next line has more leading spaces than the first line —
+        // the extra indentation means it's NOT a URL continuation.
+        // Reproduces: "   1. zkusí https://api.postmarkapp.com\n      (oficiální API)"
+        let links = detect_urls_in(
+            "   1. text https://api.postmarkapp.com\r\n      (next line)\r\n",
+            50,
+        );
+        assert_eq!(links.len(), 1, "URL should NOT merge with next line: {:?}", links);
+        assert_eq!(links[0].text, "https://api.postmarkapp.com");
     }
 
     #[test]
