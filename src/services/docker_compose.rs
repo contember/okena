@@ -35,9 +35,10 @@ pub fn detect_compose_file(project_path: &str) -> Option<String> {
 }
 
 /// List service names defined in a compose file.
+/// Excludes services with `deploy.replicas = 0`.
 pub fn list_services(project_path: &str, compose_file: &str) -> Result<Vec<String>, String> {
     let mut cmd = process::command("docker");
-    cmd.args(["compose", "-f", compose_file, "config", "--services"])
+    cmd.args(["compose", "-f", compose_file, "config", "--format", "json"])
         .current_dir(project_path);
 
     let output = process::safe_output(&mut cmd)
@@ -49,7 +50,39 @@ pub fn list_services(project_path: &str, compose_file: &str) -> Result<Vec<Strin
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    parse_compose_config_services(&stdout)
+}
+
+/// Parse `docker compose config --format json` output and return service names,
+/// filtering out services that have `deploy.replicas` set to 0.
+fn parse_compose_config_services(json: &str) -> Result<Vec<String>, String> {
+    let config: ComposeConfig = serde_json::from_str(json)
+        .map_err(|e| format!("Failed to parse docker compose config JSON: {}", e))?;
+
+    Ok(config
+        .services
+        .into_iter()
+        .filter(|(_, svc)| {
+            !matches!(svc.deploy, Some(DeployConfig { replicas: Some(0) }))
+        })
+        .map(|(name, _)| name)
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct ComposeConfig {
+    #[serde(default)]
+    services: std::collections::HashMap<String, ComposeService>,
+}
+
+#[derive(Deserialize)]
+struct ComposeService {
+    deploy: Option<DeployConfig>,
+}
+
+#[derive(Deserialize)]
+struct DeployConfig {
+    replicas: Option<u32>,
 }
 
 /// Parsed status of one Docker service.
@@ -264,5 +297,22 @@ mod tests {
         assert_eq!(COMPOSE_FILE_NAMES[1], "docker-compose.yaml");
         assert_eq!(COMPOSE_FILE_NAMES[2], "compose.yml");
         assert_eq!(COMPOSE_FILE_NAMES[3], "compose.yaml");
+    }
+
+    #[test]
+    fn test_parse_compose_config_filters_zero_replicas() {
+        let json = r#"{
+            "services": {
+                "web": {},
+                "db": { "deploy": { "replicas": 1 } },
+                "worker": { "deploy": { "replicas": 0 } },
+                "debug-tools": { "deploy": { "replicas": 0 } },
+                "redis": { "deploy": {} }
+            }
+        }"#;
+
+        let mut result = parse_compose_config_services(json).unwrap();
+        result.sort();
+        assert_eq!(result, vec!["db", "redis", "web"]);
     }
 }
