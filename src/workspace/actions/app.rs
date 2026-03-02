@@ -37,7 +37,7 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
+            remote_services: vec![],
             remote_host: None,
             remote_git_status: None,
         }
