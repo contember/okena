@@ -1,5 +1,6 @@
 use crate::git::{self, FileDiffSummary};
 use crate::git::watcher::GitStatusWatcher;
+use crate::views::components::file_tree::build_file_tree;
 use crate::action_dispatch::ActionDispatcher;
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
@@ -399,13 +400,49 @@ impl ProjectColumn {
     }
 
     fn render_diff_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::views::components::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
+
         if !self.diff_popover_visible || self.diff_file_summaries.is_empty() {
             return div().size_0().into_any_element();
         }
 
-        let max_files = 15;
-        let total_files = self.diff_file_summaries.len();
-        let show_more = total_files > max_files;
+        let summaries = &self.diff_file_summaries;
+
+        // Build tree from file summaries
+        let tree = build_file_tree(
+            summaries.iter().enumerate().map(|(i, f)| (i, &f.path))
+        );
+
+        let mut tree_elements: Vec<AnyElement> = Vec::new();
+        for item in flatten_file_tree(&tree, 0) {
+            match item {
+                FileTreeItem::Folder { name, depth } => {
+                    tree_elements.push(render_folder_row(name, depth, t));
+                }
+                FileTreeItem::File { index, depth } => {
+                    if let Some(summary) = summaries.get(index) {
+                        let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
+                        let is_deleted = summary.removed > 0 && summary.added == 0;
+                        let file_path = summary.path.clone();
+                        tree_elements.push(
+                            render_file_row(depth, filename, summary.added, summary.removed, summary.is_new, is_deleted, false, t)
+                                .id(ElementId::Name(format!("diff-file-{}", index).into()))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.hide_diff_popover(cx);
+                                    let pid = this.project_id.clone();
+                                    this.request_broker.update(cx, |broker, cx| {
+                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                            project_id: pid,
+                                            file: Some(file_path.clone()),
+                                        }, cx);
+                                    });
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+        }
 
         // Position below the git-diff-stats badge
         let bounds = self.diff_stats_bounds;
@@ -447,113 +484,7 @@ impl ProjectColumn {
                         .on_scroll_wheel(|_, _, cx| {
                             cx.stop_propagation();
                         })
-                        .children(
-                            self.diff_file_summaries
-                                .iter()
-                                .take(max_files)
-                                .enumerate()
-                                .map(|(idx, summary)| {
-                                    let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
-                                    let dir = if summary.path.contains('/') {
-                                        let parts: Vec<&str> = summary.path.rsplitn(2, '/').collect();
-                                        if parts.len() > 1 { Some(parts[1]) } else { None }
-                                    } else {
-                                        None
-                                    };
-                                    let is_new = summary.is_new;
-                                    let added = summary.added;
-                                    let removed = summary.removed;
-                                    let file_path = summary.path.clone();
-
-                                    div()
-                                        .id(ElementId::Name(format!("diff-file-{}", idx).into()))
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(12.0))
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.hide_diff_popover(cx);
-                                            let pid = this.project_id.clone();
-                                            this.request_broker.update(cx, |broker, cx| {
-                                                broker.push_overlay_request(OverlayRequest::DiffViewer {
-                                                    project_id: pid,
-                                                    file: Some(file_path.clone()),
-                                                }, cx);
-                                            });
-                                        }))
-                                        .child(
-                                            v_flex()
-                                                .overflow_hidden()
-                                                .child(
-                                                    h_flex()
-                                                        .gap(px(4.0))
-                                                        .child(
-                                                            div()
-                                                                .text_size(px(11.0))
-                                                                .text_color(rgb(t.text_primary))
-                                                                .text_ellipsis()
-                                                                .child(filename.to_string()),
-                                                        )
-                                                        .when(is_new, |d| {
-                                                            d.child(
-                                                                div()
-                                                                    .px(px(4.0))
-                                                                    .py(px(1.0))
-                                                                    .rounded(px(2.0))
-                                                                    .bg(rgb(t.term_green))
-                                                                    .text_size(px(8.0))
-                                                                    .text_color(rgb(0x000000))
-                                                                    .child("new"),
-                                                            )
-                                                        }),
-                                                )
-                                                .when_some(dir, |d, dir| {
-                                                    d.child(
-                                                        div()
-                                                            .text_size(px(9.0))
-                                                            .text_color(rgb(t.text_muted))
-                                                            .text_ellipsis()
-                                                            .child(dir.to_string()),
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap(px(6.0))
-                                                .flex_shrink_0()
-                                                .text_size(px(10.0))
-                                                .when(added > 0, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .text_color(rgb(t.term_green))
-                                                            .child(format!("+{}", added)),
-                                                    )
-                                                })
-                                                .when(removed > 0, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .text_color(rgb(t.term_red))
-                                                            .child(format!("-{}", removed)),
-                                                    )
-                                                }),
-                                        )
-                                }),
-                        )
-                        .when(show_more, |d: Stateful<Div>| {
-                            d.child(
-                                div()
-                                    .px(px(10.0))
-                                    .py(px(4.0))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("... and {} more files", total_files - max_files)),
-                            )
-                        }),
+                        .children(tree_elements),
                 ),
         )
         .into_any_element()

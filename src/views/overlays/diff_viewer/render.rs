@@ -585,116 +585,34 @@ impl DiffViewer {
 
     pub(super) fn render_tree_node(
         &self,
-        node: &FileTreeNode,
-        depth: usize,
+        tree: &FileTreeNode,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        use crate::views::components::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
+
         let mut elements: Vec<AnyElement> = Vec::new();
-
-        for (name, child) in &node.children {
-            let indent = depth * 14;
-            let has_content = !child.files.is_empty() || !child.children.is_empty();
-
-            if has_content {
-                elements.push(
-                    h_flex()
-                        .h(px(26.0))
-                        .pl(px(indent as f32 + 12.0))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(t.text_muted))
-                                .child(format!("{}/", name)),
-                        )
-                        .into_any_element(),
-                );
-
-                elements.extend(self.render_tree_node(child, depth + 1, t, cx));
+        for item in flatten_file_tree(tree, 0) {
+            match item {
+                FileTreeItem::Folder { name, depth } => {
+                    elements.push(render_folder_row(name, depth, t));
+                }
+                FileTreeItem::File { index, depth } => {
+                    if let Some(file) = self.file_stats.get(index) {
+                        let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
+                        let is_selected = index == self.selected_file_index;
+                        elements.push(
+                            render_file_row(depth, filename, file.added, file.removed, file.is_new, file.is_deleted, is_selected, t)
+                                .id(ElementId::Name(format!("tree-file-{}", index).into()))
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.select_file(index, cx);
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                }
             }
         }
-
-        for &file_index in &node.files {
-            if let Some(file) = self.file_stats.get(file_index) {
-                let indent = depth * 14;
-                let is_selected = file_index == self.selected_file_index;
-                let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
-                let added = file.added;
-                let removed = file.removed;
-                let is_new = file.is_new;
-                let is_deleted = file.is_deleted;
-
-                // Status indicator styling
-                let (status_char, status_color) = if is_new {
-                    ("A", t.diff_added_fg)
-                } else if is_deleted {
-                    ("D", t.diff_removed_fg)
-                } else {
-                    ("M", t.text_muted)
-                };
-
-                elements.push(
-                    div()
-                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .h(px(28.0))
-                        .pl(px(indent as f32 + 12.0))
-                        .pr(px(12.0))
-                        .mx(px(4.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.select_file(file_index, cx);
-                        }))
-                        // Status badge
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(status_color))
-                                .child(status_char),
-                        )
-                        // Filename
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(13.0))
-                                .text_color(rgb(t.text_primary))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(filename.to_string()),
-                        )
-                        // Line counts - more subtle
-                        .when(added > 0 || removed > 0, |d| {
-                            d.child(
-                                h_flex()
-                                    .gap(px(4.0))
-                                    .text_size(px(11.0))
-                                    .when(added > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_added_fg))
-                                                .child(format!("+{}", added)),
-                                        )
-                                    })
-                                    .when(removed > 0, |d| {
-                                        d.child(
-                                            div()
-                                                .text_color(rgb(t.diff_removed_fg))
-                                                .child(format!("-{}", removed)),
-                                        )
-                                    }),
-                            )
-                        })
-                        .into_any_element(),
-                );
-            }
-        }
-
         elements
     }
 }

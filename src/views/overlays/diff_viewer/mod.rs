@@ -478,7 +478,7 @@ impl Render for DiffViewer {
         let line_count = self.current_file.as_ref().map(|f| f.lines.len()).unwrap_or(0);
 
         let tree_elements = if has_files {
-            self.render_tree_node(&self.file_tree.clone(), 0, &t, cx)
+            self.render_tree_node(&self.file_tree.clone(), &t, cx)
         } else {
             Vec::new()
         };
