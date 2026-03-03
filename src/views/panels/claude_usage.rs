@@ -56,10 +56,10 @@ fn read_access_token() -> Option<String> {
 }
 
 fn parse_usage(resp: &serde_json::Value) -> UsageData {
-    let five_hour = parse_tier(resp, "five_hour");
-    let seven_day = parse_tier(resp, "seven_day");
-    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet");
-    let seven_day_opus = parse_tier(resp, "seven_day_opus");
+    let five_hour = parse_tier(resp, "five_hour", false);
+    let seven_day = parse_tier(resp, "seven_day", true);
+    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", true);
+    let seven_day_opus = parse_tier(resp, "seven_day_opus", true);
 
     let extra_usage = resp.get("extra_usage").and_then(|eu| {
         Some(ExtraUsage {
@@ -79,20 +79,32 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
     }
 }
 
-fn parse_tier(resp: &serde_json::Value, key: &str) -> Option<TierUsage> {
+fn parse_tier(resp: &serde_json::Value, key: &str, include_date: bool) -> Option<TierUsage> {
     let tier = resp.get(key)?;
     Some(TierUsage {
         utilization: tier["utilization"].as_f64().unwrap_or(0.0),
         resets_at: tier["resets_at"]
             .as_str()
-            .map(format_reset_time)
+            .map(|ts| format_reset_time(ts, include_date))
             .unwrap_or_default(),
     })
 }
 
-/// Format ISO 8601 reset time to a human-readable relative or short form
-fn format_reset_time(ts: &str) -> String {
-    // Parse enough to show "HH:MM UTC"
+/// Convert a civil date to days since Unix epoch (Howard Hinnant's algorithm).
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year as i64 - 1 } else { year as i64 };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * m as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Format ISO 8601 reset time to a human-readable short form.
+/// When `include_date` is true, shows relative labels: "today", "tomorrow",
+/// weekday name (for 2-6 days), or "Mar 5" for further dates.
+fn format_reset_time(ts: &str, include_date: bool) -> String {
     let parts: Vec<&str> = ts.split('T').collect();
     if parts.len() != 2 {
         return ts.to_string();
@@ -103,6 +115,45 @@ fn format_reset_time(ts: &str) -> String {
     if hm.len() < 2 {
         return ts.to_string();
     }
+
+    if include_date {
+        let date_parts: Vec<&str> = parts[0].split('-').collect();
+        if date_parts.len() == 3 {
+            let year: i32 = date_parts[0].parse().unwrap_or(0);
+            let month: u32 = date_parts[1].parse().unwrap_or(0);
+            let day: u32 = date_parts[2].parse().unwrap_or(0);
+
+            if year > 0 && (1..=12).contains(&month) && (1..=31).contains(&day) {
+                let reset_days = days_from_civil(year, month, day);
+                let today_days = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    / 86400) as i64;
+                let diff = reset_days - today_days;
+
+                let date_label = if diff == 0 {
+                    "today".to_string()
+                } else if diff == 1 {
+                    "tomorrow".to_string()
+                } else if (2..=6).contains(&diff) {
+                    let dow = ((reset_days % 7) + 7) % 7; // epoch day 0 = Thu
+                    ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][dow as usize].to_string()
+                } else {
+                    let month_name = match month {
+                        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+                        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+                        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+                        _ => "?",
+                    };
+                    format!("{} {}", month_name, day)
+                };
+
+                return format!("{}, {}:{} UTC", date_label, hm[0], hm[1]);
+            }
+        }
+    }
+
     format!("{}:{} UTC", hm[0], hm[1])
 }
 
