@@ -153,7 +153,7 @@ pub fn render_file_row(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::build_file_tree;
 
     #[test]
     fn test_build_file_tree_empty() {
