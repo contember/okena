@@ -581,39 +581,51 @@ impl ServiceManager {
                 }).detach();
             }
             ServiceKind::Okena => {
-                // Collect all descendant PIDs before killing so we can wait for them.
-                // Use get_service_pids() to find the real service root PIDs
-                // (with session backends like dtach/tmux, get_shell_pid() returns
-                // the attach client PID, not the actual service process).
-                let old_pids: Vec<u32> = instance
-                    .terminal_id
-                    .as_ref()
-                    .map(|tid| {
-                        self.backend.get_service_pids(tid)
-                            .into_iter()
-                            .flat_map(|pid| port_detect::get_descendant_pids(pid))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // Kill old terminal
-                if let Some(terminal_id) = instance.terminal_id.take() {
-                    self.backend.kill(&terminal_id);
-                    self.terminals.lock().remove(&terminal_id);
-                    self.terminal_to_service.remove(&terminal_id);
-                }
+                // Take terminal_id now to prevent concurrent access.
+                // The PtyManager handle is NOT removed yet — that happens in kill() below.
+                let terminal_id = instance.terminal_id.take();
 
                 instance.status = ServiceStatus::Restarting;
                 instance.restart_count = 0;
                 instance.detected_ports.clear();
                 cx.notify();
 
-                // Wait for old processes to die, then start the new one
                 let pid = project_id.to_string();
                 let name = service_name.to_string();
                 let path = project_path.to_string();
+                let backend = self.backend.clone();
+                let terminals = self.terminals.clone();
 
                 cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+                    // Collect descendant PIDs on background executor.
+                    // get_service_pids() may spawn subprocesses (lsof/tmux)
+                    // and get_descendant_pids() may call pgrep/wmic.
+                    let old_pids: Vec<u32> = if let Some(ref tid) = terminal_id {
+                        let tid = tid.clone();
+                        let backend_ref = backend.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                backend_ref.get_service_pids(&tid)
+                                    .into_iter()
+                                    .flat_map(|p| port_detect::get_descendant_pids(p))
+                                    .collect()
+                            })
+                            .await
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Kill old terminal (backend.kill spawns a bg thread internally)
+                    if let Some(ref tid) = terminal_id {
+                        backend.kill(tid);
+                        terminals.lock().remove(tid);
+                        let tid = tid.clone();
+                        let _ = this.update(cx, |this, _cx| {
+                            this.terminal_to_service.remove(&tid);
+                        });
+                    }
+
+                    // Wait for old processes to die
                     if !old_pids.is_empty() {
                         for _ in 0..100 {
                             if old_pids.iter().all(|&p| !is_process_alive(p)) {
@@ -882,61 +894,79 @@ impl ServiceManager {
             return;
         }
 
-        if !docker_compose::is_docker_compose_available() {
-            return;
-        }
-
-        // Resolve compose file
+        // Resolve compose file (fast filesystem check, OK on main thread)
         let compose_file = docker_config
             .and_then(|dc| dc.file.clone())
             .or_else(|| docker_compose::detect_compose_file(project_path));
 
         let Some(compose_file) = compose_file else { return };
 
-        // Get service names
-        let service_names = match docker_compose::list_services(project_path, &compose_file) {
-            Ok(names) => names,
-            Err(e) => {
-                log::warn!("Failed to list Docker Compose services for project {}: {}", project_id, e);
-                return;
-            }
-        };
-
-        // Determine which services are explicitly listed in the okena.yaml filter
-        let filter: Option<&Vec<String>> = docker_config
-            .map(|dc| &dc.services)
+        // Extract what we need from the reference before spawning
+        let filter: Option<Vec<String>> = docker_config
+            .map(|dc| dc.services.clone())
             .filter(|s| !s.is_empty());
 
-        for name in &service_names {
-            let is_extra = filter.is_some_and(|f| !f.contains(name));
+        let project_id = project_id.to_string();
+        let project_path = project_path.to_string();
 
-            let key = (project_id.to_string(), name.clone());
-            if !self.instances.contains_key(&key) {
-                self.instances.insert(
-                    key,
-                    ServiceInstance {
-                        definition: ServiceDefinition {
-                            name: name.clone(),
-                            command: String::new(),
-                            cwd: ".".to_string(),
-                            env: HashMap::new(),
-                            auto_start: false,
-                            restart_on_crash: false,
-                            restart_delay_ms: 0,
-                        },
-                        kind: ServiceKind::DockerCompose { compose_file: compose_file.clone() },
-                        status: ServiceStatus::Stopped,
-                        terminal_id: None,
-                        restart_count: 0,
-                        detected_ports: Vec::new(),
-                        is_extra,
-                    },
-                );
-            }
-        }
+        // Move docker subprocess calls to background executor
+        cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
+            let service_names = {
+                let path = project_path.clone();
+                let file = compose_file.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        if !docker_compose::is_docker_compose_available() {
+                            return None;
+                        }
+                        match docker_compose::list_services(&path, &file) {
+                            Ok(names) => Some(names),
+                            Err(e) => {
+                                log::warn!("Failed to list Docker Compose services: {}", e);
+                                None
+                            }
+                        }
+                    })
+                    .await
+            };
 
-        // Start status poller
-        self.start_docker_status_poller(project_id, project_path, &compose_file, cx);
+            let Some(service_names) = service_names else { return };
+
+            let _ = this.update(cx, |this, cx| {
+                for name in &service_names {
+                    let is_extra = filter.as_ref().is_some_and(|f| !f.contains(name));
+
+                    let key = (project_id.clone(), name.clone());
+                    if !this.instances.contains_key(&key) {
+                        this.instances.insert(
+                            key,
+                            ServiceInstance {
+                                definition: ServiceDefinition {
+                                    name: name.clone(),
+                                    command: String::new(),
+                                    cwd: ".".to_string(),
+                                    env: HashMap::new(),
+                                    auto_start: false,
+                                    restart_on_crash: false,
+                                    restart_delay_ms: 0,
+                                },
+                                kind: ServiceKind::DockerCompose { compose_file: compose_file.clone() },
+                                status: ServiceStatus::Stopped,
+                                terminal_id: None,
+                                restart_count: 0,
+                                detected_ports: Vec::new(),
+                                is_extra,
+                            },
+                        );
+                    }
+                }
+
+                // Start status poller
+                this.start_docker_status_poller(&project_id, &project_path, &compose_file, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Reload Docker Compose services on config reload.
