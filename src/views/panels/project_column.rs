@@ -227,7 +227,7 @@ impl ProjectColumn {
                     rb,
                     pid,
                     project_path,
-                    vec![],
+                    vec![usize::MAX],
                     Some(tid),
                     false,
                     false,
