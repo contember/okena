@@ -69,6 +69,26 @@ impl ConnectionHandler for MobileConnectionHandler {
         self.terminals.write().remove(prefixed_id);
     }
 
+    fn remove_terminals_except(
+        &self,
+        connection_id: &str,
+        keep_ids: &std::collections::HashSet<String>,
+    ) {
+        use okena_core::client::strip_prefix;
+        let mut terminals = self.terminals.write();
+        let to_remove: Vec<String> = terminals
+            .keys()
+            .filter(|k| {
+                is_remote_terminal(k, connection_id)
+                    && !keep_ids.contains(&strip_prefix(k, connection_id))
+            })
+            .cloned()
+            .collect();
+        for key in to_remove {
+            terminals.remove(&key);
+        }
+    }
+
     fn remove_all_terminals(&self, connection_id: &str) {
         let mut terminals = self.terminals.write();
         let to_remove: Vec<String> = terminals

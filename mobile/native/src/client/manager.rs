@@ -290,6 +290,16 @@ impl ConnectionManager {
                 ConnectionEvent::SubscriptionMappings { mappings, .. } => {
                     conn.client.write().update_stream_mappings(mappings);
                 }
+                ConnectionEvent::GitStatusChanged {
+                    statuses,
+                    ..
+                } => {
+                    if let Some(state) = conn.state_cache.write().as_mut() {
+                        for project in &mut state.projects {
+                            project.git_status = statuses.get(&project.id).cloned();
+                        }
+                    }
+                }
                 ConnectionEvent::ServerWarning { message, .. } => {
                     log::warn!("Server warning for {}: {}", conn_id, message);
                 }
