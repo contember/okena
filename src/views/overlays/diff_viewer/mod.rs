@@ -11,6 +11,7 @@ mod syntax;
 mod types;
 
 use crate::git::{DiffMode, DiffResult, FileDiff};
+use crate::vcs;
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::{theme, theme_entity};
@@ -82,6 +83,8 @@ pub struct DiffViewer {
     current_file_old_content: Option<String>,
     /// Cached new file content for re-highlighting on theme change.
     current_file_new_content: Option<String>,
+    /// VCS backend detected for the project (None if not yet detected).
+    vcs_backend: Option<vcs::VcsBackend>,
 }
 
 impl DiffViewer {
@@ -136,12 +139,14 @@ impl DiffViewer {
             is_dark,
             current_file_old_content: None,
             current_file_new_content: None,
+            vcs_backend: None,
         };
 
         if !provider.is_git_repo() {
             viewer.error_message = Some("Not a git repository".to_string());
             return viewer;
         }
+        viewer.vcs_backend = provider.vcs_backend();
 
         viewer.load_diff_async(DiffMode::WorkingTree, select_file, cx);
         viewer
@@ -510,7 +515,11 @@ impl Render for DiffViewer {
                 let modifiers = &event.keystroke.modifiers;
 
                 match key {
-                    "tab" => this.toggle_mode(cx),
+                    "tab" => {
+                        if this.vcs_backend != Some(vcs::VcsBackend::Jujutsu) {
+                            this.toggle_mode(cx);
+                        }
+                    }
                     "s" => this.toggle_view_mode(cx),
                     "w" => this.toggle_ignore_whitespace(cx),
                     "up" => this.prev_file(cx),

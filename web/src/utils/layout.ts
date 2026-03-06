@@ -9,5 +9,7 @@ export function collectTerminalIds(node: ApiLayoutNode | null): string[] {
     case "split":
     case "tabs":
       return node.children.flatMap(collectTerminalIds);
+    case "app":
+      return [];
   }
 }
