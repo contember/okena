@@ -195,7 +195,8 @@ impl ClaudeUsage {
                     continue;
                 }
 
-                let result = smol::unblock(|| {
+                // Returns (Option<UsageData>, Option<Duration>) — data + optional retry delay
+                let (result, retry_after) = smol::unblock(|| {
                     let token = match read_access_token() {
                         Some(t) => {
                             log::info!("[claude-usage] token found (len={})", t.len());
@@ -203,15 +204,18 @@ impl ClaudeUsage {
                         }
                         None => {
                             log::warn!("[claude-usage] no access token found");
-                            return None;
+                            return (None, None);
                         }
                     };
 
-                    let client = reqwest::blocking::Client::builder()
+                    let client = match reqwest::blocking::Client::builder()
                         .timeout(Duration::from_secs(10))
                         .user_agent(format!("okena/{}", env!("CARGO_PKG_VERSION")))
                         .build()
-                        .ok()?;
+                    {
+                        Ok(c) => c,
+                        Err(_) => return (None, None),
+                    };
 
                     let response = client
                         .get("https://api.anthropic.com/api/oauth/usage")
@@ -222,17 +226,40 @@ impl ClaudeUsage {
                     match response {
                         Ok(resp) => {
                             let status = resp.status();
-                            let body = resp.text().unwrap_or_default();
-                            log::info!("[claude-usage] HTTP {} body={}", status, &body[..body.len().min(500)]);
-                            if !status.is_success() {
-                                return None;
+
+                            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                                let retry_secs = resp
+                                    .headers()
+                                    .get("retry-after")
+                                    .and_then(|v| v.to_str().ok())
+                                    .and_then(|v| v.parse::<u64>().ok())
+                                    .unwrap_or(USAGE_INTERVAL.as_secs() * 2);
+                                log::warn!(
+                                    "[claude-usage] rate limited (429), retrying in {}s",
+                                    retry_secs
+                                );
+                                return (None, Some(Duration::from_secs(retry_secs)));
                             }
-                            let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
-                            Some(parse_usage(&parsed))
+
+                            let body = resp.text().unwrap_or_default();
+                            log::info!(
+                                "[claude-usage] HTTP {} body={}",
+                                status,
+                                &body[..body.len().min(500)]
+                            );
+                            if !status.is_success() {
+                                return (None, None);
+                            }
+                            let parsed: serde_json::Value =
+                                match serde_json::from_str(&body) {
+                                    Ok(v) => v,
+                                    Err(_) => return (None, None),
+                                };
+                            (Some(parse_usage(&parsed)), None)
                         }
                         Err(e) => {
                             log::warn!("[claude-usage] request failed: {}", e);
-                            None
+                            (None, None)
                         }
                     }
                 })
@@ -250,7 +277,8 @@ impl ClaudeUsage {
                     });
                 }
 
-                smol::Timer::after(USAGE_INTERVAL).await;
+                let delay = retry_after.unwrap_or(USAGE_INTERVAL);
+                smol::Timer::after(delay).await;
             }
         })
         .detach();
