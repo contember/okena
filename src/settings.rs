@@ -257,17 +257,21 @@ impl SettingsState {
     fn save_debounced(&mut self, cx: &mut Context<Self>) {
         self.save_pending.store(true, Ordering::Relaxed);
         let save_pending = self.save_pending.clone();
-        let settings = self.settings.clone();
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
             smol::Timer::after(std::time::Duration::from_millis(300)).await;
 
             if save_pending.swap(false, Ordering::Relaxed) {
-                if let Err(e) = save_settings(&settings) {
-                    log::error!("Failed to save settings: {}", e);
-                    let _ = cx.update(|cx| {
-                        ToastManager::error(format!("Failed to save settings: {}", e), cx);
-                    });
+                let settings = cx.update(|cx| {
+                    this.upgrade().map(|e| e.read(cx).settings.clone())
+                });
+                if let Some(settings) = settings {
+                    if let Err(e) = save_settings(&settings) {
+                        log::error!("Failed to save settings: {}", e);
+                        let _ = cx.update(|cx| {
+                            ToastManager::error(format!("Failed to save settings: {}", e), cx);
+                        });
+                    }
                 }
             }
         })
