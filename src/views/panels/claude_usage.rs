@@ -11,6 +11,9 @@ use std::time::Duration;
 /// Refresh interval for usage data
 const USAGE_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Minimum retry delay to avoid tight loops (e.g. when server returns retry-after: 0)
+const MIN_RETRY_DELAY: Duration = Duration::from_secs(30);
+
 /// Hover delay before showing the popover (ms)
 const HOVER_DELAY_MS: u64 = 300;
 
@@ -184,6 +187,7 @@ impl ClaudeUsage {
         let data_for_task = data.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let mut consecutive_failures: u32 = 0;
             loop {
                 // Skip fetch if claude_code_integration is disabled
                 let enabled = this.update(cx, |_, cx| {
@@ -272,12 +276,31 @@ impl ClaudeUsage {
 
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
+                    consecutive_failures = 0;
                     let _ = this.update(cx, |_this, cx| {
                         cx.notify();
                     });
+                } else {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                 }
 
-                let delay = retry_after.unwrap_or(USAGE_INTERVAL);
+                let delay = match retry_after {
+                    Some(server_delay) => {
+                        // Exponential backoff: MIN_RETRY_DELAY * 2^(failures-1), capped at 1h
+                        let backoff = MIN_RETRY_DELAY
+                            .saturating_mul(1 << consecutive_failures.min(6).saturating_sub(1));
+                        let cap = Duration::from_secs(3600);
+                        server_delay.max(backoff).min(cap)
+                    }
+                    None if consecutive_failures > 0 => {
+                        // Non-429 failures also get backoff
+                        let backoff = MIN_RETRY_DELAY
+                            .saturating_mul(1 << consecutive_failures.min(6).saturating_sub(1));
+                        backoff.min(Duration::from_secs(3600))
+                    }
+                    None => USAGE_INTERVAL,
+                };
+                log::info!("[claude-usage] next fetch in {}s", delay.as_secs());
                 smol::Timer::after(delay).await;
             }
         })
