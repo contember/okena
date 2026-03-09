@@ -880,46 +880,42 @@ impl Terminal {
                     let last_cell = &grid[Point::new(Line(buffer_line), last_col)];
                     let has_wrapline_flag = last_cell.flags.contains(Flags::WRAPLINE);
 
-                    // Visual wrap detection: check last non-space char of current row
-                    // and first non-space char of next row. This handles TUI padding
-                    // where spaces fill the rest of the line around a wrapped URL.
-                    // Skip if the next line starts with a URL scheme — that's a new
-                    // URL, not a continuation of the current one.
+                    // Visual wrap detection for TUI-managed line breaks (no
+                    // WRAPLINE flag).  Merge the next row as a URL continuation
+                    // only when:
+                    //  1. current row ends with a URL-compatible char,
+                    //  2. next row's content starts with a URL-compatible char,
+                    //  3. next row doesn't begin a new URL scheme,
+                    //  4. next row isn't indented further than the first row,
+                    //  5. next row's content contains no spaces (URLs can't
+                    //     have spaces — if there are spaces it's regular text).
                     let next_visual = visual_row + 1;
                     let visual_wrap = if !has_wrapline_flag && next_visual < screen_lines {
                         let last_nonspace_url = rtrimmed.chars().last().map_or(false, |c| url_char(c));
                         if last_nonspace_url {
                             let next_buffer = next_visual - display_offset;
-                            let mut first_is_url = false;
-                            let mut next_line_start = String::new();
-                            let mut next_leading_spaces = 0usize;
+                            let mut next_row_text = String::with_capacity(cols);
                             for col_idx in 0..cols {
                                 let cell = &grid[Point::new(Line(next_buffer), Column(col_idx))];
-                                if cell.c == ' ' {
-                                    if next_line_start.is_empty() {
-                                        next_leading_spaces += 1;
-                                        continue; // skip leading spaces
-                                    }
-                                    break; // stop at first space after content
-                                }
-                                if next_line_start.is_empty() {
-                                    first_is_url = url_char(cell.c);
-                                }
-                                next_line_start.push(cell.c);
-                                if next_line_start.len() >= 10 {
-                                    break;
-                                }
+                                next_row_text.push(cell.c);
                             }
-                            // If the next line starts with a URL scheme, it's an
-                            // independent URL — don't merge.
-                            if first_is_url && (
-                                next_line_start.starts_with("http://")
-                                || next_line_start.starts_with("https://")
-                                || next_line_start.starts_with("ftp://")
-                                || next_line_start.starts_with("file://")
-                                || next_line_start.starts_with("ssh://")
-                                || next_line_start.starts_with("git://")
-                            ) {
+                            let next_rtrimmed = next_row_text.trim_end();
+                            let next_content = next_rtrimmed.trim_start();
+                            let next_leading_spaces = next_rtrimmed.len() - next_content.len();
+
+                            if next_content.is_empty()
+                                || !url_char(next_content.chars().next().unwrap())
+                            {
+                                false
+                            } else if next_content.starts_with("http://")
+                                || next_content.starts_with("https://")
+                                || next_content.starts_with("ftp://")
+                                || next_content.starts_with("file://")
+                                || next_content.starts_with("ssh://")
+                                || next_content.starts_with("git://")
+                            {
+                                // New URL scheme — independent URL, not a
+                                // continuation.
                                 false
                             } else if next_leading_spaces > first_row_leading {
                                 // Next line is indented further than the first
@@ -927,8 +923,13 @@ impl Terminal {
                                 // content (e.g. sub-item indentation), not TUI
                                 // padding for a wrapped URL.
                                 false
+                            } else if next_content.contains(' ') {
+                                // URLs cannot contain spaces.  If the trimmed
+                                // content has an internal space it's regular
+                                // text, not a URL continuation.
+                                false
                             } else {
-                                first_is_url
+                                true
                             }
                         } else {
                             false
@@ -1580,6 +1581,47 @@ mod tests {
         assert_ne!(
             url_links[0].wrap_group, url_links[1].wrap_group,
             "URLs must have different wrap_groups even when preceded by colon"
+        );
+    }
+
+    #[test]
+    fn detect_url_not_wrapped_when_next_line_starts_with_word() {
+        // "Press ENTER..." is natural language text, not a URL continuation.
+        // The URL ends with alphanumeric chars and "Press" starts with one,
+        // but the word-followed-by-space heuristic should prevent merging.
+        let links = detect_urls_in(
+            "Login at:\r\nhttps://www.npmjs.com/login?next=/login/cli/d907c402-4ad4-474c-a183-16ae52157acf\r\nPress ENTER to open in the browser...\r\n",
+            100,
+        );
+        assert_eq!(links.len(), 1, "Should detect exactly one URL: {:?}", links);
+        assert_eq!(
+            links[0].text,
+            "https://www.npmjs.com/login?next=/login/cli/d907c402-4ad4-474c-a183-16ae52157acf"
+        );
+    }
+
+    #[test]
+    fn detect_url_not_wrapped_when_next_line_word_after_wrapline() {
+        // URL wraps via WRAPLINE (fills terminal width), then next line
+        // after the wrap tail starts with a word — should not merge.
+        let url = "https://www.npmjs.com/login?next=/login/cli/d907c402-4ad4-474c-a183-16ae52157acf";
+        let links = detect_urls_in(
+            &format!("{url}\r\nPress ENTER to open in the browser...\r\n"),
+            60, // force URL to wrap via WRAPLINE
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == url)
+            .collect();
+        assert!(
+            !url_links.is_empty(),
+            "Should detect the URL: {:?}",
+            links
+        );
+        // "Press" should NOT be part of any detected link
+        assert!(
+            links.iter().all(|l| !l.text.contains("Press")),
+            "No link should contain 'Press': {:?}",
+            links
         );
     }
 }
