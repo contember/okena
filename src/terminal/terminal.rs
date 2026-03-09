@@ -1035,7 +1035,7 @@ impl Terminal {
         }
         // Otherwise check if the terminal itself requested mouse mode
         let term = self.term.lock();
-        term.mode().contains(TermMode::MOUSE_MODE)
+        term.mode().intersects(TermMode::MOUSE_MODE)
     }
 
     /// Check if terminal is in application cursor keys mode (DECCKM)
@@ -1046,12 +1046,13 @@ impl Terminal {
         term.mode().contains(TermMode::APP_CURSOR)
     }
 
-    /// Send scroll event to PTY
-    /// For tmux backend: sends SGR mouse wheel sequences (tmux with mouse on expects these)
-    /// For other mouse mode apps: checks terminal mode for format
+    /// Send scroll events to PTY as a single batched write.
     /// button: 64 for scroll up, 65 for scroll down
-    pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize) {
-        // Check if using tmux backend - always use SGR format (tmux supports it)
+    pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize, count: usize) {
+        if count == 0 {
+            return;
+        }
+
         let use_sgr = if self.transport.uses_mouse_backend() {
             true
         } else {
@@ -1059,21 +1060,26 @@ impl Terminal {
             term.mode().contains(TermMode::SGR_MOUSE)
         };
 
-        if use_sgr {
-            // SGR format: \x1b[<button;col;rowM
-            let seq = format!("\x1b[<{};{};{}M", button, col + 1, row + 1);
-            self.send_bytes(seq.as_bytes());
-        } else {
-            // Legacy format: \x1b[M + (button+32) + (col+33) + (row+33)
-            // This format has limitations for coordinates > 223
-            let bytes = [
-                0x1b, b'[', b'M',
-                button.saturating_add(32),
-                (col as u8).saturating_add(33).min(255),
-                (row as u8).saturating_add(33).min(255),
-            ];
-            self.send_bytes(&bytes);
+        let mut buf = Vec::new();
+        for _ in 0..count {
+            if use_sgr {
+                // SGR format: \x1b[<button;col;rowM
+                buf.extend_from_slice(
+                    format!("\x1b[<{};{};{}M", button, col + 1, row + 1).as_bytes(),
+                );
+            } else {
+                // Legacy format: \x1b[M + (button+32) + (col+33) + (row+33)
+                buf.extend_from_slice(&[
+                    0x1b,
+                    b'[',
+                    b'M',
+                    button.saturating_add(32),
+                    (col as u8).saturating_add(33).min(255),
+                    (row as u8).saturating_add(33).min(255),
+                ]);
+            }
         }
+        self.send_bytes(&buf);
     }
 }
 

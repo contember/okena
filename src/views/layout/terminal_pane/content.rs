@@ -137,9 +137,7 @@ impl TerminalContent {
                     self.scroll_accumulator -= lines as f32 * cell_height;
                     let (col, row) = self.pixel_to_cell_raw(position, cell_width, cell_height);
                     let button = if lines > 0 { 64u8 } else { 65u8 };
-                    for _ in 0..lines.abs() {
-                        terminal.send_mouse_scroll(button, col, row);
-                    }
+                    terminal.send_mouse_scroll(button, col, row, lines.unsigned_abs() as usize);
                 }
             } else {
                 // Normal scrollback scrolling
