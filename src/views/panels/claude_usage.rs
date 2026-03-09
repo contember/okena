@@ -50,7 +50,28 @@ pub struct ClaudeUsage {
 
 fn read_access_token() -> Option<String> {
     let home = dirs::home_dir()?;
-    let content = std::fs::read_to_string(home.join(".claude/.credentials.json")).ok()?;
+    let content = std::fs::read_to_string(home.join(".claude/.credentials.json"))
+        .ok()
+        .or_else(|| {
+            // macOS: credentials stored in Keychain
+            #[cfg(target_os = "macos")]
+            {
+                let user = std::env::var("USER").ok()?;
+                let output = std::process::Command::new("security")
+                    .args(["find-generic-password", "-s", "Claude Code-credentials", "-a", &user, "-w"])
+                    .output()
+                    .ok()?;
+                if output.status.success() {
+                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        })?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     v["claudeAiOauth"]["accessToken"].as_str().map(String::from)
 }
