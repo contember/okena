@@ -15,13 +15,6 @@ Tabs, splits, detachable windows, command palette, and automatic workspace resto
 curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
 ```
 
-**Homebrew** (auto-update disabled):
-
-```bash
-brew tap contember/okena
-brew install --cask okena
-```
-
 ### Linux
 
 ```bash
