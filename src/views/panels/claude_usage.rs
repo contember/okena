@@ -22,6 +22,8 @@ const HOVER_DELAY_MS: u64 = 300;
 struct TierUsage {
     utilization: f64,
     resets_at: String,
+    /// Percentage of the billing period that has elapsed (0.0–100.0)
+    time_elapsed_pct: Option<f64>,
 }
 
 /// Extra paid usage info
@@ -80,10 +82,10 @@ fn read_access_token() -> Option<String> {
 }
 
 fn parse_usage(resp: &serde_json::Value) -> UsageData {
-    let five_hour = parse_tier(resp, "five_hour", false);
-    let seven_day = parse_tier(resp, "seven_day", true);
-    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", true);
-    let seven_day_opus = parse_tier(resp, "seven_day_opus", true);
+    let five_hour = parse_tier(resp, "five_hour", false, FIVE_HOUR_SECS);
+    let seven_day = parse_tier(resp, "seven_day", true, SEVEN_DAY_SECS);
+    let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", true, SEVEN_DAY_SECS);
+    let seven_day_opus = parse_tier(resp, "seven_day_opus", true, SEVEN_DAY_SECS);
 
     let extra_usage = resp.get("extra_usage").and_then(|eu| {
         Some(ExtraUsage {
@@ -103,15 +105,67 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
     }
 }
 
-fn parse_tier(resp: &serde_json::Value, key: &str, include_date: bool) -> Option<TierUsage> {
+/// Period durations for each tier
+const FIVE_HOUR_SECS: f64 = 5.0 * 3600.0;
+const SEVEN_DAY_SECS: f64 = 7.0 * 86400.0;
+
+fn parse_tier(
+    resp: &serde_json::Value,
+    key: &str,
+    include_date: bool,
+    period_secs: f64,
+) -> Option<TierUsage> {
     let tier = resp.get(key)?;
+    let resets_at_raw = tier["resets_at"].as_str();
+    let time_elapsed_pct = resets_at_raw.and_then(|ts| compute_time_elapsed_pct(ts, period_secs));
     Some(TierUsage {
         utilization: tier["utilization"].as_f64().unwrap_or(0.0),
-        resets_at: tier["resets_at"]
-            .as_str()
+        resets_at: resets_at_raw
             .map(|ts| format_reset_time(ts, include_date))
             .unwrap_or_default(),
+        time_elapsed_pct,
     })
+}
+
+/// Compute what percentage of the billing period has elapsed.
+/// `resets_at` is an ISO 8601 timestamp, `period_secs` is the total period duration.
+fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
+    let reset_epoch = parse_iso8601_to_epoch(resets_at)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    let remaining = (reset_epoch - now).max(0.0);
+    let elapsed = (period_secs - remaining).max(0.0);
+    Some((elapsed / period_secs * 100.0).clamp(0.0, 100.0))
+}
+
+/// Parse a simplified ISO 8601 timestamp (e.g. "2026-03-11T15:30:00Z") to Unix epoch seconds.
+fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
+    let parts: Vec<&str> = ts.split('T').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let date_parts: Vec<&str> = parts[0].split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+    let year: i32 = date_parts[0].parse().ok()?;
+    let month: u32 = date_parts[1].parse().ok()?;
+    let day: u32 = date_parts[2].parse().ok()?;
+
+    let time_str = parts[1].split('.').next().unwrap_or(parts[1]);
+    let time_str = time_str.trim_end_matches('Z');
+    let hms: Vec<&str> = time_str.split(':').collect();
+    if hms.len() < 2 {
+        return None;
+    }
+    let hour: u32 = hms[0].parse().ok()?;
+    let min: u32 = hms[1].parse().ok()?;
+    let sec: u32 = hms.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let days = days_from_civil(year, month, day);
+    Some(days as f64 * 86400.0 + hour as f64 * 3600.0 + min as f64 * 60.0 + sec as f64)
 }
 
 /// Convert a civil date to days since Unix epoch (Howard Hinnant's algorithm).
@@ -433,6 +487,19 @@ impl ClaudeUsage {
                                 .when_some(data.seven_day_opus.as_ref(), |el, tier| {
                                     el.child(render_tier_row(t, "Opus (7d)", tier))
                                 })
+                                // Time pace hint
+                                .when(
+                                    data.five_hour.as_ref().and_then(|t| t.time_elapsed_pct).is_some()
+                                        || data.seven_day.as_ref().and_then(|t| t.time_elapsed_pct).is_some(),
+                                    |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(px(9.0))
+                                                .text_color(rgb(t.text_muted))
+                                                .child("Bar color = pace · Marker = time elapsed"),
+                                        )
+                                    },
+                                )
                                 // Extra usage row
                                 .when_some(data.extra_usage.as_ref(), |el, extra| {
                                     if !extra.is_enabled {
@@ -522,7 +589,53 @@ fn render_tier_row(
                         }),
                 ),
         )
-        .child(render_progress_bar(t, pct))
+        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct))
+}
+
+/// Render a combined progress bar: usage fill on top of a time-elapsed marker.
+/// The time marker is a thin vertical line showing where you "should" be.
+fn render_usage_with_time_bar(
+    t: &crate::theme::ThemeColors,
+    usage_pct: f64,
+    time_pct: Option<f64>,
+) -> impl IntoElement {
+    let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
+    let usage_color = utilization_color(t, usage_pct);
+
+    let pace_color = match time_pct {
+        Some(tp) if usage_pct > tp + 15.0 => t.metric_critical, // spending too fast
+        Some(tp) if usage_pct > tp + 5.0 => t.metric_warning,   // slightly fast
+        _ => t.metric_normal,                                     // on pace or under
+    };
+
+    div()
+        .h(px(4.0))
+        .w_full()
+        .rounded(px(2.0))
+        .bg(rgb(t.bg_secondary))
+        .relative()
+        // Usage fill
+        .child(
+            div()
+                .h_full()
+                .rounded(px(2.0))
+                .bg(rgb(pace_color))
+                .w(relative(clamped_usage / 100.0)),
+        )
+        // Time elapsed marker (thin vertical line)
+        .when_some(time_pct, |el, tp| {
+            let clamped_time = tp.clamp(0.0, 100.0) as f32;
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(-1.0))
+                    .left(relative(clamped_time / 100.0))
+                    .w(px(1.5))
+                    .h(px(6.0))
+                    .rounded(px(1.0))
+                    .bg(rgb(t.text_primary)),
+            )
+        })
 }
 
 fn render_progress_bar(t: &crate::theme::ThemeColors, pct: f64) -> impl IntoElement {
