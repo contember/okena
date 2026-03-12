@@ -5,7 +5,7 @@
 use crate::theme::FolderColor;
 use crate::workspace::hooks;
 use crate::workspace::persistence::HooksConfig;
-use crate::workspace::state::{LayoutNode, ProjectData, Workspace};
+use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, Workspace};
 use gpui::*;
 use std::collections::HashMap;
 
@@ -70,7 +70,15 @@ impl Workspace {
         self.data.project_order.push(id.clone());
         self.notify_data(cx);
 
-        hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        for result in hook_results {
+            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                hook_type: result.hook_type,
+                label: result.label,
+                project_id: result.project_id.clone(),
+                status: HookTerminalStatus::Running,
+            }, cx);
+        }
         id
     }
 
@@ -177,7 +185,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
+            let _ = hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
         }
     }
 
@@ -307,7 +315,7 @@ impl Workspace {
 
         self.notify_data(cx);
 
-        hooks::fire_on_worktree_create(
+        let hook_results = hooks::fire_on_worktree_create(
             &new_project_hooks,
             &id,
             &new_project_name,
@@ -315,6 +323,14 @@ impl Workspace {
             branch,
             cx,
         );
+        for result in hook_results {
+            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                hook_type: result.hook_type,
+                label: result.label,
+                project_id: result.project_id.clone(),
+                status: HookTerminalStatus::Running,
+            }, cx);
+        }
 
         Ok(id)
     }
@@ -346,7 +362,7 @@ impl Workspace {
         self.delete_project(project_id, cx);
 
         // Fire worktree-specific hook
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
+        let _ = hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
 
         Ok(())
     }
