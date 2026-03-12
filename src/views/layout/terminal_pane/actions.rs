@@ -75,7 +75,7 @@ impl TerminalPane {
         if let Some(ref terminal) = self.terminal {
             if let Some(clipboard_item) = cx.read_from_clipboard() {
                 if let Some(text) = clipboard_item.text() {
-                    terminal.send_input(&text);
+                    terminal.send_paste(&text);
                 }
             }
         }

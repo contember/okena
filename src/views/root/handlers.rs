@@ -180,7 +180,7 @@ impl RootView {
                 if let Some(text) = text {
                     let terminals = self.terminals.lock();
                     if let Some(terminal) = terminals.get(terminal_id) {
-                        terminal.send_input(&text);
+                        terminal.send_paste(&text);
                     }
                 }
             }

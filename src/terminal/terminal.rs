@@ -322,6 +322,33 @@ impl Terminal {
         self.transport.send_input(&self.terminal_id, input.as_bytes());
     }
 
+    /// Send pasted text to the PTY, wrapping in bracketed paste sequences if the
+    /// terminal application has enabled bracketed paste mode (DECSET 2004).
+    /// This prevents shells from executing each line of a multi-line paste individually.
+    pub fn send_paste(&self, text: &str) {
+        self.had_user_input.store(true, Ordering::Relaxed);
+        self.scroll_to_bottom();
+
+        // Convert line endings: \r\n → \r, then \n → \r
+        // Terminals send \r for Enter; shells in bracketed paste mode buffer these.
+        let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+
+        let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        if bracketed {
+            // Strip any embedded bracketed paste sequences to prevent escape injection
+            let sanitized = normalized
+                .replace("\x1b[200~", "")
+                .replace("\x1b[201~", "");
+            let mut buf = Vec::with_capacity(sanitized.len() + 12);
+            buf.extend_from_slice(b"\x1b[200~");
+            buf.extend_from_slice(sanitized.as_bytes());
+            buf.extend_from_slice(b"\x1b[201~");
+            self.transport.send_input(&self.terminal_id, &buf);
+        } else {
+            self.transport.send_input(&self.terminal_id, normalized.as_bytes());
+        }
+    }
+
     /// Send raw bytes to the PTY
     /// Automatically scrolls to bottom if scrolled into history
     pub fn send_bytes(&self, data: &[u8]) {
