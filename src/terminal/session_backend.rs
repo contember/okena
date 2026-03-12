@@ -165,6 +165,8 @@ impl ResolvedBackend {
                 // -c: start directory
                 // set status off: hide tmux status bar (we have our own UI)
                 // set mouse on: enable mouse for scrolling
+                // set default-terminal: ensure inner TERM supports 256color
+                // set terminal-features + terminal-overrides: enable 24-bit truecolor (RGB)
                 // set automatic-rename off: prevent shell from overwriting window name
                 // rename-window: set meaningful window name from directory
                 let window_name = extract_dir_name(cwd);
@@ -173,7 +175,7 @@ impl ResolvedBackend {
                     None => String::new(),
                 };
                 let tmux_cmd = format!(
-                    "tmux new-session -A -s {} -c {}{} \\; set status off \\; set mouse on \\; set-window-option automatic-rename off \\; rename-window {}",
+                    "tmux new-session -A -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}",
                     shell_escape(session_name),
                     shell_escape(cwd),
                     initial_program,
