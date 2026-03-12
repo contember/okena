@@ -64,11 +64,20 @@ impl WorktreeDialog {
         project_path: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Detect git repo root (may differ from project_path in monorepos)
+        // Determine git repo root: if parent is already a worktree, use its
+        // stored main_repo_path; otherwise detect via `git rev-parse --show-toplevel`.
         let project_pathbuf = PathBuf::from(&project_path);
-        let git_root = git::get_repo_root(&project_pathbuf)
+        let parent_main_repo = workspace.read(cx).project(&project_id)
+            .and_then(|p| p.worktree_info.as_ref())
+            .map(|wt| PathBuf::from(&wt.main_repo_path));
+        let git_root = parent_main_repo
+            .or_else(|| git::get_repo_root(&project_pathbuf))
             .unwrap_or_else(|| project_pathbuf.clone());
-        let subdir = project_pathbuf.strip_prefix(&git_root)
+        // Normalize both paths before strip_prefix to handle relative paths,
+        // symlinks, or platform-specific path representations
+        let normalized_project = normalize_path(&project_pathbuf);
+        let normalized_root = normalize_path(&git_root);
+        let subdir = normalized_project.strip_prefix(&normalized_root)
             .unwrap_or(Path::new(""))
             .to_path_buf();
 
@@ -214,10 +223,11 @@ impl WorktreeDialog {
             self.get_target_paths(&branch)
         };
         let project_id = self.project_id.clone();
+        let git_root = self.git_root.clone();
 
         // Create the worktree project
         let result = self.workspace.update(cx, |ws, cx| {
-            ws.create_worktree_project(&project_id, &branch, &worktree_path, &project_path, create_branch, cx)
+            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, cx)
         });
 
         match result {
@@ -693,9 +703,9 @@ impl Render for WorktreeDialog {
                                                         if val.is_empty() { None } else { Some(val) }
                                                     };
                                                     if let Some(branch) = branch {
-                                                        let (_, path) = this.get_target_paths(&branch);
+                                                        let (worktree_path, _) = this.get_target_paths(&branch);
                                                         this.custom_path_input.update(cx, |input, cx| {
-                                                            input.set_value(&path, cx);
+                                                            input.set_value(&worktree_path, cx);
                                                         });
                                                     }
                                                 }
@@ -834,52 +844,63 @@ fn compute_target_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_target_paths, Path};
+    use super::{compute_target_paths, Path, PathBuf};
+
+    /// Compare computed paths as `Path` objects for cross-platform correctness
+    /// (avoids separator differences between Unix and Windows).
+    fn assert_paths_eq(actual: &str, expected: &Path) {
+        assert_eq!(Path::new(actual), expected);
+    }
 
     #[test]
     fn target_path_simple_repo() {
         // Project at repo root — worktree and project paths are the same
-        let git_root = Path::new("/projects/myrepo");
+        let git_root = PathBuf::from("/projects/myrepo");
         let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(git_root, subdir, "../{repo}-wt/{branch}", "feature");
-        assert_eq!(wt, "/projects/myrepo-wt/feature");
-        assert_eq!(proj, "/projects/myrepo-wt/feature");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let expected = PathBuf::from("/projects").join("myrepo-wt").join("feature");
+        assert_paths_eq(&wt, &expected);
+        assert_paths_eq(&proj, &expected);
     }
 
     #[test]
     fn target_path_monorepo() {
         // Project is a subdirectory of the git root
-        let git_root = Path::new("/projects/monorepo");
+        let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("app-in-monorepo");
-        let (wt, proj) = compute_target_paths(git_root, subdir, "../{repo}-wt/{branch}", "feature");
-        assert_eq!(wt, "/projects/monorepo-wt/feature");
-        assert_eq!(proj, "/projects/monorepo-wt/feature/app-in-monorepo");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("feature");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("app-in-monorepo"));
     }
 
     #[test]
     fn target_path_nested_monorepo_subdir() {
-        let git_root = Path::new("/projects/monorepo");
+        let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("packages/app");
-        let (wt, proj) = compute_target_paths(git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
-        assert_eq!(wt, "/projects/monorepo-wt/fix-bug");
-        assert_eq!(proj, "/projects/monorepo-wt/fix-bug/packages/app");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
+        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("fix-bug");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("packages").join("app"));
     }
 
     #[test]
     fn target_path_absolute_template() {
-        let git_root = Path::new("/projects/monorepo");
+        let git_root = PathBuf::from("/projects/monorepo");
         let subdir = Path::new("app");
-        let (wt, proj) = compute_target_paths(git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
-        assert_eq!(wt, "/tmp/worktrees/monorepo/main");
-        assert_eq!(proj, "/tmp/worktrees/monorepo/main/app");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
+        let expected_wt = PathBuf::from("/tmp").join("worktrees").join("monorepo").join("main");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("app"));
     }
 
     #[test]
     fn target_path_branch_with_slashes() {
-        let git_root = Path::new("/projects/repo");
+        let git_root = PathBuf::from("/projects/repo");
         let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(git_root, subdir, "../{repo}-wt/{branch}", "feature/my-branch");
-        assert_eq!(wt, "/projects/repo-wt/feature-my-branch");
-        assert_eq!(proj, "/projects/repo-wt/feature-my-branch");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature/my-branch");
+        let expected = PathBuf::from("/projects").join("repo-wt").join("feature-my-branch");
+        assert_paths_eq(&wt, &expected);
+        assert_paths_eq(&proj, &expected);
     }
 }

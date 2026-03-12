@@ -218,12 +218,14 @@ impl Workspace {
             .unwrap_or_else(|| 100.0 / visible_count as f32)
     }
 
-    /// Create a worktree project from an existing project
-    /// Returns the new project ID on success
+    /// Create a worktree project from an existing project.
+    /// `repo_path` is the git repository root to create the worktree from.
+    /// Returns the new project ID on success.
     pub fn create_worktree_project(
         &mut self,
         parent_project_id: &str,
         branch: &str,
+        repo_path: &std::path::Path,
         worktree_path: &str,
         project_path: &str,
         create_branch: bool,
@@ -236,17 +238,9 @@ impl Workspace {
         let parent_path = parent.path.clone();
         let parent_layout = parent.layout.clone();
 
-        // Determine the actual repo path (if parent is a worktree, use its main repo)
-        let repo_path = if let Some(ref wt_info) = parent.worktree_info {
-            std::path::PathBuf::from(&wt_info.main_repo_path)
-        } else {
-            crate::git::get_repo_root(std::path::Path::new(&parent_path))
-                .unwrap_or_else(|| std::path::PathBuf::from(&parent_path))
-        };
-
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
-        crate::git::create_worktree(&repo_path, branch, &target, create_branch)?;
+        crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
 
         // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
@@ -327,9 +321,7 @@ impl Workspace {
         // Use the stored worktree path (repo-level checkout), falling back to project path
         // for backwards compatibility with worktrees created before monorepo support
         let worktree_path = project.worktree_info.as_ref()
-            .map(|wt| &wt.worktree_path)
-            .filter(|p| !p.is_empty())
-            .map(|p| std::path::PathBuf::from(p))
+            .and_then(|wt| (!wt.worktree_path.is_empty()).then(|| std::path::PathBuf::from(&wt.worktree_path)))
             .unwrap_or_else(|| std::path::PathBuf::from(&project_path));
 
         // Remove the git worktree
