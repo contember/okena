@@ -910,16 +910,26 @@ impl Terminal {
                     // Visual wrap detection for TUI-managed line breaks (no
                     // WRAPLINE flag).  Merge the next row as a URL continuation
                     // only when:
+                    //  0. current row fills to (or near) the terminal edge,
                     //  1. current row ends with a URL-compatible char,
                     //  2. next row's content starts with a URL-compatible char,
                     //  3. next row doesn't begin a new URL scheme,
                     //  4. next row isn't indented further than the first row,
                     //  5. next row's content contains no spaces (URLs can't
-                    //     have spaces — if there are spaces it's regular text).
+                    //     have spaces — if there are spaces it's regular text),
+                    //  6. next row's content doesn't end with ':' (label pattern).
                     let next_visual = visual_row + 1;
                     let visual_wrap = if !has_wrapline_flag && next_visual < screen_lines {
-                        let last_nonspace_url = rtrimmed.chars().last().map_or(false, |c| url_char(c));
-                        if last_nonspace_url {
+                        // Visual wrapping only makes sense when the current
+                        // row fills to (or near) the terminal's right edge.
+                        // If there is significant trailing whitespace the
+                        // content is not wrapping.
+                        let content_len = rtrimmed.chars().count();
+                        if content_len + 3 < cols {
+                            false
+                        } else if !rtrimmed.chars().last().map_or(false, |c| url_char(c)) {
+                            false
+                        } else {
                             let next_buffer = next_visual - display_offset;
                             let mut next_row_text = String::with_capacity(cols);
                             for col_idx in 0..cols {
@@ -955,11 +965,13 @@ impl Terminal {
                                 // content has an internal space it's regular
                                 // text, not a URL continuation.
                                 false
+                            } else if next_content.ends_with(':') {
+                                // Label-like suffix (e.g. "remote:", "error:")
+                                // — not a URL continuation.
+                                false
                             } else {
                                 true
                             }
-                        } else {
-                            false
                         }
                     } else {
                         false
@@ -1464,13 +1476,14 @@ mod tests {
 
     #[test]
     fn detect_url_wrapped_with_padding() {
-        // TUI writes a URL that doesn't fill the row, then continues on next line.
-        // No WRAPLINE flag — the TUI manages wrapping itself.
-        // Row 1: "https://claude.ai/code/sess_ABC" + spaces (padding)
-        // Row 2: "DEF123" + spaces
+        // TUI writes a URL that fills nearly the whole row, then continues
+        // on next line.  No WRAPLINE flag — the TUI manages wrapping itself.
+        // Row 1: "https://claude.ai/code/sess_ABC" (31 chars) + padding
+        // Row 2: "DEF123" + padding
+        // cols=34 so row 1 is nearly full (31+3 >= 34).
         let links = detect_urls_in(
             "https://claude.ai/code/sess_ABC\r\nDEF123\r\n",
-            50,
+            34,
         );
         assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
         assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
@@ -1483,11 +1496,12 @@ mod tests {
     #[test]
     fn detect_url_wrapped_with_leading_padding() {
         // TUI adds leading spaces on the continuation line for alignment
-        // Row 1: "  https://claude.ai/code/sess_ABC" + spaces
-        // Row 2: "  DEF123" + spaces
+        // Row 1: "  https://claude.ai/code/sess_ABC" (33 chars) + padding
+        // Row 2: "  DEF123" + padding
+        // cols=36 so row 1 is nearly full (33+3 >= 36).
         let links = detect_urls_in(
             "  https://claude.ai/code/sess_ABC\r\n  DEF123\r\n",
-            50,
+            36,
         );
         assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
         assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
@@ -1650,5 +1664,29 @@ mod tests {
             "No link should contain 'Press': {:?}",
             links
         );
+    }
+
+    #[test]
+    fn detect_url_not_merged_with_remote_prefix() {
+        // Git push output: URL on a line that doesn't fill the terminal width.
+        // The "remote:" on the next line must NOT be merged as a continuation.
+        let links = detect_urls_in(
+            "remote:       https://github.com/contember/dotaz/pull/new/fixes\r\nremote:\r\n",
+            80,
+        );
+        assert_eq!(links.len(), 1, "Should detect exactly one URL: {:?}", links);
+        assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/new/fixes");
+    }
+
+    #[test]
+    fn detect_url_not_merged_with_label_suffix() {
+        // Even when the URL line nearly fills the terminal, a continuation
+        // ending with ':' (label pattern) must not be merged.
+        let links = detect_urls_in(
+            "https://github.com/contember/dotaz/pull/new/fixes\r\nremote:\r\n",
+            52, // URL is 50 chars, nearly fills 52-col terminal
+        );
+        assert_eq!(links.len(), 1, "Label-like 'remote:' must not be merged: {:?}", links);
+        assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/new/fixes");
     }
 }
