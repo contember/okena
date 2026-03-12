@@ -35,7 +35,7 @@ impl Workspace {
     fn find_first_terminal_path(node: &crate::workspace::state::LayoutNode) -> Option<Vec<usize>> {
         use crate::workspace::state::LayoutNode;
         match node {
-            LayoutNode::Terminal { .. } => Some(vec![]),
+            LayoutNode::Terminal { .. } | LayoutNode::App { .. } => Some(vec![]),
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for (i, child) in children.iter().enumerate() {
                     if let Some(mut path) = Self::find_first_terminal_path(child) {
@@ -143,6 +143,30 @@ impl Workspace {
                     // Switch to the terminal's project so it becomes visible
                     self.set_focused_project(Some(project_id.to_string()), cx);
                     // Use the unified focus method for consistent propagation
+                    self.set_focused_terminal(project_id.to_string(), path, cx);
+                }
+            }
+        }
+    }
+
+    /// Focus an app pane by its project ID and app ID.
+    pub fn focus_app_by_id(
+        &mut self,
+        project_id: &str,
+        app_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project(project_id) {
+            if let Some(ref layout) = project.layout {
+                if let Some(path) = layout.find_app_path(app_id) {
+                    // Activate any tabs along the path so the app becomes visible
+                    if let Some(project_mut) = self.project_mut(project_id) {
+                        if let Some(ref mut layout) = project_mut.layout {
+                            layout.activate_tabs_along_path(&path);
+                        }
+                    }
+                    self.notify_data(cx);
+                    self.set_focused_project(Some(project_id.to_string()), cx);
                     self.set_focused_terminal(project_id.to_string(), path, cx);
                 }
             }

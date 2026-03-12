@@ -1,11 +1,22 @@
 import { useReducer, useEffect, useRef, useCallback, useState } from "react";
 import { appReducer, initialState, AppContext, TerminalRegistry } from "./state/store";
 import { WsManager, type WsStatus } from "./api/websocket";
-import type { WsOutbound } from "./api/types";
+import type { ApiLayoutNode, WsOutbound } from "./api/types";
 import { getState, refresh, AuthError } from "./api/client";
 import { loadToken, clearToken, tokenTtlSecs } from "./auth/token";
 import { PairingScreen } from "./components/PairingScreen";
 import { WorkspaceLayout } from "./components/WorkspaceLayout";
+
+function collectAppIds(node: ApiLayoutNode | null | undefined, out: string[]): void {
+  if (!node) return;
+  if (node.type === "app") {
+    if (node.app_id) out.push(node.app_id);
+  } else if (node.type === "split" || node.type === "tabs") {
+    for (const child of node.children) {
+      collectAppIds(child, out);
+    }
+  }
+}
 
 export function App() {
   const [state, dispatch] = useReducer(appReducer, initialState);
@@ -24,6 +35,14 @@ export function App() {
       if (!state.selectedProjectId) {
         const projectId = ws.focused_project_id ?? ws.projects[0]?.id ?? null;
         if (projectId) dispatch({ type: "select_project", projectId });
+      }
+      // Subscribe to all app entities in the layout
+      const appIds: string[] = [];
+      for (const project of ws.projects) {
+        collectAppIds(project.layout, appIds);
+      }
+      if (appIds.length > 0) {
+        wsRef.current.subscribeApps(appIds);
       }
     } catch (e) {
       if (e instanceof AuthError) {
@@ -45,6 +64,9 @@ export function App() {
         case "auth_failed":
           clearToken();
           setAuthed(false);
+          break;
+        case "app_state_changed":
+          dispatch({ type: "set_app_state", appId: msg.app_id, state: msg.state });
           break;
       }
     },

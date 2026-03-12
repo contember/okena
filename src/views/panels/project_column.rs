@@ -1,8 +1,11 @@
-use crate::git::{self, FileDiffSummary};
+use crate::git;
+use crate::git::FileDiffSummary;
 use crate::git::watcher::GitStatusWatcher;
-use crate::views::components::file_tree::build_file_tree;
+use crate::vcs;
+use crate::views::components::build_file_tree;
 use crate::action_dispatch::ActionDispatcher;
 use crate::services::manager::{ServiceManager, ServiceStatus};
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
@@ -76,6 +79,8 @@ pub struct ProjectColumn {
     service_panel_height: f32,
     /// Bounds of the git diff stats badge (for popover positioning)
     diff_stats_bounds: Bounds<Pixels>,
+    /// App state broadcaster for passing to LayoutContainer → KruhPane
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl ProjectColumn {
@@ -87,6 +92,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         git_watcher: Option<Entity<GitStatusWatcher>>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Observe git watcher for re-renders (replaces per-column polling)
@@ -117,6 +123,7 @@ impl ProjectColumn {
             service_terminal_pane: None,
             service_panel_height: initial_service_height,
             diff_stats_bounds: Bounds::default(),
+            app_broadcaster,
         }
     }
 
@@ -355,7 +362,7 @@ impl ProjectColumn {
             }
 
             // Load file summaries
-            let summaries = git::get_diff_file_summary(Path::new(&project_path));
+            let summaries = vcs::get_diff_file_summary(Path::new(&project_path));
 
             let _ = this.update(cx, |this, cx| {
                 // Re-check token after loading
@@ -499,6 +506,7 @@ impl ProjectColumn {
             let terminals = self.terminals.clone();
             let active_drag = self.active_drag.clone();
             let action_dispatcher = self.action_dispatcher.clone();
+            let app_broadcaster = self.app_broadcaster.clone();
 
             self.layout_container = Some(cx.new(move |_cx| {
                 LayoutContainer::new(
@@ -511,6 +519,7 @@ impl ProjectColumn {
                     terminals,
                     active_drag,
                     action_dispatcher,
+                    app_broadcaster,
                 )
             }));
         } else if let Some(container) = &self.layout_container {
@@ -921,44 +930,96 @@ impl ProjectColumn {
                     .child("This project is saved as a bookmark. Start a terminal to begin working.")
             )
             .child(
-                // Start Terminal button
-                div()
-                    .id("start-terminal-btn")
-                    .cursor_pointer()
-                    .px(px(16.0))
-                    .py(px(8.0))
-                    .rounded(px(6.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .flex()
-                    .items_center()
+                h_flex()
                     .gap(px(8.0))
                     .child(
-                        svg()
-                            .path("icons/terminal.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.button_primary_fg))
-                    )
-                    .child(
+                        // Start Terminal button
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(t.button_primary_fg))
-                            .child("Start Terminal")
+                            .id("start-terminal-btn")
+                            .cursor_pointer()
+                            .px(px(16.0))
+                            .py(px(8.0))
+                            .rounded(px(6.0))
+                            .bg(rgb(t.button_primary_bg))
+                            .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                svg()
+                                    .path("icons/terminal.svg")
+                                    .size(px(14.0))
+                                    .text_color(rgb(t.button_primary_fg))
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(t.button_primary_fg))
+                                    .child("Start Terminal")
+                            )
+                            .on_click({
+                                let dispatcher = self.action_dispatcher.clone();
+                                let project_id = project_id.clone();
+                                move |_, _window, cx| {
+                                    if let Some(ref dispatcher) = dispatcher {
+                                        dispatcher.dispatch(
+                                            okena_core::api::ActionRequest::CreateTerminal {
+                                                project_id: project_id.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                }
+                            })
                     )
-                    .on_click({
-                        let dispatcher = self.action_dispatcher.clone();
-                        move |_, _window, cx| {
-                            if let Some(ref dispatcher) = dispatcher {
-                                dispatcher.dispatch(
-                                    okena_core::api::ActionRequest::CreateTerminal {
-                                        project_id: project_id.clone(),
-                                    },
-                                    cx,
-                                );
-                            }
-                        }
-                    })
+                    .children(
+                        crate::views::layout::app_registry::all_apps().iter().map(|app| {
+                            let dispatcher = self.action_dispatcher.clone();
+                            let project_id = project_id.clone();
+                            let app_kind = app.kind.to_string();
+                            let icon_path = app.icon_path;
+                            let display_name = app.display_name;
+                            div()
+                                .id(SharedString::from(format!("start-app-{}", app.kind)))
+                                .cursor_pointer()
+                                .px(px(16.0))
+                                .py(px(8.0))
+                                .rounded(px(6.0))
+                                .bg(rgb(t.bg_secondary))
+                                .border_1()
+                                .border_color(rgb(t.border))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_primary))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(t.text_primary))
+                                        .child(format!("Start {}", display_name))
+                                )
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(ref dispatcher) = dispatcher {
+                                        dispatcher.dispatch(
+                                            okena_core::api::ActionRequest::CreateApp {
+                                                project_id: project_id.clone(),
+                                                app_kind: app_kind.clone(),
+                                                app_config: serde_json::Value::Null,
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })
+                        })
+                    )
             )
     }
 }
@@ -1872,6 +1933,8 @@ impl Render for ProjectColumn {
                         .id("project-column-content")
                         .flex_1()
                         .min_h_0()
+                        .flex()
+                        .flex_col()
                         .overflow_hidden()
                         .child(self.layout_container.clone().unwrap())
                         .into_any_element()

@@ -31,6 +31,24 @@ impl LayoutContainer {
         None
     }
 
+    /// Get the app_id for the active tab in this container.
+    /// Works for both Tabs containers (looks up child by index) and standalone apps.
+    pub(super) fn get_active_app_id(&self, active_tab: usize, cx: &Context<Self>) -> Option<String> {
+        let ws = self.workspace.read(cx);
+        match self.get_layout(&ws) {
+            Some(LayoutNode::Tabs { children, .. }) => {
+                if let Some(LayoutNode::App { app_id, .. }) = children.get(active_tab) {
+                    return app_id.clone();
+                }
+            }
+            Some(LayoutNode::App { app_id, .. }) => {
+                return app_id.clone();
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// Get the shell type for the active tab in this container.
     /// Works for both Tabs containers and standalone terminals.
     fn get_active_shell_type(&self, active_tab: usize, cx: &Context<Self>) -> ShellType {

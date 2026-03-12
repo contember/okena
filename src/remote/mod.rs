@@ -1,3 +1,4 @@
+pub mod app_broadcaster;
 pub mod auth;
 pub mod bridge;
 pub mod pty_broadcaster;

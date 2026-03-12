@@ -4,6 +4,8 @@ mod remote_commands;
 mod update_checker;
 
 use crate::git::watcher::GitStatusWatcher;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
+use crate::views::layout::app_entity_registry::{AppEntityRegistry, GlobalAppEntityRegistry};
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -50,6 +52,8 @@ pub struct Okena {
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
     pub(crate) pty_broadcaster: Arc<PtyBroadcaster>,
+    pub(crate) app_broadcaster: Arc<AppStateBroadcaster>,
+    pub(crate) app_entity_registry: Arc<AppEntityRegistry>,
     pub(crate) state_version: Arc<tokio_watch::Sender<u64>>,
     remote_info: RemoteInfo,
     listen_addr: IpAddr,
@@ -127,11 +131,19 @@ impl Okena {
         })
         .detach();
 
+        // Create app state broadcaster (used by KruhPane to publish state to WebSocket clients)
+        let app_broadcaster = Arc::new(AppStateBroadcaster::new());
+
+        // Create app entity registry and set as GPUI global so KruhPane can register itself
+        let app_entity_registry = Arc::new(AppEntityRegistry::new());
+        cx.set_global(GlobalAppEntityRegistry(app_entity_registry.clone()));
+
         // Create root view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
         let request_broker_clone = request_broker.clone();
+        let app_broadcaster_for_root = Some(app_broadcaster.clone());
         let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, cx)
+            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, app_broadcaster_for_root, cx)
         });
 
         // Get terminals registry from root view
@@ -211,6 +223,8 @@ impl Okena {
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
+            app_broadcaster,
+            app_entity_registry,
             state_version: state_version.clone(),
             remote_info: remote_info.clone(),
             listen_addr,
@@ -378,6 +392,7 @@ impl Okena {
             bridge_tx,
             self.auth_store.clone(),
             self.pty_broadcaster.clone(),
+            self.app_broadcaster.clone(),
             self.state_version.clone(),
             self.listen_addr,
             self.git_status_tx.clone(),
