@@ -224,7 +224,8 @@ impl Workspace {
         &mut self,
         parent_project_id: &str,
         branch: &str,
-        target_path: &str,
+        worktree_path: &str,
+        project_path: &str,
         create_branch: bool,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
@@ -239,11 +240,12 @@ impl Workspace {
         let repo_path = if let Some(ref wt_info) = parent.worktree_info {
             std::path::PathBuf::from(&wt_info.main_repo_path)
         } else {
-            std::path::PathBuf::from(&parent_path)
+            crate::git::get_repo_root(std::path::Path::new(&parent_path))
+                .unwrap_or_else(|| std::path::PathBuf::from(&parent_path))
         };
 
-        // Create the git worktree
-        let target = std::path::PathBuf::from(target_path);
+        // Create the git worktree at the repo-level target path
+        let target = std::path::PathBuf::from(worktree_path);
         crate::git::create_worktree(&repo_path, branch, &target, create_branch)?;
 
         // Create new project with cloned layout (or new terminal if parent has no layout)
@@ -263,7 +265,7 @@ impl Workspace {
         let project = ProjectData {
             id: id.clone(),
             name: project_name,
-            path: target_path.to_string(),
+            path: project_path.to_string(),
             is_visible: true,
             layout: new_layout,
             terminal_names: HashMap::new(),
@@ -271,6 +273,7 @@ impl Workspace {
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
                 main_repo_path: repo_path.to_string_lossy().to_string(),
+                worktree_path: worktree_path.to_string(),
             }),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -299,7 +302,7 @@ impl Workspace {
             &new_project_hooks,
             &id,
             &new_project_name,
-            target_path,
+            project_path,
             branch,
             cx,
         );
@@ -321,7 +324,13 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
-        let worktree_path = std::path::PathBuf::from(&project_path);
+        // Use the stored worktree path (repo-level checkout), falling back to project path
+        // for backwards compatibility with worktrees created before monorepo support
+        let worktree_path = project.worktree_info.as_ref()
+            .map(|wt| &wt.worktree_path)
+            .filter(|p| !p.is_empty())
+            .map(|p| std::path::PathBuf::from(p))
+            .unwrap_or_else(|| std::path::PathBuf::from(&project_path));
 
         // Remove the git worktree
         crate::git::remove_worktree(&worktree_path, force)?;

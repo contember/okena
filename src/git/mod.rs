@@ -7,6 +7,7 @@ pub use repository::{
     create_worktree,
     remove_worktree,
     get_available_branches_for_worktree,
+    get_repo_root,
     has_uncommitted_changes,
     get_current_branch,
     get_default_branch,

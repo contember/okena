@@ -1,7 +1,26 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::GitStatus;
 use crate::process::{command, safe_output};
+
+/// Get the root directory of the git repository containing the given path.
+/// Returns None if the path is not inside a git repository.
+pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
+    let path_str = path.to_str()?;
+    let output = safe_output(
+        command("git").args(["-C", path_str, "rev-parse", "--show-toplevel"]),
+    )
+    .ok()?;
+
+    if output.status.success() {
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !root.is_empty() {
+            return Some(PathBuf::from(root));
+        }
+    }
+
+    None
+}
 
 /// Get branches that are already checked out in worktrees
 fn get_worktree_branches(path: &Path) -> Vec<String> {
@@ -505,6 +524,12 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn get_repo_root_returns_none_for_invalid_path() {
+        let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        assert!(get_repo_root(&path).is_none());
+    }
 
     #[test]
     fn has_uncommitted_changes_returns_false_for_invalid_path() {
