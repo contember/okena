@@ -73,8 +73,11 @@ impl WorkspaceData {
 pub struct WorktreeMetadata {
     /// ID of the main repo project
     pub parent_project_id: String,
-    /// Path to main repository
+    /// Path to main repository (git root)
     pub main_repo_path: String,
+    /// Path to the git worktree checkout directory (may differ from project path in monorepos)
+    #[serde(default)]
+    pub worktree_path: String,
 }
 
 /// A single project with its layout tree
