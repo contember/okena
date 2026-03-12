@@ -80,6 +80,23 @@ pub struct WorktreeMetadata {
     pub worktree_path: String,
 }
 
+/// Status of a hook terminal in the service panel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HookTerminalStatus {
+    Running,
+    Succeeded,
+    Failed { exit_code: i32 },
+}
+
+/// Entry for a hook terminal displayed in the service panel.
+#[derive(Clone, Debug)]
+pub struct HookTerminalEntry {
+    pub hook_type: String,
+    pub label: String,
+    pub project_id: String,
+    pub status: HookTerminalStatus,
+}
+
 /// A single project with its layout tree
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectData {
@@ -122,6 +139,9 @@ pub struct ProjectData {
     /// Remote git status (transient, populated during remote state sync)
     #[serde(skip)]
     pub remote_git_status: Option<okena_core::api::ApiGitStatus>,
+    /// Hook terminals currently displayed in the service panel (transient, not persisted)
+    #[serde(skip)]
+    pub hook_terminals: HashMap<String, HookTerminalEntry>,
 }
 
 impl ProjectData {
@@ -327,6 +347,56 @@ impl Workspace {
                 self.notify_data(cx);
             }
         }
+    }
+
+    pub fn register_hook_terminal(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        entry: HookTerminalEntry,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            project.hook_terminals.insert(terminal_id.to_string(), entry);
+            cx.notify();
+        }
+    }
+
+    pub fn update_hook_terminal_status(
+        &mut self,
+        terminal_id: &str,
+        status: HookTerminalStatus,
+        cx: &mut Context<Self>,
+    ) {
+        for project in &mut self.data.projects {
+            if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
+                entry.status = status;
+                cx.notify();
+                return;
+            }
+        }
+    }
+
+    pub fn remove_hook_terminal(
+        &mut self,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        for project in &mut self.data.projects {
+            if project.hook_terminals.remove(terminal_id).is_some() {
+                cx.notify();
+                return;
+            }
+        }
+    }
+
+    pub fn is_hook_terminal(&self, terminal_id: &str) -> Option<String> {
+        for project in &self.data.projects {
+            if project.hook_terminals.contains_key(terminal_id) {
+                return Some(project.id.clone());
+            }
+        }
+        None
     }
 
     pub fn projects(&self) -> &[ProjectData] {
@@ -1182,6 +1252,7 @@ mod tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -2067,6 +2138,7 @@ mod workspace_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -2342,6 +2414,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 

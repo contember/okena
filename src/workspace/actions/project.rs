@@ -52,6 +52,7 @@ impl Workspace {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -237,6 +238,7 @@ impl Workspace {
 
         let parent_path = parent.path.clone();
         let parent_layout = parent.layout.clone();
+        let parent_hooks = parent.hooks.clone();
 
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
@@ -270,13 +272,14 @@ impl Workspace {
                 worktree_path: worktree_path.to_string(),
             }),
             folder_color: FolderColor::default(),
-            hooks: HooksConfig::default(),
+            hooks: parent_hooks,
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         };
 
         // Insert after parent project in order
@@ -363,6 +366,7 @@ mod tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -490,6 +494,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
