@@ -210,14 +210,7 @@ impl WorktreeDialog {
             }
             // For custom paths, the worktree path IS the custom path;
             // append subdir for the project path
-            let proj = if self.subdir.as_os_str().is_empty() {
-                custom.clone()
-            } else {
-                PathBuf::from(&custom)
-                    .join(&self.subdir)
-                    .to_string_lossy()
-                    .to_string()
-            };
+            let proj = project_path_in_worktree(&custom, &self.subdir);
             (custom, proj)
         } else {
             self.get_target_paths(&branch)
@@ -802,6 +795,19 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+/// Given a worktree checkout path and a subdir, return the project path.
+/// If subdir is empty, returns the worktree path as-is.
+fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
+    if subdir.as_os_str().is_empty() {
+        worktree_path.to_string()
+    } else {
+        PathBuf::from(worktree_path)
+            .join(subdir)
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
 /// Compute worktree and project paths from template, git root, and subdir.
 /// Returns (worktree_path, project_path).
 fn compute_target_paths(
@@ -830,14 +836,7 @@ fn compute_target_paths(
         }
     };
 
-    let project_path = if subdir.as_os_str().is_empty() {
-        worktree_path.clone()
-    } else {
-        PathBuf::from(&worktree_path)
-            .join(subdir)
-            .to_string_lossy()
-            .to_string()
-    };
+    let project_path = project_path_in_worktree(&worktree_path, subdir);
 
     (worktree_path, project_path)
 }
