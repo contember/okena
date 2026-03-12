@@ -138,13 +138,15 @@ impl CloseWorktreeDialog {
         let is_dirty = self.is_dirty;
         let workspace = self.workspace.clone();
 
-        // Read hooks config before spawning
+        // Read hooks config and monitor before spawning
         let ws = workspace.read(cx);
         let project_hooks = ws
             .project(&project_id)
             .map(|p| p.hooks.clone())
             .unwrap_or_default();
         let global_hooks = settings(cx).hooks;
+        let monitor = hooks::try_monitor(cx);
+        let runner = hooks::try_runner(cx);
 
         cx.spawn(async move |this, cx| {
             let mut did_stash = false;
@@ -219,6 +221,8 @@ impl CloseWorktreeDialog {
                     let branch = branch.clone();
                     let default_branch = default_branch.clone();
                     let main_repo_path = main_repo_path.clone();
+                    let monitor = monitor.clone();
+                    let runner = runner.clone();
                     move || {
                         hooks::fire_pre_merge(
                             &project_hooks,
@@ -229,6 +233,8 @@ impl CloseWorktreeDialog {
                             &branch,
                             &default_branch,
                             &main_repo_path,
+                            monitor.as_ref(),
+                            runner.as_ref(),
                         )
                     }
                 })
@@ -266,7 +272,7 @@ impl CloseWorktreeDialog {
 
                 if let Err(e) = rebase_result {
                     // Fire on_rebase_conflict hook
-                    let terminal_actions = hooks::fire_on_rebase_conflict(
+                    let (terminal_actions, _hook_results) = hooks::fire_on_rebase_conflict(
                         &project_hooks,
                         &global_hooks,
                         &project_id,
@@ -276,6 +282,8 @@ impl CloseWorktreeDialog {
                         &default_branch,
                         &main_repo_path,
                         &e,
+                        monitor.as_ref(),
+                        runner.as_ref(),
                     );
                     for (cmd, env) in terminal_actions {
                         let project_id = project_id.clone();
@@ -331,7 +339,7 @@ impl CloseWorktreeDialog {
                 }
 
                 // post_merge hook (async)
-                hooks::fire_post_merge(
+                let _ = hooks::fire_post_merge(
                     &project_hooks,
                     &global_hooks,
                     &project_id,
@@ -340,6 +348,8 @@ impl CloseWorktreeDialog {
                     &branch,
                     &default_branch,
                     &main_repo_path,
+                    monitor.as_ref(),
+                    runner.as_ref(),
                 );
 
                 // Push default branch (if push_enabled)
@@ -405,6 +415,8 @@ impl CloseWorktreeDialog {
                 let project_path = project_path.clone();
                 let branch = branch.clone();
                 let main_repo_path = main_repo_path.clone();
+                let monitor = monitor.clone();
+                let runner = runner.clone();
                 move || {
                     hooks::fire_before_worktree_remove(
                         &project_hooks,
@@ -414,6 +426,8 @@ impl CloseWorktreeDialog {
                         &project_path,
                         &branch,
                         &main_repo_path,
+                        monitor.as_ref(),
+                        runner.as_ref(),
                     )
                 }
             })
@@ -443,13 +457,15 @@ impl CloseWorktreeDialog {
 
             // Fire on_dirty_worktree_close hook when closing dirty worktree without stash
             if force_remove {
-                let terminal_actions = hooks::fire_on_dirty_worktree_close(
+                let (terminal_actions, _hook_results) = hooks::fire_on_dirty_worktree_close(
                     &project_hooks,
                     &global_hooks,
                     &project_id,
                     &project_name,
                     &project_path,
                     &branch,
+                    monitor.as_ref(),
+                    runner.as_ref(),
                 );
                 for (cmd, env) in terminal_actions {
                     let project_id = project_id.clone();
@@ -469,7 +485,7 @@ impl CloseWorktreeDialog {
                 match result {
                     Ok(()) => {
                         // Step 4: worktree_removed hook (async)
-                        hooks::fire_worktree_removed(
+                        let _ = hooks::fire_worktree_removed(
                             &project_hooks,
                             &global_hooks,
                             &project_id,
@@ -477,6 +493,8 @@ impl CloseWorktreeDialog {
                             &project_path,
                             &branch,
                             &main_repo_path,
+                            monitor.as_ref(),
+                            runner.as_ref(),
                         );
 
                         let _ = this.update(cx, |this, cx| {
