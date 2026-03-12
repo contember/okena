@@ -223,16 +223,19 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
         Ok(data)
     } else {
-        // Config dir exists but workspace.json doesn't — block auto-save
-        // to prevent a default workspace from overwriting a potentially
-        // recoverable file (e.g. restored from backup manually).
-        if path.parent().is_some_and(|p| p.exists()) {
+        let bak_path = path.with_extension("json.bak");
+        if bak_path.exists() {
+            // Backup exists but workspace.json doesn't and recovery above failed —
+            // block auto-save to prevent overwriting recoverable data.
             log::warn!(
-                "Workspace file not found at {:?} (config dir exists). \
+                "Workspace file not found at {:?} but backup exists. \
                  Starting with default workspace. Auto-save DISABLED to protect data.",
                 path,
             );
             LOADED_FROM_DEFAULT.store(true, Ordering::Relaxed);
+        } else {
+            // Fresh install — no workspace.json and no backup. Allow saving.
+            log::info!("No workspace file found — starting with default workspace.");
         }
         Ok(default_workspace())
     }
