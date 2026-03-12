@@ -3,6 +3,7 @@ use crate::terminal::terminal::Terminal;
 use crate::theme::{theme, ansi_to_hsla};
 use crate::workspace::settings::CursorShape;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::grid::Dimensions;
 use gpui::*;
@@ -361,9 +362,26 @@ impl Element for TerminalElement {
                     let cell = &grid[cell_point];
                     let col_i32 = col as i32;
 
-                    // Handle background colors
+                    // Handle colors with BOLD→bright promotion and DIM
                     let mut fg = cell.fg.clone();
                     let mut bg = cell.bg.clone();
+
+                    // BOLD promotes basic ANSI colors (0-7) to their bright variants
+                    if cell.flags.contains(Flags::BOLD) {
+                        fg = match fg {
+                            Color::Named(NamedColor::Black) => Color::Named(NamedColor::BrightBlack),
+                            Color::Named(NamedColor::Red) => Color::Named(NamedColor::BrightRed),
+                            Color::Named(NamedColor::Green) => Color::Named(NamedColor::BrightGreen),
+                            Color::Named(NamedColor::Yellow) => Color::Named(NamedColor::BrightYellow),
+                            Color::Named(NamedColor::Blue) => Color::Named(NamedColor::BrightBlue),
+                            Color::Named(NamedColor::Magenta) => Color::Named(NamedColor::BrightMagenta),
+                            Color::Named(NamedColor::Cyan) => Color::Named(NamedColor::BrightCyan),
+                            Color::Named(NamedColor::White) => Color::Named(NamedColor::BrightWhite),
+                            Color::Indexed(idx @ 0..=7) => Color::Indexed(idx + 8),
+                            other => other,
+                        };
+                    }
+
                     if cell.flags.contains(Flags::INVERSE) {
                         std::mem::swap(&mut fg, &mut bg);
                     }
@@ -428,11 +446,16 @@ impl Element for TerminalElement {
                     }
 
                     // Create text style
-                    let fg_color = if is_selected {
+                    let mut fg_color = if is_selected {
                         rgb(t.selection_fg).into()
                     } else {
                         ansi_to_hsla(&t,&fg)
                     };
+
+                    // DIM (SGR 2) reduces foreground brightness by ~33%
+                    if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
+                        fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
+                    }
 
                     // Use pre-computed font variants to avoid repeated cloning
                     let is_bold = cell.flags.contains(Flags::BOLD);
