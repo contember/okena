@@ -118,6 +118,25 @@ impl SettingsState {
 
     setting_setter!(set_claude_code_integration, claude_code_integration, bool);
 
+    /// Set sidebar open state
+    pub fn set_sidebar_open(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.is_open = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set sidebar auto-hide mode
+    pub fn set_sidebar_auto_hide(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.sidebar.auto_hide = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set sidebar width (clamped to min/max bounds)
+    pub fn set_sidebar_width(&mut self, value: f32, cx: &mut Context<Self>) {
+        use crate::workspace::persistence::{MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
+        self.settings.sidebar.width = value.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        self.save_and_notify(cx);
+    }
+
     /// Set the theme mode
     pub fn set_theme_mode(&mut self, value: ThemeMode, cx: &mut Context<Self>) {
         self.settings.theme_mode = value;
