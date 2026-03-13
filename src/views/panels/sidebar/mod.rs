@@ -848,9 +848,9 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
-            SidebarCursorItem::Hook { project_id, .. } => {
+            SidebarCursorItem::Hook { project_id, terminal_id } => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(Some(project_id), cx);
+                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
