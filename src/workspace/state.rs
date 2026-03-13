@@ -529,17 +529,26 @@ impl Workspace {
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
         let focused = self.focused_project_id();
         let folder_filter = self.active_folder_filter.as_ref();
+
+        // When a project is focused, also show its worktree children
+        let is_focused = |p: &ProjectData, fid: &String| -> bool {
+            &p.id == fid
+                || p.worktree_info
+                    .as_ref()
+                    .map_or(false, |wi| &wi.parent_project_id == fid)
+        };
+
         let mut result = Vec::new();
         for id in &self.data.project_order {
             if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
                 // When folder filter is active, skip folders that don't match
                 if let Some(filter_id) = folder_filter {
                     if &folder.id != filter_id {
-                        // Still allow the focused project through even if in wrong folder
+                        // Still allow the focused project (and its worktrees) through even if in wrong folder
                         if let Some(fid) = focused {
                             for pid in &folder.project_ids {
-                                if pid == fid {
-                                    if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
+                                if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
+                                    if is_focused(p, fid) {
                                         result.push(p);
                                     }
                                 }
@@ -551,7 +560,7 @@ impl Workspace {
                 // Folder: include its projects
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                        if focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                             result.push(p);
                         }
                     }
@@ -559,13 +568,13 @@ impl Workspace {
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
                 // Top-level project: hide when folder filter is active
                 if folder_filter.is_some() {
-                    // Still allow the focused project through
-                    if focused.map_or(false, |fid| &p.id == fid) {
+                    // Still allow the focused project (and its worktrees) through
+                    if focused.map_or(false, |fid| is_focused(p, fid)) {
                         result.push(p);
                     }
                     continue;
                 }
-                if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                if focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                     result.push(p);
                 }
             }
