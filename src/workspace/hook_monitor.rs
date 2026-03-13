@@ -37,6 +37,9 @@ struct HookMonitorInner {
     next_id: u64,
     running_count: usize,
     exit_waiters: HashMap<String, mpsc::Sender<Option<u32>>>,
+    /// Monotonic counter incremented on every mutation. Allows cheap
+    /// "has anything changed?" checks without cloning the full history.
+    version: u64,
 }
 
 /// Thread-safe hook execution monitor.
@@ -56,6 +59,7 @@ impl HookMonitor {
             next_id: 1,
             running_count: 0,
             exit_waiters: HashMap::new(),
+            version: 0,
         })))
     }
 
@@ -71,6 +75,7 @@ impl HookMonitor {
         let id = inner.next_id;
         inner.next_id += 1;
         inner.running_count += 1;
+        inner.version += 1;
 
         inner.history.push_back(HookExecution {
             id,
@@ -100,6 +105,7 @@ impl HookMonitor {
     pub fn record_finish(&self, id: u64, status: HookStatus) {
         let mut inner = self.0.lock();
         inner.running_count = inner.running_count.saturating_sub(1);
+        inner.version += 1;
 
         // Find the entry's hook_type first (Copy-friendly &'static str)
         let hook_type = inner.history.iter().find(|e| e.id == id).map(|e| e.hook_type);
@@ -146,6 +152,12 @@ impl HookMonitor {
         inner.history.iter().rev().cloned().collect()
     }
 
+    /// Monotonic version counter — incremented on every mutation.
+    /// Allows cheap change detection without cloning history.
+    pub fn version(&self) -> u64 {
+        self.0.lock().version
+    }
+
     /// Number of currently running hooks.
     #[cfg(test)]
     pub fn running_count(&self) -> usize {
@@ -184,6 +196,7 @@ impl HookMonitor {
                 inner.pending_toasts.push(Toast::error(msg));
             }
             inner.running_count = inner.running_count.saturating_sub(1);
+            inner.version += 1;
             true
         } else {
             false

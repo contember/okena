@@ -141,6 +141,27 @@ impl Sidebar {
             cx.notify();
         }).detach();
 
+        // Auto-expand projects that gain hook terminals (outside of render).
+        // Tracked in hook_auto_expanded so we only expand once per project
+        // (user can collapse afterward without it re-expanding).
+        cx.observe(&workspace, |this, workspace, cx| {
+            let ws = workspace.read(cx);
+            let mut changed = false;
+            for project in &ws.data().projects {
+                if !project.hook_terminals.is_empty() && this.hook_auto_expanded.insert(project.id.clone()) {
+                    this.expanded_projects.insert(project.id.clone());
+                    changed = true;
+                }
+            }
+            let before_len = this.hook_auto_expanded.len();
+            this.hook_auto_expanded.retain(|id| {
+                ws.data().projects.iter().any(|p| p.id == *id && !p.hook_terminals.is_empty())
+            });
+            if changed || this.hook_auto_expanded.len() != before_len {
+                cx.notify();
+            }
+        }).detach();
+
         Self {
             workspace,
             request_broker,
@@ -1214,18 +1235,6 @@ impl Render for Sidebar {
         }
 
         let workspace = self.workspace.read(cx);
-
-        // Auto-expand projects that gain hook terminals (once per project,
-        // so the user can collapse afterward without it re-expanding every frame).
-        for project in &workspace.data().projects {
-            if !project.hook_terminals.is_empty() && self.hook_auto_expanded.insert(project.id.clone()) {
-                self.expanded_projects.insert(project.id.clone());
-            }
-        }
-        // Clean up tracking for projects whose hooks are gone
-        self.hook_auto_expanded.retain(|id| {
-            workspace.data().projects.iter().any(|p| p.id == *id && !p.hook_terminals.is_empty())
-        });
 
         // Collect all projects for lookup
         let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()

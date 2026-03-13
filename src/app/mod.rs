@@ -515,9 +515,9 @@ impl Okena {
         })
         .detach();
     }
-}
 
-impl Okena {
+    // ── Hook terminal exit handling ──────────────────────────────────────
+
     /// Process hook terminal exit events: update status, resolve pending worktree closes,
     /// and schedule cleanup. Returns the set of terminal IDs that were hook terminals.
     fn handle_hook_terminal_exits(

@@ -11,38 +11,33 @@ use std::time::Duration;
 pub struct HookLog {
     focus_handle: FocusHandle,
     history: Vec<HookExecution>,
+    /// Last seen HookMonitor version — used to skip expensive history cloning
+    /// when nothing has changed.
+    last_version: u64,
 }
 
 impl HookLog {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let history = cx
+        let (history, last_version) = cx
             .try_global::<HookMonitor>()
-            .map(|m| m.history())
+            .map(|m| (m.history(), m.version()))
             .unwrap_or_default();
 
         let focus_handle = cx.focus_handle();
 
-        // Refresh history every 500ms to pick up running → finished transitions
+        // Poll for changes at 1s intervals. The version check makes the common
+        // case (no changes) a single lock + u64 compare with no allocation.
         cx.spawn(async move |this: WeakEntity<HookLog>, cx| {
             loop {
-                smol::Timer::after(Duration::from_millis(500)).await;
+                smol::Timer::after(Duration::from_secs(1)).await;
                 let result = this.update(cx, |this, cx| {
-                    let new_history = cx
-                        .try_global::<HookMonitor>()
-                        .map(|m| m.history())
-                        .unwrap_or_default();
-                    if new_history.len() != this.history.len()
-                        || new_history.iter().zip(this.history.iter()).any(|(a, b)| {
-                            a.id != b.id || !matches!((&a.status, &b.status),
-                                (HookStatus::Running, HookStatus::Running) |
-                                (HookStatus::Succeeded { .. }, HookStatus::Succeeded { .. }) |
-                                (HookStatus::Failed { .. }, HookStatus::Failed { .. }) |
-                                (HookStatus::SpawnError { .. }, HookStatus::SpawnError { .. })
-                            )
-                        })
-                    {
-                        this.history = new_history;
-                        cx.notify();
+                    if let Some(monitor) = cx.try_global::<HookMonitor>() {
+                        let current_version = monitor.version();
+                        if current_version != this.last_version {
+                            this.history = monitor.history();
+                            this.last_version = current_version;
+                            cx.notify();
+                        }
                     }
                 });
                 if result.is_err() {
@@ -52,7 +47,7 @@ impl HookLog {
         })
         .detach();
 
-        Self { focus_handle, history }
+        Self { focus_handle, history, last_version }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
