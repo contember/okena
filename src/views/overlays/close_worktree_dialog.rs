@@ -539,6 +539,13 @@ impl CloseWorktreeDialog {
                     });
                 }
 
+                let _ = cx.update(|cx| {
+                    this.update(cx, |this, cx| {
+                        this.processing = ProcessingState::Removing;
+                        cx.notify();
+                    })
+                });
+
                 cx.update(|cx| {
                     let result = workspace.update(cx, |ws, cx| {
                         ws.remove_worktree_project(&project_id, force_remove, cx)

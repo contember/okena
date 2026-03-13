@@ -68,6 +68,7 @@ pub(super) enum SidebarCursorItem {
     GroupHeader { project_id: String, group: GroupKind },
     Terminal { project_id: String, terminal_id: String },
     Service { project_id: String, service_name: String },
+    #[allow(dead_code)]
     Hook { project_id: String, terminal_id: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
@@ -119,6 +120,9 @@ pub struct Sidebar {
     pub(super) service_manager: Option<Entity<ServiceManager>>,
     /// Collapsed state for group headers (Terminals/Services) per project
     collapsed_groups: HashSet<(String, GroupKind)>,
+    /// Project IDs that have been auto-expanded due to hook terminals.
+    /// Tracked so we only auto-expand once (user can collapse afterward).
+    hook_auto_expanded: HashSet<String>,
 }
 
 impl Sidebar {
@@ -161,6 +165,7 @@ impl Sidebar {
             backend: None,
             service_manager: None,
             collapsed_groups: HashSet::new(),
+            hook_auto_expanded: HashSet::new(),
         }
     }
 
@@ -1210,12 +1215,17 @@ impl Render for Sidebar {
 
         let workspace = self.workspace.read(cx);
 
-        // Auto-expand projects that have active hook terminals
+        // Auto-expand projects that gain hook terminals (once per project,
+        // so the user can collapse afterward without it re-expanding every frame).
         for project in &workspace.data().projects {
-            if !project.hook_terminals.is_empty() {
+            if !project.hook_terminals.is_empty() && self.hook_auto_expanded.insert(project.id.clone()) {
                 self.expanded_projects.insert(project.id.clone());
             }
         }
+        // Clean up tracking for projects whose hooks are gone
+        self.hook_auto_expanded.retain(|id| {
+            workspace.data().projects.iter().any(|p| p.id == *id && !p.hook_terminals.is_empty())
+        });
 
         // Collect all projects for lookup
         let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
