@@ -101,7 +101,6 @@ pub struct HookTerminalEntry {
 #[derive(Clone, Debug)]
 pub struct PendingWorktreeClose {
     pub project_id: String,
-    pub force: bool,
     pub hook_terminal_id: String,
     /// Data needed for the worktree_removed hook after removal
     pub branch: String,

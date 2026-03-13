@@ -203,8 +203,7 @@ impl ToastOverlay {
                             if let Some(tm) = cx.try_global::<ToastManager>() {
                                 let mut queue = tm.0.lock();
                                 for toast in hook_toasts {
-                                    log::error!("[toast] {}", toast.message);
-                                    eprintln!("[ERROR] {}", toast.message);
+                                    log::debug!("[hook toast] {}", toast.message);
                                     queue.push(toast);
                                     while queue.len() > MAX_VISIBLE_TOASTS {
                                         queue.remove(0);
