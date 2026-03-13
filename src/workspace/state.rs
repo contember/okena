@@ -411,9 +411,14 @@ impl Workspace {
                 }
             }
             Some(fid) => {
-                // Focus active: show only the exactly focused item
                 if &p.id == fid {
+                    // Focused project is this parent: show it + all worktree children
                     result.push(p);
+                    for wt_id in &p.worktree_ids {
+                        if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == wt_id) {
+                            result.push(wt);
+                        }
+                    }
                 } else if p.worktree_ids.contains(fid) {
                     // Focused project is a worktree child of this parent
                     if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == fid) {
@@ -2401,22 +2406,30 @@ mod workspace_tests {
     }
 
     #[test]
-    fn test_focus_parent_shows_only_parent() {
+    fn test_focus_parent_shows_parent_and_worktrees() {
         let mut parent = make_project("parent", true);
-        parent.worktree_ids = vec!["wt1".to_string()];
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
         });
-        let data = make_workspace_data(vec![parent, wt1], vec!["parent"]);
+        let mut wt2 = make_project("wt2", true);
+        wt2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+        let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
         ws.focus_manager.set_focused_project_id(Some("parent".to_string()));
 
         let visible = ws.visible_projects();
-        assert_eq!(visible.len(), 1);
+        assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "parent");
+        assert_eq!(visible[1].id, "wt1");
+        assert_eq!(visible[2].id, "wt2");
     }
 
     #[test]
