@@ -9,7 +9,7 @@ use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
 
 use super::item_widgets::*;
-use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag};
+use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag, WorktreeDrag, WorktreeDragView};
 use std::collections::HashMap;
 
 impl Sidebar {
@@ -198,13 +198,14 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
         let is_visible = project.show_in_overview;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
+        let parent_id = project.parent_project_id.clone().unwrap_or_default();
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
@@ -233,6 +234,30 @@ impl Sidebar {
             .when(!is_closing, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
             .when(is_focused_project && !is_closing, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            // Drag source for worktree reordering
+            .when(!parent_id.is_empty(), |d| {
+                let wt_id = project_id.clone();
+                let wt_name = project_name.clone();
+                let pid = parent_id.clone();
+                d.on_drag(WorktreeDrag { worktree_id: wt_id, parent_id: pid, worktree_name: wt_name }, move |drag, _position, _window, cx| {
+                    cx.new(|_| WorktreeDragView { name: drag.worktree_name.clone() })
+                })
+            })
+            // Drop target for worktree reordering within same parent
+            .drag_over::<WorktreeDrag>(move |style, _, _, _| {
+                style.border_t_2().border_color(rgb(t.border_active))
+            })
+            .on_drop(cx.listener({
+                let project_id = project_id.clone();
+                let parent_id = parent_id.clone();
+                move |this, drag: &WorktreeDrag, _window, cx| {
+                    if drag.worktree_id != project_id && drag.parent_id == parent_id {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.reorder_worktree(&parent_id, &drag.worktree_id, worktree_index, cx);
+                        });
+                    }
+                }
+            }))
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();
                 move |this, event: &MouseDownEvent, _window, cx| {

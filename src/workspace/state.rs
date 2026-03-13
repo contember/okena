@@ -124,6 +124,9 @@ pub struct ProjectData {
     /// Optional worktree metadata (only set for worktree projects)
     #[serde(default)]
     pub worktree_info: Option<WorktreeMetadata>,
+    /// Ordered list of worktree child project IDs (for parent projects)
+    #[serde(default)]
+    pub worktree_ids: Vec<String>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -581,6 +584,7 @@ impl Workspace {
                                 if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
                                     if is_focused(p, fid) {
                                         result.push(p);
+                                        self.push_worktree_children(p, &mut result);
                                     }
                                 }
                             }
@@ -594,6 +598,7 @@ impl Workspace {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
                         if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
                             result.push(p);
+                            self.push_worktree_children(p, &mut result);
                         }
                         if folder_filter.is_some() {
                             for wt in &self.data.projects {
@@ -619,15 +624,26 @@ impl Workspace {
                     // Still allow the focused project (and its worktrees) through
                     if effective_focused.map_or(false, |fid| is_focused(p, fid)) {
                         result.push(p);
+                        self.push_worktree_children(p, &mut result);
                     }
                     continue;
                 }
                 if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
                     result.push(p);
+                    self.push_worktree_children(p, &mut result);
                 }
             }
         }
         result
+    }
+
+    /// Push worktree children of a project into the result list, in `worktree_ids` order.
+    fn push_worktree_children<'a>(&'a self, parent: &'a ProjectData, result: &mut Vec<&'a ProjectData>) {
+        for wt_id in &parent.worktree_ids {
+            if let Some(wt) = self.data.projects.iter().find(|p| &p.id == wt_id) {
+                result.push(wt);
+            }
+        }
     }
 
     /// Get a project by ID
@@ -1412,6 +1428,7 @@ mod tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: Default::default(),
             hooks: Default::default(),
             is_remote: false,
@@ -2300,6 +2317,7 @@ mod workspace_tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -2644,6 +2662,61 @@ mod workspace_tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
+
+    #[test]
+    fn test_visible_projects_includes_worktree_children() {
+        let mut parent = make_project("parent", true);
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
+        let mut wt1 = make_project("wt1", true);
+        wt1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut wt2 = make_project("wt2", true);
+        wt2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+        let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
+        let ws = Workspace::new(data);
+
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "parent");
+        assert_eq!(visible[1].id, "wt1");
+        assert_eq!(visible[2].id, "wt2");
+    }
+
+    #[test]
+    fn test_visible_projects_worktree_children_in_folder() {
+        let mut parent = make_project("parent", true);
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt1 = make_project("wt1", true);
+        wt1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let other = make_project("other", true);
+        let mut data = make_workspace_data(vec![parent, wt1, other], vec!["f1", "other"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["parent".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+        let ws = Workspace::new(data);
+
+        let visible = ws.visible_projects();
+        // parent + wt1 from folder, then other
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "parent");
+        assert_eq!(visible[1].id, "wt1");
+        assert_eq!(visible[2].id, "other");
+    }
 }
 
 #[cfg(test)]
@@ -2671,6 +2744,7 @@ mod gpui_tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,

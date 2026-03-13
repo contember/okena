@@ -353,6 +353,7 @@ impl RootView {
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
                                 worktree_info: None,
+                                worktree_ids: Vec::new(),
                                 folder_color: project_color,
                                 hooks: HooksConfig::default(),
                                 is_remote: true,

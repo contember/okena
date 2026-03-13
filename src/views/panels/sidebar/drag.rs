@@ -28,6 +28,44 @@ impl Render for ProjectDragView {
     }
 }
 
+/// Drag payload for worktree reordering within a parent
+#[derive(Clone)]
+pub(super) struct WorktreeDrag {
+    pub worktree_id: String,
+    pub parent_id: String,
+    pub worktree_name: String,
+}
+
+/// Drag preview view for worktree items
+pub(super) struct WorktreeDragView {
+    pub name: String,
+}
+
+impl Render for WorktreeDragView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x404040))
+            .rounded(px(4.0))
+            .shadow_lg()
+            .text_size(px(12.0))
+            .text_color(rgb(0xffffff))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(12.0))
+                    .text_color(rgb(0xcccccc))
+            )
+            .child(self.name.clone())
+    }
+}
+
 /// Drag payload for folder reordering
 #[derive(Clone)]
 pub(super) struct FolderDrag {

@@ -173,12 +173,54 @@ pub(crate) fn validate_workspace_data(
         project.hidden_terminals.retain(|id, _| layout_ids.contains(id));
     }
 
-    // Ensure project_order contains all project IDs (that aren't in a folder)
+    // Populate worktree_ids from worktree_info back-references (migration for old data)
+    {
+        // Collect worktree relationships: parent_id -> vec of (worktree_id, position_in_project_order)
+        let mut parent_to_children: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
+        for project in &data.projects {
+            if let Some(ref wt_info) = project.worktree_info {
+                let pos = data.project_order.iter().position(|id| id == &project.id);
+                parent_to_children
+                    .entry(wt_info.parent_project_id.clone())
+                    .or_default()
+                    .push((project.id.clone(), pos));
+            }
+        }
+
+        for project in &mut data.projects {
+            if project.worktree_ids.is_empty() {
+                if let Some(mut children) = parent_to_children.remove(&project.id) {
+                    // Sort by position in project_order for deterministic migration
+                    children.sort_by_key(|(_, pos)| pos.unwrap_or(usize::MAX));
+                    project.worktree_ids = children.into_iter().map(|(id, _)| id).collect();
+                }
+            }
+        }
+
+        // Remove non-orphan worktrees from project_order (they live in parent's worktree_ids now)
+        let worktree_ids_in_parents: std::collections::HashSet<String> = data.projects.iter()
+            .flat_map(|p| p.worktree_ids.iter().cloned())
+            .collect();
+        data.project_order.retain(|id| !worktree_ids_in_parents.contains(id));
+
+        // Also remove from folder project_ids
+        for folder in &mut data.folders {
+            folder.project_ids.retain(|id| !worktree_ids_in_parents.contains(id));
+        }
+    }
+
+    // Ensure project_order contains all project IDs (that aren't in a folder or worktree_ids)
     let folder_project_ids: std::collections::HashSet<String> = data.folders.iter()
         .flat_map(|f| f.project_ids.iter().cloned())
         .collect();
+    let worktree_child_ids: std::collections::HashSet<String> = data.projects.iter()
+        .flat_map(|p| p.worktree_ids.iter().cloned())
+        .collect();
     for project in &data.projects {
-        if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
+        if !data.project_order.contains(&project.id)
+            && !folder_project_ids.contains(&project.id)
+            && !worktree_child_ids.contains(&project.id)
+        {
             data.project_order.push(project.id.clone());
         }
     }
@@ -427,6 +469,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
                     main_repo_path: parent_path.clone(),
                     worktree_path: wt_path_clone,
                 }),
+                worktree_ids: Vec::new(),
                 default_shell: None,
                 folder_color: FolderColor::default(),
                 hooks: super::settings::HooksConfig::default(),
@@ -483,6 +526,7 @@ pub fn default_workspace() -> WorkspaceData {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: super::settings::HooksConfig::default(),
             is_remote: false,
@@ -516,6 +560,7 @@ mod tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: super::super::settings::HooksConfig::default(),
             is_remote: false,
@@ -796,6 +841,16 @@ mod tests {
         assert!(filtered.project_widths.contains_key("local1"));
     }
 
+    fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+            parent_project_id: parent_id.to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: format!("/tmp/worktrees/{}", id),
+        });
+        p
+    }
+
     // === sync_worktrees ===
 
     #[test]
@@ -975,5 +1030,72 @@ mod tests {
 
         // Should NOT create a duplicate
         assert_eq!(data.projects.len(), 2);
+    }
+
+    // === validate_workspace_data worktree migration ===
+
+    #[test]
+    fn validate_populates_worktree_ids_from_worktree_info() {
+        // Simulate old data: worktrees in project_order, parent has empty worktree_ids
+        let mut data = make_workspace(
+            vec![make_project("parent"), make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")],
+            vec!["parent", "wt1", "wt2"],
+            vec![],
+        );
+        validate_workspace_data(&mut data, false);
+
+        // Parent should now have worktree_ids populated
+        let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
+        assert_eq!(parent.worktree_ids, vec!["wt1".to_string(), "wt2".to_string()]);
+    }
+
+    #[test]
+    fn validate_removes_worktrees_from_project_order() {
+        let mut data = make_workspace(
+            vec![make_project("parent"), make_worktree_project("wt1", "parent")],
+            vec!["parent", "wt1"],
+            vec![],
+        );
+        validate_workspace_data(&mut data, false);
+
+        // wt1 should be removed from project_order (lives in parent.worktree_ids now)
+        assert!(!data.project_order.contains(&"wt1".to_string()));
+        assert!(data.project_order.contains(&"parent".to_string()));
+    }
+
+    #[test]
+    fn validate_removes_worktrees_from_folder_project_ids() {
+        let mut data = make_workspace(
+            vec![make_project("parent"), make_worktree_project("wt1", "parent")],
+            vec!["f1"],
+            vec![FolderData {
+                id: "f1".to_string(),
+                name: "Folder".to_string(),
+                project_ids: vec!["parent".to_string(), "wt1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            }],
+        );
+        validate_workspace_data(&mut data, false);
+
+        // wt1 should be removed from folder's project_ids
+        assert_eq!(data.folders[0].project_ids, vec!["parent".to_string()]);
+    }
+
+    #[test]
+    fn validate_preserves_existing_worktree_ids() {
+        // Parent already has worktree_ids set — migration should not overwrite
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt2".to_string(), "wt1".to_string()]; // custom order
+        let mut data = make_workspace(
+            vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")],
+            vec!["parent"],
+            vec![],
+        );
+        validate_workspace_data(&mut data, false);
+
+        let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
+        // Should preserve existing order, not overwrite
+        assert_eq!(parent.worktree_ids, vec!["wt2".to_string(), "wt1".to_string()]);
     }
 }

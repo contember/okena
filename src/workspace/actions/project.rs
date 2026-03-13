@@ -69,6 +69,7 @@ impl Workspace {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -183,6 +184,16 @@ impl Workspace {
             (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
         });
 
+        // Collect orphaned worktree children (if deleting a parent)
+        let orphaned_worktrees: Vec<String> = self.project(project_id)
+            .map(|p| p.worktree_ids.clone())
+            .unwrap_or_default();
+
+        // Remove from parent's worktree_ids (if deleting a worktree child)
+        for parent in &mut self.data.projects {
+            parent.worktree_ids.retain(|id| id != project_id);
+        }
+
         // Remove from projects list
         self.data.projects.retain(|p| p.id != project_id);
         // Remove from project order
@@ -191,6 +202,14 @@ impl Workspace {
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
+
+        // Re-home orphaned worktrees to project_order
+        for wt_id in orphaned_worktrees {
+            if self.data.projects.iter().any(|p| p.id == wt_id) && !self.data.project_order.contains(&wt_id) {
+                self.data.project_order.push(wt_id);
+            }
+        }
+
         // Remove from widths
         self.data.project_widths.remove(project_id);
         // Clear closing state
@@ -237,6 +256,23 @@ impl Workspace {
             self.data.project_order.insert(target, project_id.to_string());
         }
         self.notify_data(cx);
+    }
+
+    /// Reorder a worktree within its parent's worktree_ids list
+    pub fn reorder_worktree(&mut self, parent_id: &str, worktree_id: &str, new_index: usize, cx: &mut Context<Self>) {
+        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id) {
+            if let Some(current_index) = parent.worktree_ids.iter().position(|id| id == worktree_id) {
+                let id = parent.worktree_ids.remove(current_index);
+                let target = if new_index > current_index {
+                    new_index.saturating_sub(1)
+                } else {
+                    new_index
+                };
+                let target = target.min(parent.worktree_ids.len());
+                parent.worktree_ids.insert(target, id);
+                self.notify_data(cx);
+            }
+        }
     }
 
     /// Update project column widths
@@ -312,6 +348,7 @@ impl Workspace {
                 main_repo_path: repo_path.to_string_lossy().to_string(),
                 worktree_path: worktree_path.to_string(),
             }),
+            worktree_ids: Vec::new(),
             folder_color: parent_color,
             hooks: parent_hooks,
             is_remote: false,
@@ -324,22 +361,14 @@ impl Workspace {
             hook_terminals: HashMap::new(),
         };
 
-        // Insert after parent project in order (or after its folder if parent is inside one)
-        let parent_index = self.data.project_order
-            .iter()
-            .position(|pid| pid == parent_project_id)
-            .or_else(|| {
-                // Parent is inside a folder — find the folder containing it
-                self.data.folders.iter()
-                    .find(|f| f.project_ids.contains(&parent_project_id.to_string()))
-                    .and_then(|f| self.data.project_order.iter().position(|pid| pid == &f.id))
-            })
-            .unwrap_or(self.data.project_order.len().saturating_sub(1));
-
         let new_project_hooks = project.hooks.clone();
         let new_project_name = project.name.clone();
         self.data.projects.push(project);
-        self.data.project_order.insert(parent_index + 1, id.clone());
+
+        // Add to parent's worktree_ids (not project_order)
+        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_project_id) {
+            parent.worktree_ids.push(id.clone());
+        }
 
         self.notify_data(cx);
 
@@ -390,6 +419,7 @@ impl Workspace {
                 main_repo_path: main_repo_path.to_string(),
                 worktree_path: wt_path.to_string(),
             }),
+            worktree_ids: Vec::new(),
             default_shell: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -482,6 +512,7 @@ mod tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -611,6 +642,7 @@ mod gpui_tests {
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: None,
+            worktree_ids: Vec::new(),
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -697,6 +729,78 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().project_order, vec!["p3", "p1", "p2"]);
+        });
+    }
+
+    fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+            parent_project_id: parent_id.to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: format!("/tmp/worktrees/{}", id),
+        });
+        p
+    }
+
+    #[gpui::test]
+    fn test_delete_worktree_removes_from_parent_worktree_ids(cx: &mut gpui::TestAppContext) {
+        init_test_settings(cx);
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_project("wt1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let parent = ws.project("parent").unwrap();
+            assert_eq!(parent.worktree_ids, vec!["wt2".to_string()]);
+            assert!(!ws.data().project_order.contains(&"wt1".to_string()));
+        });
+    }
+
+    #[gpui::test]
+    fn test_delete_parent_rehomes_orphaned_worktrees(cx: &mut gpui::TestAppContext) {
+        init_test_settings(cx);
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_project("parent", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Orphaned worktrees should be added to project_order
+            assert!(ws.data().project_order.contains(&"wt1".to_string()));
+            assert!(ws.data().project_order.contains(&"wt2".to_string()));
+            assert!(!ws.data().project_order.contains(&"parent".to_string()));
+        });
+    }
+
+    #[gpui::test]
+    fn test_reorder_worktree(cx: &mut gpui::TestAppContext) {
+        let mut parent = make_project("parent");
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string(), "wt3".to_string()];
+        let mut data = make_workspace_data();
+        data.projects = vec![parent, make_worktree_project("wt1", "parent"), make_worktree_project("wt2", "parent"), make_worktree_project("wt3", "parent")];
+        data.project_order = vec!["parent".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.reorder_worktree("parent", "wt3", 0, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let parent = ws.project("parent").unwrap();
+            assert_eq!(parent.worktree_ids, vec!["wt3", "wt1", "wt2"]);
         });
     }
 
