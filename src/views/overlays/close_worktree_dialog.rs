@@ -273,7 +273,7 @@ impl CloseWorktreeDialog {
 
                 if let Err(e) = rebase_result {
                     // Fire on_rebase_conflict hook
-                    let (terminal_actions, _hook_results) = hooks::fire_on_rebase_conflict(
+                    let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
                         &project_hooks,
                         &global_hooks,
                         &project_id,
@@ -286,14 +286,21 @@ impl CloseWorktreeDialog {
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
-                    for (cmd, env) in terminal_actions {
-                        let project_id = project_id.clone();
-                        let _ = cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
+                    let _ = cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
-                            })
-                        });
-                    }
+                            }
+                            for result in hook_results {
+                                ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                                    hook_type: result.hook_type,
+                                    label: result.label,
+                                    project_id: result.project_id.clone(),
+                                    status: HookTerminalStatus::Running,
+                                }, cx);
+                            }
+                        })
+                    });
 
                     if did_stash {
                         let pop_path = PathBuf::from(&project_path);
@@ -450,7 +457,6 @@ impl CloseWorktreeDialog {
                         if let Some(result) = hook_results.first() {
                             ws.register_pending_worktree_close(PendingWorktreeClose {
                                 project_id: project_id.clone(),
-                                force: force_remove,
                                 hook_terminal_id: result.terminal_id.clone(),
                                 branch: branch.clone(),
                                 main_repo_path: main_repo_path.clone(),
@@ -506,7 +512,7 @@ impl CloseWorktreeDialog {
 
                 // Fire on_dirty_worktree_close hook when closing dirty worktree without stash
                 if force_remove {
-                    let (terminal_actions, _hook_results) = hooks::fire_on_dirty_worktree_close(
+                    let (terminal_actions, hook_results) = hooks::fire_on_dirty_worktree_close(
                         &project_hooks,
                         &global_hooks,
                         &project_id,
@@ -516,14 +522,21 @@ impl CloseWorktreeDialog {
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
-                    for (cmd, env) in terminal_actions {
-                        let project_id = project_id.clone();
-                        let _ = cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
+                    let _ = cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
-                            })
-                        });
-                    }
+                            }
+                            for result in hook_results {
+                                ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                                    hook_type: result.hook_type,
+                                    label: result.label,
+                                    project_id: result.project_id.clone(),
+                                    status: HookTerminalStatus::Running,
+                                }, cx);
+                            }
+                        })
+                    });
                 }
 
                 cx.update(|cx| {
