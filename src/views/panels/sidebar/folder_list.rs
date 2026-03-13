@@ -278,7 +278,7 @@ impl Sidebar {
             .id(ElementId::Name(format!("folder-project-row-{}", project.id).into()))
             .group("folder-project-item")
             .h(px(24.0))
-            .pl(px(28.0))  // Indented for folder nesting
+            .pl(px(20.0))  // Indented for folder nesting
             .pr(px(8.0))
             .flex()
             .items_center()

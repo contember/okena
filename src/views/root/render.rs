@@ -145,13 +145,18 @@ impl RootView {
             .min_w_0()
             .overflow_x_hidden()
             .relative()
-            // Shift+scroll for horizontal scrolling of project columns
+            // Horizontal scrolling of project columns: shift+scroll or native touchpad horizontal scroll
             .on_scroll_wheel(cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
-                if !event.modifiers.shift {
-                    return;
-                }
                 let delta = event.delta.pixel_delta(px(17.0));
-                let scroll_amount = if !delta.x.is_zero() { delta.x } else { delta.y };
+                let scroll_amount = if event.modifiers.shift {
+                    // Shift+scroll: use horizontal delta if present, otherwise convert vertical
+                    if !delta.x.is_zero() { delta.x } else { delta.y }
+                } else if !delta.x.is_zero() {
+                    // Native touchpad horizontal scroll
+                    delta.x
+                } else {
+                    return;
+                };
                 let max_offset = scroll_handle_for_wheel.max_offset();
                 if max_offset.width <= px(2.0) {
                     return;

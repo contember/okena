@@ -14,8 +14,14 @@ use std::time::Instant;
 /// Stored as a GPUI Global. All fields are Clone + Send + Sync.
 #[derive(Clone)]
 pub struct HookRunner {
-    pub backend: Arc<dyn TerminalBackend>,
-    pub terminals: TerminalsRegistry,
+    backend: Arc<dyn TerminalBackend>,
+    terminals: TerminalsRegistry,
+}
+
+impl HookRunner {
+    pub fn new(backend: Arc<dyn TerminalBackend>, terminals: TerminalsRegistry) -> Self {
+        Self { backend, terminals }
+    }
 }
 
 impl gpui::Global for HookRunner {}
@@ -78,17 +84,7 @@ impl HookRunner {
             }
         };
 
-        let shell = if cfg!(windows) {
-            ShellType::Custom {
-                path: "cmd".to_string(),
-                args: vec!["/C".to_string(), full_cmd],
-            }
-        } else {
-            ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), full_cmd],
-            }
-        };
+        let shell = ShellType::for_command(full_cmd);
 
         let cwd = if project_path.is_empty() { "." } else { project_path };
 
@@ -118,6 +114,30 @@ fn is_valid_env_key(key: &str) -> bool {
         return false;
     }
     bytes[1..].iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Build a `std::process::Command` for headless hook execution.
+/// Handles platform dispatch (sh -c / cmd /C), env vars, and cwd.
+fn build_headless_command(command: &str, env_vars: &HashMap<String, String>) -> std::process::Command {
+    #[cfg(unix)]
+    let mut cmd = crate::process::command("sh");
+    #[cfg(unix)]
+    cmd.arg("-c").arg(command);
+
+    #[cfg(windows)]
+    let mut cmd = crate::process::command("cmd");
+    #[cfg(windows)]
+    cmd.arg("/C").arg(command);
+
+    for (key, value) in env_vars {
+        cmd.env(key, value);
+    }
+
+    if let Some(path) = env_vars.get("OKENA_PROJECT_PATH") {
+        cmd.current_dir(path);
+    }
+
+    cmd
 }
 
 /// Build a display label for a hook terminal tab.
@@ -252,23 +272,7 @@ fn run_hook(
     std::thread::spawn(move || {
         let start = Instant::now();
 
-        #[cfg(unix)]
-        let mut cmd = crate::process::command("sh");
-        #[cfg(unix)]
-        cmd.arg("-c").arg(&command);
-
-        #[cfg(windows)]
-        let mut cmd = crate::process::command("cmd");
-        #[cfg(windows)]
-        cmd.arg("/C").arg(&command);
-
-        for (key, value) in &env_vars {
-            cmd.env(key, value);
-        }
-
-        if let Some(path) = env_vars.get("OKENA_PROJECT_PATH") {
-            cmd.current_dir(path);
-        }
+        let mut cmd = build_headless_command(&command, &env_vars);
 
         match cmd
             .stdout(std::process::Stdio::null())
@@ -364,25 +368,7 @@ fn run_hook_sync(
     let exec_id = monitor.map(|m| m.record_start(hook_type, command, project_name, None));
     let start = Instant::now();
 
-    #[cfg(unix)]
-    let mut cmd = crate::process::command("sh");
-    #[cfg(unix)]
-    cmd.arg("-c").arg(command);
-
-    #[cfg(windows)]
-    let mut cmd = crate::process::command("cmd");
-    #[cfg(windows)]
-    cmd.arg("/C").arg(command);
-
-    for (key, value) in &env_vars {
-        cmd.env(key, value);
-    }
-
-    if let Some(path) = env_vars.get("OKENA_PROJECT_PATH") {
-        cmd.current_dir(path);
-    }
-
-    let output = cmd
+    let output = build_headless_command(command, &env_vars)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()

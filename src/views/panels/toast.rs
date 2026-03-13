@@ -167,6 +167,23 @@ impl ToastManager {
         Self::post(Toast::info(message), cx);
     }
 
+    /// Post multiple toasts at once, capping the queue at MAX_VISIBLE_TOASTS.
+    pub fn post_batch(toasts: Vec<Toast>, cx: &App) {
+        if toasts.is_empty() {
+            return;
+        }
+        if let Some(tm) = cx.try_global::<ToastManager>() {
+            let mut queue = tm.0.lock();
+            for toast in toasts {
+                log::debug!("[hook toast] {}", toast.message);
+                queue.push(toast);
+            }
+            while queue.len() > MAX_VISIBLE_TOASTS {
+                queue.remove(0);
+            }
+        }
+    }
+
     /// Remove a toast by ID.
     pub fn dismiss(id: &str, cx: &App) {
         if let Some(tm) = cx.try_global::<ToastManager>() {
@@ -199,18 +216,7 @@ impl ToastOverlay {
                     // Drain pending toasts from HookMonitor into ToastManager
                     if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
                         let hook_toasts = monitor.drain_pending_toasts();
-                        if !hook_toasts.is_empty() {
-                            if let Some(tm) = cx.try_global::<ToastManager>() {
-                                let mut queue = tm.0.lock();
-                                for toast in hook_toasts {
-                                    log::debug!("[hook toast] {}", toast.message);
-                                    queue.push(toast);
-                                    while queue.len() > MAX_VISIBLE_TOASTS {
-                                        queue.remove(0);
-                                    }
-                                }
-                            }
-                        }
+                        ToastManager::post_batch(hook_toasts, cx);
                     }
 
                     if let Some(tm) = cx.try_global::<ToastManager>() {

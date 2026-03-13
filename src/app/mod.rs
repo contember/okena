@@ -148,10 +148,10 @@ impl Okena {
         });
 
         // Create HookRunner for PTY-backed hook execution
-        cx.set_global(crate::workspace::hooks::HookRunner {
-            backend: local_backend_for_services.clone(),
-            terminals: terminals.clone(),
-        });
+        cx.set_global(crate::workspace::hooks::HookRunner::new(
+            local_backend_for_services.clone(),
+            terminals.clone(),
+        ));
 
         // Create remote connection manager and wire to root view
         let remote_manager = cx.new(|cx| {
@@ -477,7 +477,7 @@ impl Okena {
                         // waiting on a PTY terminal via mpsc::Receiver. This MUST happen
                         // before handle_hook_terminal_exits (phase 2) which updates
                         // workspace status and may trigger project removal.
-                        if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                        if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
                             for (terminal_id, exit_code) in &exit_events {
                                 monitor.notify_exit(terminal_id, *exit_code);
                             }
@@ -543,27 +543,23 @@ impl Okena {
             let success = *exit_code == Some(0);
             let tid = terminal_id.clone();
 
-            // Update workspace status
-            if success {
-                self.workspace.update(cx, |ws, cx| {
-                    ws.update_hook_terminal_status(&tid, crate::workspace::state::HookTerminalStatus::Succeeded, cx);
-                });
-            } else {
-                let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                self.workspace.update(cx, |ws, cx| {
-                    ws.update_hook_terminal_status(&tid, crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }, cx);
-                });
-            }
-
             // Update HookMonitor so the hook log shows correct status
-            if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+            if let Some(monitor) = crate::workspace::hooks::try_monitor(cx) {
                 monitor.finish_by_terminal_id(&tid, *exit_code);
             }
 
-            // Check for pending worktree close tied to this hook terminal.
-            // Use a single workspace.update to atomically take the pending close
-            // and capture all needed data, avoiding a TOCTOU race.
+            // Single workspace.update: set hook status, then handle pending close atomically.
             let pending_data = self.workspace.update(cx, |ws, cx| {
+                // Update hook terminal status
+                let status = if success {
+                    crate::workspace::state::HookTerminalStatus::Succeeded
+                } else {
+                    let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                    crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
+                };
+                ws.update_hook_terminal_status(&tid, status, cx);
+
+                // Check for pending worktree close tied to this hook terminal
                 let pending = ws.take_pending_worktree_close(&tid)?;
                 let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
                     .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
@@ -602,8 +598,8 @@ impl Okena {
             log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
 
             let global_hooks = crate::settings::settings(cx).hooks;
-            let monitor = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>().cloned();
-            let runner = cx.try_global::<crate::workspace::hooks::HookRunner>().cloned();
+            let monitor = crate::workspace::hooks::try_monitor(cx);
+            let runner = crate::workspace::hooks::try_runner(cx);
             self.terminals.lock().remove(tid);
 
             // Fire lifecycle hooks

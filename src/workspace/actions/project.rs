@@ -5,7 +5,7 @@
 use crate::theme::FolderColor;
 use crate::workspace::hooks;
 use crate::workspace::persistence::HooksConfig;
-use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, Workspace};
+use crate::workspace::state::{LayoutNode, ProjectData, Workspace};
 use gpui::*;
 use std::collections::HashMap;
 
@@ -22,12 +22,27 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Toggle project visibility
+    /// Toggle project visibility (also toggles all worktree children)
     pub fn toggle_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let new_visible = self.project(project_id).map(|p| !p.is_visible);
+        let Some(new_visible) = new_visible else { return };
+
         self.with_project(project_id, cx, |project| {
-            project.is_visible = !project.is_visible;
+            project.is_visible = new_visible;
             true
         });
+
+        // Propagate to worktree children
+        let child_ids: Vec<String> = self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
+            .map(|p| p.id.clone())
+            .collect();
+        for child_id in child_ids {
+            self.with_project(&child_id, cx, |project| {
+                project.is_visible = new_visible;
+                true
+            });
+        }
     }
 
     /// Add a new project
@@ -71,14 +86,7 @@ impl Workspace {
         self.notify_data(cx);
 
         let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
-        for result in hook_results {
-            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                hook_type: result.hook_type,
-                label: result.label,
-                project_id: result.project_id.clone(),
-                status: HookTerminalStatus::Running,
-            }, cx);
-        }
+        self.register_hook_results(hook_results, cx);
         id
     }
 
@@ -337,14 +345,7 @@ impl Workspace {
             branch,
             cx,
         );
-        for result in hook_results {
-            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                hook_type: result.hook_type,
-                label: result.label,
-                project_id: result.project_id.clone(),
-                status: HookTerminalStatus::Running,
-            }, cx);
-        }
+        self.register_hook_results(hook_results, cx);
 
         Ok(id)
     }
