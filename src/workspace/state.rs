@@ -553,23 +553,6 @@ impl Workspace {
         let focused = self.focused_project_id();
         let folder_filter = self.active_folder_filter.as_ref();
 
-        // If the focused project is a worktree child, resolve to its parent
-        // so that all sibling worktrees and the parent are shown together
-        let effective_focused: Option<&String> = focused.map(|fid| {
-            self.project(fid)
-                .and_then(|p| p.worktree_info.as_ref())
-                .map(|wi| &wi.parent_project_id)
-                .unwrap_or(fid)
-        });
-
-        // When a project is focused, also show its worktree children
-        let is_focused = |p: &ProjectData, fid: &String| -> bool {
-            &p.id == fid
-                || p.worktree_info
-                    .as_ref()
-                    .map_or(false, |wi| &wi.parent_project_id == fid)
-        };
-
         let mut result = Vec::new();
         // Track worktree children already added via their parent's folder
         let mut added_via_folder: HashSet<&str> = HashSet::new();
@@ -578,14 +561,11 @@ impl Workspace {
                 // When folder filter is active, skip folders that don't match
                 if let Some(filter_id) = folder_filter {
                     if &folder.id != filter_id {
-                        // Still allow the focused project (and its worktrees) through even if in wrong folder
-                        if let Some(fid) = effective_focused {
+                        // Still allow the focused project (or its worktree) through
+                        if focused.is_some() {
                             for pid in &folder.project_ids {
                                 if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
-                                    if is_focused(p, fid) {
-                                        result.push(p);
-                                        self.push_worktree_children(p, &mut result);
-                                    }
+                                    self.push_project_with_worktrees(p, focused, &mut result);
                                 }
                             }
                         }
@@ -596,20 +576,10 @@ impl Workspace {
                 // since they live in project_order rather than folder.project_ids)
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
-                            result.push(p);
-                            self.push_worktree_children(p, &mut result);
-                        }
+                        self.push_project_with_worktrees(p, focused, &mut result);
                         if folder_filter.is_some() {
-                            for wt in &self.data.projects {
-                                if let Some(ref wi) = wt.worktree_info {
-                                    if wi.parent_project_id == *pid {
-                                        if effective_focused.map_or(wt.show_in_overview, |fid| is_focused(wt, fid)) {
-                                            result.push(wt);
-                                            added_via_folder.insert(&wt.id);
-                                        }
-                                    }
-                                }
+                            for wt_id in &p.worktree_ids {
+                                added_via_folder.insert(wt_id.as_str());
                             }
                         }
                     }
@@ -621,27 +591,52 @@ impl Workspace {
                 }
                 // Top-level project: hide when folder filter is active
                 if folder_filter.is_some() {
-                    // Still allow the focused project (and its worktrees) through
-                    if effective_focused.map_or(false, |fid| is_focused(p, fid)) {
-                        result.push(p);
-                        self.push_worktree_children(p, &mut result);
+                    // Still allow the focused project through
+                    if focused.is_some() {
+                        self.push_project_with_worktrees(p, focused, &mut result);
                     }
                     continue;
                 }
-                if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
-                    result.push(p);
-                    self.push_worktree_children(p, &mut result);
-                }
+                self.push_project_with_worktrees(p, focused, &mut result);
             }
         }
         result
     }
 
-    /// Push worktree children of a project into the result list, in `worktree_ids` order.
-    fn push_worktree_children<'a>(&'a self, parent: &'a ProjectData, result: &mut Vec<&'a ProjectData>) {
-        for wt_id in &parent.worktree_ids {
-            if let Some(wt) = self.data.projects.iter().find(|p| &p.id == wt_id) {
-                result.push(wt);
+    /// Push a project and its worktree children into the result list,
+    /// respecting focus filtering: when a project is focused, only show that
+    /// project (not sibling worktrees). When a worktree is focused, only
+    /// show that worktree (found through its parent's worktree_ids).
+    fn push_project_with_worktrees<'a>(
+        &'a self,
+        p: &'a ProjectData,
+        focused: Option<&String>,
+        result: &mut Vec<&'a ProjectData>,
+    ) {
+        match focused {
+            None => {
+                // No focus: show project if visible, then all visible worktree children
+                if p.show_in_overview {
+                    result.push(p);
+                }
+                for wt_id in &p.worktree_ids {
+                    if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == wt_id) {
+                        if wt.show_in_overview {
+                            result.push(wt);
+                        }
+                    }
+                }
+            }
+            Some(fid) => {
+                // Focus active: show only the exactly focused item
+                if &p.id == fid {
+                    result.push(p);
+                } else if p.worktree_ids.contains(fid) {
+                    // Focused project is a worktree child of this parent
+                    if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == fid) {
+                        result.push(wt);
+                    }
+                }
             }
         }
     }
@@ -2716,6 +2711,50 @@ mod workspace_tests {
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
         assert_eq!(visible[2].id, "other");
+    }
+
+    #[test]
+    fn test_focus_parent_shows_only_parent() {
+        let mut parent = make_project("parent", true);
+        parent.worktree_ids = vec!["wt1".to_string()];
+        let mut wt1 = make_project("wt1", true);
+        wt1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let data = make_workspace_data(vec![parent, wt1], vec!["parent"]);
+        let mut ws = Workspace::new(data);
+        ws.focus_manager.set_focused_project_id(Some("parent".to_string()));
+
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "parent");
+    }
+
+    #[test]
+    fn test_focus_worktree_shows_only_worktree() {
+        let mut parent = make_project("parent", true);
+        parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
+        let mut wt1 = make_project("wt1", true);
+        wt1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut wt2 = make_project("wt2", true);
+        wt2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "parent".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+        let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
+        let mut ws = Workspace::new(data);
+        ws.focus_manager.set_focused_project_id(Some("wt1".to_string()));
+
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "wt1");
     }
 }
 
