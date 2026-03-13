@@ -141,10 +141,16 @@ impl Okena {
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
             Arc::new(crate::terminal::backend::LocalBackend::new(pty_manager.clone()));
         let service_manager = cx.new(|_cx| {
-            ServiceManager::new(local_backend_for_services, terminals.clone())
+            ServiceManager::new(local_backend_for_services.clone(), terminals.clone())
         });
         root_view.update(cx, |rv, cx| {
             rv.set_service_manager(service_manager.clone(), cx);
+        });
+
+        // Create HookRunner for PTY-backed hook execution
+        cx.set_global(crate::workspace::hooks::HookRunner {
+            backend: local_backend_for_services.clone(),
+            terminals: terminals.clone(),
         });
 
         // Create remote connection manager and wire to root view
@@ -466,6 +472,15 @@ impl Okena {
                 // Notify main window after processing the batch
                 let _ = this.update(cx, |this, cx| {
                     if !exit_events.is_empty() {
+                        // FIRST: notify exit waiters for ALL terminals unconditionally.
+                        // This unblocks sync hooks waiting in smol::unblock.
+                        // notify_exit is a no-op for terminals without a registered waiter.
+                        if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                            for (terminal_id, exit_code) in &exit_events {
+                                monitor.notify_exit(terminal_id, *exit_code);
+                            }
+                        }
+
                         // Let service manager handle service terminals (may keep
                         // their UI Terminal for viewing crash output)
                         let service_tids: std::collections::HashSet<String> =
@@ -479,11 +494,151 @@ impl Okena {
                                 handled
                             });
 
-                        // Remove UI Terminals for non-service terminals
+                        // THEN: identify hook terminals via workspace
+                        let hook_tids: std::collections::HashSet<String> = {
+                            let ws = this.workspace.read(cx);
+                            exit_events.iter()
+                                .filter(|(tid, _)| !service_tids.contains(tid))
+                                .filter(|(tid, _)| ws.is_hook_terminal(tid).is_some())
+                                .map(|(tid, _)| tid.clone())
+                                .collect()
+                        };
+
+                        for (terminal_id, exit_code) in &exit_events {
+                            if !hook_tids.contains(terminal_id) {
+                                continue;
+                            }
+
+                            let success = *exit_code == Some(0);
+                            let tid = terminal_id.clone();
+
+                            if success {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.update_hook_terminal_status(&tid, crate::workspace::state::HookTerminalStatus::Succeeded, cx);
+                                });
+                            } else {
+                                let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.update_hook_terminal_status(&tid, crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }, cx);
+                                });
+                            }
+
+                            // Update HookMonitor so the hook log shows correct status
+                            if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                                monitor.finish_by_terminal_id(&tid, *exit_code);
+                            }
+
+                            // Check for pending worktree close tied to this hook terminal
+                            let pending_close = this.workspace.read(cx)
+                                .take_pending_worktree_close_peek(&tid);
+
+                            if let Some(pending) = pending_close {
+                                let workspace_pc = this.workspace.clone();
+                                let terminals_pc = this.terminals.clone();
+                                let tid_pc = tid.clone();
+                                if success {
+                                    // Hook succeeded — optimistically delete project from UI immediately,
+                                    // then run git worktree remove in the background.
+                                    log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
+
+                                    // Capture project info before deletion
+                                    let project_path_for_git = this.workspace.read(cx)
+                                        .project(&pending.project_id)
+                                        .map(|p| p.path.clone());
+                                    let hook_info = this.workspace.read(cx)
+                                        .project(&pending.project_id)
+                                        .map(|p| (p.hooks.clone(), p.name.clone(), p.path.clone()));
+                                    let global_hooks = crate::settings::settings(cx).hooks;
+                                    let monitor = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>().cloned();
+                                    let runner = cx.try_global::<crate::workspace::hooks::HookRunner>().cloned();
+
+                                    // Remove hook terminal, pending close, and delete project NOW
+                                    this.workspace.update(cx, |ws, cx| {
+                                        ws.remove_hook_terminal(&tid_pc, cx);
+                                        let _ = ws.take_pending_worktree_close(&tid_pc);
+                                        ws.delete_project(&pending.project_id, cx);
+                                    });
+                                    this.terminals.lock().remove(&tid_pc);
+
+                                    // Fire lifecycle hooks
+                                    if let Some((project_hooks, project_name, project_path)) = hook_info {
+                                        crate::workspace::hooks::fire_on_worktree_close(
+                                            &project_hooks,
+                                            &pending.project_id,
+                                            &project_name,
+                                            &project_path,
+                                            cx,
+                                        );
+                                        let _ = crate::workspace::hooks::fire_worktree_removed(
+                                            &project_hooks,
+                                            &global_hooks,
+                                            &pending.project_id,
+                                            &project_name,
+                                            &project_path,
+                                            &pending.branch,
+                                            &pending.main_repo_path,
+                                            monitor.as_ref(),
+                                            runner.as_ref(),
+                                        );
+                                    }
+
+                                    // Git worktree remove in the background (fire-and-forget)
+                                    let pending_clone = pending.clone();
+                                    cx.spawn(async move |_this, _cx| {
+                                        if let Some(path) = project_path_for_git {
+                                            let main_repo = pending_clone.main_repo_path.clone();
+                                            let result = smol::unblock(move || {
+                                                crate::git::remove_worktree_fast(
+                                                    &std::path::PathBuf::from(&path),
+                                                    &std::path::PathBuf::from(&main_repo),
+                                                )
+                                            }).await;
+                                            if let Err(e) = result {
+                                                log::error!("Background worktree remove failed: {}", e);
+                                            }
+                                        }
+                                    }).detach();
+                                } else {
+                                    // Hook failed — cancel the pending close, keep project
+                                    log::warn!("Pending worktree close: hook failed, cancelling removal");
+                                    let failed_project_id = pending.project_id.clone();
+                                    this.workspace.update(cx, |ws, _cx| {
+                                        let _ = ws.take_pending_worktree_close(&tid_pc);
+                                        ws.closing_projects.remove(&failed_project_id);
+                                    });
+                                    // Clean up hook terminal after delay
+                                    cx.spawn(async move |_this, cx| {
+                                        cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                                        let _ = cx.update(|cx| {
+                                            workspace_pc.update(cx, |ws, cx| {
+                                                ws.remove_hook_terminal(&tid_pc, cx);
+                                            });
+                                            terminals_pc.lock().remove(&tid_pc);
+                                        });
+                                    }).detach();
+                                }
+                            } else {
+                                // Regular hook terminal — remove after brief delay
+                                let tid_cleanup = terminal_id.clone();
+                                let workspace_cleanup = this.workspace.clone();
+                                let terminals_cleanup = this.terminals.clone();
+                                cx.spawn(async move |_this, cx| {
+                                    cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                                    let _ = cx.update(|cx| {
+                                        workspace_cleanup.update(cx, |ws, cx| {
+                                            ws.remove_hook_terminal(&tid_cleanup, cx);
+                                        });
+                                        terminals_cleanup.lock().remove(&tid_cleanup);
+                                    });
+                                }).detach();
+                            }
+                        }
+
+                        // Remove UI Terminals for non-service, non-hook terminals
                         {
                             let mut reg = this.terminals.lock();
                             for (terminal_id, _) in &exit_events {
-                                if !service_tids.contains(terminal_id) {
+                                if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
                                     reg.remove(terminal_id);
                                 }
                             }

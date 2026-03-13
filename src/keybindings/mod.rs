@@ -74,6 +74,7 @@ actions!(
         TogglePaneSwitcher,
         StartAllServices,
         StopAllServices,
+        ShowHookLog,
     ]
 );
 

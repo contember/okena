@@ -174,6 +174,8 @@ impl Workspace {
         }
         // Remove from widths
         self.data.project_widths.remove(project_id);
+        // Clear closing state
+        self.closing_projects.remove(project_id);
         // Clear focus if this was the focused project
         if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
             self.focus_manager.set_focused_project_id(None);
@@ -185,7 +187,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
-            let _ = hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
+            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
         }
     }
 
@@ -361,8 +363,8 @@ impl Workspace {
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, cx);
 
-        // Fire worktree-specific hook
-        let _ = hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
+        // Fire worktree-specific hook (runs headlessly since project is deleted)
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
 
         Ok(())
     }

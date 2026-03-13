@@ -160,6 +160,35 @@ impl HookMonitor {
         rx
     }
 
+    /// Find and finish a hook execution by its terminal ID.
+    /// Returns `true` if a matching running execution was found and finished.
+    pub fn finish_by_terminal_id(&self, terminal_id: &str, exit_code: Option<u32>) -> bool {
+        let mut inner = self.0.lock();
+        if let Some(entry) = inner.history.iter_mut().find(|e| {
+            e.terminal_id.as_deref() == Some(terminal_id)
+                && matches!(e.status, HookStatus::Running)
+        }) {
+            let duration = entry.started_at.elapsed();
+            let success = exit_code == Some(0);
+            if success {
+                entry.status = HookStatus::Succeeded { duration };
+            } else {
+                let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                entry.status = HookStatus::Failed {
+                    duration,
+                    exit_code: code,
+                    stderr: String::new(),
+                };
+                let msg = format!("Hook `{}` failed (exit code {})", entry.hook_type, code);
+                inner.pending_toasts.push(Toast::error(msg));
+            }
+            inner.running_count = inner.running_count.saturating_sub(1);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Notify that a hook terminal has exited. Sends exit code through the
     /// waiter channel (if any) and removes the waiter.
     pub fn notify_exit(&self, terminal_id: &str, exit_code: Option<u32>) {

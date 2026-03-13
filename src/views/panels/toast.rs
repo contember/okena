@@ -196,6 +196,24 @@ impl ToastOverlay {
                 smol::Timer::after(TICK_INTERVAL).await;
 
                 let result = this.update(cx, |this, cx| {
+                    // Drain pending toasts from HookMonitor into ToastManager
+                    if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                        let hook_toasts = monitor.drain_pending_toasts();
+                        if !hook_toasts.is_empty() {
+                            if let Some(tm) = cx.try_global::<ToastManager>() {
+                                let mut queue = tm.0.lock();
+                                for toast in hook_toasts {
+                                    log::error!("[toast] {}", toast.message);
+                                    eprintln!("[ERROR] {}", toast.message);
+                                    queue.push(toast);
+                                    while queue.len() > MAX_VISIBLE_TOASTS {
+                                        queue.remove(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(tm) = cx.try_global::<ToastManager>() {
                         let snapshot = tm.drain_snapshot();
                         if snapshot != this.toasts {

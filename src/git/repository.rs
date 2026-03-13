@@ -108,6 +108,29 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
     }
 }
 
+/// Fast worktree removal: delete the directory and prune stale worktree metadata.
+/// Much faster than `git worktree remove` which does expensive status checks.
+/// Only safe when the caller has already handled dirty state (stash/discard).
+pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Result<(), String> {
+    // Remove the worktree directory
+    if worktree_path.exists() {
+        std::fs::remove_dir_all(worktree_path)
+            .map_err(|e| format!("Failed to remove worktree directory: {}", e))?;
+    }
+
+    // Prune stale worktree entries from the main repo
+    let main_str = main_repo_path.to_str().ok_or("Invalid main repo path")?;
+    let output = safe_output(command("git").args(["-C", main_str, "worktree", "prune"]))
+        .map_err(|e| format!("Failed to prune worktrees: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("git worktree prune warning: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
 /// List all branches in a repository
 fn list_branches(path: &Path) -> Vec<String> {
     let path_str = match path.to_str() {
