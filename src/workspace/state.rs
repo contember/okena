@@ -97,6 +97,17 @@ pub struct HookTerminalEntry {
     pub status: HookTerminalStatus,
 }
 
+/// Pending worktree close operation waiting for a hook to complete.
+#[derive(Clone, Debug)]
+pub struct PendingWorktreeClose {
+    pub project_id: String,
+    pub force: bool,
+    pub hook_terminal_id: String,
+    /// Data needed for the worktree_removed hook after removal
+    pub branch: String,
+    pub main_repo_path: String,
+}
+
 /// A single project with its layout tree
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectData {
@@ -268,6 +279,12 @@ pub struct Workspace {
     /// the project ID is recorded here. On the next sync, we detect the
     /// new terminal and focus it.
     pub pending_remote_focus: HashSet<String>,
+    /// Pending worktree close operations waiting for a hook terminal to exit.
+    /// Key is the hook terminal_id.
+    pub pending_worktree_closes: HashMap<String, PendingWorktreeClose>,
+    /// Project IDs currently being closed (hook running or git worktree remove in progress).
+    /// Used by the sidebar to show a visual "closing" indicator.
+    pub closing_projects: HashSet<String>,
 }
 
 impl Workspace {
@@ -279,6 +296,8 @@ impl Workspace {
             data_version: 0,
             active_folder_filter: None,
             pending_remote_focus: HashSet::new(),
+            pending_worktree_closes: HashMap::new(),
+            closing_projects: HashSet::new(),
         }
     }
 
@@ -357,8 +376,31 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            let label = entry.label.clone();
             project.hook_terminals.insert(terminal_id.to_string(), entry);
-            cx.notify();
+
+            // Add the hook terminal to the project's layout so it renders in a pane
+            let hook_node = LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: crate::terminal::shell_config::ShellType::Default,
+                zoom_level: 1.0,
+            };
+            if let Some(ref existing) = project.layout {
+                let existing = existing.clone();
+                project.layout = Some(LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![existing, hook_node],
+                    sizes: vec![0.7, 0.3],
+                });
+            } else {
+                project.layout = Some(hook_node);
+            }
+            // Set the terminal name to the hook label
+            project.terminal_names.insert(terminal_id.to_string(), label);
+
+            self.notify_data(cx);
         }
     }
 
@@ -384,7 +426,16 @@ impl Workspace {
     ) {
         for project in &mut self.data.projects {
             if project.hook_terminals.remove(terminal_id).is_some() {
-                cx.notify();
+                // Also remove from the layout tree
+                if let Some(ref layout) = project.layout {
+                    if let Some(path) = layout.find_terminal_path(terminal_id) {
+                        if let Some(ref mut layout) = project.layout {
+                            layout.remove_at_path(&path);
+                        }
+                    }
+                }
+                project.terminal_names.remove(terminal_id);
+                self.notify_data(cx);
                 return;
             }
         }
@@ -397,6 +448,22 @@ impl Workspace {
             }
         }
         None
+    }
+
+    /// Register a pending worktree close that will execute when the hook terminal exits.
+    pub fn register_pending_worktree_close(&mut self, pending: PendingWorktreeClose) {
+        self.closing_projects.insert(pending.project_id.clone());
+        self.pending_worktree_closes.insert(pending.hook_terminal_id.clone(), pending);
+    }
+
+    /// Check if there's a pending worktree close for the given terminal ID (non-mutating).
+    pub fn take_pending_worktree_close_peek(&self, terminal_id: &str) -> Option<PendingWorktreeClose> {
+        self.pending_worktree_closes.get(terminal_id).cloned()
+    }
+
+    /// Take a pending worktree close for the given terminal ID (removes it).
+    pub fn take_pending_worktree_close(&mut self, terminal_id: &str) -> Option<PendingWorktreeClose> {
+        self.pending_worktree_closes.remove(terminal_id)
     }
 
     pub fn projects(&self) -> &[ProjectData] {

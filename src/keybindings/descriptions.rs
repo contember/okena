@@ -7,9 +7,10 @@ use super::{
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
-    ShowFileSearch, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices, StopAllServices,
-    ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide, ZoomIn, ZoomOut,
+    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
+    ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
+    StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
+    ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -434,6 +435,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Stop all services for the focused project",
             category: "Services",
             factory: || Box::new(StopAllServices),
+        },
+    );
+
+    map.insert(
+        "ShowHookLog",
+        ActionDescription {
+            name: "Hook Log",
+            description: "View hook execution history",
+            category: "Global",
+            factory: || Box::new(ShowHookLog),
         },
     );
 

@@ -13,6 +13,7 @@ mod folder_list;
 mod item_widgets;
 mod project_list;
 mod remote_list;
+mod hook_list;
 mod service_list;
 
 use crate::action_dispatch::ActionDispatcher;
@@ -45,6 +46,7 @@ use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
 pub(super) enum GroupKind {
     Terminals,
     Services,
+    Hooks,
 }
 
 impl GroupKind {
@@ -52,6 +54,7 @@ impl GroupKind {
         match self {
             GroupKind::Terminals => "Terminals",
             GroupKind::Services => "Services",
+            GroupKind::Hooks => "Hooks",
         }
     }
 }
@@ -65,6 +68,7 @@ pub(super) enum SidebarCursorItem {
     GroupHeader { project_id: String, group: GroupKind },
     Terminal { project_id: String, terminal_id: String },
     Service { project_id: String, service_name: String },
+    Hook { project_id: String, terminal_id: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
     #[allow(dead_code)]
@@ -263,6 +267,28 @@ impl Sidebar {
                     let is_cursor = cursor_index == Some(*flat_idx);
                     flat_elements.push(
                         self.render_service_item(project, service, group_items_padding, is_cursor, cx)
+                            .into_any_element()
+                    );
+                    *flat_idx += 1;
+                }
+            }
+        }
+
+        // Hooks group
+        if !project.hook_terminals.is_empty() {
+            let is_collapsed = self.is_group_collapsed(&project.id, &GroupKind::Hooks);
+            let is_cursor = cursor_index == Some(*flat_idx);
+            flat_elements.push(
+                self.render_hooks_group_header(project, is_collapsed, is_cursor, group_header_padding, cx)
+                    .into_any_element()
+            );
+            *flat_idx += 1;
+
+            if !is_collapsed {
+                for hook in &project.hook_terminals {
+                    let is_cursor = cursor_index == Some(*flat_idx);
+                    flat_elements.push(
+                        self.render_hook_item(project, hook, group_items_padding, is_cursor, cx)
                             .into_any_element()
                     );
                     *flat_idx += 1;
@@ -529,6 +555,15 @@ impl Sidebar {
             HashMap::new()
         };
 
+        // Pre-collect hook terminal IDs per project
+        let hook_terminal_ids: HashMap<String, Vec<String>> = workspace.data().projects.iter()
+            .filter(|p| !p.hook_terminals.is_empty())
+            .map(|p| {
+                let ids = p.hook_terminals.keys().cloned().collect();
+                (p.id.clone(), ids)
+            })
+            .collect();
+
         // Build worktree children map
         let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
         for project in &workspace.data().projects {
@@ -558,7 +593,7 @@ impl Sidebar {
                             }) {
                                 continue;
                             }
-                            self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
+                            self.push_project_cursor_items(project, &worktree_children_map, &service_names, &hook_terminal_ids, &mut cursor_items);
                         }
                     }
                 }
@@ -572,7 +607,7 @@ impl Sidebar {
                 }) {
                     continue;
                 }
-                self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
+                self.push_project_cursor_items(project, &worktree_children_map, &service_names, &hook_terminal_ids, &mut cursor_items);
             }
         }
 
@@ -585,13 +620,14 @@ impl Sidebar {
         project: &ProjectData,
         worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
         service_names: &HashMap<String, Vec<String>>,
+        hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
         // Expanded terminal and service items (grouped)
         if self.expanded_projects.contains(&project.id) {
-            self.push_group_cursor_items(&project.id, &project.layout, service_names, cursor_items);
+            self.push_group_cursor_items(&project.id, &project.layout, service_names, hook_terminal_ids, cursor_items);
         }
 
         // Worktree children (always visible below parent)
@@ -601,7 +637,7 @@ impl Sidebar {
 
                 // Expanded terminal/service items for worktree child (grouped)
                 if self.expanded_projects.contains(&child.id) {
-                    self.push_group_cursor_items(&child.id, &child.layout, service_names, cursor_items);
+                    self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
                 }
             }
         }
@@ -613,6 +649,7 @@ impl Sidebar {
         project_id: &str,
         layout: &Option<crate::workspace::state::LayoutNode>,
         service_names: &HashMap<String, Vec<String>>,
+        hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         // Terminals group
@@ -648,6 +685,25 @@ impl Sidebar {
                         cursor_items.push(SidebarCursorItem::Service {
                             project_id: project_id.to_string(),
                             service_name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Hooks group
+        if let Some(tids) = hook_terminal_ids.get(project_id) {
+            if !tids.is_empty() {
+                cursor_items.push(SidebarCursorItem::GroupHeader {
+                    project_id: project_id.to_string(),
+                    group: GroupKind::Hooks,
+                });
+
+                if !self.is_group_collapsed(project_id, &GroupKind::Hooks) {
+                    for tid in tids {
+                        cursor_items.push(SidebarCursorItem::Hook {
+                            project_id: project_id.to_string(),
+                            terminal_id: tid.clone(),
                         });
                     }
                 }
@@ -787,6 +843,16 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
+            SidebarCursorItem::Hook { project_id, .. } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.set_focused_project(Some(project_id), cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
         }
         cx.notify();
     }
@@ -810,7 +876,7 @@ impl Sidebar {
             SidebarCursorItem::GroupHeader { project_id, group } => {
                 self.toggle_group(&project_id, group);
             }
-            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } | SidebarCursorItem::Hook { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -1030,6 +1096,14 @@ pub(super) struct SidebarServiceInfo {
     pub is_docker: bool,
 }
 
+/// Hook terminal info for sidebar rendering.
+#[derive(Clone)]
+pub(super) struct SidebarHookInfo {
+    pub terminal_id: String,
+    pub label: String,
+    pub status: crate::workspace::state::HookTerminalStatus,
+}
+
 /// Lightweight projection of ProjectData for sidebar rendering.
 /// Avoids cloning the full LayoutNode tree, path, hidden_terminals, and hooks
 /// which are never used by the sidebar.
@@ -1047,8 +1121,14 @@ pub(super) struct SidebarProjectInfo {
     pub tab_group_terminals: HashSet<String>,
     /// True if this is a worktree whose parent project no longer exists
     pub is_orphan: bool,
+    /// Number of active worktree children (for parent projects)
+    pub worktree_count: usize,
     /// Services defined in okena.yaml for this project
     pub services: Vec<SidebarServiceInfo>,
+    /// Hook terminals currently running for this project
+    pub hook_terminals: Vec<SidebarHookInfo>,
+    /// True if this worktree is being closed (hook running or git remove in progress)
+    pub is_closing: bool,
 }
 
 impl SidebarProjectInfo {
@@ -1061,7 +1141,12 @@ impl SidebarProjectInfo {
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout
-                .map(|l| l.collect_terminal_ids())
+                .map(|l| {
+                    l.collect_terminal_ids()
+                        .into_iter()
+                        .filter(|tid| !project.hook_terminals.contains_key(tid))
+                        .collect()
+                })
                 .unwrap_or_default(),
             inactive_tab_terminals: layout
                 .map(|l| l.collect_inactive_tab_terminal_ids())
@@ -1071,7 +1156,16 @@ impl SidebarProjectInfo {
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
             is_orphan: false,
+            worktree_count: 0,
             services: Vec::new(),
+            hook_terminals: project.hook_terminals.iter().map(|(tid, entry)| {
+                SidebarHookInfo {
+                    terminal_id: tid.clone(),
+                    label: entry.label.clone(),
+                    status: entry.status.clone(),
+                }
+            }).collect(),
+            is_closing: false,
         }
     }
 }
@@ -1116,6 +1210,13 @@ impl Render for Sidebar {
 
         let workspace = self.workspace.read(cx);
 
+        // Auto-expand projects that have active hook terminals
+        for project in &workspace.data().projects {
+            if !project.hook_terminals.is_empty() {
+                self.expanded_projects.insert(project.id.clone());
+            }
+        }
+
         // Collect all projects for lookup
         let all_projects: HashMap<&str, &ProjectData> = workspace.data().projects.iter()
             .map(|p| (p.id.as_str(), p))
@@ -1127,10 +1228,12 @@ impl Render for Sidebar {
         for project in &workspace.data().projects {
             if let Some(ref wt_info) = project.worktree_info {
                 if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                    let mut info = SidebarProjectInfo::from_project(project);
+                    info.is_closing = workspace.closing_projects.contains(&project.id);
                     worktree_children_map
                         .entry(wt_info.parent_project_id.clone())
                         .or_default()
-                        .push(SidebarProjectInfo::from_project(project));
+                        .push(info);
                 }
             }
         }
@@ -1194,6 +1297,7 @@ impl Render for Sidebar {
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
+                        info.is_closing = workspace.closing_projects.contains(&p.id);
                         info
                     })
                     .collect();
@@ -1203,6 +1307,7 @@ impl Render for Sidebar {
                         fp.services = services;
                     }
                     if let Some(children) = worktree_children_map.remove(&fp.id) {
+                        fp.worktree_count = children.len();
                         folder_wt_children.insert(fp.id.clone(), children);
                     }
                 }
@@ -1229,6 +1334,8 @@ impl Render for Sidebar {
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
+                project_info.is_closing = workspace.closing_projects.contains(&project.id);
+                project_info.worktree_count = wt_children.len();
                 if let Some(services) = project_services.remove(&project.id) {
                     project_info.services = services;
                 }

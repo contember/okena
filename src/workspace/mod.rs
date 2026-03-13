@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod focus;
+pub mod hook_monitor;
 pub mod hooks;
 pub mod persistence;
 pub mod request_broker;

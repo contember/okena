@@ -27,6 +27,7 @@ use crate::views::overlays::remote_context_menu::{RemoteContextMenu, RemoteConte
 use crate::views::overlays::tab_context_menu::{TabContextMenu, TabContextMenuEvent};
 use crate::views::overlays::terminal_context_menu::{TerminalContextMenu, TerminalContextMenuEvent};
 use crate::views::overlays::close_worktree_dialog::{CloseWorktreeDialog, CloseWorktreeDialogEvent};
+use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
 use crate::views::overlays::rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
 use okena_core::client::RemoteConnectionConfig;
@@ -194,6 +195,12 @@ impl CloseEvent for CloseWorktreeDialogEvent {
 impl CloseEvent for RenameDirectoryDialogEvent {
     fn is_close(&self) -> bool {
         matches!(self, RenameDirectoryDialogEvent::Close | RenameDirectoryDialogEvent::Renamed)
+    }
+}
+
+impl CloseEvent for HookLogEvent {
+    fn is_close(&self) -> bool {
+        matches!(self, HookLogEvent::Close)
     }
 }
 
@@ -456,6 +463,11 @@ impl OverlayManager {
             self.open_modal(entity, cx);
         }
         cx.notify();
+    }
+
+    /// Toggle hook log overlay.
+    pub fn toggle_hook_log(&mut self, cx: &mut Context<Self>) {
+        toggle_overlay!(self, cx, HookLog, HookLogEvent, |cx| HookLog::new(cx));
     }
 
     /// Toggle pairing dialog overlay.

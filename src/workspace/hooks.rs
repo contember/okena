@@ -425,24 +425,21 @@ pub fn fire_on_project_open(
 }
 
 /// Fire the `on_project_close` hook for a project.
+/// Runs headlessly (no PTY terminal) since the project is being deleted.
 pub fn fire_on_project_close(
     project_hooks: &HooksConfig,
     project_id: &str,
     project_name: &str,
     project_path: &str,
     cx: &App,
-) -> Vec<HookTerminalResult> {
+) {
     let global_hooks = settings(cx).hooks;
     if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_project_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, runner.as_ref(), project_id) {
-            return vec![result];
-        }
+        run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id);
     }
-    Vec::new()
 }
 
 /// Fire the `on_worktree_create` hook after a worktree is successfully created.
@@ -469,24 +466,21 @@ pub fn fire_on_worktree_create(
 }
 
 /// Fire the `on_worktree_close` hook after a worktree is successfully removed.
+/// Runs headlessly (no PTY terminal) since the worktree project is being deleted.
 pub fn fire_on_worktree_close(
     project_hooks: &HooksConfig,
     project_id: &str,
     project_name: &str,
     project_path: &str,
     cx: &App,
-) -> Vec<HookTerminalResult> {
+) {
     let global_hooks = settings(cx).hooks;
     if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_worktree_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_worktree_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, runner.as_ref(), project_id) {
-            return vec![result];
-        }
+        run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id);
     }
-    Vec::new()
 }
 
 /// Bare sync hook runner for tests (no monitor, no runner).
@@ -575,6 +569,32 @@ pub fn fire_before_worktree_remove(
         return run_hook_sync(&cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id);
     }
     Ok(None)
+}
+
+/// Fire the `before_worktree_remove` hook asynchronously (non-blocking).
+/// Returns hook terminal results for the caller to register.
+/// The caller is responsible for checking the exit code and proceeding with removal.
+pub fn fire_before_worktree_remove_async(
+    project_hooks: &HooksConfig,
+    global_hooks: &HooksConfig,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    branch: &str,
+    main_repo_path: &str,
+    monitor: Option<&HookMonitor>,
+    runner: Option<&HookRunner>,
+) -> Vec<HookTerminalResult> {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.before_worktree_remove) {
+        let mut env = project_env(project_id, project_name, project_path);
+        env.insert("OKENA_BRANCH".into(), branch.into());
+        env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
+        log::info!("Running before_worktree_remove hook (async) for project '{}'", project_name);
+        if let Some(result) = run_hook(cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id) {
+            return vec![result];
+        }
+    }
+    Vec::new()
 }
 
 /// Fire the `on_rebase_conflict` hook.

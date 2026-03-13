@@ -4,7 +4,7 @@ use crate::settings::settings;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, modal_backdrop, modal_content};
 use crate::workspace::hooks;
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, PendingWorktreeClose, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -222,8 +222,9 @@ impl CloseWorktreeDialog {
                     let default_branch = default_branch.clone();
                     let main_repo_path = main_repo_path.clone();
                     let monitor = monitor.clone();
-                    let runner = runner.clone();
                     move || {
+                        // Sync hooks run headlessly (no PTY) — they block the flow
+                        // and can't be shown in the UI anyway
                         hooks::fire_pre_merge(
                             &project_hooks,
                             &global_hooks,
@@ -234,7 +235,7 @@ impl CloseWorktreeDialog {
                             &default_branch,
                             &main_repo_path,
                             monitor.as_ref(),
-                            runner.as_ref(),
+                            None,
                         )
                     }
                 })
@@ -406,19 +407,23 @@ impl CloseWorktreeDialog {
                 }
             }
 
-            // Step 2: before_worktree_remove hook (sync)
-            let before_remove_result = smol::unblock({
-                let project_hooks = project_hooks.clone();
-                let global_hooks = global_hooks.clone();
-                let project_id = project_id.clone();
-                let project_name = project_name.clone();
-                let project_path = project_path.clone();
-                let branch = branch.clone();
-                let main_repo_path = main_repo_path.clone();
-                let monitor = monitor.clone();
-                let runner = runner.clone();
-                move || {
-                    hooks::fire_before_worktree_remove(
+            let force_remove = is_dirty && !did_stash;
+
+            // Step 2: before_worktree_remove hook
+            // If the hook exists and we have a runner, fire it as a visible PTY terminal
+            // and register a pending close — the actual removal happens when the hook exits.
+            // If no hook or no runner, proceed with immediate removal.
+            let has_before_remove_hook = cx.update(|cx| {
+                let global_hooks = settings(cx).hooks;
+                let ws = workspace.read(cx);
+                let ph = ws.project(&project_id).map(|p| p.hooks.clone()).unwrap_or_default();
+                ph.before_worktree_remove.is_some() || global_hooks.before_worktree_remove.is_some()
+            });
+
+            if has_before_remove_hook && runner.is_some() {
+                // Fire hook as visible PTY terminal and defer removal
+                cx.update(|cx| {
+                    let hook_results = hooks::fire_before_worktree_remove_async(
                         &project_hooks,
                         &global_hooks,
                         &project_id,
@@ -428,88 +433,132 @@ impl CloseWorktreeDialog {
                         &main_repo_path,
                         monitor.as_ref(),
                         runner.as_ref(),
-                    )
-                }
-            })
-            .await;
+                    );
 
-            if let Err(e) = before_remove_result {
-                let _ = cx.update(|cx| {
-                    this.update(cx, |this, cx| {
-                        this.error_message =
-                            Some(format!("before_worktree_remove hook failed: {}", e));
-                        this.processing = ProcessingState::Idle;
-                        cx.notify();
-                    })
-                });
-                return;
-            }
+                    workspace.update(cx, |ws, cx| {
+                        // Register hook terminals visually
+                        for result in &hook_results {
+                            ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                                hook_type: result.hook_type.clone(),
+                                label: result.label.clone(),
+                                project_id: result.project_id.clone(),
+                                status: HookTerminalStatus::Running,
+                            }, cx);
+                        }
 
-            // Step 3: Remove worktree
-            let _ = cx.update(|cx| {
-                this.update(cx, |this, cx| {
-                    this.processing = ProcessingState::Removing;
-                    cx.notify();
-                })
-            });
-
-            let force_remove = is_dirty && !did_stash;
-
-            // Fire on_dirty_worktree_close hook when closing dirty worktree without stash
-            if force_remove {
-                let (terminal_actions, _hook_results) = hooks::fire_on_dirty_worktree_close(
-                    &project_hooks,
-                    &global_hooks,
-                    &project_id,
-                    &project_name,
-                    &project_path,
-                    &branch,
-                    monitor.as_ref(),
-                    runner.as_ref(),
-                );
-                for (cmd, env) in terminal_actions {
-                    let project_id = project_id.clone();
-                    let _ = cx.update(|cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
-                        })
+                        // Register pending close — PTY exit handler will complete it
+                        if let Some(result) = hook_results.first() {
+                            ws.register_pending_worktree_close(PendingWorktreeClose {
+                                project_id: project_id.clone(),
+                                force: force_remove,
+                                hook_terminal_id: result.terminal_id.clone(),
+                                branch: branch.clone(),
+                                main_repo_path: main_repo_path.clone(),
+                            });
+                        }
                     });
-                }
-            }
 
-            cx.update(|cx| {
-                let result = workspace.update(cx, |ws, cx| {
-                    ws.remove_worktree_project(&project_id, force_remove, cx)
+                    // Close dialog — removal will happen when hook exits
+                    let _ = this.update(cx, |this, cx| {
+                        this.close(cx);
+                    });
                 });
+            } else {
+                // No hook or no runner — run headlessly then remove immediately
+                if has_before_remove_hook {
+                    let before_remove_result = smol::unblock({
+                        let project_hooks = project_hooks.clone();
+                        let global_hooks = global_hooks.clone();
+                        let project_id = project_id.clone();
+                        let project_name = project_name.clone();
+                        let project_path = project_path.clone();
+                        let branch = branch.clone();
+                        let main_repo_path = main_repo_path.clone();
+                        let monitor = monitor.clone();
+                        move || {
+                            hooks::fire_before_worktree_remove(
+                                &project_hooks,
+                                &global_hooks,
+                                &project_id,
+                                &project_name,
+                                &project_path,
+                                &branch,
+                                &main_repo_path,
+                                monitor.as_ref(),
+                                None,
+                            )
+                        }
+                    })
+                    .await;
 
-                match result {
-                    Ok(()) => {
-                        // Step 4: worktree_removed hook (async)
-                        let _ = hooks::fire_worktree_removed(
-                            &project_hooks,
-                            &global_hooks,
-                            &project_id,
-                            &project_name,
-                            &project_path,
-                            &branch,
-                            &main_repo_path,
-                            monitor.as_ref(),
-                            runner.as_ref(),
-                        );
-
-                        let _ = this.update(cx, |this, cx| {
-                            this.close(cx);
+                    if let Err(e) = before_remove_result {
+                        let _ = cx.update(|cx| {
+                            this.update(cx, |this, cx| {
+                                this.error_message =
+                                    Some(format!("before_worktree_remove hook failed: {}", e));
+                                this.processing = ProcessingState::Idle;
+                                cx.notify();
+                            })
                         });
+                        return;
                     }
-                    Err(e) => {
-                        let _ = this.update(cx, |this, cx| {
-                            this.error_message = Some(format!("Failed to remove worktree: {}", e));
-                            this.processing = ProcessingState::Idle;
-                            cx.notify();
+                }
+
+                // Fire on_dirty_worktree_close hook when closing dirty worktree without stash
+                if force_remove {
+                    let (terminal_actions, _hook_results) = hooks::fire_on_dirty_worktree_close(
+                        &project_hooks,
+                        &global_hooks,
+                        &project_id,
+                        &project_name,
+                        &project_path,
+                        &branch,
+                        monitor.as_ref(),
+                        runner.as_ref(),
+                    );
+                    for (cmd, env) in terminal_actions {
+                        let project_id = project_id.clone();
+                        let _ = cx.update(|cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
+                            })
                         });
                     }
                 }
-            });
+
+                cx.update(|cx| {
+                    let result = workspace.update(cx, |ws, cx| {
+                        ws.remove_worktree_project(&project_id, force_remove, cx)
+                    });
+
+                    match result {
+                        Ok(()) => {
+                            let _ = hooks::fire_worktree_removed(
+                                &project_hooks,
+                                &global_hooks,
+                                &project_id,
+                                &project_name,
+                                &project_path,
+                                &branch,
+                                &main_repo_path,
+                                monitor.as_ref(),
+                                runner.as_ref(),
+                            );
+
+                            let _ = this.update(cx, |this, cx| {
+                                this.close(cx);
+                            });
+                        }
+                        Err(e) => {
+                            let _ = this.update(cx, |this, cx| {
+                                this.error_message = Some(format!("Failed to remove worktree: {}", e));
+                                this.processing = ProcessingState::Idle;
+                                cx.notify();
+                            });
+                        }
+                    }
+                });
+            }
         })
         .detach();
     }
