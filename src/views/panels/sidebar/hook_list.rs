@@ -132,7 +132,13 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
+                                    // Notify exit waiter to unblock any sync hook
+                                    // waiting on this terminal (e.g. pre_merge).
+                                    if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                                        monitor.notify_exit(&terminal_id, None);
+                                    }
                                     this.workspace.update(cx, |ws, cx| {
+                                        ws.cancel_pending_worktree_close(&terminal_id);
                                         ws.remove_hook_terminal(&terminal_id, cx);
                                     });
                                     let terminals = this.terminals.clone();

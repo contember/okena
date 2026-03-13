@@ -229,36 +229,6 @@ impl Render for StatusBar {
                                     .child(memory_str)
                             )
                     )
-                    // Hook execution indicator
-                    .when_some(
-                        cx.try_global::<crate::workspace::hook_monitor::HookMonitor>()
-                            .map(|m| m.running_count())
-                            .filter(|&c| c > 0),
-                        |el, count| {
-                            el.child(
-                                h_flex()
-                                    .id("hook-status")
-                                    .cursor_pointer()
-                                    .gap(px(4.0))
-                                    .px(px(4.0))
-                                    .py(px(1.0))
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(t.term_yellow))
-                                            .text_size(px(11.0))
-                                            .child(format!("hooks: {}", count)),
-                                    )
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(
-                                            Box::new(crate::keybindings::ShowHookLog),
-                                            cx,
-                                        );
-                                    }),
-                            )
-                        },
-                    )
                     // Claude Code status + usage
                     .when(settings_entity(cx).read(cx).settings.claude_code_integration, |d| {
                         d.child(self.claude_status.clone())

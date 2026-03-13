@@ -97,6 +97,7 @@ pub fn sidebar_name_label(
         .flex_1()
         .min_w_0()
         .overflow_hidden()
+        .whitespace_nowrap()
         .text_size(px(12.0))
         .text_color(rgb(t.text_primary))
         .text_ellipsis()

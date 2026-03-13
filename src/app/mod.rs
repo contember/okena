@@ -528,36 +528,33 @@ impl Okena {
                                 monitor.finish_by_terminal_id(&tid, *exit_code);
                             }
 
-                            // Check for pending worktree close tied to this hook terminal
-                            let pending_close = this.workspace.read(cx)
-                                .take_pending_worktree_close_peek(&tid);
+                            // Check for pending worktree close tied to this hook terminal.
+                            // Use a single workspace.update to atomically take the pending close
+                            // and capture all needed data, avoiding a TOCTOU race.
+                            let pending_data = this.workspace.update(cx, |ws, cx| {
+                                let pending = ws.take_pending_worktree_close(&tid)?;
+                                let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
+                                    .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
+                                    .unwrap_or((None, None));
+                                if success {
+                                    ws.remove_hook_terminal(&tid, cx);
+                                    ws.delete_project(&pending.project_id, cx);
+                                } else {
+                                    ws.closing_projects.remove(&pending.project_id);
+                                }
+                                Some((pending, project_path_for_git, hook_info))
+                            });
 
-                            if let Some(pending) = pending_close {
+                            if let Some((pending, project_path_for_git, hook_info)) = pending_data {
                                 let workspace_pc = this.workspace.clone();
                                 let terminals_pc = this.terminals.clone();
                                 let tid_pc = tid.clone();
                                 if success {
-                                    // Hook succeeded — optimistically delete project from UI immediately,
-                                    // then run git worktree remove in the background.
                                     log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
 
-                                    // Capture project info before deletion
-                                    let project_path_for_git = this.workspace.read(cx)
-                                        .project(&pending.project_id)
-                                        .map(|p| p.path.clone());
-                                    let hook_info = this.workspace.read(cx)
-                                        .project(&pending.project_id)
-                                        .map(|p| (p.hooks.clone(), p.name.clone(), p.path.clone()));
                                     let global_hooks = crate::settings::settings(cx).hooks;
                                     let monitor = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>().cloned();
                                     let runner = cx.try_global::<crate::workspace::hooks::HookRunner>().cloned();
-
-                                    // Remove hook terminal, pending close, and delete project NOW
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.remove_hook_terminal(&tid_pc, cx);
-                                        let _ = ws.take_pending_worktree_close(&tid_pc);
-                                        ws.delete_project(&pending.project_id, cx);
-                                    });
                                     this.terminals.lock().remove(&tid_pc);
 
                                     // Fire lifecycle hooks
@@ -599,14 +596,9 @@ impl Okena {
                                         }
                                     }).detach();
                                 } else {
-                                    // Hook failed — cancel the pending close, keep project
+                                    // Hook failed — pending close and closing_projects already
+                                    // cleaned up in the atomic update above. Clean up hook terminal after delay.
                                     log::warn!("Pending worktree close: hook failed, cancelling removal");
-                                    let failed_project_id = pending.project_id.clone();
-                                    this.workspace.update(cx, |ws, _cx| {
-                                        let _ = ws.take_pending_worktree_close(&tid_pc);
-                                        ws.closing_projects.remove(&failed_project_id);
-                                    });
-                                    // Clean up hook terminal after delay
                                     cx.spawn(async move |_this, cx| {
                                         cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
                                         let _ = cx.update(|cx| {
