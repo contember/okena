@@ -22,12 +22,27 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Toggle project visibility
+    /// Toggle project visibility (also toggles all worktree children)
     pub fn toggle_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let new_visible = self.project(project_id).map(|p| !p.is_visible);
+        let Some(new_visible) = new_visible else { return };
+
         self.with_project(project_id, cx, |project| {
-            project.is_visible = !project.is_visible;
+            project.is_visible = new_visible;
             true
         });
+
+        // Propagate to worktree children
+        let child_ids: Vec<String> = self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
+            .map(|p| p.id.clone())
+            .collect();
+        for child_id in child_ids {
+            self.with_project(&child_id, cx, |project| {
+                project.is_visible = new_visible;
+                true
+            });
+        }
     }
 
     /// Add a new project
@@ -52,13 +67,15 @@ impl Workspace {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
         self.data.project_order.push(id.clone());
         self.notify_data(cx);
 
-        hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        self.register_hook_results(hook_results, cx);
         id
     }
 
@@ -129,12 +146,23 @@ impl Workspace {
         });
     }
 
-    /// Set the folder color for a project
+    /// Set the folder color for a project (also propagates to worktree children)
     pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         self.with_project(project_id, cx, |project| {
             project.folder_color = color;
             true
         });
+        // Propagate color to worktree children
+        let child_ids: Vec<String> = self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
+            .map(|p| p.id.clone())
+            .collect();
+        for child_id in child_ids {
+            self.with_project(&child_id, cx, |project| {
+                project.folder_color = color;
+                true
+            });
+        }
     }
 
     /// Delete a project
@@ -154,6 +182,8 @@ impl Workspace {
         }
         // Remove from widths
         self.data.project_widths.remove(project_id);
+        // Clear closing state
+        self.closing_projects.remove(project_id);
         // Clear focus if this was the focused project
         if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
             self.focus_manager.set_focused_project_id(None);
@@ -237,6 +267,8 @@ impl Workspace {
 
         let parent_path = parent.path.clone();
         let parent_layout = parent.layout.clone();
+        let parent_hooks = parent.hooks.clone();
+        let parent_color = parent.folder_color;
 
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
@@ -269,14 +301,15 @@ impl Workspace {
                 main_repo_path: repo_path.to_string_lossy().to_string(),
                 worktree_path: worktree_path.to_string(),
             }),
-            folder_color: FolderColor::default(),
-            hooks: HooksConfig::default(),
+            folder_color: parent_color,
+            hooks: parent_hooks,
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         };
 
         // Insert after parent project in order
@@ -292,7 +325,7 @@ impl Workspace {
 
         self.notify_data(cx);
 
-        hooks::fire_on_worktree_create(
+        let hook_results = hooks::fire_on_worktree_create(
             &new_project_hooks,
             &id,
             &new_project_name,
@@ -300,6 +333,7 @@ impl Workspace {
             branch,
             cx,
         );
+        self.register_hook_results(hook_results, cx);
 
         Ok(id)
     }
@@ -330,7 +364,7 @@ impl Workspace {
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, cx);
 
-        // Fire worktree-specific hook
+        // Fire worktree-specific hook (runs headlessly since project is deleted)
         hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
 
         Ok(())
@@ -363,6 +397,7 @@ mod tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -490,6 +525,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            hook_terminals: HashMap::new(),
         }
     }
 

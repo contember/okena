@@ -52,6 +52,22 @@ impl Default for ShellType {
 }
 
 impl ShellType {
+    /// Create a shell type that runs a single command via the platform's command shell.
+    /// Uses `sh -c` on Unix and `cmd /C` on Windows.
+    pub fn for_command(command: String) -> Self {
+        if cfg!(windows) {
+            ShellType::Custom {
+                path: "cmd".to_string(),
+                args: vec!["/C".to_string(), command],
+            }
+        } else {
+            ShellType::Custom {
+                path: "sh".to_string(),
+                args: vec!["-c".to_string(), command],
+            }
+        }
+    }
+
     /// Get a display name for this shell type
     pub fn display_name(&self) -> String {
         match self {

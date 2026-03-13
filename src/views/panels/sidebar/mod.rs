@@ -13,6 +13,7 @@ mod folder_list;
 mod item_widgets;
 mod project_list;
 mod remote_list;
+mod hook_list;
 mod service_list;
 
 use crate::action_dispatch::ActionDispatcher;
@@ -45,6 +46,7 @@ use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
 pub(super) enum GroupKind {
     Terminals,
     Services,
+    Hooks,
 }
 
 impl GroupKind {
@@ -52,6 +54,7 @@ impl GroupKind {
         match self {
             GroupKind::Terminals => "Terminals",
             GroupKind::Services => "Services",
+            GroupKind::Hooks => "Hooks",
         }
     }
 }
@@ -65,6 +68,8 @@ pub(super) enum SidebarCursorItem {
     GroupHeader { project_id: String, group: GroupKind },
     Terminal { project_id: String, terminal_id: String },
     Service { project_id: String, service_name: String },
+    #[allow(dead_code)]
+    Hook { project_id: String, terminal_id: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
     #[allow(dead_code)]
@@ -115,6 +120,9 @@ pub struct Sidebar {
     pub(super) service_manager: Option<Entity<ServiceManager>>,
     /// Collapsed state for group headers (Terminals/Services) per project
     collapsed_groups: HashSet<(String, GroupKind)>,
+    /// Project IDs that have been auto-expanded due to hook terminals.
+    /// Tracked so we only auto-expand once (user can collapse afterward).
+    hook_auto_expanded: HashSet<String>,
 }
 
 impl Sidebar {
@@ -131,6 +139,27 @@ impl Sidebar {
             });
             this.pending_sidebar_requests.extend(requests);
             cx.notify();
+        }).detach();
+
+        // Auto-expand projects that gain hook terminals (outside of render).
+        // Tracked in hook_auto_expanded so we only expand once per project
+        // (user can collapse afterward without it re-expanding).
+        cx.observe(&workspace, |this, workspace, cx| {
+            let ws = workspace.read(cx);
+            let mut changed = false;
+            for project in &ws.data().projects {
+                if !project.hook_terminals.is_empty() && this.hook_auto_expanded.insert(project.id.clone()) {
+                    this.expanded_projects.insert(project.id.clone());
+                    changed = true;
+                }
+            }
+            let before_len = this.hook_auto_expanded.len();
+            this.hook_auto_expanded.retain(|id| {
+                ws.data().projects.iter().any(|p| p.id == *id && !p.hook_terminals.is_empty())
+            });
+            if changed || this.hook_auto_expanded.len() != before_len {
+                cx.notify();
+            }
         }).detach();
 
         Self {
@@ -157,6 +186,7 @@ impl Sidebar {
             backend: None,
             service_manager: None,
             collapsed_groups: HashSet::new(),
+            hook_auto_expanded: HashSet::new(),
         }
     }
 
@@ -263,6 +293,28 @@ impl Sidebar {
                     let is_cursor = cursor_index == Some(*flat_idx);
                     flat_elements.push(
                         self.render_service_item(project, service, group_items_padding, is_cursor, cx)
+                            .into_any_element()
+                    );
+                    *flat_idx += 1;
+                }
+            }
+        }
+
+        // Hooks group
+        if !project.hook_terminals.is_empty() {
+            let is_collapsed = self.is_group_collapsed(&project.id, &GroupKind::Hooks);
+            let is_cursor = cursor_index == Some(*flat_idx);
+            flat_elements.push(
+                self.render_hooks_group_header(project, is_collapsed, is_cursor, group_header_padding, cx)
+                    .into_any_element()
+            );
+            *flat_idx += 1;
+
+            if !is_collapsed {
+                for hook in &project.hook_terminals {
+                    let is_cursor = cursor_index == Some(*flat_idx);
+                    flat_elements.push(
+                        self.render_hook_item(project, hook, group_items_padding, is_cursor, cx)
                             .into_any_element()
                     );
                     *flat_idx += 1;
@@ -529,6 +581,15 @@ impl Sidebar {
             HashMap::new()
         };
 
+        // Pre-collect hook terminal IDs per project
+        let hook_terminal_ids: HashMap<String, Vec<String>> = workspace.data().projects.iter()
+            .filter(|p| !p.hook_terminals.is_empty())
+            .map(|p| {
+                let ids = p.hook_terminals.keys().cloned().collect();
+                (p.id.clone(), ids)
+            })
+            .collect();
+
         // Build worktree children map
         let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
         for project in &workspace.data().projects {
@@ -558,7 +619,7 @@ impl Sidebar {
                             }) {
                                 continue;
                             }
-                            self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
+                            self.push_project_cursor_items(project, &worktree_children_map, &service_names, &hook_terminal_ids, &mut cursor_items);
                         }
                     }
                 }
@@ -572,7 +633,7 @@ impl Sidebar {
                 }) {
                     continue;
                 }
-                self.push_project_cursor_items(project, &worktree_children_map, &service_names, &mut cursor_items);
+                self.push_project_cursor_items(project, &worktree_children_map, &service_names, &hook_terminal_ids, &mut cursor_items);
             }
         }
 
@@ -585,23 +646,34 @@ impl Sidebar {
         project: &ProjectData,
         worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
         service_names: &HashMap<String, Vec<String>>,
+        hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
-        // Expanded terminal and service items (grouped)
-        if self.expanded_projects.contains(&project.id) {
-            self.push_group_cursor_items(&project.id, &project.layout, service_names, cursor_items);
+        let has_worktrees = worktree_children_map.get(&project.id).map_or(false, |c| !c.is_empty());
+
+        if has_worktrees {
+            // Main worktree entry (uses parent project's ID)
+            cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: project.id.clone() });
+            if self.expanded_projects.contains(&project.id) {
+                self.push_group_cursor_items(&project.id, &project.layout, service_names, hook_terminal_ids, cursor_items);
+            }
+        } else {
+            // No worktrees - expanded children directly under project
+            if self.expanded_projects.contains(&project.id) {
+                self.push_group_cursor_items(&project.id, &project.layout, service_names, hook_terminal_ids, cursor_items);
+            }
         }
 
-        // Worktree children (always visible below parent)
+        // Linked worktree children (always visible below parent)
         if let Some(children) = worktree_children_map.get(&project.id) {
             for child in children {
                 cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
 
                 // Expanded terminal/service items for worktree child (grouped)
                 if self.expanded_projects.contains(&child.id) {
-                    self.push_group_cursor_items(&child.id, &child.layout, service_names, cursor_items);
+                    self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
                 }
             }
         }
@@ -613,6 +685,7 @@ impl Sidebar {
         project_id: &str,
         layout: &Option<crate::workspace::state::LayoutNode>,
         service_names: &HashMap<String, Vec<String>>,
+        hook_terminal_ids: &HashMap<String, Vec<String>>,
         cursor_items: &mut Vec<SidebarCursorItem>,
     ) {
         // Terminals group
@@ -648,6 +721,25 @@ impl Sidebar {
                         cursor_items.push(SidebarCursorItem::Service {
                             project_id: project_id.to_string(),
                             service_name: name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Hooks group
+        if let Some(tids) = hook_terminal_ids.get(project_id) {
+            if !tids.is_empty() {
+                cursor_items.push(SidebarCursorItem::GroupHeader {
+                    project_id: project_id.to_string(),
+                    group: GroupKind::Hooks,
+                });
+
+                if !self.is_group_collapsed(project_id, &GroupKind::Hooks) {
+                    for tid in tids {
+                        cursor_items.push(SidebarCursorItem::Hook {
+                            project_id: project_id.to_string(),
+                            terminal_id: tid.clone(),
                         });
                     }
                 }
@@ -787,6 +879,16 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
+            SidebarCursorItem::Hook { project_id, terminal_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
         }
         cx.notify();
     }
@@ -810,7 +912,7 @@ impl Sidebar {
             SidebarCursorItem::GroupHeader { project_id, group } => {
                 self.toggle_group(&project_id, group);
             }
-            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } | SidebarCursorItem::Hook { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -1030,6 +1132,14 @@ pub(super) struct SidebarServiceInfo {
     pub is_docker: bool,
 }
 
+/// Hook terminal info for sidebar rendering.
+#[derive(Clone)]
+pub(super) struct SidebarHookInfo {
+    pub terminal_id: String,
+    pub label: String,
+    pub status: crate::workspace::state::HookTerminalStatus,
+}
+
 /// Lightweight projection of ProjectData for sidebar rendering.
 /// Avoids cloning the full LayoutNode tree, path, hidden_terminals, and hooks
 /// which are never used by the sidebar.
@@ -1047,8 +1157,16 @@ pub(super) struct SidebarProjectInfo {
     pub tab_group_terminals: HashSet<String>,
     /// True if this is a worktree whose parent project no longer exists
     pub is_orphan: bool,
+    /// Number of active worktree children (for parent projects)
+    pub worktree_count: usize,
     /// Services defined in okena.yaml for this project
     pub services: Vec<SidebarServiceInfo>,
+    /// Hook terminals currently running for this project
+    pub hook_terminals: Vec<SidebarHookInfo>,
+    /// True if this worktree is being closed (hook running or git remove in progress)
+    pub is_closing: bool,
+    /// Parent project's folder color (for worktree children to inherit)
+    pub parent_folder_color: Option<FolderColor>,
 }
 
 impl SidebarProjectInfo {
@@ -1061,7 +1179,12 @@ impl SidebarProjectInfo {
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout
-                .map(|l| l.collect_terminal_ids())
+                .map(|l| {
+                    l.collect_terminal_ids()
+                        .into_iter()
+                        .filter(|tid| !project.hook_terminals.contains_key(tid))
+                        .collect()
+                })
                 .unwrap_or_default(),
             inactive_tab_terminals: layout
                 .map(|l| l.collect_inactive_tab_terminal_ids())
@@ -1071,9 +1194,50 @@ impl SidebarProjectInfo {
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
             is_orphan: false,
+            worktree_count: 0,
             services: Vec::new(),
+            hook_terminals: project.hook_terminals.iter().map(|(tid, entry)| {
+                SidebarHookInfo {
+                    terminal_id: tid.clone(),
+                    label: entry.label.clone(),
+                    status: entry.status.clone(),
+                }
+            }).collect(),
+            is_closing: false,
+            parent_folder_color: None,
         }
     }
+}
+
+/// Build a "main worktree" entry from a parent project and prepend it to children.
+/// Also propagates the parent's folder color to all worktree children and clears
+/// terminal/service/hook data from the parent header (it moves to the main_wt entry).
+fn build_main_worktree_entry(
+    project: &ProjectData,
+    project_info: &mut SidebarProjectInfo,
+    children: &mut Vec<SidebarProjectInfo>,
+    project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
+    closing_projects: &HashSet<String>,
+) {
+    let branch = crate::git::get_current_branch(std::path::Path::new(&project.path));
+    let mut main_wt = SidebarProjectInfo::from_project(project);
+    main_wt.name = branch.unwrap_or_else(|| project.name.clone());
+    main_wt.parent_folder_color = Some(project.folder_color);
+    main_wt.is_closing = closing_projects.contains(&project.id);
+    if let Some(services) = project_services.remove(&project.id) {
+        main_wt.services = services;
+    }
+    for child in children.iter_mut() {
+        child.parent_folder_color = Some(project.folder_color);
+    }
+    children.insert(0, main_wt);
+    // Clear terminal/service data from project header (shown under main worktree)
+    project_info.terminal_ids.clear();
+    project_info.terminal_names.clear();
+    project_info.inactive_tab_terminals.clear();
+    project_info.tab_group_terminals.clear();
+    project_info.has_layout = false;
+    project_info.hook_terminals.clear();
 }
 
 /// An item in the sidebar's top-level ordering: either a project or a folder
@@ -1127,10 +1291,12 @@ impl Render for Sidebar {
         for project in &workspace.data().projects {
             if let Some(ref wt_info) = project.worktree_info {
                 if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
+                    let mut info = SidebarProjectInfo::from_project(project);
+                    info.is_closing = workspace.closing_projects.contains(&project.id);
                     worktree_children_map
                         .entry(wt_info.parent_project_id.clone())
                         .or_default()
-                        .push(SidebarProjectInfo::from_project(project));
+                        .push(info);
                 }
             }
         }
@@ -1194,16 +1360,22 @@ impl Render for Sidebar {
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
+                        info.is_closing = workspace.closing_projects.contains(&p.id);
                         info
                     })
                     .collect();
                 let mut folder_wt_children: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
                 for fp in &mut folder_projects {
-                    if let Some(services) = project_services.remove(&fp.id) {
-                        fp.services = services;
-                    }
-                    if let Some(children) = worktree_children_map.remove(&fp.id) {
+                    if let Some(mut children) = worktree_children_map.remove(&fp.id) {
+                        fp.worktree_count = children.len();
+                        if let Some(&project) = all_projects.get(fp.id.as_str()) {
+                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects);
+                        }
                         folder_wt_children.insert(fp.id.clone(), children);
+                    } else {
+                        if let Some(services) = project_services.remove(&fp.id) {
+                            fp.services = services;
+                        }
                     }
                 }
                 items.push(SidebarItem::Folder {
@@ -1224,13 +1396,20 @@ impl Render for Sidebar {
                         continue;
                     }
                 }
-                let wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
+                let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
                 let mut project_info = SidebarProjectInfo::from_project(project);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
-                if let Some(services) = project_services.remove(&project.id) {
-                    project_info.services = services;
+                project_info.is_closing = workspace.closing_projects.contains(&project.id);
+                project_info.worktree_count = wt_children.len();
+
+                if !wt_children.is_empty() {
+                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects);
+                } else {
+                    if let Some(services) = project_services.remove(&project.id) {
+                        project_info.services = services;
+                    }
                 }
                 items.push(SidebarItem::Project {
                     project: project_info,
@@ -1250,10 +1429,11 @@ impl Render for Sidebar {
         self.validate_cursor(cursor_items.len());
         let cursor_index = self.cursor_index;
 
-        // Determine which project has the focused terminal
-        let focused_project_id = self.workspace.read(cx).focus_manager
-            .focused_terminal_state()
-            .map(|ft| ft.project_id);
+        // Determine which project is focused — no highlight when showing all projects
+        let focused_project_id: Option<String> = {
+            let ws = self.workspace.read(cx);
+            ws.focus_manager.focused_project_id().cloned()
+        };
 
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
@@ -1266,7 +1446,7 @@ impl Render for Sidebar {
                     let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
                     if project.is_orphan {
                         flat_elements.push(
-                            self.render_worktree_item(&project, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(&project, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                     } else {
                         flat_elements.push(
@@ -1275,17 +1455,20 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Expanded terminals and services (grouped)
-                    if self.expanded_projects.contains(&project.id) {
+                    // Expanded terminals and services (grouped) — only for projects without worktrees
+                    if project.worktree_count == 0 && self.expanded_projects.contains(&project.id) {
                         self.render_expanded_children(&project, 28.0, 40.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                     }
 
-                    // Worktree children
+                    // Worktree children (includes main worktree as first entry when present)
                     for child in &worktree_children {
                         let is_cursor = cursor_index == Some(flat_idx);
-                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                        // Don't highlight the main worktree row (same ID as parent — parent header shows focus)
+                        let is_main_worktree = child.id == project.id;
+                        let is_focused_project = !is_main_worktree
+                            && focused_project_id.as_ref() == Some(&child.id);
                         flat_elements.push(
-                            self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(child, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
@@ -1317,7 +1500,7 @@ impl Render for Sidebar {
                             let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
-                                    self.render_worktree_item(fp, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_worktree_item(fp, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                 );
                             } else {
                                 flat_elements.push(
@@ -1326,23 +1509,25 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Expanded terminals and services for folder project (grouped)
-                            if self.expanded_projects.contains(&fp.id) {
-                                self.render_expanded_children(fp, 48.0, 60.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            // Expanded terminals and services for folder project (grouped) — only without worktrees
+                            if fp.worktree_count == 0 && self.expanded_projects.contains(&fp.id) {
+                                self.render_expanded_children(fp, 40.0, 52.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }
 
                             // Worktree children for folder project
                             if let Some(wt_children) = worktree_children.get(&fp.id) {
                                 for child in wt_children {
                                     let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                                    let is_main_worktree = child.id == fp.id;
+                                    let is_focused_project = !is_main_worktree
+                                        && focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
-                                        self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        self.render_worktree_item(child, 32.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 
                                     if self.expanded_projects.contains(&child.id) {
-                                        self.render_expanded_children(child, 60.0, 72.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                        self.render_expanded_children(child, 52.0, 64.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                                     }
                                 }
                             }

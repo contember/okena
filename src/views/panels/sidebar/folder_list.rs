@@ -278,7 +278,7 @@ impl Sidebar {
             .id(ElementId::Name(format!("folder-project-row-{}", project.id).into()))
             .group("folder-project-item")
             .h(px(24.0))
-            .pl(px(28.0))  // Indented for folder nesting
+            .pl(px(20.0))  // Indented for folder nesting
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -341,21 +341,26 @@ impl Sidebar {
                     });
                 }
             }))
-            .child(
-                sidebar_expand_arrow(
-                    ElementId::Name(format!("expand-fp-{}", project.id).into()),
-                    is_expanded,
-                    &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.toggle_expanded(&project_id);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                })),
-            )
+            .child({
+                if project.worktree_count == 0 {
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("expand-fp-{}", project.id).into()),
+                        is_expanded,
+                        &t,
+                    )
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.toggle_expanded(&project_id);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .into_any_element()
+                } else {
+                    div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
+                }
+            })
             .child({
                 // Project color dot
                 let folder_color = t.get_folder_color(project.folder_color);

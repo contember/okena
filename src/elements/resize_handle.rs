@@ -101,7 +101,7 @@ impl Element for ResizeHandle {
             )
         };
 
-        window.insert_hitbox(hitbox_bounds, HitboxBehavior::BlockMouse)
+        window.insert_hitbox(hitbox_bounds, HitboxBehavior::BlockMouseExceptScroll)
     }
 
     fn paint(

@@ -18,7 +18,7 @@ use crate::views::layout::split_pane::{new_active_drag, ActiveDrag};
 use crate::views::panels::status_bar::StatusBar;
 use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
-use crate::workspace::persistence::{load_settings, AppSettings};
+use crate::settings::settings;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -40,8 +40,6 @@ pub struct RootView {
     sidebar: Entity<Sidebar>,
     /// Sidebar state controller
     sidebar_ctrl: SidebarController,
-    /// App settings for persistence
-    app_settings: AppSettings,
     /// Stored project column entities (created once, not during render)
     project_columns: HashMap<String, Entity<ProjectColumn>>,
     /// Title bar entity
@@ -84,8 +82,8 @@ impl RootView {
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
 
-        // Load app settings and create sidebar controller
-        let app_settings = load_settings();
+        // Create sidebar controller from current global settings
+        let app_settings = settings(cx);
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
@@ -141,7 +139,6 @@ impl RootView {
             terminals,
             sidebar,
             sidebar_ctrl,
-            app_settings,
             project_columns: HashMap::new(),
             title_bar,
             status_bar,
@@ -364,6 +361,7 @@ impl RootView {
                                 remote_services,
                                 remote_host,
                                 remote_git_status: api_project.git_status.clone(),
+                                hook_terminals: std::collections::HashMap::new(),
                             });
                         }
                     });

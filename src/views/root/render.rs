@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -145,13 +145,18 @@ impl RootView {
             .min_w_0()
             .overflow_x_hidden()
             .relative()
-            // Shift+scroll for horizontal scrolling of project columns
+            // Horizontal scrolling of project columns: shift+scroll or native touchpad horizontal scroll
             .on_scroll_wheel(cx.listener(move |_this, event: &ScrollWheelEvent, _window, cx| {
-                if !event.modifiers.shift {
-                    return;
-                }
                 let delta = event.delta.pixel_delta(px(17.0));
-                let scroll_amount = if !delta.x.is_zero() { delta.x } else { delta.y };
+                let scroll_amount = if event.modifiers.shift {
+                    // Shift+scroll: use horizontal delta if present, otherwise convert vertical
+                    if !delta.x.is_zero() { delta.x } else { delta.y }
+                } else if !delta.x.is_zero() {
+                    // Native touchpad horizontal scroll
+                    delta.x
+                } else {
+                    return;
+                };
                 let max_offset = scroll_handle_for_wheel.max_offset();
                 if max_offset.width <= px(2.0) {
                     return;
@@ -322,7 +327,10 @@ impl Render for RootView {
                             DragState::Sidebar => {
                                 // Handle sidebar resize
                                 let new_width = f32::from(event.position.x);
-                                this.sidebar_ctrl.set_width(new_width, &mut this.app_settings);
+                                this.sidebar_ctrl.set_width(new_width);
+                                // Persist through global SettingsState (debounced)
+                                let width = this.sidebar_ctrl.width();
+                                settings_entity(cx).update(cx, |s, cx| s.set_sidebar_width(width, cx));
                                 cx.notify();
                             }
                             DragState::ServicePanel { project_id, initial_mouse_y, initial_height } => {
@@ -441,6 +449,13 @@ impl Render for RootView {
                 let overlay_manager = overlay_manager.clone();
                 move |_this, _: &ShowSettings, _window, cx| {
                     overlay_manager.update(cx, |om, cx| om.toggle_settings_panel(cx));
+                }
+            }))
+            // Handle show hook log action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                move |_this, _: &ShowHookLog, _window, cx| {
+                    overlay_manager.update(cx, |om, cx| om.toggle_hook_log(cx));
                 }
             }))
             // Handle show pairing dialog action

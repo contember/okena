@@ -22,6 +22,7 @@ pub mod detached_terminal;
 pub mod diff_viewer;
 pub mod file_search;
 pub mod file_viewer;
+pub mod hook_log;
 mod markdown_renderer;
 pub mod keybindings_help;
 pub mod project_switcher;
