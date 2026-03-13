@@ -1209,6 +1209,37 @@ impl SidebarProjectInfo {
     }
 }
 
+/// Build a "main worktree" entry from a parent project and prepend it to children.
+/// Also propagates the parent's folder color to all worktree children and clears
+/// terminal/service/hook data from the parent header (it moves to the main_wt entry).
+fn build_main_worktree_entry(
+    project: &ProjectData,
+    project_info: &mut SidebarProjectInfo,
+    children: &mut Vec<SidebarProjectInfo>,
+    project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
+    closing_projects: &HashSet<String>,
+) {
+    let branch = crate::git::get_current_branch(std::path::Path::new(&project.path));
+    let mut main_wt = SidebarProjectInfo::from_project(project);
+    main_wt.name = branch.unwrap_or_else(|| project.name.clone());
+    main_wt.parent_folder_color = Some(project.folder_color);
+    main_wt.is_closing = closing_projects.contains(&project.id);
+    if let Some(services) = project_services.remove(&project.id) {
+        main_wt.services = services;
+    }
+    for child in children.iter_mut() {
+        child.parent_folder_color = Some(project.folder_color);
+    }
+    children.insert(0, main_wt);
+    // Clear terminal/service data from project header (shown under main worktree)
+    project_info.terminal_ids.clear();
+    project_info.terminal_names.clear();
+    project_info.inactive_tab_terminals.clear();
+    project_info.tab_group_terminals.clear();
+    project_info.has_layout = false;
+    project_info.hook_terminals.clear();
+}
+
 /// An item in the sidebar's top-level ordering: either a project or a folder
 enum SidebarItem {
     Project {
@@ -1337,29 +1368,9 @@ impl Render for Sidebar {
                 for fp in &mut folder_projects {
                     if let Some(mut children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
-                        // Create main worktree entry from parent project
                         if let Some(&project) = all_projects.get(fp.id.as_str()) {
-                            let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
-                                .and_then(|s| s.branch);
-                            let mut main_wt = SidebarProjectInfo::from_project(project);
-                            main_wt.name = branch.unwrap_or_else(|| project.name.clone());
-                            main_wt.parent_folder_color = Some(project.folder_color);
-                            main_wt.is_closing = workspace.closing_projects.contains(&project.id);
-                            if let Some(services) = project_services.remove(&fp.id) {
-                                main_wt.services = services;
-                            }
-                            for child in &mut children {
-                                child.parent_folder_color = Some(project.folder_color);
-                            }
-                            children.insert(0, main_wt);
+                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects);
                         }
-                        // Clear terminal/service data from project header
-                        fp.terminal_ids.clear();
-                        fp.terminal_names.clear();
-                        fp.inactive_tab_terminals.clear();
-                        fp.tab_group_terminals.clear();
-                        fp.has_layout = false;
-                        fp.hook_terminals.clear();
                         folder_wt_children.insert(fp.id.clone(), children);
                     } else {
                         if let Some(services) = project_services.remove(&fp.id) {
@@ -1394,27 +1405,7 @@ impl Render for Sidebar {
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {
-                    // Create main worktree entry from parent project
-                    let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
-                        .and_then(|s| s.branch);
-                    let mut main_wt = SidebarProjectInfo::from_project(project);
-                    main_wt.name = branch.unwrap_or_else(|| project.name.clone());
-                    main_wt.parent_folder_color = Some(project.folder_color);
-                    main_wt.is_closing = workspace.closing_projects.contains(&project.id);
-                    if let Some(services) = project_services.remove(&project.id) {
-                        main_wt.services = services;
-                    }
-                    for child in &mut wt_children {
-                        child.parent_folder_color = Some(project.folder_color);
-                    }
-                    wt_children.insert(0, main_wt);
-                    // Clear terminal/service data from project header (shown under main worktree)
-                    project_info.terminal_ids.clear();
-                    project_info.terminal_names.clear();
-                    project_info.inactive_tab_terminals.clear();
-                    project_info.tab_group_terminals.clear();
-                    project_info.has_layout = false;
-                    project_info.hook_terminals.clear();
+                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects);
                 } else {
                     if let Some(services) = project_services.remove(&project.id) {
                         project_info.services = services;
@@ -1509,7 +1500,7 @@ impl Render for Sidebar {
                             let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
-                                    self.render_worktree_item(fp, 28.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_worktree_item(fp, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                 );
                             } else {
                                 flat_elements.push(
@@ -1520,7 +1511,7 @@ impl Render for Sidebar {
 
                             // Expanded terminals and services for folder project (grouped) — only without worktrees
                             if fp.worktree_count == 0 && self.expanded_projects.contains(&fp.id) {
-                                self.render_expanded_children(fp, 48.0, 60.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                self.render_expanded_children(fp, 40.0, 52.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }
 
                             // Worktree children for folder project
@@ -1531,12 +1522,12 @@ impl Render for Sidebar {
                                     let is_focused_project = !is_main_worktree
                                         && focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
-                                        self.render_worktree_item(child, 40.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        self.render_worktree_item(child, 32.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 
                                     if self.expanded_projects.contains(&child.id) {
-                                        self.render_expanded_children(child, 60.0, 72.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                        self.render_expanded_children(child, 52.0, 64.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                                     }
                                 }
                             }

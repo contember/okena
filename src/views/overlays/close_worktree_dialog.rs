@@ -4,7 +4,7 @@ use crate::settings::settings;
 use crate::theme::theme;
 use crate::views::components::{button, button_primary, modal_backdrop, modal_content};
 use crate::workspace::hooks;
-use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, PendingWorktreeClose, Workspace};
+use crate::workspace::state::{PendingWorktreeClose, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -291,14 +291,7 @@ impl CloseWorktreeDialog {
                             for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
                             }
-                            for result in hook_results {
-                                ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                                    hook_type: result.hook_type,
-                                    label: result.label,
-                                    project_id: result.project_id.clone(),
-                                    status: HookTerminalStatus::Running,
-                                }, cx);
-                            }
+                            ws.register_hook_results(hook_results, cx);
                         })
                     });
 
@@ -420,12 +413,8 @@ impl CloseWorktreeDialog {
             // If the hook exists and we have a runner, fire it as a visible PTY terminal
             // and register a pending close — the actual removal happens when the hook exits.
             // If no hook or no runner, proceed with immediate removal.
-            let has_before_remove_hook = cx.update(|cx| {
-                let global_hooks = settings(cx).hooks;
-                let ws = workspace.read(cx);
-                let ph = ws.project(&project_id).map(|p| p.hooks.clone()).unwrap_or_default();
-                ph.before_worktree_remove.is_some() || global_hooks.before_worktree_remove.is_some()
-            });
+            let has_before_remove_hook =
+                project_hooks.before_worktree_remove.is_some() || global_hooks.before_worktree_remove.is_some();
 
             if has_before_remove_hook && runner.is_some() {
                 // Fire hook as visible PTY terminal and defer removal
@@ -442,22 +431,16 @@ impl CloseWorktreeDialog {
                         runner.as_ref(),
                     );
 
+                    let pending_terminal_id = hook_results.first().map(|r| r.terminal_id.clone());
+
                     workspace.update(cx, |ws, cx| {
-                        // Register hook terminals visually
-                        for result in &hook_results {
-                            ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                                hook_type: result.hook_type,
-                                label: result.label.clone(),
-                                project_id: result.project_id.clone(),
-                                status: HookTerminalStatus::Running,
-                            }, cx);
-                        }
+                        ws.register_hook_results(hook_results, cx);
 
                         // Register pending close — PTY exit handler will complete it
-                        if let Some(result) = hook_results.first() {
+                        if let Some(hook_terminal_id) = pending_terminal_id {
                             ws.register_pending_worktree_close(PendingWorktreeClose {
                                 project_id: project_id.clone(),
-                                hook_terminal_id: result.terminal_id.clone(),
+                                hook_terminal_id,
                                 branch: branch.clone(),
                                 main_repo_path: main_repo_path.clone(),
                             });
@@ -527,14 +510,7 @@ impl CloseWorktreeDialog {
                             for (cmd, env) in terminal_actions {
                                 ws.add_terminal_with_command(&project_id, &cmd, &env, cx);
                             }
-                            for result in hook_results {
-                                ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                                    hook_type: result.hook_type,
-                                    label: result.label,
-                                    project_id: result.project_id.clone(),
-                                    status: HookTerminalStatus::Running,
-                                }, cx);
-                            }
+                            ws.register_hook_results(hook_results, cx);
                         })
                     });
                 }

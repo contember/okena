@@ -116,18 +116,11 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Result<(), String> {
-    // Safety check: warn if there are uncommitted changes that would be lost
-    if worktree_path.exists() && has_uncommitted_changes(worktree_path) {
-        log::warn!(
-            "remove_worktree_fast: worktree at '{}' has uncommitted changes — proceeding with removal",
-            worktree_path.display()
-        );
-    }
-
-    // Remove the worktree directory
-    if worktree_path.exists() {
-        std::fs::remove_dir_all(worktree_path)
-            .map_err(|e| format!("Failed to remove worktree directory: {}", e))?;
+    // Remove the worktree directory (treat NotFound as success — already gone)
+    match std::fs::remove_dir_all(worktree_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to remove worktree directory: {}", e)),
     }
 
     // Prune stale worktree entries from the main repo

@@ -177,17 +177,7 @@ impl ServiceManager {
             .to_string_lossy()
             .to_string();
 
-        let shell = if cfg!(windows) {
-            ShellType::Custom {
-                path: "cmd".to_string(),
-                args: vec!["/C".to_string(), command],
-            }
-        } else {
-            ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), command],
-            }
-        };
+        let shell = ShellType::for_command(command);
 
         match self.backend.reconnect_terminal(saved_terminal_id, &cwd, Some(&shell)) {
             Ok(terminal_id) => {
@@ -436,17 +426,7 @@ impl ServiceManager {
             .to_string_lossy()
             .to_string();
 
-        let shell = if cfg!(windows) {
-            ShellType::Custom {
-                path: "cmd".to_string(),
-                args: vec!["/C".to_string(), command],
-            }
-        } else {
-            ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), command],
-            }
-        };
+        let shell = ShellType::for_command(command);
 
         instance.status = ServiceStatus::Starting;
 
@@ -1040,17 +1020,7 @@ impl ServiceManager {
             compose_file, service_name
         );
 
-        let shell = if cfg!(windows) {
-            ShellType::Custom {
-                path: "cmd".to_string(),
-                args: vec!["/C".to_string(), command],
-            }
-        } else {
-            ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), command],
-            }
-        };
+        let shell = ShellType::for_command(command);
 
         match self.backend.create_terminal(&project_path, Some(&shell)) {
             Ok(terminal_id) => {

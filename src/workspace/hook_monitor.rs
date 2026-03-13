@@ -107,11 +107,11 @@ impl HookMonitor {
         inner.running_count = inner.running_count.saturating_sub(1);
         inner.version += 1;
 
-        // Find the entry's hook_type first (Copy-friendly &'static str)
-        let hook_type = inner.history.iter().find(|e| e.id == id).map(|e| e.hook_type);
+        // Single-pass: find by position, then use index for both toast and status update.
+        if let Some(idx) = inner.history.iter().position(|e| e.id == id) {
+            let hook_type = inner.history[idx].hook_type;
 
-        // Queue a toast on failure (before mutably borrowing history)
-        if let Some(hook_type) = hook_type {
+            // Queue a toast on failure
             match &status {
                 HookStatus::Failed { stderr, .. } => {
                     let first_line = stderr.lines().next().unwrap_or("(no output)");
@@ -132,11 +132,8 @@ impl HookMonitor {
                 }
                 _ => {}
             }
-        }
 
-        // Now update the entry status
-        if let Some(entry) = inner.history.iter_mut().find(|e| e.id == id) {
-            entry.status = status;
+            inner.history[idx].status = status;
         }
     }
 

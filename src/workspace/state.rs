@@ -94,7 +94,6 @@ pub enum HookTerminalStatus {
 pub struct HookTerminalEntry {
     pub hook_type: &'static str,
     pub label: String,
-    pub project_id: String,
     pub status: HookTerminalStatus,
 }
 
@@ -444,6 +443,22 @@ impl Workspace {
         }
     }
 
+    /// Register hook terminal results from a hook execution.
+    /// Convenience wrapper that converts `HookTerminalResult`s into `HookTerminalEntry`s.
+    pub fn register_hook_results(
+        &mut self,
+        results: Vec<crate::workspace::hooks::HookTerminalResult>,
+        cx: &mut Context<Self>,
+    ) {
+        for result in results {
+            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                hook_type: result.hook_type,
+                label: result.label,
+                status: HookTerminalStatus::Running,
+            }, cx);
+        }
+    }
+
     pub fn update_hook_terminal_status(
         &mut self,
         terminal_id: &str,
@@ -452,8 +467,10 @@ impl Workspace {
     ) {
         for project in &mut self.data.projects {
             if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
-                entry.status = status;
-                cx.notify();
+                if entry.status != status {
+                    entry.status = status;
+                    cx.notify();
+                }
                 return;
             }
         }
@@ -530,6 +547,15 @@ impl Workspace {
         let focused = self.focused_project_id();
         let folder_filter = self.active_folder_filter.as_ref();
 
+        // If the focused project is a worktree child, resolve to its parent
+        // so that all sibling worktrees and the parent are shown together
+        let effective_focused: Option<&String> = focused.map(|fid| {
+            self.project(fid)
+                .and_then(|p| p.worktree_info.as_ref())
+                .map(|wi| &wi.parent_project_id)
+                .unwrap_or(fid)
+        });
+
         // When a project is focused, also show its worktree children
         let is_focused = |p: &ProjectData, fid: &String| -> bool {
             &p.id == fid
@@ -545,7 +571,7 @@ impl Workspace {
                 if let Some(filter_id) = folder_filter {
                     if &folder.id != filter_id {
                         // Still allow the focused project (and its worktrees) through even if in wrong folder
-                        if let Some(fid) = focused {
+                        if let Some(fid) = effective_focused {
                             for pid in &folder.project_ids {
                                 if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
                                     if is_focused(p, fid) {
@@ -560,7 +586,7 @@ impl Workspace {
                 // Folder: include its projects
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
+                        if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                             result.push(p);
                         }
                     }
@@ -569,12 +595,12 @@ impl Workspace {
                 // Top-level project: hide when folder filter is active
                 if folder_filter.is_some() {
                     // Still allow the focused project (and its worktrees) through
-                    if focused.map_or(false, |fid| is_focused(p, fid)) {
+                    if effective_focused.map_or(false, |fid| is_focused(p, fid)) {
                         result.push(p);
                     }
                     continue;
                 }
-                if focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
+                if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                     result.push(p);
                 }
             }
@@ -746,10 +772,7 @@ impl LayoutNode {
             terminal_id: None,
             minimized: false,
             detached: false,
-            shell_type: ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), full_cmd],
-            },
+            shell_type: ShellType::for_command(full_cmd),
             zoom_level: 1.0,
         }
     }
@@ -2767,7 +2790,6 @@ mod gpui_tests {
         HookTerminalEntry {
             hook_type,
             label: format!("{} (test)", hook_type),
-            project_id: "p1".to_string(),
             status: HookTerminalStatus::Running,
         }
     }
@@ -2912,7 +2934,6 @@ mod gpui_tests {
             ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
                 hook_type: "on_project_open",
                 label: "on_project_open (feature/foo)".to_string(),
-                project_id: "p1".to_string(),
                 status: HookTerminalStatus::Running,
             }, cx);
         });
