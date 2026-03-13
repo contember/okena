@@ -369,6 +369,13 @@ impl DiffViewer {
                             .size_full()
                             .bg(rgb(t.bg_secondary))
                             .cursor(CursorStyle::IBeam)
+                            .map(|mut list| {
+                                // Prevent GPUI from redirecting horizontal delta to
+                                // vertical scroll when only overflow-y is set (which
+                                // causes diagonal scroll on Shift+wheel).
+                                list.style().restrict_scroll_to_axis = Some(true);
+                                list
+                            })
                             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _window, cx| {
                                 this.handle_scroll_x(event, cx);
                             }))
