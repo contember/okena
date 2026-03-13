@@ -322,7 +322,10 @@ impl Render for RootView {
                             DragState::Sidebar => {
                                 // Handle sidebar resize
                                 let new_width = f32::from(event.position.x);
-                                this.sidebar_ctrl.set_width(new_width, &mut this.app_settings);
+                                this.sidebar_ctrl.set_width(new_width);
+                                // Persist through global SettingsState (debounced)
+                                let width = this.sidebar_ctrl.width();
+                                settings_entity(cx).update(cx, |s, cx| s.set_sidebar_width(width, cx));
                                 cx.notify();
                             }
                             DragState::ServicePanel { project_id, initial_mouse_y, initial_height } => {

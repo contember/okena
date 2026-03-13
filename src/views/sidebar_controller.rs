@@ -3,7 +3,7 @@
 //! Manages sidebar visibility, auto-hide behavior, and animation state.
 //! The actual animation spawning is handled by the parent view.
 
-use crate::workspace::persistence::{save_settings, AppSettings, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
+use crate::workspace::persistence::{AppSettings, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH};
 
 /// Animation duration in milliseconds.
 pub const ANIMATION_DURATION_MS: u64 = 150;
@@ -78,10 +78,10 @@ impl SidebarController {
     }
 
     /// Set the sidebar width (clamped to min/max bounds).
-    pub fn set_width(&mut self, width: f32, settings: &mut AppSettings) {
+    ///
+    /// Note: Caller is responsible for persisting via SettingsState.
+    pub fn set_width(&mut self, width: f32) {
         self.width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-        settings.sidebar.width = self.width;
-        let _ = save_settings(settings);
     }
 
     /// Check if sidebar is logically open.
@@ -121,14 +121,10 @@ impl SidebarController {
 
     /// Toggle sidebar visibility.
     ///
-    /// Returns the animation target and updates settings.
-    pub fn toggle(&mut self, settings: &mut AppSettings) -> AnimationTarget {
+    /// Returns the animation target. Caller is responsible for persisting via SettingsState.
+    pub fn toggle(&mut self) -> AnimationTarget {
         self.open = !self.open;
         self.hover_shown = false;
-
-        // Persist state
-        settings.sidebar.is_open = self.open;
-        let _ = save_settings(settings);
 
         if self.open {
             AnimationTarget::Open
@@ -140,8 +136,8 @@ impl SidebarController {
     /// Toggle auto-hide mode.
     ///
     /// If auto-hide is enabled and sidebar is open, it will close.
-    /// Returns the animation target and updates settings.
-    pub fn toggle_auto_hide(&mut self, settings: &mut AppSettings) -> AnimationTarget {
+    /// Returns the animation target. Caller is responsible for persisting via SettingsState.
+    pub fn toggle_auto_hide(&mut self) -> AnimationTarget {
         self.auto_hide = !self.auto_hide;
 
         let target = if self.auto_hide && self.open {
@@ -151,11 +147,6 @@ impl SidebarController {
         } else {
             AnimationTarget::None
         };
-
-        // Persist state
-        settings.sidebar.auto_hide = self.auto_hide;
-        settings.sidebar.is_open = self.open;
-        let _ = save_settings(settings);
 
         target
     }
@@ -209,16 +200,16 @@ mod tests {
 
     #[test]
     fn test_toggle() {
-        let mut settings = test_settings();
+        let settings = test_settings();
         let mut ctrl = SidebarController::new(&settings);
 
         assert!(!ctrl.is_open());
 
-        let target = ctrl.toggle(&mut settings);
+        let target = ctrl.toggle();
         assert!(ctrl.is_open());
         assert_eq!(target, AnimationTarget::Open);
 
-        let target = ctrl.toggle(&mut settings);
+        let target = ctrl.toggle();
         assert!(!ctrl.is_open());
         assert_eq!(target, AnimationTarget::Close);
     }
@@ -231,7 +222,7 @@ mod tests {
         ctrl.animation = 1.0;
 
         // Enable auto-hide while open should close
-        let target = ctrl.toggle_auto_hide(&mut settings);
+        let target = ctrl.toggle_auto_hide();
         assert!(ctrl.is_auto_hide());
         assert!(!ctrl.is_open());
         assert_eq!(target, AnimationTarget::Close);
@@ -254,16 +245,16 @@ mod tests {
 
     #[test]
     fn test_width_clamping() {
-        let mut settings = test_settings();
+        let settings = test_settings();
         let mut ctrl = SidebarController::new(&settings);
 
-        ctrl.set_width(10.0, &mut settings); // below MIN
+        ctrl.set_width(10.0); // below MIN
         assert_eq!(ctrl.width(), MIN_SIDEBAR_WIDTH);
 
-        ctrl.set_width(9999.0, &mut settings); // above MAX
+        ctrl.set_width(9999.0); // above MAX
         assert_eq!(ctrl.width(), MAX_SIDEBAR_WIDTH);
 
-        ctrl.set_width(300.0, &mut settings); // within range
+        ctrl.set_width(300.0); // within range
         assert_eq!(ctrl.width(), 300.0);
     }
 

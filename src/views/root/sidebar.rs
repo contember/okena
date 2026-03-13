@@ -1,3 +1,4 @@
+use crate::settings::settings_entity;
 use crate::views::sidebar_controller::{AnimationTarget, SidebarController, FRAME_TIME_MS};
 use gpui::*;
 
@@ -6,7 +7,10 @@ use super::RootView;
 impl RootView {
     /// Toggle sidebar visibility with animation
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        let target = self.sidebar_ctrl.toggle(&mut self.app_settings);
+        let target = self.sidebar_ctrl.toggle();
+        // Persist through global SettingsState (avoids stale settings overwrite)
+        let open = self.sidebar_ctrl.is_open();
+        settings_entity(cx).update(cx, |s, cx| s.set_sidebar_open(open, cx));
         self.sync_status_bar_sidebar_state(cx);
         self.animate_sidebar_to(target, cx);
     }
@@ -24,7 +28,14 @@ impl RootView {
 
     /// Toggle auto-hide mode
     pub(super) fn toggle_sidebar_auto_hide(&mut self, cx: &mut Context<Self>) {
-        let target = self.sidebar_ctrl.toggle_auto_hide(&mut self.app_settings);
+        let target = self.sidebar_ctrl.toggle_auto_hide();
+        // Persist through global SettingsState
+        let open = self.sidebar_ctrl.is_open();
+        let auto_hide = self.sidebar_ctrl.is_auto_hide();
+        settings_entity(cx).update(cx, |s, cx| {
+            s.set_sidebar_auto_hide(auto_hide, cx);
+            s.set_sidebar_open(open, cx);
+        });
         self.animate_sidebar_to(target, cx);
         cx.notify();
     }
