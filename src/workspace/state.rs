@@ -382,7 +382,9 @@ impl Workspace {
             let label = entry.label.clone();
             project.hook_terminals.insert(terminal_id.to_string(), entry);
 
-            // Add the hook terminal to the project's layout so it renders in a pane
+            // Add the hook terminal to the project's layout so it renders in a pane.
+            // If there are already hook terminals, group them in Tabs to avoid nested splits
+            // that progressively shrink the main terminal area.
             let hook_node = LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
                 minimized: false,
@@ -390,20 +392,56 @@ impl Workspace {
                 shell_type: crate::terminal::shell_config::ShellType::Default,
                 zoom_level: 1.0,
             };
-            if let Some(ref existing) = project.layout {
-                let existing = existing.clone();
-                project.layout = Some(LayoutNode::Split {
+            if let Some(ref mut existing) = project.layout {
+                // Check if the layout is already a horizontal split with hook terminals
+                // on the right side — if so, add to existing Tabs group.
+                let added_to_existing = if let LayoutNode::Split {
                     direction: SplitDirection::Horizontal,
-                    children: vec![existing, hook_node],
-                    sizes: vec![0.7, 0.3],
-                });
+                    children, ..
+                } = existing {
+                    if children.len() == 2 {
+                        match &mut children[1] {
+                            LayoutNode::Tabs { children: tab_children, active_tab } => {
+                                // Already a Tabs group — append and switch to new tab
+                                tab_children.push(hook_node.clone());
+                                *active_tab = tab_children.len() - 1;
+                                true
+                            }
+                            other if project.hook_terminals.len() == 2 => {
+                                // Second hook: convert single terminal to Tabs
+                                let prev = other.clone();
+                                *other = LayoutNode::Tabs {
+                                    children: vec![prev, hook_node.clone()],
+                                    active_tab: 1,
+                                };
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !added_to_existing {
+                    let existing = existing.clone();
+                    project.layout = Some(LayoutNode::Split {
+                        direction: SplitDirection::Horizontal,
+                        children: vec![existing, hook_node],
+                        sizes: vec![0.7, 0.3],
+                    });
+                }
             } else {
                 project.layout = Some(hook_node);
             }
             // Set the terminal name to the hook label
             project.terminal_names.insert(terminal_id.to_string(), label);
 
-            self.notify_data(cx);
+            // Use cx.notify() instead of notify_data() — hook terminals are transient
+            // and should not trigger a workspace save to disk.
+            cx.notify();
         }
     }
 
@@ -432,13 +470,18 @@ impl Workspace {
                 // Also remove from the layout tree
                 if let Some(ref layout) = project.layout {
                     if let Some(path) = layout.find_terminal_path(terminal_id) {
-                        if let Some(ref mut layout) = project.layout {
+                        if path.is_empty() {
+                            // Hook terminal is the root layout node — clear it entirely
+                            project.layout = None;
+                        } else if let Some(ref mut layout) = project.layout {
                             layout.remove_at_path(&path);
                         }
                     }
                 }
                 project.terminal_names.remove(terminal_id);
-                self.notify_data(cx);
+                // Use cx.notify() instead of notify_data() — hook terminals are transient
+                // and should not trigger a workspace save to disk.
+                cx.notify();
                 return;
             }
         }
@@ -459,14 +502,16 @@ impl Workspace {
         self.pending_worktree_closes.insert(pending.hook_terminal_id.clone(), pending);
     }
 
-    /// Check if there's a pending worktree close for the given terminal ID (non-mutating).
-    pub fn take_pending_worktree_close_peek(&self, terminal_id: &str) -> Option<PendingWorktreeClose> {
-        self.pending_worktree_closes.get(terminal_id).cloned()
-    }
-
     /// Take a pending worktree close for the given terminal ID (removes it).
     pub fn take_pending_worktree_close(&mut self, terminal_id: &str) -> Option<PendingWorktreeClose> {
         self.pending_worktree_closes.remove(terminal_id)
+    }
+
+    /// Cancel a pending worktree close: remove it and unmark the project as closing.
+    pub fn cancel_pending_worktree_close(&mut self, terminal_id: &str) {
+        if let Some(pending) = self.take_pending_worktree_close(terminal_id) {
+            self.closing_projects.remove(&pending.project_id);
+        }
     }
 
     pub fn projects(&self) -> &[ProjectData] {

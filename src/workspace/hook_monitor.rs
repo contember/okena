@@ -147,6 +147,7 @@ impl HookMonitor {
     }
 
     /// Number of currently running hooks.
+    #[cfg(test)]
     pub fn running_count(&self) -> usize {
         self.0.lock().running_count
     }
@@ -203,7 +204,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
     }
 }
 
