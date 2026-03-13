@@ -90,6 +90,7 @@ pub enum HookTerminalStatus {
 
 /// Entry for a hook terminal displayed in the service panel.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct HookTerminalEntry {
     pub hook_type: String,
     pub label: String,

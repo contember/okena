@@ -112,6 +112,14 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 /// Much faster than `git worktree remove` which does expensive status checks.
 /// Only safe when the caller has already handled dirty state (stash/discard).
 pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Result<(), String> {
+    // Safety check: warn if there are uncommitted changes that would be lost
+    if worktree_path.exists() && has_uncommitted_changes(worktree_path) {
+        log::warn!(
+            "remove_worktree_fast: worktree at '{}' has uncommitted changes — proceeding with removal",
+            worktree_path.display()
+        );
+    }
+
     // Remove the worktree directory
     if worktree_path.exists() {
         std::fs::remove_dir_all(worktree_path)

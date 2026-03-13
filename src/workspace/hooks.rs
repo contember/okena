@@ -51,6 +51,8 @@ impl HookRunner {
                 format!("{} && {}", env_prefix, command)
             }
         } else {
+            // POSIX single-quote escaping: wrap values in '...' and escape embedded
+            // single quotes as '\''. Safe because hook terminals always use `sh -c`.
             let env_prefix = env_vars
                 .iter()
                 .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))

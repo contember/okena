@@ -472,9 +472,11 @@ impl Okena {
                 // Notify main window after processing the batch
                 let _ = this.update(cx, |this, cx| {
                     if !exit_events.is_empty() {
-                        // FIRST: notify exit waiters for ALL terminals unconditionally.
-                        // This unblocks sync hooks waiting in smol::unblock.
-                        // notify_exit is a no-op for terminals without a registered waiter.
+                        // Two-phase hook exit handling:
+                        // Phase 1 (here): notify_exit unblocks any sync hook threads
+                        // waiting on a PTY terminal via mpsc::Receiver. This MUST happen
+                        // before handle_hook_terminal_exits (phase 2) which updates
+                        // workspace status and may trigger project removal.
                         if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
                             for (terminal_id, exit_code) in &exit_events {
                                 monitor.notify_exit(terminal_id, *exit_code);
