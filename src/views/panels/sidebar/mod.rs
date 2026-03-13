@@ -38,7 +38,7 @@ use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView};
+use drag::{ProjectDrag, ProjectDragView, FolderDrag, FolderDragView, WorktreeDrag, WorktreeDragView};
 
 /// Sub-category group kind within an expanded project.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -529,15 +529,15 @@ impl Sidebar {
             HashMap::new()
         };
 
-        // Build worktree children map
+        // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
-        for project in &workspace.data().projects {
-            if let Some(ref wt_info) = project.worktree_info {
-                if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
-                    worktree_children_map
-                        .entry(wt_info.parent_project_id.clone())
-                        .or_default()
-                        .push(project);
+        for parent in &workspace.data().projects {
+            if !parent.worktree_ids.is_empty() {
+                let children: Vec<&ProjectData> = parent.worktree_ids.iter()
+                    .filter_map(|wt_id| all_projects.get(wt_id.as_str()).copied())
+                    .collect();
+                if !children.is_empty() {
+                    worktree_children_map.insert(parent.id.clone(), children);
                 }
             }
         }
@@ -1047,6 +1047,8 @@ pub(super) struct SidebarProjectInfo {
     pub tab_group_terminals: HashSet<String>,
     /// True if this is a worktree whose parent project no longer exists
     pub is_orphan: bool,
+    /// Parent project ID (for worktree children, used for drag-and-drop reordering)
+    pub parent_project_id: Option<String>,
     /// Services defined in okena.yaml for this project
     pub services: Vec<SidebarServiceInfo>,
 }
@@ -1071,6 +1073,7 @@ impl SidebarProjectInfo {
                 .unwrap_or_default(),
             terminal_names: project.terminal_names.clone(),
             is_orphan: false,
+            parent_project_id: project.worktree_info.as_ref().map(|w| w.parent_project_id.clone()),
             services: Vec::new(),
         }
     }
@@ -1121,16 +1124,17 @@ impl Render for Sidebar {
             .map(|p| (p.id.as_str(), p))
             .collect();
 
-        // Build worktree children map (child project -> parent project)
+        // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
         let all_project_ids: HashSet<&str> = workspace.data().projects.iter().map(|p| p.id.as_str()).collect();
-        for project in &workspace.data().projects {
-            if let Some(ref wt_info) = project.worktree_info {
-                if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
-                    worktree_children_map
-                        .entry(wt_info.parent_project_id.clone())
-                        .or_default()
-                        .push(SidebarProjectInfo::from_project(project));
+        for parent in &workspace.data().projects {
+            if !parent.worktree_ids.is_empty() {
+                let children: Vec<SidebarProjectInfo> = parent.worktree_ids.iter()
+                    .filter_map(|wt_id| all_projects.get(wt_id.as_str()))
+                    .map(|p| SidebarProjectInfo::from_project(p))
+                    .collect();
+                if !children.is_empty() {
+                    worktree_children_map.insert(parent.id.clone(), children);
                 }
             }
         }
@@ -1266,7 +1270,7 @@ impl Render for Sidebar {
                     let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
                     if project.is_orphan {
                         flat_elements.push(
-                            self.render_worktree_item(&project, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(&project, 0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                     } else {
                         flat_elements.push(
@@ -1281,11 +1285,11 @@ impl Render for Sidebar {
                     }
 
                     // Worktree children
-                    for child in &worktree_children {
+                    for (wt_idx, child) in worktree_children.iter().enumerate() {
                         let is_cursor = cursor_index == Some(flat_idx);
                         let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                         flat_elements.push(
-                            self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(child, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
@@ -1317,7 +1321,7 @@ impl Render for Sidebar {
                             let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
-                                    self.render_worktree_item(fp, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_worktree_item(fp, 0, is_cursor, is_focused_project, window, cx).into_any_element()
                                 );
                             } else {
                                 flat_elements.push(
@@ -1333,11 +1337,11 @@ impl Render for Sidebar {
 
                             // Worktree children for folder project
                             if let Some(wt_children) = worktree_children.get(&fp.id) {
-                                for child in wt_children {
+                                for (wt_idx, child) in wt_children.iter().enumerate() {
                                     let is_cursor = cursor_index == Some(flat_idx);
                                     let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
-                                        self.render_worktree_item(child, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        self.render_worktree_item(child, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 
