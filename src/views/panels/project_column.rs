@@ -756,7 +756,16 @@ impl ProjectColumn {
         let workspace_for_hide = self.workspace.clone();
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
-        let folder_color = t.get_folder_color(project.folder_color);
+        // Worktree projects inherit their parent's folder color
+        let effective_color = if let Some(ref wt_info) = project.worktree_info {
+            let ws = self.workspace.read(cx);
+            ws.project(&wt_info.parent_project_id)
+                .map(|p| p.folder_color)
+                .unwrap_or(project.folder_color)
+        } else {
+            project.folder_color
+        };
+        let folder_color = t.get_folder_color(effective_color);
 
         v_flex()
             // Colored accent bar

@@ -138,12 +138,23 @@ impl Workspace {
         });
     }
 
-    /// Set the folder color for a project
+    /// Set the folder color for a project (also propagates to worktree children)
     pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         self.with_project(project_id, cx, |project| {
             project.folder_color = color;
             true
         });
+        // Propagate color to worktree children
+        let child_ids: Vec<String> = self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
+            .map(|p| p.id.clone())
+            .collect();
+        for child_id in child_ids {
+            self.with_project(&child_id, cx, |project| {
+                project.folder_color = color;
+                true
+            });
+        }
     }
 
     /// Delete a project
@@ -249,6 +260,7 @@ impl Workspace {
         let parent_path = parent.path.clone();
         let parent_layout = parent.layout.clone();
         let parent_hooks = parent.hooks.clone();
+        let parent_color = parent.folder_color;
 
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
@@ -281,7 +293,7 @@ impl Workspace {
                 main_repo_path: repo_path.to_string_lossy().to_string(),
                 worktree_path: worktree_path.to_string(),
             }),
-            folder_color: FolderColor::default(),
+            folder_color: parent_color,
             hooks: parent_hooks,
             is_remote: false,
             connection_id: None,

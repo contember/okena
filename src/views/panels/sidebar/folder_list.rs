@@ -341,21 +341,26 @@ impl Sidebar {
                     });
                 }
             }))
-            .child(
-                sidebar_expand_arrow(
-                    ElementId::Name(format!("expand-fp-{}", project.id).into()),
-                    is_expanded,
-                    &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.toggle_expanded(&project_id);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                })),
-            )
+            .child({
+                if project.worktree_count == 0 {
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("expand-fp-{}", project.id).into()),
+                        is_expanded,
+                        &t,
+                    )
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.toggle_expanded(&project_id);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .into_any_element()
+                } else {
+                    div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
+                }
+            })
             .child({
                 // Project color dot
                 let folder_color = t.get_folder_color(project.folder_color);
