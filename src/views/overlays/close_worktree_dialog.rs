@@ -446,7 +446,7 @@ impl CloseWorktreeDialog {
                         // Register hook terminals visually
                         for result in &hook_results {
                             ws.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                                hook_type: result.hook_type.clone(),
+                                hook_type: result.hook_type,
                                 label: result.label.clone(),
                                 project_id: result.project_id.clone(),
                                 status: HookTerminalStatus::Running,

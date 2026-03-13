@@ -92,7 +92,7 @@ pub enum HookTerminalStatus {
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct HookTerminalEntry {
-    pub hook_type: String,
+    pub hook_type: &'static str,
     pub label: String,
     pub project_id: String,
     pub status: HookTerminalStatus,
@@ -407,8 +407,10 @@ impl Workspace {
                                 *active_tab = tab_children.len() - 1;
                                 true
                             }
-                            other if project.hook_terminals.len() == 2 => {
-                                // Second hook: convert single terminal to Tabs
+                            other @ LayoutNode::Terminal { .. } => {
+                                // Single hook terminal — convert to Tabs for the new one.
+                                // Check layout structure directly instead of relying on
+                                // hook_terminals count which can be stale after removals.
                                 let prev = other.clone();
                                 *other = LayoutNode::Tabs {
                                     children: vec![prev, hook_node.clone()],
@@ -2501,7 +2503,7 @@ mod workspace_tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
@@ -2753,6 +2755,168 @@ mod gpui_tests {
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "local1");
             assert_eq!(visible[1].id, "remote:conn1:p1");
+        });
+    }
+
+    // ── register_hook_terminal layout tests ──────────────────────────────
+
+    fn make_hook_entry(hook_type: &'static str) -> HookTerminalEntry {
+        HookTerminalEntry {
+            hook_type,
+            label: format!("{} (test)", hook_type),
+            project_id: "p1".to_string(),
+            status: HookTerminalStatus::Running,
+        }
+    }
+
+    #[gpui::test]
+    fn test_register_hook_terminal_no_layout(cx: &mut gpui::TestAppContext) {
+        let mut p = make_project("p1");
+        p.layout = None;
+        let data = make_workspace_data(vec![p], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            assert!(matches!(layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_hook_terminal_creates_split(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { direction, children, sizes } => {
+                    assert_eq!(*direction, SplitDirection::Horizontal);
+                    assert_eq!(children.len(), 2);
+                    assert!((sizes[0] - 0.7).abs() < 0.01);
+                    assert!((sizes[1] - 0.3).abs() < 0.01);
+                    // Original terminal on left
+                    assert!(matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "term_p1"));
+                    // Hook terminal on right
+                    assert!(matches!(&children[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+                }
+                _ => panic!("Expected horizontal split, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_second_hook_creates_tabs(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { children, .. } => {
+                    assert_eq!(children.len(), 2);
+                    match &children[1] {
+                        LayoutNode::Tabs { children: tabs, active_tab } => {
+                            assert_eq!(tabs.len(), 2);
+                            assert_eq!(*active_tab, 1);
+                            assert!(matches!(&tabs[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+                            assert!(matches!(&tabs[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-2"));
+                        }
+                        _ => panic!("Expected Tabs node for second hook"),
+                    }
+                }
+                _ => panic!("Expected split layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_third_hook_appends_to_tabs(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+            ws.register_hook_terminal("p1", "hook-3", make_hook_entry("post_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { children, .. } => {
+                    match &children[1] {
+                        LayoutNode::Tabs { children: tabs, active_tab } => {
+                            assert_eq!(tabs.len(), 3);
+                            assert_eq!(*active_tab, 2);
+                        }
+                        _ => panic!("Expected Tabs"),
+                    }
+                }
+                _ => panic!("Expected split layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_hook_terminal_cleans_layout(cx: &mut gpui::TestAppContext) {
+        let mut p = make_project("p1");
+        p.layout = None;
+        let data = make_workspace_data(vec![p], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        // Verify terminal is there
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("p1").unwrap().layout.is_some());
+            assert!(ws.project("p1").unwrap().hook_terminals.contains_key("hook-1"));
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_hook_terminal("hook-1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(p.layout.is_none());
+            assert!(p.hook_terminals.is_empty());
+            assert!(!p.terminal_names.contains_key("hook-1"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_hook_terminal_sets_name(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
+                hook_type: "on_project_open",
+                label: "on_project_open (feature/foo)".to_string(),
+                project_id: "p1".to_string(),
+                status: HookTerminalStatus::Running,
+            }, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let name = ws.project("p1").unwrap().terminal_names.get("hook-1").unwrap();
+            assert_eq!(name, "on_project_open (feature/foo)");
         });
     }
 }

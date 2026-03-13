@@ -111,6 +111,10 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 /// Fast worktree removal: delete the directory and prune stale worktree metadata.
 /// Much faster than `git worktree remove` which does expensive status checks.
 /// Only safe when the caller has already handled dirty state (stash/discard).
+///
+/// Note: `git worktree prune` removes ALL stale entries (not just the one we deleted).
+/// This is safe because prune only acts on entries whose directories no longer exist,
+/// and we only delete the single target directory before pruning.
 pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Result<(), String> {
     // Safety check: warn if there are uncommitted changes that would be lost
     if worktree_path.exists() && has_uncommitted_changes(worktree_path) {

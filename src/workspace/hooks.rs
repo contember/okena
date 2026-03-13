@@ -25,7 +25,7 @@ impl gpui::Global for HookRunner {}
 pub struct HookTerminalResult {
     pub terminal_id: String,
     pub label: String,
-    pub hook_type: String,
+    pub hook_type: &'static str,
     pub project_id: String,
 }
 
@@ -38,9 +38,22 @@ impl HookRunner {
         env_vars: &HashMap<String, String>,
         project_path: &str,
     ) -> Result<String, String> {
-        // Build the full command with env vars baked in
+        // Build the full command with env vars baked in.
+        // Filter out any keys that aren't valid shell identifiers to prevent injection.
+        let safe_env: Vec<_> = env_vars
+            .iter()
+            .filter(|(k, _)| {
+                if is_valid_env_key(k) {
+                    true
+                } else {
+                    log::warn!("Skipping invalid env var key in hook terminal: {:?}", k);
+                    false
+                }
+            })
+            .collect();
+
         let full_cmd = if cfg!(windows) {
-            let env_prefix = env_vars
+            let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| format!("set {}={}", k, v))
                 .collect::<Vec<_>>()
@@ -53,7 +66,7 @@ impl HookRunner {
         } else {
             // POSIX single-quote escaping: wrap values in '...' and escape embedded
             // single quotes as '\''. Safe because hook terminals always use `sh -c`.
-            let env_prefix = env_vars
+            let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))
                 .collect::<Vec<_>>()
@@ -92,6 +105,19 @@ impl HookRunner {
 
         Ok(terminal_id)
     }
+}
+
+/// Check that an env var key is safe for shell interpolation.
+/// Allows `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_env_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
+        return false;
+    }
+    bytes[1..].iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Build a display label for a hook terminal tab.
@@ -204,7 +230,7 @@ fn run_hook(
                 return Some(HookTerminalResult {
                     terminal_id,
                     label,
-                    hook_type: hook_type.to_string(),
+                    hook_type,
                     project_id: project_id.to_string(),
                 });
             }
@@ -299,47 +325,39 @@ fn run_hook_sync(
     runner: Option<&HookRunner>,
     project_id: &str,
 ) -> Result<Option<HookTerminalResult>, String> {
-    // PTY path
-    if let Some(runner) = runner {
+    // PTY path: requires both runner and monitor (monitor provides the exit waiter channel).
+    // If runner exists but monitor is missing, fall through to headless execution.
+    if let (Some(runner), Some(monitor)) = (runner, monitor) {
         let project_path = env_vars.get("OKENA_PROJECT_PATH").cloned().unwrap_or_default();
         let label = build_hook_label(hook_type, &env_vars, project_name);
-        let start = Instant::now();
 
         let terminal_id = runner.create_hook_terminal(command, &env_vars, &project_path)?;
 
-        let exec_id = monitor.map(|m| m.record_start(hook_type, command, project_name, Some(terminal_id.clone())));
+        let _exec_id = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
         // Register exit waiter and block until the PTY process exits
-        let rx = monitor
-            .map(|m| m.register_exit_waiter(&terminal_id))
-            .ok_or_else(|| "HookMonitor required for sync PTY hooks".to_string())?;
+        let rx = monitor.register_exit_waiter(&terminal_id);
 
         let exit_code = rx.recv().map_err(|_| "Hook terminal exit channel closed unexpectedly".to_string())?;
-        let duration = start.elapsed();
 
+        // Do NOT call record_finish here — the main thread's handle_hook_terminal_exits
+        // calls finish_by_terminal_id which is the sole authority for PTY hook completion
+        // (avoids duplicate toast notifications).
         let success = exit_code == Some(0);
 
         if success {
-            if let (Some(m), Some(id)) = (monitor, exec_id) {
-                m.record_finish(id, HookStatus::Succeeded { duration });
-            }
             return Ok(Some(HookTerminalResult {
                 terminal_id,
                 label,
-                hook_type: hook_type.to_string(),
+                hook_type,
                 project_id: project_id.to_string(),
             }));
         } else {
             let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-            if let (Some(m), Some(id)) = (monitor, exec_id) {
-                m.record_finish(id, HookStatus::Failed {
-                    duration,
-                    exit_code: code,
-                    stderr: String::new(),
-                });
-            }
             return Err(format!("Hook failed (exit {})", code));
         }
+    } else if runner.is_some() {
+        log::warn!("HookRunner available but no HookMonitor for sync hook '{}'; falling back to headless", hook_type);
     }
 
     // Fallback: headless execution
@@ -777,5 +795,22 @@ mod tests {
     fn build_hook_label_falls_back_to_project_name() {
         let env = HashMap::new();
         assert_eq!(build_hook_label("on_project_open", &env, "my-project"), "on_project_open (my-project)");
+    }
+
+    #[test]
+    fn valid_env_keys() {
+        assert!(is_valid_env_key("OKENA_PROJECT_PATH"));
+        assert!(is_valid_env_key("_FOO"));
+        assert!(is_valid_env_key("A1"));
+        assert!(is_valid_env_key("a"));
+    }
+
+    #[test]
+    fn invalid_env_keys() {
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("123ABC"));
+        assert!(!is_valid_env_key("FOO BAR"));
+        assert!(!is_valid_env_key("FOO;BAR"));
+        assert!(!is_valid_env_key("FOO=BAR"));
     }
 }
