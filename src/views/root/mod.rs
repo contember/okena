@@ -364,6 +364,7 @@ impl RootView {
                                 remote_services,
                                 remote_host,
                                 remote_git_status: api_project.git_status.clone(),
+                                default_shell: None,
                             });
                         }
                     });

@@ -1277,6 +1277,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 
@@ -1517,6 +1518,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 

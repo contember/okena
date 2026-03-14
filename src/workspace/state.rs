@@ -122,6 +122,9 @@ pub struct ProjectData {
     /// Remote git status (transient, populated during remote state sync)
     #[serde(skip)]
     pub remote_git_status: Option<okena_core::api::ApiGitStatus>,
+    /// Per-project default shell (overrides global default when ShellType::Default is used)
+    #[serde(default)]
+    pub default_shell: Option<crate::terminal::shell_config::ShellType>,
 }
 
 impl ProjectData {
@@ -1182,6 +1185,7 @@ mod tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 
@@ -2067,6 +2071,7 @@ mod workspace_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 
@@ -2342,6 +2347,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 

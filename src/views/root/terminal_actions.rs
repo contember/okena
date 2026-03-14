@@ -64,9 +64,12 @@ impl RootView {
             ws.set_terminal_shell(project_id, &layout_path, shell_type.clone(), cx);
         });
 
-        // Determine the actual shell to use (resolve Default to settings)
+        // Determine the actual shell to use (resolve Default → project default → global default)
         let actual_shell = if shell_type == crate::terminal::shell_config::ShellType::Default {
-            settings(cx).default_shell.clone()
+            self.workspace.read(cx)
+                .project(project_id)
+                .and_then(|p| p.default_shell.clone())
+                .unwrap_or_else(|| settings(cx).default_shell.clone())
         } else {
             shell_type
         };

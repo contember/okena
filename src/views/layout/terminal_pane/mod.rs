@@ -367,7 +367,10 @@ impl TerminalPane {
         }
 
         let shell = if self.shell_type == ShellType::Default {
-            settings(cx).default_shell.clone()
+            self.workspace.read(cx)
+                .project(&self.project_id)
+                .and_then(|p| p.default_shell.clone())
+                .unwrap_or_else(|| settings(cx).default_shell.clone())
         } else {
             self.shell_type.clone()
         };
@@ -401,7 +404,10 @@ impl TerminalPane {
         }
 
         let shell = if self.shell_type == ShellType::Default {
-            settings(cx).default_shell.clone()
+            self.workspace.read(cx)
+                .project(&self.project_id)
+                .and_then(|p| p.default_shell.clone())
+                .unwrap_or_else(|| settings(cx).default_shell.clone())
         } else {
             self.shell_type.clone()
         };

@@ -34,6 +34,16 @@ impl Workspace {
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
     pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) -> String {
         let path = expand_tilde(&path);
+
+        // Auto-detect WSL UNC paths and set default shell accordingly
+        #[cfg(windows)]
+        let default_shell = crate::terminal::shell_config::parse_wsl_unc_path(&path)
+            .map(|(distro, _)| crate::terminal::shell_config::ShellType::Wsl {
+                distro: Some(distro),
+            });
+        #[cfg(not(windows))]
+        let default_shell: Option<crate::terminal::shell_config::ShellType> = None;
+
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
             id: id.clone(),
@@ -52,6 +62,7 @@ impl Workspace {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell,
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -277,6 +288,7 @@ impl Workspace {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         };
 
         // Insert after parent project in order
@@ -363,6 +375,7 @@ mod tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 
@@ -490,6 +503,7 @@ mod gpui_tests {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
+            default_shell: None,
         }
     }
 

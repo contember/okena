@@ -282,10 +282,45 @@ pub fn detect_wsl_distros() -> Vec<String> {
     distros
 }
 
+/// Parse a WSL UNC path into (distro_name, linux_path).
+///
+/// Recognized formats:
+/// - `\\wsl.localhost\Distro\path` or `\\wsl$\Distro\path` (backslash)
+/// - `//wsl.localhost/Distro/path` or `//wsl$/Distro/path` (forward-slash)
+#[cfg(windows)]
+pub fn parse_wsl_unc_path(path: &str) -> Option<(String, String)> {
+    let normalized = path.replace('\\', "/");
+
+    // Must start with // (UNC prefix after normalization)
+    let rest = normalized.strip_prefix("//")?;
+
+    // Check for wsl.localhost/ or wsl$/
+    let after_host = rest.strip_prefix("wsl.localhost/")
+        .or_else(|| rest.strip_prefix("wsl$/"))?;
+
+    // Next segment is the distro name
+    let (distro, linux_path) = match after_host.find('/') {
+        Some(idx) => (&after_host[..idx], &after_host[idx..]),
+        None => (after_host, "/"),
+    };
+
+    if distro.is_empty() {
+        return None;
+    }
+
+    Some((distro.to_string(), linux_path.to_string()))
+}
+
 /// Convert a Windows path to WSL path format
 /// Example: C:\Users\name -> /mnt/c/Users/name
+/// Also handles WSL UNC paths: \\wsl.localhost\Ubuntu\home\user -> /home/user
 #[cfg(windows)]
 pub fn windows_path_to_wsl(windows_path: &str) -> String {
+    // Check for WSL UNC paths first
+    if let Some((_distro, linux_path)) = parse_wsl_unc_path(windows_path) {
+        return linux_path;
+    }
+
     let path = windows_path.replace('\\', "/");
 
     // Check for drive letter (e.g., C:/)
@@ -319,6 +354,57 @@ mod tests {
             "/mnt/d/Projects/app"
         );
         assert_eq!(windows_path_to_wsl("/already/unix"), "/already/unix");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_wsl_unc_path_conversion() {
+        // Backslash UNC paths
+        assert_eq!(
+            windows_path_to_wsl("\\\\wsl.localhost\\Ubuntu\\home\\user\\project"),
+            "/home/user/project"
+        );
+        assert_eq!(
+            windows_path_to_wsl("\\\\wsl$\\Ubuntu\\home\\user"),
+            "/home/user"
+        );
+        // Forward-slash UNC paths
+        assert_eq!(
+            windows_path_to_wsl("//wsl.localhost/Debian/tmp"),
+            "/tmp"
+        );
+        assert_eq!(
+            windows_path_to_wsl("//wsl$/Arch/etc/config"),
+            "/etc/config"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_parse_wsl_unc_path() {
+        // wsl.localhost backslash
+        let (distro, path) = parse_wsl_unc_path("\\\\wsl.localhost\\Ubuntu\\home\\user").unwrap();
+        assert_eq!(distro, "Ubuntu");
+        assert_eq!(path, "/home/user");
+
+        // wsl$ backslash
+        let (distro, path) = parse_wsl_unc_path("\\\\wsl$\\Debian\\tmp\\file").unwrap();
+        assert_eq!(distro, "Debian");
+        assert_eq!(path, "/tmp/file");
+
+        // Forward-slash variant
+        let (distro, path) = parse_wsl_unc_path("//wsl.localhost/Arch/etc").unwrap();
+        assert_eq!(distro, "Arch");
+        assert_eq!(path, "/etc");
+
+        // Distro only (no sub-path)
+        let (distro, path) = parse_wsl_unc_path("\\\\wsl.localhost\\Ubuntu").unwrap();
+        assert_eq!(distro, "Ubuntu");
+        assert_eq!(path, "/");
+
+        // Not a WSL UNC path
+        assert!(parse_wsl_unc_path("C:\\Users\\test").is_none());
+        assert!(parse_wsl_unc_path("/regular/path").is_none());
     }
 
     #[test]
