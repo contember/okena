@@ -234,6 +234,40 @@ impl ActionDispatcher {
         }
     }
 
+    /// Split a terminal (local: workspace layout operation; remote: via server).
+    ///
+    /// For local projects this only modifies the layout — the UI will lazily
+    /// spawn the PTY with the correct shell.  Going through `execute_action`
+    /// would eagerly call `spawn_uninitialized_terminals` with `None` shell,
+    /// ignoring the project / global default shell (e.g. WSL).
+    pub fn split_terminal(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        direction: crate::workspace::state::SplitDirection,
+        cx: &mut impl AppContext,
+    ) {
+        match self {
+            Self::Local { workspace, .. } => {
+                let pid = project_id.to_string();
+                let lp = layout_path.to_vec();
+                workspace.update(cx, |ws, cx| {
+                    ws.split_terminal(&pid, &lp, direction, cx);
+                });
+            }
+            Self::Remote { .. } => {
+                self.dispatch(
+                    ActionRequest::SplitTerminal {
+                        project_id: project_id.to_string(),
+                        path: layout_path.to_vec(),
+                        direction,
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
     /// Add a tab (local: workspace layout operation; remote: create terminal).
     pub fn add_tab(
         &self,

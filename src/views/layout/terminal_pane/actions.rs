@@ -11,13 +11,8 @@ use super::TerminalPane;
 
 impl TerminalPane {
     pub(super) fn handle_split(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        let action = ActionRequest::SplitTerminal {
-            project_id: self.project_id.clone(),
-            path: self.layout_path.clone(),
-            direction,
-        };
         if let Some(ref dispatcher) = self.action_dispatcher {
-            dispatcher.dispatch(action, cx);
+            dispatcher.split_terminal(&self.project_id, &self.layout_path, direction, cx);
         }
     }
 

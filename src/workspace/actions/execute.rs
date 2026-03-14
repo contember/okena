@@ -8,7 +8,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use crate::remote::bridge::CommandResult;
 use crate::remote::types::ActionRequest;
+use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
+use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::layout::pane_drag::DropZone;
 use crate::views::root::TerminalsRegistry;
@@ -432,13 +434,22 @@ pub fn spawn_uninitialized_terminals(
     };
 
     let project_path = project.path.clone();
+    let project_default_shell = project.default_shell.clone();
     let mut uninitialized = Vec::new();
     if let Some(layout) = &project.layout {
-        collect_uninitialized_terminals(layout, vec![], &mut uninitialized);
+        collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
 
-    for path in uninitialized {
-        match backend.create_terminal(&project_path, None) {
+    let global_default = settings(cx).default_shell.clone();
+
+    for (path, shell_type) in uninitialized {
+        let shell = match shell_type {
+            ShellType::Default => project_default_shell
+                .clone()
+                .unwrap_or_else(|| global_default.clone()),
+            other => other,
+        };
+        match backend.create_terminal(&project_path, Some(&shell)) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
                 let terminal = Arc::new(Terminal::new(
@@ -493,6 +504,31 @@ pub fn collect_uninitialized_terminals(
                 let mut child_path = current_path.clone();
                 child_path.push(i);
                 collect_uninitialized_terminals(child, child_path, result);
+            }
+        }
+    }
+}
+
+/// Like `collect_uninitialized_terminals` but also returns each node's `shell_type`.
+fn collect_uninitialized_terminals_with_shell(
+    node: &LayoutNode,
+    current_path: Vec<usize>,
+    result: &mut Vec<(Vec<usize>, ShellType)>,
+) {
+    match node {
+        LayoutNode::Terminal {
+            terminal_id: None,
+            shell_type,
+            ..
+        } => {
+            result.push((current_path, shell_type.clone()));
+        }
+        LayoutNode::Terminal { .. } => {}
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            for (i, child) in children.iter().enumerate() {
+                let mut child_path = current_path.clone();
+                child_path.push(i);
+                collect_uninitialized_terminals_with_shell(child, child_path, result);
             }
         }
     }
