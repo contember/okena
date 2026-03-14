@@ -549,13 +549,36 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
     settings
 }
 
-/// Save app settings to disk
+/// Process-level mutex for settings file access.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+/// Save app settings to disk.
+///
+/// `remote_connections` are managed separately via `update_remote_connections()`,
+/// so this function preserves whatever is on disk rather than overwriting with
+/// the (potentially stale) in-memory copy.
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
+    let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    save_settings_locked(settings)
+}
+
+/// Inner save — caller MUST already hold `SETTINGS_LOCK`.
+fn save_settings_locked(settings: &AppSettings) -> Result<()> {
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = serde_json::to_string_pretty(settings)?;
+
+    // Preserve remote_connections from disk (they are managed out-of-band
+    // by update_remote_connections and not kept in SettingsState's in-memory copy).
+    let mut to_save = settings.clone();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(on_disk) = serde_json::from_str::<AppSettings>(&content) {
+            to_save.remote_connections = on_disk.remote_connections;
+        }
+    }
+
+    let content = serde_json::to_string_pretty(&to_save)?;
 
     // Atomic write: write to temp file, set permissions, then rename
     let tmp_path = path.with_extension("json.tmp");
@@ -568,9 +591,6 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
-
-/// Process-level mutex for settings file access.
-static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Atomically load, update, and save the `remote_connections` field in settings.
 ///
@@ -626,9 +646,17 @@ where
 
     #[cfg(not(unix))]
     {
-        let mut settings = load_settings();
+        let path = get_settings_path();
+        let mut settings: AppSettings = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default();
         updater(&mut settings.remote_connections);
-        save_settings(&settings)?;
+
+        let content = serde_json::to_string_pretty(&settings)?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &content)?;
+        std::fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 }
