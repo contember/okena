@@ -124,7 +124,7 @@ pub fn load_session(name: &str, backend: SessionBackend) -> Result<WorkspaceData
 
     let session_backend = backend.resolve();
     let clear_ids = !session_backend.supports_persistence();
-    validate_workspace_data(&mut data, clear_ids);
+    validate_workspace_data(&mut data, clear_ids, backend);
 
     Ok(data)
 }
@@ -199,7 +199,7 @@ pub fn import_workspace(path: &std::path::Path) -> Result<WorkspaceData> {
     data.version = WORKSPACE_VERSION;
 
     // Always clear terminal IDs on import, plus full validation with folder consistency
-    validate_workspace_data(&mut data, true);
+    validate_workspace_data(&mut data, true, SessionBackend::None);
 
     Ok(data)
 }

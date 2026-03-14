@@ -111,10 +111,44 @@ fn is_process_alive(pid: u32) -> bool {
 
 /// Validate and fix workspace data consistency.
 /// Called after deserialization in all load paths.
-pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_ids: bool) {
-    // Optionally clear terminal IDs (on app restart without session persistence)
+pub(crate) fn validate_workspace_data(
+    data: &mut WorkspaceData,
+    clear_terminal_ids: bool,
+    #[cfg_attr(not(windows), allow(unused))]
+    backend_preference: SessionBackend,
+) {
+    // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set.
+    // This must run BEFORE clearing terminal IDs so we can check WSL backend availability.
+    #[cfg(windows)]
+    for project in &mut data.projects {
+        if project.default_shell.is_none() {
+            if let Some((distro, _)) = crate::terminal::shell_config::parse_wsl_unc_path(&project.path) {
+                project.default_shell = Some(crate::terminal::shell_config::ShellType::Wsl {
+                    distro: Some(distro),
+                });
+            }
+        }
+    }
+
+    // Optionally clear terminal IDs (on app restart without session persistence).
+    // On Windows, WSL projects may have their own session backend (dtach/tmux/screen)
+    // even though the host has none — preserve their terminal IDs for reconnection.
     if clear_terminal_ids {
         for project in &mut data.projects {
+            #[cfg(windows)]
+            {
+                use crate::terminal::shell_config::ShellType;
+                if let Some(ShellType::Wsl { distro }) = &project.default_shell {
+                    let wsl_backend = crate::terminal::session_backend::resolve_for_wsl(
+                        distro.as_deref(),
+                        backend_preference,
+                    );
+                    if wsl_backend.supports_persistence() {
+                        // WSL project with session backend — keep terminal IDs for reconnection
+                        continue;
+                    }
+                }
+            }
             if let Some(ref mut layout) = project.layout {
                 layout.clear_terminal_ids();
             }
@@ -146,18 +180,6 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
     for project in &data.projects {
         if !data.project_order.contains(&project.id) && !folder_project_ids.contains(&project.id) {
             data.project_order.push(project.id.clone());
-        }
-    }
-
-    // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set
-    #[cfg(windows)]
-    for project in &mut data.projects {
-        if project.default_shell.is_none() {
-            if let Some((distro, _)) = crate::terminal::shell_config::parse_wsl_unc_path(&project.path) {
-                project.default_shell = Some(crate::terminal::shell_config::ShellType::Wsl {
-                    distro: Some(distro),
-                });
-            }
         }
     }
 
@@ -229,7 +251,7 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
-        validate_workspace_data(&mut data, clear_ids);
+        validate_workspace_data(&mut data, clear_ids, backend);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
@@ -414,7 +436,7 @@ mod tests {
             vec!["p1"], // p2 is orphaned
             vec![],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
         assert!(data.project_order.contains(&"p2".to_string()));
     }
 
@@ -431,7 +453,7 @@ mod tests {
                 folder_color: FolderColor::default(),
             }],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
         assert_eq!(data.folders[0].project_ids, vec!["p1".to_string()]);
     }
 
@@ -442,7 +464,7 @@ mod tests {
             vec!["nonexistent_folder", "p1"],
             vec![],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
         assert!(!data.project_order.contains(&"nonexistent_folder".to_string()));
         assert!(data.project_order.contains(&"p1".to_string()));
     }
@@ -459,7 +481,7 @@ mod tests {
         });
         project.service_terminals.insert("web".to_string(), "svc-term-1".to_string());
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
-        validate_workspace_data(&mut data, true);
+        validate_workspace_data(&mut data, true, SessionBackend::None);
 
         let layout = data.projects[0].layout.as_ref().unwrap();
         match layout {
@@ -483,7 +505,7 @@ mod tests {
             children: vec![LayoutNode::new_terminal()],
         });
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         assert!(matches!(data.projects[0].layout, Some(LayoutNode::Terminal { .. })));
     }
@@ -504,7 +526,7 @@ mod tests {
         // Note: f1 is in folders but not in project_order
         data.project_order.push("f1".to_string());
 
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         // bad_folder should be removed (not a valid project or folder)
         assert!(!data.project_order.contains(&"bad_folder".to_string()));
@@ -598,7 +620,7 @@ mod tests {
         project.hidden_terminals.insert("t2".to_string(), true);
 
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         assert!(data.projects[0].terminal_names.contains_key("t1"));
         assert!(!data.projects[0].terminal_names.contains_key("t2"));
@@ -614,7 +636,7 @@ mod tests {
         project.terminal_names.insert("t2".to_string(), "Term 2".to_string());
 
         let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         assert!(data.projects[0].terminal_names.is_empty());
     }
