@@ -1,9 +1,13 @@
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::process::Command;
+#[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
+use std::sync::Mutex;
 
 /// Backend for persistent terminal sessions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SessionBackend {
     /// No persistence - direct shell
     None,
@@ -152,7 +156,6 @@ impl ResolvedBackend {
     /// Build the command to create or attach to a session
     /// Returns (program, args) tuple
     /// When `command` is Some, the session runs that command instead of the default shell.
-    #[allow(dead_code)] // Used only on Unix
     pub fn build_command(&self, session_name: &str, cwd: &str, command: Option<&str>) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
@@ -296,8 +299,183 @@ impl ResolvedBackend {
     }
 }
 
+/// Resolve a session backend for a specific WSL distro.
+/// Runs `wsl.exe -d <distro> -- sh -c "command -v <tool>"` to check availability.
+/// Results are cached per (distro, preference) pair so detection runs at most once.
+#[cfg(windows)]
+pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> ResolvedBackend {
+    use std::sync::LazyLock;
+
+    static CACHE: LazyLock<Mutex<HashMap<(Option<String>, SessionBackend), ResolvedBackend>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let key = (distro.map(|s| s.to_string()), preference);
+    if let Some(cached) = CACHE.lock().unwrap().get(&key) {
+        return *cached;
+    }
+
+    let result = match preference {
+        SessionBackend::None => ResolvedBackend::None,
+        SessionBackend::Tmux => {
+            if is_wsl_tool_available(distro, "tmux") {
+                ResolvedBackend::Tmux
+            } else {
+                log::warn!("tmux requested but not available in WSL, falling back to none");
+                ResolvedBackend::None
+            }
+        }
+        SessionBackend::Screen => {
+            if is_wsl_tool_available(distro, "screen") {
+                ResolvedBackend::Screen
+            } else {
+                log::warn!("screen requested but not available in WSL, falling back to none");
+                ResolvedBackend::None
+            }
+        }
+        SessionBackend::Dtach => {
+            if is_wsl_tool_available(distro, "dtach") {
+                ResolvedBackend::Dtach
+            } else {
+                log::warn!("dtach requested but not available in WSL, falling back to none");
+                ResolvedBackend::None
+            }
+        }
+        SessionBackend::Auto => {
+            if is_wsl_tool_available(distro, "dtach") {
+                log::info!("Auto-detected dtach in WSL for session persistence");
+                ResolvedBackend::Dtach
+            } else if is_wsl_tool_available(distro, "tmux") {
+                log::info!("Auto-detected tmux in WSL for session persistence");
+                ResolvedBackend::Tmux
+            } else if is_wsl_tool_available(distro, "screen") {
+                log::info!("Auto-detected screen in WSL for session persistence");
+                ResolvedBackend::Screen
+            } else {
+                log::info!("No session backend available in WSL");
+                ResolvedBackend::None
+            }
+        }
+    };
+
+    CACHE.lock().unwrap().insert(key, result);
+    result
+}
+
+/// Check if a tool is available inside a WSL distro using `command -v`.
+#[cfg(windows)]
+fn is_wsl_tool_available(distro: Option<&str>, tool: &str) -> bool {
+    let mut cmd = crate::process::command("wsl.exe");
+    if let Some(d) = distro {
+        cmd.args(["-d", d]);
+    }
+    cmd.args(["--", "sh", "-c", &format!("command -v {}", tool)]);
+    crate::process::safe_output(&mut cmd)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// WSL-native socket directory for dtach sessions (lives inside WSL, not on Windows host).
+/// Uses a fixed path since we can't read XDG_RUNTIME_DIR from outside WSL.
+#[cfg(windows)]
+const WSL_DTACH_SOCKET_DIR: &str = "/tmp/okena-dtach";
+
+/// Get the WSL-native socket path for a dtach session.
+#[cfg(windows)]
+fn get_wsl_dtach_socket_path(session_name: &str) -> String {
+    format!("{}/{}.sock", WSL_DTACH_SOCKET_DIR, session_name)
+}
+
+impl ResolvedBackend {
+    /// Build a session command wrapped through `wsl.exe` for running inside WSL.
+    /// Returns `("wsl.exe", [args...])` or `None` for `ResolvedBackend::None`.
+    ///
+    /// Unlike `build_command()` (which runs on the host), this constructs commands
+    /// that execute inside WSL. Key differences:
+    /// - dtach socket paths use WSL-native `/tmp/` instead of Windows temp dir
+    /// - Default shell uses `"$SHELL"` (resolved inside WSL) instead of host env var
+    #[cfg(windows)]
+    pub fn build_wsl_session_command(
+        &self,
+        distro: Option<&str>,
+        session_name: &str,
+        wsl_cwd: &str,
+        command: Option<&str>,
+    ) -> Option<(String, Vec<String>)> {
+        let inner_cmd = match self {
+            Self::None => return None,
+            Self::Tmux => {
+                // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
+                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command)?;
+                inner_args.last()?.to_string()
+            }
+            Self::Screen => {
+                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command)?;
+                let mut parts = vec!["screen".to_string()];
+                parts.extend(inner_args.iter().map(|a| shell_escape(a)));
+                parts.join(" ")
+            }
+            Self::Dtach => {
+                // Build dtach command with WSL-native socket path and $SHELL
+                // (can't delegate to build_command — it uses Windows temp dir and host $SHELL)
+                let socket_path = get_wsl_dtach_socket_path(session_name);
+                let program = match command {
+                    Some(cmd) => format!("sh -c {}", shell_escape(cmd)),
+                    // Use $SHELL (resolved inside WSL) — not shell_escape'd so it expands
+                    None => "\"$SHELL\"".to_string(),
+                };
+                format!(
+                    "mkdir -p {} && cd {} && exec dtach -A {} -E -r winch {}",
+                    shell_escape(WSL_DTACH_SOCKET_DIR),
+                    shell_escape(wsl_cwd),
+                    shell_escape(&socket_path),
+                    program
+                )
+            }
+        };
+
+        let mut args = Vec::new();
+        if let Some(d) = distro {
+            args.push("-d".to_string());
+            args.push(d.to_string());
+        }
+        args.extend(["--".to_string(), "sh".to_string(), "-c".to_string(), inner_cmd]);
+
+        Some(("wsl.exe".to_string(), args))
+    }
+}
+
+/// Kill a session backend running inside WSL.
+#[cfg(windows)]
+pub fn kill_wsl_session(backend: ResolvedBackend, distro: Option<&str>, session_name: &str) {
+    let kill_cmd = match backend {
+        ResolvedBackend::None => return,
+        ResolvedBackend::Tmux => {
+            format!("tmux kill-session -t {}", shell_escape(session_name))
+        }
+        ResolvedBackend::Screen => {
+            format!("screen -S {} -X quit", shell_escape(session_name))
+        }
+        ResolvedBackend::Dtach => {
+            let socket = get_wsl_dtach_socket_path(session_name);
+            format!(
+                "lsof -t {} 2>/dev/null | xargs -r kill; rm -f {}",
+                shell_escape(&socket),
+                shell_escape(&socket)
+            )
+        }
+    };
+
+    let mut cmd = crate::process::command("wsl.exe");
+    if let Some(d) = distro {
+        cmd.args(["-d", d]);
+    }
+    cmd.args(["--", "sh", "-c", &kill_cmd]);
+    let _ = crate::process::safe_output(&mut cmd);
+    log::debug!("Killed WSL session {} ({:?})", session_name, backend);
+}
+
 /// Escape a string for safe use in shell commands
-#[allow(dead_code)] // Used only on Unix for tmux/screen/dtach commands
+#[allow(dead_code)]
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any existing single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -560,5 +738,83 @@ mod tests {
         let backend = ResolvedBackend::None;
         assert!(backend.build_command("test-session", "/home/user", None).is_none());
         assert!(backend.build_command("test-session", "/home/user", Some("echo hi")).is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_dtach() {
+        let backend = ResolvedBackend::Dtach;
+        let result = backend.build_wsl_session_command(
+            Some("Ubuntu"),
+            "tm-12345678",
+            "/home/user/project",
+            None,
+        );
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "wsl.exe");
+        assert!(args.contains(&"-d".to_string()));
+        assert!(args.contains(&"Ubuntu".to_string()));
+        assert!(args.contains(&"--".to_string()));
+        assert!(args.contains(&"sh".to_string()));
+        assert!(args.contains(&"-c".to_string()));
+        // The inner command should contain dtach with WSL-native socket path
+        let inner_cmd = args.last().unwrap();
+        assert!(inner_cmd.contains("dtach -A"), "inner cmd: {}", inner_cmd);
+        assert!(inner_cmd.contains("-E -r winch"), "inner cmd: {}", inner_cmd);
+        // Must use WSL-native socket path, not Windows temp dir
+        assert!(inner_cmd.contains("/tmp/okena-dtach/"), "socket path should be WSL-native: {}", inner_cmd);
+        // Must use $SHELL (resolved inside WSL), not /bin/sh
+        assert!(inner_cmd.contains("\"$SHELL\""), "should use $SHELL not /bin/sh: {}", inner_cmd);
+        assert!(!inner_cmd.contains("/bin/sh"), "should not contain /bin/sh: {}", inner_cmd);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_tmux() {
+        let backend = ResolvedBackend::Tmux;
+        let result = backend.build_wsl_session_command(
+            Some("Ubuntu"),
+            "tm-12345678",
+            "/home/user/project",
+            None,
+        );
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "wsl.exe");
+        let inner_cmd = args.last().unwrap();
+        assert!(inner_cmd.contains("tmux new-session -A"), "inner cmd: {}", inner_cmd);
+        assert!(inner_cmd.contains("set status off"), "inner cmd: {}", inner_cmd);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_none() {
+        let backend = ResolvedBackend::None;
+        let result = backend.build_wsl_session_command(
+            Some("Ubuntu"),
+            "tm-12345678",
+            "/home/user/project",
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_build_wsl_session_command_default_distro() {
+        let backend = ResolvedBackend::Tmux;
+        let result = backend.build_wsl_session_command(
+            None, // default distro
+            "tm-12345678",
+            "/home/user/project",
+            None,
+        );
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "wsl.exe");
+        // Should NOT contain -d flag when distro is None
+        assert!(!args.contains(&"-d".to_string()));
+        assert!(args.contains(&"--".to_string()));
     }
 }

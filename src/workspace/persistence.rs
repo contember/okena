@@ -149,6 +149,18 @@ pub(crate) fn validate_workspace_data(data: &mut WorkspaceData, clear_terminal_i
         }
     }
 
+    // Auto-detect WSL default shell for projects with WSL UNC paths that don't have it set
+    #[cfg(windows)]
+    for project in &mut data.projects {
+        if project.default_shell.is_none() {
+            if let Some((distro, _)) = crate::terminal::shell_config::parse_wsl_unc_path(&project.path) {
+                project.default_shell = Some(crate::terminal::shell_config::ShellType::Wsl {
+                    distro: Some(distro),
+                });
+            }
+        }
+    }
+
     // Folder consistency checks
     {
         let valid_project_ids: std::collections::HashSet<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();

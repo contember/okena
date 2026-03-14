@@ -69,6 +69,12 @@ struct PtyHandle {
     reader_handle: Option<JoinHandle<()>>,
     writer_handle: Option<JoinHandle<()>>,
     shutdown: Arc<PtyShutdownState>,
+    /// WSL distro name if this terminal runs inside WSL (Windows only)
+    #[cfg(windows)]
+    wsl_distro: Option<String>,
+    /// Resolved session backend for WSL terminals (Windows only)
+    #[cfg(windows)]
+    wsl_backend: Option<ResolvedBackend>,
 }
 
 /// Manages all PTY processes
@@ -77,6 +83,9 @@ pub struct PtyManager {
     event_tx: Sender<PtyEvent>,
     /// Session backend for persistence (tmux/screen/none)
     session_backend: ResolvedBackend,
+    /// Raw user preference (needed for WSL per-terminal resolution)
+    #[cfg(windows)]
+    session_backend_preference: SessionBackend,
 }
 
 impl PtyManager {
@@ -94,6 +103,8 @@ impl PtyManager {
                 terminals: Arc::new(Mutex::new(HashMap::new())),
                 event_tx: tx,
                 session_backend,
+                #[cfg(windows)]
+                session_backend_preference: backend,
             },
             rx,
         )
@@ -156,7 +167,10 @@ impl PtyManager {
         })?;
 
         // Build command based on session backend and shell config
+        #[cfg(unix)]
         let cmd = self.build_terminal_command(terminal_id, cwd, shell);
+        #[cfg(windows)]
+        let (cmd, wsl_distro, wsl_backend) = self.build_terminal_command(terminal_id, cwd, shell);
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
@@ -223,65 +237,118 @@ impl PtyManager {
                 reader_handle: Some(reader_handle),
                 writer_handle: Some(writer_handle),
                 shutdown,
+                #[cfg(windows)]
+                wsl_distro,
+                #[cfg(windows)]
+                wsl_backend,
             },
         );
 
         Ok(())
     }
 
-    /// Build the command to run in the terminal
-    #[allow(unused_variables)] // terminal_id used only on Unix for session backend
+    /// Build the command to run in the terminal.
+    /// On Unix, returns just the CommandBuilder.
+    /// On Windows, also returns WSL distro/backend info for session persistence.
+    #[cfg(unix)]
     fn build_terminal_command(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> CommandBuilder {
-        // On Unix, if session backend is active, use it for persistence
-        // Session backends (tmux/screen) are not available on Windows
-        #[cfg(unix)]
-        let mut cmd = {
-            // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
-            // so it can be passed to the session backend
-            let custom_command = match shell {
-                Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
-                    Some(args[1].as_str())
-                }
-                _ => None,
-            };
+        // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
+        // so it can be passed to the session backend
+        let custom_command = match shell {
+            Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
+                Some(args[1].as_str())
+            }
+            _ => None,
+        };
 
-            if let Some((program, args)) = self
-                .session_backend
-                .build_command(&self.session_backend.session_name(terminal_id), cwd, custom_command)
-            {
-                let mut cmd = CommandBuilder::new(program);
-                for arg in args {
-                    cmd.arg(arg);
-                }
-                // For screen, we need to set cwd separately as it doesn't have -c flag
-                if matches!(self.session_backend, ResolvedBackend::Screen) {
+        let mut cmd = if let Some((program, args)) = self
+            .session_backend
+            .build_command(&self.session_backend.session_name(terminal_id), cwd, custom_command)
+        {
+            let mut cmd = CommandBuilder::new(program);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            // For screen, we need to set cwd separately as it doesn't have -c flag
+            if matches!(self.session_backend, ResolvedBackend::Screen) {
+                cmd.cwd(cwd);
+            }
+            cmd
+        } else {
+            // No session backend - use shell config or default
+            match shell {
+                Some(shell_type) => shell_type.build_command(cwd),
+                None => {
+                    let mut cmd = CommandBuilder::new_default_prog();
                     cmd.cwd(cwd);
-                }
-                cmd
-            } else {
-                // No session backend - use shell config or default
-                match shell {
-                    Some(shell_type) => shell_type.build_command(cwd),
-                    None => {
-                        let mut cmd = CommandBuilder::new_default_prog();
-                        cmd.cwd(cwd);
-                        cmd
-                    }
+                    cmd
                 }
             }
         };
 
-        // On Windows, always use shell config (no session backend support)
-        #[cfg(windows)]
-        let mut cmd = match shell {
-            Some(shell_type) => shell_type.build_command(cwd),
+        Self::set_terminal_env(&mut cmd);
+        cmd
+    }
+
+    /// Build the command to run in the terminal (Windows version).
+    /// Returns (cmd, wsl_distro, wsl_backend) for WSL session tracking.
+    #[cfg(windows)]
+    fn build_terminal_command(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        shell: Option<&ShellType>,
+    ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
+        use crate::terminal::session_backend::resolve_for_wsl;
+        use crate::terminal::shell_config::windows_path_to_wsl;
+
+        // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
+        let custom_command = match shell {
+            Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
+                Some(args[1].as_str())
+            }
+            _ => None,
+        };
+
+        let (mut cmd, wsl_distro, wsl_backend) = match shell {
+            Some(ShellType::Wsl { distro }) => {
+                let wsl_backend = resolve_for_wsl(distro.as_deref(), self.session_backend_preference);
+                let session_name = wsl_backend.session_name(terminal_id);
+                let wsl_cwd = windows_path_to_wsl(cwd);
+
+                if let Some((program, args)) = wsl_backend.build_wsl_session_command(
+                    distro.as_deref(),
+                    &session_name,
+                    &wsl_cwd,
+                    custom_command,
+                ) {
+                    let mut cmd = CommandBuilder::new(program);
+                    for arg in args {
+                        cmd.arg(arg);
+                    }
+                    (cmd, distro.clone(), Some(wsl_backend))
+                } else {
+                    (
+                        ShellType::Wsl { distro: distro.clone() }.build_command(cwd),
+                        distro.clone(),
+                        None,
+                    )
+                }
+            }
+            Some(shell_type) => (shell_type.build_command(cwd), None, None),
             None => {
                 let mut cmd = CommandBuilder::new_default_prog();
                 cmd.cwd(cwd);
-                cmd
+                (cmd, None, None)
             }
         };
 
+        Self::set_terminal_env(&mut cmd);
+        (cmd, wsl_distro, wsl_backend)
+    }
+
+    /// Set common terminal environment variables on a command.
+    fn set_terminal_env(cmd: &mut CommandBuilder) {
         // Set TERM environment variable - required for proper terminal operation
         // especially when running as a macOS app bundle which doesn't inherit shell environment
         cmd.env("TERM", "xterm-256color");
@@ -300,8 +367,6 @@ impl PtyManager {
         // App bundles start with minimal PATH and won't find tmux/screen otherwise
         #[cfg(target_os = "macos")]
         cmd.env("PATH", get_extended_path());
-
-        cmd
     }
 
     /// Read loop for PTY output
@@ -424,12 +489,31 @@ impl PtyManager {
         let session_name = session_backend.session_name(terminal_id);
         let short_id = terminal_id[..8.min(terminal_id.len())].to_string();
 
+        // Read WSL info before moving the handle
+        #[cfg(windows)]
+        let wsl_distro = handle.as_ref().and_then(|h| h.wsl_distro.clone());
+        #[cfg(windows)]
+        let wsl_backend = handle.as_ref().and_then(|h| h.wsl_backend);
+
         // Move blocking cleanup (thread joins, subprocess calls) to a background thread
         if let Err(e) = std::thread::Builder::new()
             .name(format!("pty-shutdown-{}", short_id))
             .spawn(move || {
                 if let Some(handle) = handle {
                     Self::shutdown_handle(handle);
+                }
+                // On Windows, if this was a WSL terminal with a session backend,
+                // kill the session inside WSL instead of on the host
+                #[cfg(windows)]
+                {
+                    if let Some(backend) = wsl_backend {
+                        crate::terminal::session_backend::kill_wsl_session(
+                            backend,
+                            wsl_distro.as_deref(),
+                            &session_name,
+                        );
+                        return;
+                    }
                 }
                 session_backend.kill_session(&session_name);
             })
@@ -570,6 +654,56 @@ impl PtyManager {
     /// Capture the terminal buffer to a file (only works with tmux backend)
     /// Returns the path to the captured file, or None if not using tmux
     pub fn capture_buffer(&self, terminal_id: &str) -> Option<std::path::PathBuf> {
+        // Check for WSL tmux first (Windows only)
+        #[cfg(windows)]
+        {
+            let terminals = self.terminals.lock();
+            if let Some(handle) = terminals.get(terminal_id) {
+                if matches!(handle.wsl_backend, Some(ResolvedBackend::Tmux)) {
+                    let session_name = ResolvedBackend::Tmux.session_name(terminal_id);
+                    let output_path = std::env::temp_dir().join(format!(
+                        "terminal-{}.txt",
+                        &terminal_id[..8.min(terminal_id.len())]
+                    ));
+                    let distro = handle.wsl_distro.clone();
+                    drop(terminals); // Release lock before subprocess call
+
+                    let mut cmd = crate::process::command("wsl.exe");
+                    if let Some(d) = &distro {
+                        cmd.args(["-d", d]);
+                    }
+                    cmd.args([
+                        "--", "tmux", "capture-pane", "-t", &session_name, "-p", "-S", "-",
+                    ]);
+                    return match crate::process::safe_output(&mut cmd) {
+                        Ok(output) if output.status.success() => {
+                            match std::fs::write(&output_path, &output.stdout) {
+                                Ok(_) => {
+                                    log::info!("Captured WSL terminal buffer to {:?}", output_path);
+                                    Some(output_path)
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to write capture file: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                        Ok(output) => {
+                            log::error!(
+                                "WSL tmux capture-pane failed: {}",
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            log::error!("Failed to run WSL tmux capture-pane: {}", e);
+                            None
+                        }
+                    };
+                }
+            }
+        }
+
         if !matches!(self.session_backend, ResolvedBackend::Tmux) {
             log::warn!("Buffer capture only supported with tmux backend");
             return None;
