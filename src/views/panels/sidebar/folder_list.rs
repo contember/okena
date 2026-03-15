@@ -421,21 +421,21 @@ impl Sidebar {
             })
             .child(
                 div()
-                    .when(!project.is_visible, |d| d.opacity(0.0))
+                    .when(!project.show_in_overview, |d| d.opacity(0.0))
                     .group_hover("folder-project-item", |s| s.opacity(1.0))
                     .child({
-                        let is_visible = project.is_visible;
-                        let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                        let show_in_overview = project.show_in_overview;
+                        let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
                         sidebar_visibility_toggle(
                             ElementId::Name(format!("fp-visibility-{}", project.id).into()),
-                            is_visible,
+                            show_in_overview,
                             &t,
                         )
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             move |this, _, _window, cx| {
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_visibility(&project_id, cx);
+                                    ws.toggle_project_overview_visibility(&project_id, cx);
                                 });
                                 cx.stop_propagation();
                             }

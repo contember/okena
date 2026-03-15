@@ -217,7 +217,7 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
 /// Caller chains `.on_click()` to toggle visibility.
 pub fn sidebar_visibility_toggle(
     id: impl Into<ElementId>,
-    is_visible: bool,
+    show_in_overview: bool,
     t: &ThemeColors,
 ) -> Stateful<Div> {
     div()
@@ -233,13 +233,13 @@ pub fn sidebar_visibility_toggle(
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             svg()
-                .path(if is_visible {
+                .path(if show_in_overview {
                     "icons/eye.svg"
                 } else {
                     "icons/eye-off.svg"
                 })
                 .size(px(12.0))
-                .text_color(if is_visible {
+                .text_color(if show_in_overview {
                     rgb(t.term_blue)
                 } else {
                     rgb(t.text_muted)

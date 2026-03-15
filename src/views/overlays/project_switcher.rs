@@ -2,7 +2,7 @@
 //!
 //! Provides keyboard-driven project switching with:
 //! - Enter: Focus the selected project
-//! - Space: Toggle project visibility
+//! - Space: Toggle project overview visibility
 //! - Type to filter projects
 
 use crate::keybindings::Cancel;
@@ -89,7 +89,7 @@ impl ProjectSwitcher {
         let is_selected = display_index == self.state.selected_index;
         let name = project.name.clone();
         let path = project.path.clone();
-        let is_visible = project.is_visible;
+        let show_in_overview = project.show_in_overview;
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
 
@@ -168,13 +168,13 @@ impl ProjectSwitcher {
                     .justify_center()
                     .child(
                         svg()
-                            .path(if is_visible {
+                            .path(if show_in_overview {
                                 "icons/eye.svg"
                             } else {
                                 "icons/eye-off.svg"
                             })
                             .size(px(14.0))
-                            .text_color(if is_visible {
+                            .text_color(if show_in_overview {
                                 rgb(t.text_secondary)
                             } else {
                                 rgb(t.text_muted)

@@ -113,8 +113,8 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub path: String,
-    #[serde(default = "default_true")]
-    pub is_visible: bool,
+    #[serde(default = "default_true", alias = "is_visible")]
+    pub show_in_overview: bool,
     /// Layout tree for terminal panes. None means project is a bookmark without terminals.
     pub layout: Option<LayoutNode>,
     #[serde(default)]
@@ -592,14 +592,14 @@ impl Workspace {
                 // since they live in project_order rather than folder.project_ids)
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
+                        if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
                             result.push(p);
                         }
                         if folder_filter.is_some() {
                             for wt in &self.data.projects {
                                 if let Some(ref wi) = wt.worktree_info {
                                     if wi.parent_project_id == *pid {
-                                        if effective_focused.map_or(wt.is_visible, |fid| is_focused(wt, fid)) {
+                                        if effective_focused.map_or(wt.show_in_overview, |fid| is_focused(wt, fid)) {
                                             result.push(wt);
                                             added_via_folder.insert(&wt.id);
                                         }
@@ -622,7 +622,7 @@ impl Workspace {
                     }
                     continue;
                 }
-                if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
+                if effective_focused.map_or(p.show_in_overview, |fid| is_focused(p, fid)) {
                     result.push(p);
                 }
             }
@@ -1407,7 +1407,7 @@ mod tests {
             id: "test-id".to_string(),
             name: "test".to_string(),
             path: path.to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: None,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -2289,7 +2289,7 @@ mod workspace_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: visible,
+            show_in_overview: visible,
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
                 minimized: false,
@@ -2660,7 +2660,7 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
                 minimized: false,
@@ -2788,8 +2788,8 @@ mod gpui_tests {
         let mut p1 = make_project("p1");
         let p2 = make_project("p2");
         let mut p3 = make_project("p3");
-        p1.is_visible = false;
-        p3.is_visible = false;
+        p1.show_in_overview = false;
+        p3.show_in_overview = false;
         let data = make_workspace_data(vec![p1, p2, p3], vec!["p1", "p2", "p3"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -2801,7 +2801,7 @@ mod gpui_tests {
 
         // After toggling visibility
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_visibility("p1", cx);
+            ws.toggle_project_overview_visibility("p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -2877,9 +2877,9 @@ mod gpui_tests {
 
         let local = make_project("local1");
         let mut remote1 = make_remote_project("remote:conn1:p1", "conn1");
-        remote1.is_visible = true;
+        remote1.show_in_overview = true;
         let mut remote2 = make_remote_project("remote:conn1:p2", "conn1");
-        remote2.is_visible = false; // hidden remote project
+        remote2.show_in_overview = false; // hidden remote project
 
         let mut data = make_workspace_data(
             vec![local, remote1, remote2],

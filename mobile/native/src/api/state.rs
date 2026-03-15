@@ -11,7 +11,7 @@ pub struct ProjectInfo {
     pub id: String,
     pub name: String,
     pub path: String,
-    pub is_visible: bool,
+    pub show_in_overview: bool,
     pub terminal_ids: Vec<String>,
     pub terminal_names: HashMap<String, String>,
 }
@@ -40,7 +40,7 @@ pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 path: p.path.clone(),
-                is_visible: p.is_visible,
+                show_in_overview: p.show_in_overview,
                 terminal_ids,
                 terminal_names: p.terminal_names.clone(),
             }

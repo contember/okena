@@ -260,7 +260,7 @@ pub enum OverlayManagerEvent {
     /// Project switcher: Focus a specific project
     FocusProject(String),
 
-    /// Project switcher: Toggle project visibility
+    /// Project switcher: Toggle project overview visibility
     ToggleProjectVisibility(String),
 
     /// Remote connect dialog: connection paired and ready

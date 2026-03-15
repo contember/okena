@@ -1258,7 +1258,7 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
                 minimized: false,
@@ -1506,7 +1506,7 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(layout),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

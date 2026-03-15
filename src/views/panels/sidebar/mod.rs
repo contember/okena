@@ -1146,7 +1146,7 @@ pub(super) struct SidebarHookInfo {
 pub(super) struct SidebarProjectInfo {
     pub id: String,
     pub name: String,
-    pub is_visible: bool,
+    pub show_in_overview: bool,
     pub folder_color: FolderColor,
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
@@ -1175,7 +1175,7 @@ impl SidebarProjectInfo {
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
-            is_visible: project.is_visible,
+            show_in_overview: project.show_in_overview,
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout

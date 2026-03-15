@@ -154,7 +154,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             path: "/tmp".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout,
             terminal_names: Default::default(),
             git_status: None,

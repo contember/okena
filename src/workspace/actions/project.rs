@@ -22,13 +22,13 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Toggle project visibility (also toggles all worktree children)
-    pub fn toggle_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let new_visible = self.project(project_id).map(|p| !p.is_visible);
+    /// Toggle project overview visibility (also toggles all worktree children)
+    pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let new_visible = self.project(project_id).map(|p| !p.show_in_overview);
         let Some(new_visible) = new_visible else { return };
 
         self.with_project(project_id, cx, |project| {
-            project.is_visible = new_visible;
+            project.show_in_overview = new_visible;
             true
         });
 
@@ -39,7 +39,7 @@ impl Workspace {
             .collect();
         for child_id in child_ids {
             self.with_project(&child_id, cx, |project| {
-                project.is_visible = new_visible;
+                project.show_in_overview = new_visible;
                 true
             });
         }
@@ -64,7 +64,7 @@ impl Workspace {
             id: id.clone(),
             name: name.clone(),
             path: path.clone(),
-            is_visible: true,
+            show_in_overview: true,
             layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -303,7 +303,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: new_layout,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -381,7 +381,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: wt_path.to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -477,7 +477,7 @@ mod tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -606,7 +606,7 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

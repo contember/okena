@@ -148,7 +148,7 @@ impl HeadlessApp {
                     .data()
                     .projects
                     .iter()
-                    .filter(|p| !p.is_remote && p.is_visible)
+                    .filter(|p| !p.is_remote && p.show_in_overview)
                     .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
                     .collect();
 

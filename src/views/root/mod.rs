@@ -341,14 +341,14 @@ impl RootView {
                             existing.remote_services = remote_services;
                             existing.remote_host = remote_host;
                             existing.remote_git_status = api_project.git_status.clone();
-                            // Don't overwrite is_visible — it's client-side state
+                            // Don't overwrite show_in_overview — it's client-side state
                             // (the user may have toggled visibility locally).
                         } else {
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
                                 name: api_project.name.clone(),
                                 path: api_project.path.clone(),
-                                is_visible: api_project.is_visible,
+                                show_in_overview: api_project.show_in_overview,
                                 layout,
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
