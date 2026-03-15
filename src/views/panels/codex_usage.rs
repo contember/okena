@@ -57,17 +57,31 @@ pub struct CodexUsage {
 }
 
 /// Read Codex OAuth credentials from ~/.codex/auth.json
-fn read_codex_auth() -> Option<(String, String)> {
+fn read_codex_auth() -> Option<CodexAuth> {
     let home = dirs::home_dir()?;
-    let content = std::fs::read_to_string(home.join(".codex/auth.json")).ok()?;
+    let path = home.join(".codex/auth.json");
+    let content = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let refresh_token = v["tokens"]["refresh_token"].as_str()?.to_string();
-    let account_id = v["tokens"]["account_id"].as_str()?.to_string();
-    Some((refresh_token, account_id))
+    let tokens = &v["tokens"];
+    Some(CodexAuth {
+        access_token: tokens["access_token"].as_str()?.to_string(),
+        refresh_token: tokens["refresh_token"].as_str()?.to_string(),
+        account_id: tokens["account_id"].as_str()?.to_string(),
+        auth_path: path,
+    })
 }
 
-/// Refresh the OAuth access token using the refresh token
-fn refresh_access_token(refresh_token: &str) -> Option<String> {
+struct CodexAuth {
+    access_token: String,
+    refresh_token: String,
+    account_id: String,
+    auth_path: std::path::PathBuf,
+}
+
+/// Refresh the OAuth access token using the refresh token.
+/// Returns the new access token and persists new tokens back to auth.json
+/// (OpenAI uses rotating refresh tokens — the old one is invalidated on use).
+fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -78,14 +92,38 @@ fn refresh_access_token(refresh_token: &str) -> Option<String> {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(format!(
             "grant_type=refresh_token&client_id={}&refresh_token={}",
-            CODEX_CLIENT_ID, refresh_token
+            CODEX_CLIENT_ID, auth.refresh_token
         ))
         .send()
         .ok()?
         .json()
         .ok()?;
 
-    resp["access_token"].as_str().map(String::from)
+    let new_access = resp["access_token"].as_str()?;
+    let new_refresh = resp["refresh_token"].as_str();
+
+    // Persist new tokens back to auth.json so the refresh token stays valid
+    if let Ok(content) = std::fs::read_to_string(&auth.auth_path) {
+        if let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
+                tokens.insert(
+                    "access_token".to_string(),
+                    serde_json::Value::String(new_access.to_string()),
+                );
+                if let Some(rt) = new_refresh {
+                    tokens.insert(
+                        "refresh_token".to_string(),
+                        serde_json::Value::String(rt.to_string()),
+                    );
+                }
+            }
+            if let Ok(updated) = serde_json::to_string_pretty(&file_json) {
+                let _ = std::fs::write(&auth.auth_path, updated);
+            }
+        }
+    }
+
+    Some(new_access.to_string())
 }
 
 fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
@@ -115,9 +153,27 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
     })
 }
 
+fn try_fetch_with_token(
+    client: &reqwest::blocking::Client,
+    access_token: &str,
+    account_id: &str,
+) -> Result<reqwest::blocking::Response, Option<u16>> {
+    let resp = client
+        .get("https://chatgpt.com/backend-api/codex/usage")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("chatgpt-account-id", account_id)
+        .send()
+        .map_err(|_| None)?;
+
+    if resp.status().is_success() {
+        Ok(resp)
+    } else {
+        Err(Some(resp.status().as_u16()))
+    }
+}
+
 fn fetch_usage() -> Option<UsageData> {
-    let (refresh_token, account_id) = read_codex_auth()?;
-    let access_token = refresh_access_token(&refresh_token)?;
+    let auth = read_codex_auth()?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -125,17 +181,24 @@ fn fetch_usage() -> Option<UsageData> {
         .build()
         .ok()?;
 
-    let resp = client
-        .get("https://chatgpt.com/backend-api/codex/usage")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("chatgpt-account-id", &account_id)
-        .send()
-        .ok()?;
-
-    if !resp.status().is_success() {
-        log::warn!("[codex-usage] API returned {}", resp.status());
-        return None;
-    }
+    // Try cached access token first, refresh on 401
+    let resp = match try_fetch_with_token(&client, &auth.access_token, &auth.account_id) {
+        Ok(resp) => resp,
+        Err(Some(401)) => {
+            let new_token = refresh_access_token(&auth)?;
+            match try_fetch_with_token(&client, &new_token, &auth.account_id) {
+                Ok(resp) => resp,
+                Err(status) => {
+                    log::warn!("[codex-usage] API returned {:?} after token refresh", status);
+                    return None;
+                }
+            }
+        }
+        Err(status) => {
+            log::warn!("[codex-usage] API returned {:?}", status);
+            return None;
+        }
+    };
 
     let body: serde_json::Value = resp.json().ok()?;
 
