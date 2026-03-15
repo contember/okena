@@ -13,6 +13,11 @@ use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
 
+use super::claude_status::ClaudeStatus;
+use super::claude_usage::ClaudeUsage;
+use super::codex_status::CodexStatus;
+use super::codex_usage::CodexUsage;
+
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -72,9 +77,12 @@ pub struct StatusBar {
     cache: Arc<Mutex<SystemInfoCache>>,
     /// Activate functions cloned from registry (keyed by extension ID).
     activate_fns: Vec<(String, okena_extensions::ActivateFn)>,
-    /// Active extension instances. Dropping an instance deactivates the extension
-    /// (cancels background tasks, releases views).
+    /// Active extension instances.
     active_extensions: HashMap<String, ExtensionInstance>,
+    claude_status: Entity<ClaudeStatus>,
+    claude_usage: Entity<ClaudeUsage>,
+    codex_status: Entity<CodexStatus>,
+    codex_usage: Entity<CodexUsage>,
     sidebar_open: bool,
 }
 
@@ -114,26 +122,30 @@ impl StatusBar {
             })
             .unwrap_or_default();
 
-        // Activate initially enabled extensions
         let enabled = settings_entity(cx).read(cx).settings.enabled_extensions.clone();
         let active_extensions = Self::activate_extensions(&activate_fns, &enabled, cx);
 
-        // Observe settings to sync extensions when enabled_extensions changes
         let settings = settings_entity(cx);
         cx.observe(&settings, |this, entity, cx| {
             let enabled = entity.read(cx).settings.enabled_extensions.clone();
             this.sync_extensions(&enabled, cx);
         }).detach();
 
+        let claude_status = cx.new(|cx| ClaudeStatus::new(cx));
+        let claude_usage = cx.new(|cx| ClaudeUsage::new(cx));
+        let codex_status = cx.new(|cx| CodexStatus::new(cx));
+        let codex_usage = cx.new(|cx| CodexUsage::new(cx));
+
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
         Self {
-            workspace, cache, activate_fns, active_extensions, sidebar_open: true,
+            workspace, cache, activate_fns, active_extensions,
+            claude_status, claude_usage, codex_status, codex_usage,
+            sidebar_open: true,
         }
     }
 
-    /// Activate extensions that are in the enabled set.
     fn activate_extensions(
         activate_fns: &[(String, okena_extensions::ActivateFn)],
         enabled: &HashSet<String>,
@@ -145,20 +157,13 @@ impl StatusBar {
             .collect()
     }
 
-    /// Sync active extensions with the current enabled set.
-    /// Activates newly enabled extensions, deactivates disabled ones
-    /// (dropping the instance cancels background tasks and releases views).
     fn sync_extensions(&mut self, enabled: &HashSet<String>, cx: &mut Context<Self>) {
-        // Deactivate disabled (drop instances → cancel tasks)
         self.active_extensions.retain(|id, _| enabled.contains(id.as_str()));
-
-        // Activate newly enabled
         for (id, activate) in &self.activate_fns {
             if enabled.contains(id.as_str()) && !self.active_extensions.contains_key(id) {
                 self.active_extensions.insert(id.clone(), activate(cx));
             }
         }
-
         cx.notify();
     }
 
@@ -290,7 +295,17 @@ impl Render for StatusBar {
                                     .text_color(rgb(mem_color))
                                     .child(memory_str)
                             )
-                    );
+                    )
+                    // Claude Code status + usage
+                    .when(settings_entity(cx).read(cx).settings.claude_code_integration, |d| {
+                        d.child(self.claude_status.clone())
+                            .child(self.claude_usage.clone())
+                    })
+                    // Codex status + usage
+                    .when(settings_entity(cx).read(cx).settings.codex_integration, |d| {
+                        d.child(self.codex_status.clone())
+                            .child(self.codex_usage.clone())
+                    });
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {

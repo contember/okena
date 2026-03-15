@@ -1904,7 +1904,7 @@ fn scrollbar_thumb(scroll: &ScrollHandle, t: &ThemeColors) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _cx| {
-            let max_y = f32::from(scroll.max_offset().height);
+            let max_y = f32::from(scroll.max_offset().y);
             if max_y < 1.0 {
                 return;
             }

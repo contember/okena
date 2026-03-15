@@ -136,6 +136,9 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    setting_setter!(set_claude_code_integration, claude_code_integration, bool);
+    setting_setter!(set_codex_integration, codex_integration, bool);
+
     /// Set sidebar open state
     pub fn set_sidebar_open(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.sidebar.is_open = value;

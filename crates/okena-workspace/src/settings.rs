@@ -344,13 +344,13 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extension_settings: HashMap<String, serde_json::Value>,
 
-    /// Legacy: Claude Code integration flag. Migrated to enabled_extensions.
-    #[serde(default, skip_serializing)]
-    claude_code_integration: bool,
+    /// Show Claude Code status indicator in the status bar (default: false)
+    #[serde(default)]
+    pub claude_code_integration: bool,
 
-    /// Legacy: Codex integration flag. Migrated to enabled_extensions.
-    #[serde(default, skip_serializing)]
-    codex_integration: bool,
+    /// Show Codex status indicator in the status bar (default: false)
+    #[serde(default)]
+    pub codex_integration: bool,
 
     /// Idle timeout in seconds for "waiting for input" detection (default: 5, 0 = disabled)
     #[serde(default = "default_idle_timeout_secs")]
