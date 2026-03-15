@@ -198,7 +198,7 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, left_padding: f32, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
@@ -223,7 +223,7 @@ impl Sidebar {
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
             .group("worktree-item")
             .h(px(24.0))
-            .pl(px(left_padding))
+            .pl(px(indent))  // Indented under parent project
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -280,7 +280,7 @@ impl Sidebar {
                             .text_color(if project.is_orphan {
                                 rgb(t.warning)
                             } else {
-                                rgb(t.text_secondary)
+                                rgb(t.get_folder_color(project.folder_color))
                             })
                     )
             )
