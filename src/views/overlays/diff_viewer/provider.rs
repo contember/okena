@@ -1,12 +1,15 @@
 //! DiffProvider trait and implementations for local and remote git diffs.
 
 use crate::git::{DiffMode, DiffResult};
+use crate::vcs;
 
 /// Provides git diff data from either local git commands or a remote server.
 pub trait DiffProvider: Send + Sync + 'static {
     fn is_git_repo(&self) -> bool;
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>);
+    /// Detect the VCS backend for this provider's repository.
+    fn vcs_backend(&self) -> Option<vcs::VcsBackend> { None }
 }
 
 /// Local diff provider — wraps existing git functions.
@@ -23,6 +26,10 @@ impl LocalDiffProvider {
 impl DiffProvider for LocalDiffProvider {
     fn is_git_repo(&self) -> bool {
         crate::git::is_git_repo(std::path::Path::new(&self.path))
+    }
+
+    fn vcs_backend(&self) -> Option<vcs::VcsBackend> {
+        vcs::detect_vcs(std::path::Path::new(&self.path))
     }
 
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {

@@ -2,6 +2,8 @@ import type { ApiLayoutNode, ApiProject } from "../api/types";
 import { TerminalPane } from "./TerminalPane";
 import { SplitLayout } from "./SplitLayout";
 import { TabLayout } from "./TabLayout";
+import { KruhPane } from "./KruhPane/KruhPane";
+import { useApp } from "../state/store";
 
 export function TerminalArea({
   layout,
@@ -57,5 +59,20 @@ export function LayoutRenderer({
           {node.children}
         </TabLayout>
       );
+    case "app":
+      return <AppPane appId={node.app_id} appKind={node.app_kind} />;
   }
+}
+
+function AppPane({ appId, appKind }: { appId: string | null; appKind: string }) {
+  const { ws } = useApp();
+  return (
+    <KruhPane
+      appId={appId}
+      appKind={appKind}
+      onAction={(action) => {
+        if (appId) ws.sendAppAction(appId, action);
+      }}
+    />
+  );
 }

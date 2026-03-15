@@ -65,6 +65,7 @@ pub(super) enum SidebarCursorItem {
     GroupHeader { project_id: String, group: GroupKind },
     Terminal { project_id: String, terminal_id: String },
     Service { project_id: String, service_name: String },
+    App { project_id: String, app_id: String },
     #[allow(dead_code)]
     RemoteConnection { connection_id: String },
     #[allow(dead_code)]
@@ -589,7 +590,7 @@ impl Sidebar {
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
-        // Expanded terminal and service items (grouped)
+        // Expanded terminal, service, and app items (grouped)
         if self.expanded_projects.contains(&project.id) {
             self.push_group_cursor_items(&project.id, &project.layout, service_names, cursor_items);
         }
@@ -599,7 +600,7 @@ impl Sidebar {
             for child in children {
                 cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
 
-                // Expanded terminal/service items for worktree child (grouped)
+                // Expanded terminal/service/app items for worktree child (grouped)
                 if self.expanded_projects.contains(&child.id) {
                     self.push_group_cursor_items(&child.id, &child.layout, service_names, cursor_items);
                 }
@@ -632,6 +633,14 @@ impl Sidebar {
                         });
                     }
                 }
+            }
+
+            // Apps
+            for (aid, _kind) in layout.collect_app_info() {
+                cursor_items.push(SidebarCursorItem::App {
+                    project_id: project_id.to_string(),
+                    app_id: aid,
+                });
             }
         }
 
@@ -742,6 +751,16 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
+            SidebarCursorItem::App { project_id, app_id } => {
+                self.workspace.update(cx, |ws, cx| {
+                    ws.focus_app_by_id(&project_id, &app_id, cx);
+                });
+                self.cursor_index = None;
+                if let Some(ref saved) = self.saved_focus {
+                    window.focus(saved, cx);
+                }
+                self.saved_focus = None;
+            }
             SidebarCursorItem::Folder { folder_id } => {
                 self.workspace.update(cx, |ws, cx| {
                     ws.toggle_folder_collapsed(&folder_id, cx);
@@ -810,7 +829,7 @@ impl Sidebar {
             SidebarCursorItem::GroupHeader { project_id, group } => {
                 self.toggle_group(&project_id, group);
             }
-            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } => {}
+            SidebarCursorItem::Terminal { .. } | SidebarCursorItem::Service { .. } | SidebarCursorItem::App { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {
                 let collapsed = self.collapsed_connections.get(&connection_id).copied().unwrap_or(false);
                 self.collapsed_connections.insert(connection_id, !collapsed);
@@ -1049,6 +1068,8 @@ pub(super) struct SidebarProjectInfo {
     pub is_orphan: bool,
     /// Services defined in okena.yaml for this project
     pub services: Vec<SidebarServiceInfo>,
+    /// App panes: (app_id, app_kind)
+    pub app_info: Vec<(String, String)>,
 }
 
 impl SidebarProjectInfo {
@@ -1072,6 +1093,9 @@ impl SidebarProjectInfo {
             terminal_names: project.terminal_names.clone(),
             is_orphan: false,
             services: Vec::new(),
+            app_info: layout
+                .map(|l| l.collect_app_info())
+                .unwrap_or_default(),
         }
     }
 }
@@ -1275,7 +1299,7 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Expanded terminals and services (grouped)
+                    // Expanded terminals, services, and apps (grouped)
                     if self.expanded_projects.contains(&project.id) {
                         self.render_expanded_children(&project, 28.0, 40.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                     }
@@ -1326,7 +1350,7 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Expanded terminals and services for folder project (grouped)
+                            // Expanded terminals, services, and apps for folder project (grouped)
                             if self.expanded_projects.contains(&fp.id) {
                                 self.render_expanded_children(fp, 48.0, 60.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }

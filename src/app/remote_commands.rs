@@ -1,5 +1,5 @@
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
-use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
+use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiLayoutNode, ApiProject, ApiServiceInfo, StateResponse};
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
 use crate::views::root::TerminalsRegistry;
@@ -10,6 +10,8 @@ use okena_core::api::ApiGitStatus;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::watch as tokio_watch;
+
+use crate::views::layout::app_entity_registry::AppEntityRegistry;
 
 use super::Okena;
 
@@ -25,6 +27,7 @@ pub(crate) async fn remote_command_loop(
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     service_manager: Entity<ServiceManager>,
+    app_entity_registry: Arc<AppEntityRegistry>,
     cx: &mut AsyncApp,
 ) {
     loop {
@@ -111,7 +114,7 @@ pub(crate) async fn remote_command_loop(
                 }
             }
             RemoteCommand::GetState => {
-                cx.update(|cx| {
+                let mut resp = cx.update(|cx| {
                     let ws = workspace.read(cx);
                     let sm = service_manager.read(cx);
                     let sv = *state_version.borrow();
@@ -206,17 +209,24 @@ pub(crate) async fn remote_command_loop(
                         }
                     });
 
-                    let resp = StateResponse {
+                    StateResponse {
                         state_version: sv,
                         projects,
                         focused_project_id: ws.focused_project_id().cloned(),
                         fullscreen_terminal: fullscreen,
                         project_order: data.project_order.clone(),
                         folders,
-                    };
+                    }
+                });
 
-                    CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
-                })
+                // Populate app states using the outer AsyncApp context.
+                for project in &mut resp.projects {
+                    if let Some(layout) = &mut project.layout {
+                        populate_app_states(layout, &app_entity_registry, cx);
+                    }
+                }
+
+                CommandResult::Ok(Some(serde_json::to_value(resp).expect("BUG: StateResponse must serialize")))
             }
             RemoteCommand::GetTerminalSizes { terminal_ids } => {
                 cx.update(|_cx| {
@@ -244,6 +254,23 @@ pub(crate) async fn remote_command_loop(
                     }
                 })
             }
+            RemoteCommand::GetAppState { app_id } => {
+                let app_kind = app_entity_registry.app_kind(&app_id);
+                match (app_entity_registry.get_view_state(&app_id, cx), app_kind) {
+                    (Some(state), Some(app_kind)) => CommandResult::Ok(Some(
+                        serde_json::json!({ "app_kind": app_kind, "state": state }),
+                    )),
+                    _ => CommandResult::Err(format!("App not found: {}", app_id)),
+                }
+            }
+            RemoteCommand::AppAction { project_id: _, app_id, action } => {
+                cx.update(|cx| {
+                    match app_entity_registry.handle_action(&app_id, action, cx) {
+                        Ok(()) => CommandResult::Ok(None),
+                        Err(e) => CommandResult::Err(e),
+                    }
+                })
+            }
         };
 
         if let Some(reply) = msg.reply {
@@ -266,13 +293,36 @@ impl Okena {
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
         let service_manager = self.service_manager.clone();
+        let app_entity_registry = self.app_entity_registry.clone();
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
                 bridge_rx, backend, workspace, terminals,
-                state_version, git_status_tx, service_manager, cx,
+                state_version, git_status_tx, service_manager,
+                app_entity_registry, cx,
             ).await;
         })
         .detach();
+    }
+}
+
+/// Walk an `ApiLayoutNode` tree and populate `app_state` for each `App` node
+/// from the `AppEntityRegistry`. Nodes with no registered state are left as
+/// `None`, which serializes to `null` (omitted via `skip_serializing_if`).
+fn populate_app_states(
+    node: &mut ApiLayoutNode,
+    registry: &AppEntityRegistry,
+    cx: &mut AsyncApp,
+) {
+    match node {
+        ApiLayoutNode::App { app_id: Some(id), app_state, .. } => {
+            *app_state = registry.get_view_state(id, cx);
+        }
+        ApiLayoutNode::Split { children, .. } | ApiLayoutNode::Tabs { children, .. } => {
+            for child in children {
+                populate_app_states(child, registry, cx);
+            }
+        }
+        _ => {}
     }
 }

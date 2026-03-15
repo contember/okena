@@ -5,6 +5,7 @@ mod sidebar;
 mod terminal_actions;
 
 use crate::git::watcher::GitStatusWatcher;
+use crate::remote::app_broadcaster::AppStateBroadcaster;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
@@ -73,6 +74,8 @@ pub struct RootView {
     pane_switcher_entity: Option<Entity<pane_switcher::PaneSwitcher>>,
     /// Service manager (set by Okena after creation)
     service_manager: Option<Entity<ServiceManager>>,
+    /// App state broadcaster passed down to KruhPane instances
+    app_broadcaster: Option<Arc<AppStateBroadcaster>>,
 }
 
 impl RootView {
@@ -80,6 +83,7 @@ impl RootView {
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
         pty_manager: Arc<PtyManager>,
+        app_broadcaster: Option<Arc<AppStateBroadcaster>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
@@ -161,6 +165,7 @@ impl RootView {
             git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
+            app_broadcaster,
         };
 
         // Initialize project columns
@@ -510,6 +515,7 @@ impl RootView {
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
+        let app_broadcaster_clone = self.app_broadcaster.clone();
         let id = project_id.to_string();
         let workspace_for_dispatch = self.workspace.clone();
         let action_dispatcher = self.remote_manager.as_ref().map(|rm| {
@@ -530,6 +536,7 @@ impl RootView {
                 terminals_clone,
                 active_drag_clone,
                 None, // remote projects don't get git watcher
+                app_broadcaster_clone,
                 cx,
             );
             col.set_action_dispatcher(action_dispatcher);
@@ -550,6 +557,7 @@ impl RootView {
         let request_broker_clone = self.request_broker.clone();
         let terminals_clone = self.terminals.clone();
         let active_drag_clone = self.active_drag.clone();
+        let app_broadcaster_clone = self.app_broadcaster.clone();
         let id = project_id.to_string();
         let backend_clone = self.backend.clone();
         let workspace_for_dispatch = self.workspace.clone();
@@ -566,6 +574,7 @@ impl RootView {
                 terminals_clone,
                 active_drag_clone,
                 git_watcher,
+                app_broadcaster_clone,
                 cx,
             );
             col.set_action_dispatcher(Some(

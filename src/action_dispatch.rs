@@ -532,5 +532,30 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ReloadServices { project_id } => ActionRequest::ReloadServices {
             project_id: s(&project_id),
         },
+        ActionRequest::CreateApp {
+            project_id,
+            app_kind,
+            app_config,
+        } => ActionRequest::CreateApp {
+            project_id: s(&project_id),
+            app_kind,
+            app_config,
+        },
+        ActionRequest::CloseApp {
+            project_id,
+            app_id,
+        } => ActionRequest::CloseApp {
+            project_id: s(&project_id),
+            app_id: s(&app_id),
+        },
+        ActionRequest::AppAction {
+            project_id,
+            app_id,
+            payload,
+        } => ActionRequest::AppAction {
+            project_id: s(&project_id),
+            app_id: s(&app_id),
+            payload,
+        },
     }
 }

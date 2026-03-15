@@ -1,4 +1,4 @@
-import type { WsInbound, WsOutbound } from "./types";
+import type { KruhAction, WsInbound, WsOutbound } from "./types";
 import { parseBinaryFrame, buildBinaryFrame, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, FRAME_TYPE_INPUT } from "./types";
 import { loadToken } from "../auth/token";
 
@@ -13,6 +13,7 @@ export class WsManager {
   private reconnectDelay = 1000;
   private disposed = false;
   private subscribedTerminals = new Set<string>();
+  private subscribedApps = new Set<string>();
 
   onPtyData: PtyDataHandler = () => {};
   onJson: JsonHandler = () => {};
@@ -51,6 +52,10 @@ export class WsManager {
         if (this.subscribedTerminals.size > 0) {
           this.subscribe([...this.subscribedTerminals]);
         }
+        // Re-subscribe to previously subscribed app streams
+        if (this.subscribedApps.size > 0) {
+          this.sendJson({ type: "subscribe_apps", app_ids: [...this.subscribedApps] });
+        }
       }
       this.onJson(msg);
     };
@@ -77,6 +82,29 @@ export class WsManager {
       this.subscribedTerminals.delete(id);
     }
     this.sendJson({ type: "unsubscribe", terminal_ids: terminalIds });
+  }
+
+  subscribeApps(appIds: string[]): void {
+    const newIds = appIds.filter((id) => !this.subscribedApps.has(id));
+    for (const id of appIds) {
+      this.subscribedApps.add(id);
+    }
+    if (newIds.length > 0) {
+      this.sendJson({ type: "subscribe_apps", app_ids: newIds });
+    }
+  }
+
+  unsubscribeApps(appIds: string[]): void {
+    for (const id of appIds) {
+      this.subscribedApps.delete(id);
+    }
+    if (appIds.length > 0) {
+      this.sendJson({ type: "unsubscribe_apps", app_ids: appIds });
+    }
+  }
+
+  sendAppAction(appId: string, action: KruhAction): void {
+    this.sendJson({ type: "app_action", app_id: appId, action });
   }
 
   sendText(terminalId: string, text: string): void {

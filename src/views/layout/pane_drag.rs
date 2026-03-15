@@ -7,23 +7,25 @@ use crate::theme::theme;
 use gpui::*;
 use gpui_component::h_flex;
 
-/// Drag payload emitted from a terminal header.
+/// Drag payload emitted from a pane header (terminal or app).
 #[derive(Clone)]
 pub struct PaneDrag {
     pub project_id: String,
     pub layout_path: Vec<usize>,
-    pub terminal_id: String,
-    pub terminal_name: String,
+    pub pane_id: String,       // terminal_id or app_id
+    pub pane_name: String,     // display name
+    pub icon_path: String,     // "icons/terminal.svg" or "icons/kruh.svg"
 }
 
-/// Ghost view rendered while dragging a terminal pane.
+/// Ghost view rendered while dragging a pane.
 pub struct PaneDragView {
     label: String,
+    icon_path: String,
 }
 
 impl PaneDragView {
-    pub fn new(label: String) -> Self {
-        Self { label }
+    pub fn new(label: String, icon_path: String) -> Self {
+        Self { label, icon_path }
     }
 }
 
@@ -47,7 +49,7 @@ impl Render for PaneDragView {
                     .gap(px(6.0))
                     .child(
                         svg()
-                            .path("icons/terminal.svg")
+                            .path(self.icon_path.clone())
                             .size(px(12.0))
                             .text_color(rgb(t.success)),
                     )

@@ -1,4 +1,3 @@
-use crate::git;
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
@@ -64,7 +63,7 @@ impl GitStatusWatcher {
                 for (id, path) in &projects {
                     let path = path.clone();
                     let status = smol::unblock(move || {
-                        git::get_git_status(Path::new(&path))
+                        crate::vcs::get_vcs_status(Path::new(&path))
                     }).await;
                     new_statuses.insert(id.clone(), status);
                 }
