@@ -1,8 +1,6 @@
 use okena_terminal::session_backend::SessionBackend;
 use okena_core::theme::FolderColor;
-use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData};
-#[cfg(test)]
-use crate::state::WorktreeMetadata;
+use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData, WorktreeMetadata};
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -410,12 +408,103 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
     data
 }
 
-/// Remove stale worktree projects whose directories no longer exist on disk.
+/// Discover worktrees from git and sync them into workspace data.
 ///
-/// Worktrees are only added as projects explicitly by the user (via the worktree
-/// list popover or the create worktree dialog). This function only cleans up
-/// worktree projects that have become stale.
+/// For each non-worktree, non-remote project, calls `list_git_worktrees` and
+/// adds any worktree paths not already tracked as projects. Also removes
+/// worktree projects whose directories no longer exist on disk.
 pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
+    use okena_git::repository::list_git_worktrees;
+
+    // Collect existing project paths for dedup
+    let existing_paths: std::collections::HashSet<String> = data.projects.iter()
+        .map(|p| p.path.clone())
+        .collect();
+
+    // Collect parent projects (non-worktree, non-remote, with existing directories)
+    // Store both original and canonical paths for comparison with git output
+    let parents: Vec<(String, String, String)> = data.projects.iter()
+        .filter(|p| p.worktree_info.is_none() && !p.is_remote)
+        .filter(|p| Path::new(&p.path).exists())
+        .map(|p| {
+            let canonical = Path::new(&p.path)
+                .canonicalize()
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_else(|_| p.path.clone());
+            (p.id.clone(), p.path.clone(), canonical)
+        })
+        .collect();
+
+    // Build canonical existing paths for dedup
+    let canonical_existing: std::collections::HashSet<String> = existing_paths.iter()
+        .map(|p| Path::new(p).canonicalize()
+            .map(|c| c.to_string_lossy().to_string())
+            .unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    // Discovery: add new worktree projects
+    for (parent_id, parent_path, canonical_parent) in &parents {
+        let worktrees = list_git_worktrees(Path::new(parent_path));
+        for (wt_path, branch) in worktrees {
+            // Skip the main repo's own path (compare canonical)
+            if wt_path == *parent_path || wt_path == *canonical_parent {
+                continue;
+            }
+            // Skip if already tracked (compare both raw and canonical)
+            if existing_paths.contains(&wt_path) || canonical_existing.contains(&wt_path) {
+                continue;
+            }
+            // Skip if directory doesn't exist
+            if !Path::new(&wt_path).exists() {
+                continue;
+            }
+
+            let dir_name = Path::new(&wt_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("worktree");
+            let project_name = format!("{} ({})", dir_name, branch);
+            let new_id = uuid::Uuid::new_v4().to_string();
+
+            let project = ProjectData {
+                id: new_id.clone(),
+                name: project_name,
+                path: wt_path,
+                show_in_overview: true,
+                layout: Some(LayoutNode::new_terminal()),
+                terminal_names: HashMap::new(),
+                hidden_terminals: HashMap::new(),
+                worktree_info: Some(WorktreeMetadata {
+                    parent_project_id: parent_id.clone(),
+                    color_override: None,
+                    main_repo_path: parent_path.clone(),
+                    worktree_path: String::new(),
+                    branch_name: String::new(),
+                }),
+                folder_color: FolderColor::default(),
+                hooks: super::settings::HooksConfig::default(),
+                is_remote: false,
+                connection_id: None,
+                service_terminals: HashMap::new(),
+                remote_services: Vec::new(),
+                remote_host: None,
+                remote_git_status: None,
+                default_shell: Default::default(),
+                hook_terminals: Default::default(),
+                worktree_ids: Default::default(),
+            };
+
+            // Insert after parent in project_order
+            data.projects.push(project);
+            if let Some(parent_index) = data.project_order.iter().position(|pid| pid == parent_id) {
+                data.project_order.insert(parent_index + 1, new_id);
+            } else {
+                data.project_order.push(new_id);
+            }
+        }
+    }
+
+    // Cleanup: remove worktree projects whose directories no longer exist
     let stale_ids: Vec<String> = data.projects.iter()
         .filter(|p| p.worktree_info.is_some())
         .filter(|p| !Path::new(&p.path).exists())
@@ -833,6 +922,7 @@ mod tests {
         p
     }
 
+
     // === sync_worktrees ===
 
     #[test]
@@ -845,6 +935,7 @@ mod tests {
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
+
         });
 
         let mut data = make_workspace(
@@ -871,6 +962,7 @@ mod tests {
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
+
         });
 
         let mut data = make_workspace(
@@ -902,6 +994,7 @@ mod tests {
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
+
         });
 
         let mut data = make_workspace(
@@ -982,5 +1075,6 @@ mod tests {
         let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
         // Should preserve existing order, not overwrite
         assert_eq!(parent.worktree_ids, vec!["wt2".to_string(), "wt1".to_string()]);
+
     }
 }
