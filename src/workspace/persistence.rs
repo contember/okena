@@ -413,6 +413,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
             let project_name = format!("{} ({})", dir_name, branch);
             let new_id = uuid::Uuid::new_v4().to_string();
 
+            let wt_path_clone = wt_path.clone();
             let project = ProjectData {
                 id: new_id.clone(),
                 name: project_name,
@@ -424,8 +425,9 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
                 worktree_info: Some(WorktreeMetadata {
                     parent_project_id: parent_id.clone(),
                     main_repo_path: parent_path.clone(),
-                    worktree_path: String::new(),
+                    worktree_path: wt_path_clone,
                 }),
+                default_shell: None,
                 folder_color: FolderColor::default(),
                 hooks: super::settings::HooksConfig::default(),
                 is_remote: false,
@@ -434,7 +436,6 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
                 remote_services: Vec::new(),
                 remote_host: None,
                 remote_git_status: None,
-                default_shell: None,
                 hook_terminals: HashMap::new(),
             };
 

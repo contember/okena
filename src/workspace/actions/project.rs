@@ -390,6 +390,7 @@ impl Workspace {
                 main_repo_path: main_repo_path.to_string(),
                 worktree_path: wt_path.to_string(),
             }),
+            default_shell: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
             is_remote: false,
@@ -398,7 +399,6 @@ impl Workspace {
             remote_services: Vec::new(),
             remote_host: None,
             remote_git_status: None,
-            default_shell: None,
             hook_terminals: HashMap::new(),
         };
 
