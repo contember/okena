@@ -632,11 +632,9 @@ impl Workspace {
                     }
                 }
             }
-            log::info!("visible_projects (grouped): {:?}", grouped.iter().map(|p| &p.name).collect::<Vec<_>>());
             return grouped;
         }
 
-        log::info!("visible_projects: {:?}", result.iter().map(|p| &p.name).collect::<Vec<_>>());
         result
     }
 

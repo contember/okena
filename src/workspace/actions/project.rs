@@ -251,8 +251,6 @@ impl Workspace {
     /// Also removes the project from any folder it may be in.
     /// Worktree children are moved along with their parent.
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
-        log::info!("move_project: id={}, new_index={}, project_order_before={:?}", project_id, new_index, self.data.project_order);
-
         // Remove from any folder first
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
@@ -299,8 +297,6 @@ impl Workspace {
             let insert_at = (target + offset).min(self.data.project_order.len());
             self.data.project_order.insert(insert_at, id);
         }
-
-        log::info!("move_project: project_order_after={:?}", self.data.project_order);
 
         self.notify_data(cx);
     }

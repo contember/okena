@@ -117,8 +117,15 @@ impl Sidebar {
                 let folder_id = folder_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
+                    // Toggle folder scope: if already scoped to this folder, clear; otherwise set
+                    let current = this.workspace.read(cx).active_folder_filter().cloned();
+                    let next = if current.as_deref() == Some(&folder_id) {
+                        None
+                    } else {
+                        Some(folder_id.clone())
+                    };
                     this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_collapsed(&folder_id, cx);
+                        ws.set_folder_filter(next, cx);
                     });
                 }
             }))
@@ -175,8 +182,14 @@ impl Sidebar {
                                 this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
+                                let current = this.workspace.read(cx).active_folder_filter().cloned();
+                                let next = if current.as_deref() == Some(&folder_id) {
+                                    None
+                                } else {
+                                    Some(folder_id.clone())
+                                };
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_folder_collapsed(&folder_id, cx);
+                                    ws.set_folder_filter(next, cx);
                                 });
                             }
                             cx.stop_propagation();
