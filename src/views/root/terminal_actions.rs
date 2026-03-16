@@ -65,14 +65,10 @@ impl RootView {
         });
 
         // Determine the actual shell to use (resolve Default → project default → global default)
-        let actual_shell = if shell_type == crate::terminal::shell_config::ShellType::Default {
-            self.workspace.read(cx)
-                .project(project_id)
-                .and_then(|p| p.default_shell.clone())
-                .unwrap_or_else(|| settings(cx).default_shell.clone())
-        } else {
-            shell_type
-        };
+        let actual_shell = shell_type.resolve_default(
+            self.workspace.read(cx).project(project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings(cx).default_shell,
+        );
 
         // Create new terminal with the new shell
         match self.backend.create_terminal(&project_path, Some(&actual_shell)) {

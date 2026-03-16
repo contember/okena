@@ -41,11 +41,7 @@ impl Workspace {
         });
 
         // Propagate to worktree children
-        let child_ids: Vec<String> = self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
-            .map(|p| p.id.clone())
-            .collect();
-        for child_id in child_ids {
+        for child_id in self.worktree_child_ids(project_id) {
             self.with_project(&child_id, cx, |project| {
                 project.show_in_overview = new_visible;
                 true
@@ -183,11 +179,7 @@ impl Workspace {
             true
         });
         // Propagate color to worktree children
-        let child_ids: Vec<String> = self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
-            .map(|p| p.id.clone())
-            .collect();
-        for child_id in child_ids {
+        for child_id in self.worktree_child_ids(project_id) {
             self.with_project(&child_id, cx, |project| {
                 project.folder_color = color;
                 true
@@ -257,10 +249,7 @@ impl Workspace {
         }
 
         // Collect worktree children IDs that should move with this project
-        let wt_child_ids: Vec<String> = self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
-            .map(|p| p.id.clone())
-            .collect();
+        let wt_child_ids = self.worktree_child_ids(project_id);
 
         // Remove parent and its worktree children from project_order
         let removed: Vec<String> = {

@@ -68,6 +68,17 @@ impl ShellType {
         }
     }
 
+    /// Resolve `ShellType::Default` into a concrete shell by checking
+    /// the project's default shell first, then the global setting.
+    /// Non-Default variants are returned unchanged.
+    pub fn resolve_default(self, project_shell: Option<&ShellType>, global_shell: &ShellType) -> ShellType {
+        if self == ShellType::Default {
+            project_shell.cloned().unwrap_or_else(|| global_shell.clone())
+        } else {
+            self
+        }
+    }
+
     /// Get a display name for this shell type
     pub fn display_name(&self) -> String {
         match self {

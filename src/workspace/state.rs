@@ -603,11 +603,12 @@ impl Workspace {
         // Only moves worktrees whose parent IS in the result; orphan worktrees
         // (parent not visible or in a folder) stay at their original position.
         let worktree_children: HashMap<&str, Vec<&ProjectData>> = {
+            let result_ids: HashSet<&str> = result.iter().map(|p| p.id.as_str()).collect();
             let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
             for p in &result {
                 if let Some(ref wi) = p.worktree_info {
-                    // Only group if parent is in the result
-                    if result.iter().any(|r| r.id == wi.parent_project_id) {
+                    // Only group if parent is in the result (O(1) lookup)
+                    if result_ids.contains(wi.parent_project_id.as_str()) {
                         map.entry(wi.parent_project_id.as_str())
                             .or_default()
                             .push(p);
@@ -683,6 +684,14 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Get IDs of worktree children for a given parent project.
+    pub fn worktree_child_ids(&self, parent_id: &str) -> Vec<String> {
+        self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == parent_id))
+            .map(|p| p.id.clone())
+            .collect()
     }
 
     /// Get a project by ID
