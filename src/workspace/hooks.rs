@@ -59,9 +59,14 @@ impl HookRunner {
             .collect();
 
         let full_cmd = if cfg!(windows) {
+            // Escape values for cmd.exe: wrap in double quotes, escape embedded
+            // double quotes and percent signs to prevent command injection.
             let env_prefix = safe_env
                 .iter()
-                .map(|(k, v)| format!("set {}={}", k, v))
+                .map(|(k, v)| {
+                    let escaped = v.replace('%', "%%").replace('"', "\\\"");
+                    format!("set \"{}={}\"", k, escaped)
+                })
                 .collect::<Vec<_>>()
                 .join(" && ");
             if env_prefix.is_empty() {
@@ -245,7 +250,8 @@ fn run_hook(
 
         match runner.create_hook_terminal(&command, &env_vars, &project_path) {
             Ok(terminal_id) => {
-                let _exec_id = monitor.map(|m| m.record_start(hook_type, &command, project_name, Some(terminal_id.clone())));
+                // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
+                let _ = monitor.map(|m| m.record_start(hook_type, &command, project_name, Some(terminal_id.clone())));
                 log::info!("Hook '{}' started in terminal {} (label: {})", hook_type, terminal_id, label);
                 return Some(HookTerminalResult {
                     terminal_id,
@@ -337,12 +343,21 @@ fn run_hook_sync(
 
         let terminal_id = runner.create_hook_terminal(command, &env_vars, &project_path)?;
 
-        let _exec_id = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
+        // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
+        let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
-        // Register exit waiter and block until the PTY process exits
+        // Register exit waiter and block until the PTY process exits (5 min timeout)
         let rx = monitor.register_exit_waiter(&terminal_id);
 
-        let exit_code = rx.recv().map_err(|_| "Hook terminal exit channel closed unexpectedly".to_string())?;
+        let exit_code = rx.recv_timeout(std::time::Duration::from_secs(300))
+            .map_err(|e| match e {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    format!("Hook '{}' timed out after 5 minutes — dismiss it from the sidebar to unblock", hook_type)
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    "Hook terminal exit channel closed unexpectedly".to_string()
+                }
+            })?;
 
         // Do NOT call record_finish here — the main thread's handle_hook_terminal_exits
         // calls finish_by_terminal_id which is the sole authority for PTY hook completion

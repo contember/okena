@@ -1,4 +1,5 @@
 use crate::git;
+use crate::git::repository::{normalize_path, project_path_in_worktree, compute_target_paths};
 use crate::keybindings::Cancel;
 use crate::process::command;
 use crate::settings::settings;
@@ -9,7 +10,7 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
 struct PrInfo {
@@ -84,10 +85,15 @@ impl WorktreeDialog {
         // Get available branches using the git root
         let branches = git::get_available_branches_for_worktree(&git_root);
 
+        // Pre-generate a branch name suggestion
+        let generated_branch = crate::git::branch_names::generate_branch_name(&git_root);
+
         let branch_search_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
+            let mut input = SimpleInputState::new(cx)
                 .placeholder("Search or create branch...")
-                .icon("icons/search.svg")
+                .icon("icons/search.svg");
+            input.set_value(&generated_branch, cx);
+            input
         });
 
         let custom_path_input = cx.new(|cx| {
@@ -782,124 +788,3 @@ impl Render for WorktreeDialog {
     }
 }
 
-/// Normalize a path by resolving `.` and `..` components without filesystem access.
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => { result.pop(); }
-            Component::CurDir => {}
-            other => result.push(other),
-        }
-    }
-    result
-}
-
-/// Given a worktree checkout path and a subdir, return the project path.
-/// If subdir is empty, returns the worktree path as-is.
-fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
-    if subdir.as_os_str().is_empty() {
-        worktree_path.to_string()
-    } else {
-        PathBuf::from(worktree_path)
-            .join(subdir)
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
-/// Compute worktree and project paths from template, git root, and subdir.
-/// Returns (worktree_path, project_path).
-fn compute_target_paths(
-    git_root: &Path,
-    subdir: &Path,
-    template: &str,
-    branch: &str,
-) -> (String, String) {
-    let repo_name = git_root.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-    let safe_branch = branch.replace('/', "-");
-
-    let expanded = template
-        .replace("{repo}", repo_name)
-        .replace("{branch}", &safe_branch);
-
-    let worktree_path = {
-        let path = PathBuf::from(&expanded);
-        if path.is_relative() {
-            normalize_path(&git_root.join(&expanded))
-                .to_string_lossy()
-                .to_string()
-        } else {
-            expanded
-        }
-    };
-
-    let project_path = project_path_in_worktree(&worktree_path, subdir);
-
-    (worktree_path, project_path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{compute_target_paths, Path, PathBuf};
-
-    /// Compare computed paths as `Path` objects for cross-platform correctness
-    /// (avoids separator differences between Unix and Windows).
-    fn assert_paths_eq(actual: &str, expected: &Path) {
-        assert_eq!(Path::new(actual), expected);
-    }
-
-    #[test]
-    fn target_path_simple_repo() {
-        // Project at repo root — worktree and project paths are the same
-        let git_root = PathBuf::from("/projects/myrepo");
-        let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
-        let expected = PathBuf::from("/projects").join("myrepo-wt").join("feature");
-        assert_paths_eq(&wt, &expected);
-        assert_paths_eq(&proj, &expected);
-    }
-
-    #[test]
-    fn target_path_monorepo() {
-        // Project is a subdirectory of the git root
-        let git_root = PathBuf::from("/projects/monorepo");
-        let subdir = Path::new("app-in-monorepo");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
-        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("feature");
-        assert_paths_eq(&wt, &expected_wt);
-        assert_paths_eq(&proj, &expected_wt.join("app-in-monorepo"));
-    }
-
-    #[test]
-    fn target_path_nested_monorepo_subdir() {
-        let git_root = PathBuf::from("/projects/monorepo");
-        let subdir = Path::new("packages/app");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
-        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("fix-bug");
-        assert_paths_eq(&wt, &expected_wt);
-        assert_paths_eq(&proj, &expected_wt.join("packages").join("app"));
-    }
-
-    #[test]
-    fn target_path_absolute_template() {
-        let git_root = PathBuf::from("/projects/monorepo");
-        let subdir = Path::new("app");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
-        let expected_wt = PathBuf::from("/tmp").join("worktrees").join("monorepo").join("main");
-        assert_paths_eq(&wt, &expected_wt);
-        assert_paths_eq(&proj, &expected_wt.join("app"));
-    }
-
-    #[test]
-    fn target_path_branch_with_slashes() {
-        let git_root = PathBuf::from("/projects/repo");
-        let subdir = Path::new("");
-        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature/my-branch");
-        let expected = PathBuf::from("/projects").join("repo-wt").join("feature-my-branch");
-        assert_paths_eq(&wt, &expected);
-        assert_paths_eq(&proj, &expected);
-    }
-}

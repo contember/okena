@@ -212,6 +212,32 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
         )
 }
 
+/// Quick worktree creation button (+).
+///
+/// Caller chains `.on_click()` to trigger quick worktree creation.
+pub fn sidebar_quick_create_button(
+    id: impl Into<ElementId>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .cursor_pointer()
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(
+            svg()
+                .path("icons/plus.svg")
+                .size(px(12.0))
+                .text_color(rgb(t.text_secondary)),
+        )
+}
+
 /// Visibility toggle (eye / eye-off).
 ///
 /// Caller chains `.on_click()` to toggle visibility.

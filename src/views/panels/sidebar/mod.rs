@@ -81,6 +81,8 @@ pub struct Sidebar {
     workspace: Entity<Workspace>,
     pub(super) request_broker: Entity<RequestBroker>,
     expanded_projects: HashSet<String>,
+    /// Projects whose worktree children list is collapsed
+    collapsed_worktrees: HashSet<String>,
     pub(super) terminals: TerminalsRegistry,
     /// Terminal rename state: (project_id, terminal_id)
     pub(super) terminal_rename: Option<RenameState<(String, String)>>,
@@ -166,6 +168,7 @@ impl Sidebar {
             workspace,
             request_broker,
             expanded_projects: HashSet::new(),
+            collapsed_worktrees: HashSet::new(),
             terminals,
             terminal_rename: None,
             terminal_click_detector: ClickDetector::new(),
@@ -200,6 +203,14 @@ impl Sidebar {
             self.expanded_projects.remove(project_id);
         } else {
             self.expanded_projects.insert(project_id.to_string());
+        }
+    }
+
+    pub(super) fn toggle_worktrees_collapsed(&mut self, project_id: &str) {
+        if self.collapsed_worktrees.contains(project_id) {
+            self.collapsed_worktrees.remove(project_id);
+        } else {
+            self.collapsed_worktrees.insert(project_id.to_string());
         }
     }
 
@@ -666,14 +677,16 @@ impl Sidebar {
             }
         }
 
-        // Linked worktree children (always visible below parent)
-        if let Some(children) = worktree_children_map.get(&project.id) {
-            for child in children {
-                cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
+        // Linked worktree children (collapsible via parent arrow)
+        if !self.collapsed_worktrees.contains(&project.id) {
+            if let Some(children) = worktree_children_map.get(&project.id) {
+                for child in children {
+                    cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: child.id.clone() });
 
-                // Expanded terminal/service items for worktree child (grouped)
-                if self.expanded_projects.contains(&child.id) {
-                    self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
+                    // Expanded terminal/service items for worktree child (grouped)
+                    if self.expanded_projects.contains(&child.id) {
+                        self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
+                    }
                 }
             }
         }
@@ -1169,6 +1182,12 @@ pub(super) struct SidebarProjectInfo {
     pub is_closing: bool,
     /// Parent project's folder color (for worktree children to inherit)
     pub parent_folder_color: Option<FolderColor>,
+    /// Project path (for quick worktree creation)
+    pub path: String,
+    /// Whether this project is inside a git repo (for showing quick create button)
+    pub is_git_repo: bool,
+    /// Whether this project is itself a worktree
+    pub is_worktree: bool,
 }
 
 impl SidebarProjectInfo {
@@ -1208,6 +1227,9 @@ impl SidebarProjectInfo {
             }).collect(),
             is_closing: false,
             parent_folder_color: None,
+            path: project.path.clone(),
+            is_git_repo: crate::git::get_git_status(std::path::Path::new(&project.path)).is_some(),
+            is_worktree: project.worktree_info.is_some(),
         }
     }
 }
@@ -1222,7 +1244,8 @@ fn build_main_worktree_entry(
     project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
     closing_projects: &HashSet<String>,
 ) {
-    let branch = crate::git::get_current_branch(std::path::Path::new(&project.path));
+    let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
+        .and_then(|s| s.branch);
     let mut main_wt = SidebarProjectInfo::from_project(project);
     main_wt.name = branch.unwrap_or_else(|| project.name.clone());
     main_wt.parent_folder_color = Some(project.folder_color);
@@ -1354,8 +1377,7 @@ impl Render for Sidebar {
 
         // Build sidebar items from project_order
         let mut items: Vec<SidebarItem> = Vec::new();
-        let mut top_index = 0;
-        for id in &workspace.data().project_order {
+        for (top_index, id) in workspace.data().project_order.iter().enumerate() {
             // Check if this is a folder
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 let mut folder_projects: Vec<SidebarProjectInfo> = folder.project_ids.iter()
@@ -1379,6 +1401,8 @@ impl Render for Sidebar {
                         if let Some(&project) = all_projects.get(fp.id.as_str()) {
                             build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects);
                         }
+                        // Parent header eye reflects group state
+                        fp.show_in_overview = children.iter().any(|c| c.show_in_overview);
                         folder_wt_children.insert(fp.id.clone(), children);
                     } else {
                         if let Some(services) = project_services.remove(&fp.id) {
@@ -1392,7 +1416,6 @@ impl Render for Sidebar {
                     projects: folder_projects,
                     worktree_children: folder_wt_children,
                 });
-                top_index += 1;
                 continue;
             }
 
@@ -1414,6 +1437,8 @@ impl Render for Sidebar {
 
                 if !wt_children.is_empty() {
                     build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects);
+                    // Parent header eye reflects group state: visible if any child is visible
+                    project_info.show_in_overview = wt_children.iter().any(|c| c.show_in_overview);
                 } else {
                     if let Some(services) = project_services.remove(&project.id) {
                         project_info.services = services;
@@ -1424,9 +1449,13 @@ impl Render for Sidebar {
                     index: top_index,
                     worktree_children: wt_children,
                 });
-                top_index += 1;
             }
         }
+
+        // Index for trailing drop zone (after last item in project_order)
+        let end_index = items.last().map_or(0, |item| match item {
+            SidebarItem::Project { index, .. } | SidebarItem::Folder { index, .. } => index + 1,
+        });
 
         let color_picker_project_id = self.color_picker_project_id.clone();
         let color_picker_folder_id = self.color_picker_folder_id.clone();
@@ -1441,6 +1470,7 @@ impl Render for Sidebar {
         let focused_project_id: Option<String> = {
             let ws = self.workspace.read(cx);
             ws.focus_manager.focused_project_id().cloned()
+                .or_else(|| ws.focus_manager.focused_terminal_state().map(|ft| ft.project_id))
         };
 
         // Build flat elements with cursor tracking
@@ -1541,6 +1571,33 @@ impl Render for Sidebar {
                 }
             }
         }
+
+        // Trailing drop zone so items can be dropped after the last entry
+        flat_elements.push(
+            div()
+                .id("sidebar-drop-tail")
+                .h(px(24.0))
+                .flex_1()
+                .min_h(px(24.0))
+                .drag_over::<ProjectDrag>(move |style, _, _, _| {
+                    style.border_t_2().border_color(rgb(t.border_active))
+                })
+                .on_drop(cx.listener(move |this, drag: &ProjectDrag, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.move_project(&drag.project_id, end_index, cx);
+                        ws.set_focused_project(None, cx);
+                    });
+                }))
+                .drag_over::<FolderDrag>(move |style, _, _, _| {
+                    style.border_t_2().border_color(rgb(t.border_active))
+                })
+                .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.move_item_in_order(&drag.folder_id, end_index, cx);
+                    });
+                }))
+                .into_any_element()
+        );
 
         div()
             .relative()

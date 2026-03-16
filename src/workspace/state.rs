@@ -90,9 +90,7 @@ pub enum HookTerminalStatus {
 
 /// Entry for a hook terminal displayed in the service panel.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct HookTerminalEntry {
-    pub hook_type: &'static str,
     pub label: String,
     pub status: HookTerminalStatus,
 }
@@ -458,7 +456,6 @@ impl Workspace {
     ) {
         for result in results {
             self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                hook_type: result.hook_type,
                 label: result.label,
                 status: HookTerminalStatus::Running,
             }, cx);
@@ -601,6 +598,45 @@ impl Workspace {
                 self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
             }
         }
+
+        // Group worktree children right after their parent project.
+        // Build a new list: for each non-worktree project, append it followed
+        // by any worktree children that were in the result.
+        let worktree_children: HashMap<&str, Vec<&ProjectData>> = {
+            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
+            for p in &result {
+                if let Some(ref wi) = p.worktree_info {
+                    map.entry(wi.parent_project_id.as_str())
+                        .or_default()
+                        .push(p);
+                }
+            }
+            map
+        };
+        if !worktree_children.is_empty() {
+            let mut grouped = Vec::with_capacity(result.len());
+            for p in &result {
+                if p.worktree_info.is_some() {
+                    continue; // will be added after parent
+                }
+                grouped.push(*p);
+                if let Some(children) = worktree_children.get(p.id.as_str()) {
+                    grouped.extend(children);
+                }
+            }
+            // Add orphan worktrees whose parent isn't in the result
+            for p in &result {
+                if let Some(ref wi) = p.worktree_info {
+                    if !result.iter().any(|r| r.id == wi.parent_project_id) {
+                        grouped.push(p);
+                    }
+                }
+            }
+            log::info!("visible_projects (grouped): {:?}", grouped.iter().map(|p| &p.name).collect::<Vec<_>>());
+            return grouped;
+        }
+
+        log::info!("visible_projects: {:?}", result.iter().map(|p| &p.name).collect::<Vec<_>>());
         result
     }
 
@@ -2633,6 +2669,62 @@ mod workspace_tests {
     }
 
     #[test]
+    fn test_folder_filter_worktree_children_not_duplicated() {
+        // w1 is a worktree child of p1. Both p1 and w1 are in project_order.
+        // When folder filter is active for f1 (containing p1), w1 should appear
+        // exactly once — not duplicated from both the folder expansion and project_order.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), w1, make_project("p2", true)],
+            vec!["f1", "w1", "p2"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+        ws.active_folder_filter = Some("f1".to_string());
+
+        let visible = ws.visible_projects();
+        // p1 + w1, no duplicates
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_orphan_worktree_shown_when_parent_not_in_result() {
+        // w1 is a worktree child of p1, but p1 is hidden. w1 should still
+        // appear as an orphan worktree in the result.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let data = make_workspace_data(
+            vec![make_project("p1", false), w1],
+            vec!["p1", "w1"],
+        );
+        let ws = Workspace::new(data);
+
+        let visible = ws.visible_projects();
+        // p1 is hidden, w1 is visible as an orphan
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "w1");
+    }
+
+    #[test]
     fn test_folder_filter_with_focus_override() {
         let mut data = make_workspace_data(
             vec![
@@ -3062,9 +3154,8 @@ mod gpui_tests {
 
     // ── register_hook_terminal layout tests ──────────────────────────────
 
-    fn make_hook_entry(hook_type: &'static str) -> HookTerminalEntry {
+    fn make_hook_entry(hook_type: &str) -> HookTerminalEntry {
         HookTerminalEntry {
-            hook_type,
             label: format!("{} (test)", hook_type),
             status: HookTerminalStatus::Running,
         }
@@ -3208,7 +3299,6 @@ mod gpui_tests {
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
-                hook_type: "on_project_open",
                 label: "on_project_open (feature/foo)".to_string(),
                 status: HookTerminalStatus::Running,
             }, cx);

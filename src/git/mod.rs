@@ -1,5 +1,6 @@
+pub mod branch_names;
 pub mod diff;
-mod repository;
+pub(crate) mod repository;
 pub mod watcher;
 
 pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
@@ -88,27 +89,51 @@ where
 
 /// Get git status for a directory path (with caching).
 /// Returns None if the path is not inside a git repository.
+///
+/// On cache miss, returns stale data if available (non-blocking for UI).
+/// Use `refresh_git_status` for a blocking fresh fetch (e.g. from a background watcher).
 pub fn get_git_status(path: &Path) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
 
-    // Check cache first
-    let cached = with_cache(|cache| {
+    // Check cache — return fresh or stale data without blocking
+    let (cached, is_fresh) = with_cache(|cache| {
         if let Some(entry) = cache.get(&path_buf) {
-            if entry.is_fresh() {
-                return Some(entry.status.clone());
-            }
+            (Some(entry.status.clone()), entry.is_fresh())
+        } else {
+            (None, false)
         }
-        None
     });
 
-    if let Some(status) = cached {
-        return status;
+    if is_fresh {
+        return cached.unwrap();
     }
 
-    // Cache miss or stale - fetch fresh status
+    // Have stale data — return it immediately (watcher will refresh)
+    if cached.is_some() {
+        return cached.unwrap();
+    }
+
+    // No cached data at all — must do initial fetch (only happens once per path)
     let status = repository::get_status(path);
 
-    // Update cache
+    with_cache(|cache| {
+        cache.insert(
+            path_buf,
+            CacheEntry {
+                status: status.clone(),
+                timestamp: Instant::now(),
+            },
+        );
+    });
+
+    status
+}
+
+/// Fetch fresh git status and update the cache. Intended for background watchers.
+pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
+    let path_buf = path.to_path_buf();
+    let status = repository::get_status(path);
+
     with_cache(|cache| {
         cache.insert(
             path_buf,

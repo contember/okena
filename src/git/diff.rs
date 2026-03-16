@@ -3,7 +3,7 @@
 //! Provides structures and functions for parsing unified diff output
 //! and executing git diff commands.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::process::{command, safe_output};
 use serde::{Serialize, Deserialize};
@@ -441,17 +441,48 @@ fn create_untracked_file_diff(repo_path: &Path, file_path: &str) -> Option<FileD
 }
 
 /// Check if a path is inside a git repository.
+/// Results are cached for 30 seconds to avoid spawning subprocesses on every render.
 pub fn is_git_repo(path: &Path) -> bool {
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<HashMap<PathBuf, (bool, Instant)>>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_secs(30);
+
+    let path_buf = path.to_path_buf();
+
+    // Check cache first
+    {
+        let guard = CACHE.lock();
+        if let Some(ref cache) = *guard {
+            if let Some(&(result, ts)) = cache.get(&path_buf) {
+                if ts.elapsed() < TTL {
+                    return result;
+                }
+            }
+        }
+    }
+
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return false,
     };
 
-    safe_output(
+    let result = safe_output(
         command("git").args(["-C", path_str, "rev-parse", "--is-inside-work-tree"]),
     )
     .map(|o| o.status.success())
-    .unwrap_or(false)
+    .unwrap_or(false);
+
+    // Store in cache
+    {
+        let mut guard = CACHE.lock();
+        let cache = guard.get_or_insert_with(HashMap::new);
+        cache.insert(path_buf, (result, Instant::now()));
+    }
+
+    result
 }
 
 /// Get the full content of a file from git at a specific revision.

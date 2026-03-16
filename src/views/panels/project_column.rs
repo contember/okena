@@ -799,7 +799,16 @@ impl ProjectColumn {
                             .rounded(px(4.0))
                             .bg(rgb(folder_color))
                     )
-                    .child(
+                    .child({
+                        // For worktree projects, show parent project's name
+                        let display_name = if let Some(ref wt_info) = project.worktree_info {
+                            let ws = self.workspace.read(cx);
+                            ws.project(&wt_info.parent_project_id)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| project.name.clone())
+                        } else {
+                            project.name.clone()
+                        };
                         div()
                             .flex_shrink_0()
                             .text_size(px(12.0))
@@ -807,8 +816,8 @@ impl ProjectColumn {
                             .text_color(rgb(t.text_primary))
                             .line_height(px(14.0))
                             .text_ellipsis()
-                            .child(project.name.clone()),
-                    )
+                            .child(display_name)
+                    })
                     .child(
                         div()
                             .text_size(px(10.0))

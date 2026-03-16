@@ -15,7 +15,12 @@ use std::collections::HashMap;
 impl Sidebar {
     pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
+        let has_worktrees = project.worktree_count > 0;
+        let is_expanded = if has_worktrees {
+            !self.collapsed_worktrees.contains(&project.id)
+        } else {
+            self.expanded_projects.contains(&project.id)
+        };
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
@@ -23,6 +28,10 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Show quick create button for git repos that aren't themselves worktrees
+        let show_quick_create = project.is_git_repo && !project.is_worktree;
+        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -59,6 +68,8 @@ impl Sidebar {
                     if drag.project_id != project_id {
                         this.workspace.update(cx, |ws, cx| {
                             ws.move_project(&drag.project_id, index, cx);
+                            // Clear zoom so all projects are visible after reorder
+                            ws.set_focused_project(None, cx);
                         });
                     }
                 }
@@ -89,7 +100,8 @@ impl Sidebar {
                 }
             }))
             .child({
-                if project.worktree_count == 0 {
+                let has_expandable_content = has_layout || has_worktrees;
+                if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-{}", project.id).into()),
                         is_expanded,
@@ -98,14 +110,17 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
+                            if has_worktrees {
+                                this.toggle_worktrees_collapsed(&project_id);
+                            } else {
+                                this.toggle_expanded(&project_id);
+                            }
                             cx.notify();
                             cx.stop_propagation();
                         }
                     }))
                     .into_any_element()
                 } else {
-                    // Spacer when worktrees are shown (no expand arrow needed)
                     div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
                 }
             })
@@ -204,7 +219,6 @@ impl Sidebar {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
-        let is_visible = project.show_in_overview;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let parent_id = project.parent_project_id.clone().unwrap_or_default();
@@ -377,7 +391,7 @@ impl Sidebar {
                         .group_hover("worktree-item", |s| s.opacity(1.0))
                         .child({
                             let show_in_overview = project.show_in_overview;
-                            let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
+                            let visibility_tooltip = if show_in_overview { "Hide Worktree" } else { "Show Worktree" };
                             sidebar_visibility_toggle(
                                 ElementId::Name(format!("visibility-wt-{}", project_id).into()),
                                 show_in_overview,

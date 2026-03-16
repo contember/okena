@@ -53,6 +53,16 @@ impl Workspace {
         }
     }
 
+    /// Toggle visibility of a single project without cascading to worktree children.
+    /// Used for worktree items (including the main worktree entry) so toggling one
+    /// worktree doesn't affect siblings or the parent project header.
+    pub fn toggle_single_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            project.show_in_overview = !project.show_in_overview;
+            true
+        });
+    }
+
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
     pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) -> String {
@@ -239,30 +249,59 @@ impl Workspace {
 
     /// Move a project to a new position in the top-level order.
     /// Also removes the project from any folder it may be in.
+    /// Worktree children are moved along with their parent.
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
+        log::info!("move_project: id={}, new_index={}, project_order_before={:?}", project_id, new_index, self.data.project_order);
+
         // Remove from any folder first
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
 
-        // Find current index in project_order
-        if let Some(current_index) = self.data.project_order.iter().position(|id| id == project_id) {
-            // Remove from current position
-            let id = self.data.project_order.remove(current_index);
-            // Adjust target index if needed
-            let target = if new_index > current_index {
-                new_index.saturating_sub(1)
-            } else {
-                new_index
-            };
-            // Insert at new position
-            let target = target.min(self.data.project_order.len());
-            self.data.project_order.insert(target, id);
-        } else {
-            // Project wasn't in project_order (was only in a folder) - insert at target
-            let target = new_index.min(self.data.project_order.len());
-            self.data.project_order.insert(target, project_id.to_string());
+        // Collect worktree children IDs that should move with this project
+        let wt_child_ids: Vec<String> = self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
+            .map(|p| p.id.clone())
+            .collect();
+
+        // Remove parent and its worktree children from project_order
+        let removed: Vec<String> = {
+            let ids_to_remove: std::collections::HashSet<&str> = std::iter::once(project_id)
+                .chain(wt_child_ids.iter().map(|s| s.as_str()))
+                .collect();
+            let mut removed = Vec::new();
+            self.data.project_order.retain(|id| {
+                if ids_to_remove.contains(id.as_str()) {
+                    removed.push(id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+
+        // Insert at new position (parent first, then children in original relative order)
+        let target = new_index.min(self.data.project_order.len());
+        // Put parent first, then children (preserving their relative order from `removed`)
+        let mut to_insert: Vec<String> = Vec::with_capacity(removed.len());
+        // Parent first
+        if let Some(pos) = removed.iter().position(|id| id == project_id) {
+            to_insert.push(removed[pos].clone());
         }
+        // Then children in their original order
+        for id in &removed {
+            if id != project_id {
+                to_insert.push(id.clone());
+            }
+        }
+        for (offset, id) in to_insert.into_iter().enumerate() {
+            let insert_at = (target + offset).min(self.data.project_order.len());
+            self.data.project_order.insert(insert_at, id);
+        }
+
+        log::info!("move_project: project_order_after={:?}", self.data.project_order);
+
         self.notify_data(cx);
     }
 
@@ -331,13 +370,7 @@ impl Workspace {
 
         // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
-        let project_name = format!("{} ({})",
-            std::path::Path::new(&parent_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Project"),
-            branch
-        );
+        let project_name = branch.to_string();
 
         let new_layout = parent_layout
             .as_ref()
@@ -467,6 +500,47 @@ impl Workspace {
         }
         self.data.project_widths.remove(project_id);
         // Note: caller is responsible for calling notify_data
+    }
+
+    /// Quick-create a worktree with an auto-generated Czech bakery branch name.
+    /// Returns the new project ID on success.
+    pub fn quick_create_worktree(
+        &mut self,
+        parent_project_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        let parent = self.project(parent_project_id)
+            .ok_or_else(|| "Parent project not found".to_string())?;
+
+        let project_path = std::path::PathBuf::from(&parent.path);
+
+        // Determine git root
+        let git_root = parent.worktree_info.as_ref()
+            .map(|wt| std::path::PathBuf::from(&wt.main_repo_path))
+            .or_else(|| crate::git::get_repo_root(&project_path))
+            .ok_or_else(|| "Not a git repository".to_string())?;
+
+        // Compute subdir
+        let normalized_project = crate::git::repository::normalize_path(&project_path);
+        let normalized_root = crate::git::repository::normalize_path(&git_root);
+        let subdir = normalized_project.strip_prefix(&normalized_root)
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
+
+        // Generate branch name
+        let branch = crate::git::branch_names::generate_branch_name(&git_root);
+
+        // Compute paths
+        let path_template = crate::settings::settings(cx).worktree.path_template;
+        let (worktree_path, project_path) = crate::git::repository::compute_target_paths(
+            &git_root, &subdir, &path_template, &branch,
+        );
+
+        // Create the worktree project (always create_branch=true for generated names)
+        self.create_worktree_project(
+            parent_project_id, &branch, &git_root,
+            &worktree_path, &project_path, true, cx,
+        )
     }
 
     /// Remove a worktree project and its git worktree

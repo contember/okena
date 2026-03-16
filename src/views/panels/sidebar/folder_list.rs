@@ -86,15 +86,15 @@ impl Sidebar {
                     }
                 }
             }))
-            // Drop target for projects being dragged onto folder
+            // Drop target for reordering projects above this folder
             .drag_over::<ProjectDrag>(move |style, _, _, _| {
-                style.bg(rgb(t.bg_selection))
+                style.border_t_2().border_color(rgb(t.border_active))
             })
             .on_drop(cx.listener({
-                let folder_id = folder_id.clone();
                 move |this, drag: &ProjectDrag, _window, cx| {
                     this.workspace.update(cx, |ws, cx| {
-                        ws.move_project_to_folder(&drag.project_id, &folder_id, None, cx);
+                        ws.move_project(&drag.project_id, index, cx);
+                        ws.set_focused_project(None, cx);
                     });
                 }
             }))
@@ -257,7 +257,12 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
+        let has_worktrees = project.worktree_count > 0;
+        let is_expanded = if has_worktrees {
+            !self.collapsed_worktrees.contains(&project.id)
+        } else {
+            self.expanded_projects.contains(&project.id)
+        };
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let folder_id = folder_id.to_string();
@@ -266,6 +271,10 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Show quick create button for git repos that aren't themselves worktrees
+        let show_quick_create = project.is_git_repo && !project.is_worktree;
+        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -305,6 +314,7 @@ impl Sidebar {
                         if let Some(pos) = pos {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
+                                ws.set_focused_project(None, cx);
                             });
                             // Send reorder to server for remote folders
                             if folder_id.starts_with("remote-folder:") {
@@ -342,7 +352,8 @@ impl Sidebar {
                 }
             }))
             .child({
-                if project.worktree_count == 0 {
+                let has_expandable_content = has_layout || has_worktrees;
+                if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-fp-{}", project.id).into()),
                         is_expanded,
@@ -351,7 +362,11 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
+                            if has_worktrees {
+                                this.toggle_worktrees_collapsed(&project_id);
+                            } else {
+                                this.toggle_expanded(&project_id);
+                            }
                             cx.notify();
                             cx.stop_propagation();
                         }
@@ -423,6 +438,9 @@ impl Sidebar {
                 div()
                     .when(!project.show_in_overview, |d| d.opacity(0.0))
                     .group_hover("folder-project-item", |s| s.opacity(1.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
                     .child({
                         let show_in_overview = project.show_in_overview;
                         let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
@@ -441,6 +459,30 @@ impl Sidebar {
                             }
                         }))
                         .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                    })
+                    .when(show_quick_create, |d| {
+                        d.child(
+                            sidebar_quick_create_button(
+                                ElementId::Name(format!("fp-quick-wt-{}", quick_create_id).into()),
+                                &t,
+                            )
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener({
+                                let project_id = quick_create_id.clone();
+                                move |this, _, _window, cx| {
+                                    cx.stop_propagation();
+                                    let result = this.workspace.update(cx, |ws, cx| {
+                                        ws.quick_create_worktree(&project_id, cx)
+                                    });
+                                    if let Err(e) = result {
+                                        log::error!("Quick worktree creation failed: {}", e);
+                                    }
+                                }
+                            }))
+                            .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                        )
                     }),
             )
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))

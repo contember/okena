@@ -64,7 +64,7 @@ impl GitStatusWatcher {
                 for (id, path) in &projects {
                     let path = path.clone();
                     let status = smol::unblock(move || {
-                        git::get_git_status(Path::new(&path))
+                        git::refresh_git_status(Path::new(&path))
                     }).await;
                     new_statuses.insert(id.clone(), status);
                 }
