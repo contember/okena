@@ -1443,7 +1443,8 @@ impl Render for Sidebar {
             match item {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
+                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id)
+                        && project.worktree_count == 0;
                     if project.is_orphan {
                         flat_elements.push(
                             self.render_worktree_item(&project, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1463,10 +1464,7 @@ impl Render for Sidebar {
                     // Worktree children (includes main worktree as first entry when present)
                     for child in &worktree_children {
                         let is_cursor = cursor_index == Some(flat_idx);
-                        // Don't highlight the main worktree row (same ID as parent — parent header shows focus)
-                        let is_main_worktree = child.id == project.id;
-                        let is_focused_project = !is_main_worktree
-                            && focused_project_id.as_ref() == Some(&child.id);
+                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                         flat_elements.push(
                             self.render_worktree_item(child, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
@@ -1497,7 +1495,8 @@ impl Render for Sidebar {
                     if !folder.collapsed {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
+                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id)
+                                && fp.worktree_count == 0;
                             if fp.is_orphan {
                                 flat_elements.push(
                                     self.render_worktree_item(fp, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1518,9 +1517,7 @@ impl Render for Sidebar {
                             if let Some(wt_children) = worktree_children.get(&fp.id) {
                                 for child in wt_children {
                                     let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_main_worktree = child.id == fp.id;
-                                    let is_focused_project = !is_main_worktree
-                                        && focused_project_id.as_ref() == Some(&child.id);
+                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
                                         self.render_worktree_item(child, 32.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );

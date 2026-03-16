@@ -568,6 +568,8 @@ impl Workspace {
         };
 
         let mut result = Vec::new();
+        // Track worktree children already added via their parent's folder
+        let mut added_via_folder: HashSet<&str> = HashSet::new();
         for id in &self.data.project_order {
             if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
                 // When folder filter is active, skip folders that don't match
@@ -586,15 +588,32 @@ impl Workspace {
                         continue;
                     }
                 }
-                // Folder: include its projects
+                // Folder: include its projects (and worktree children when folder filter is active,
+                // since they live in project_order rather than folder.project_ids)
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
                         if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                             result.push(p);
                         }
+                        if folder_filter.is_some() {
+                            for wt in &self.data.projects {
+                                if let Some(ref wi) = wt.worktree_info {
+                                    if wi.parent_project_id == *pid {
+                                        if effective_focused.map_or(wt.is_visible, |fid| is_focused(wt, fid)) {
+                                            result.push(wt);
+                                            added_via_folder.insert(&wt.id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
+                // Skip worktree children already added via their parent's folder
+                if added_via_folder.contains(p.id.as_str()) {
+                    continue;
+                }
                 // Top-level project: hide when folder filter is active
                 if folder_filter.is_some() {
                     // Still allow the focused project (and its worktrees) through
@@ -2552,6 +2571,48 @@ mod workspace_tests {
         ws.focus_manager.set_focused_project_id(None);
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 4);
+    }
+
+    #[test]
+    fn test_folder_filter_includes_worktree_children() {
+        // p1 is in folder f1, with worktree children w1, w2 (in project_order, not in folder)
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut w2 = make_project("w2", true);
+        w2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), w1, w2, make_project("p2", true)],
+            vec!["f1", "w1", "w2", "p2"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+
+        // No filter: all 4 visible
+        assert_eq!(ws.visible_projects().len(), 4);
+
+        // Filter to f1: should show p1 + w1 + w2 (worktree children of p1)
+        ws.active_folder_filter = Some("f1".to_string());
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
     }
 
     #[test]
