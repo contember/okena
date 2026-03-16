@@ -46,6 +46,7 @@ impl Sidebar {
         project_count: usize,
         idle_terminal_count: usize,
         is_cursor: bool,
+        is_focused: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -67,6 +68,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for folder reordering
             .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {

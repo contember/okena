@@ -1487,6 +1487,26 @@ impl Render for Sidebar {
                 .or_else(|| ws.focus_manager.focused_terminal_state().map(|ft| ft.project_id))
         };
 
+        // Compute ancestor IDs for subtle highlight on parent project and folder headers
+        let (focused_parent_project_id, focused_folder_id): (Option<String>, Option<String>) = {
+            if let Some(ref fid) = focused_project_id {
+                let ws = self.workspace.read(cx);
+                // If focused project is a worktree child, find its parent
+                let parent_id = ws.project(fid)
+                    .and_then(|p| p.worktree_info.as_ref())
+                    .map(|wt| wt.parent_project_id.clone());
+                // The "effective" project for folder lookup is the parent if it's a worktree child
+                let effective_id = parent_id.as_deref().unwrap_or(fid.as_str());
+                // Find which folder contains this project
+                let folder_id = ws.data().folders.iter()
+                    .find(|f| f.project_ids.iter().any(|pid| pid == effective_id))
+                    .map(|f| f.id.clone());
+                (parent_id, folder_id)
+            } else {
+                (None, None)
+            }
+        };
+
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
         let mut flat_idx: usize = 0;
@@ -1520,8 +1540,9 @@ impl Render for Sidebar {
             match item {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id)
-                        && project.worktree_count == 0;
+                    let is_focused_project = (focused_project_id.as_ref() == Some(&project.id)
+                        && project.worktree_count == 0)
+                        || focused_parent_project_id.as_ref() == Some(&project.id);
                     if project.is_orphan {
                         flat_elements.push(
                             self.render_worktree_item(&project, 8.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1554,6 +1575,7 @@ impl Render for Sidebar {
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
+                    let is_focused_folder = focused_folder_id.as_ref() == Some(&folder.id);
                     let idle_terminal_count = if folder.collapsed {
                         let terminals = self.terminals.lock();
                         projects.iter()
@@ -1564,7 +1586,7 @@ impl Render for Sidebar {
                         0
                     };
                     flat_elements.push(
-                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, window, cx).into_any_element()
+                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, is_focused_folder, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
@@ -1572,8 +1594,9 @@ impl Render for Sidebar {
                     if !folder.collapsed {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id)
-                                && fp.worktree_count == 0;
+                            let is_focused_project = (focused_project_id.as_ref() == Some(&fp.id)
+                                && fp.worktree_count == 0)
+                                || focused_parent_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
                                     self.render_worktree_item(fp, 28.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()

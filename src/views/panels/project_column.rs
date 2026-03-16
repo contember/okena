@@ -627,9 +627,6 @@ impl ProjectColumn {
                 })
             });
         let is_worktree = project.worktree_info.is_some();
-        let main_repo_path = project.worktree_info.as_ref()
-            .map(|w| w.main_repo_path.clone())
-            .unwrap_or_default();
         let entity_handle = cx.entity().clone();
 
         match status {
@@ -645,41 +642,27 @@ impl ProjectColumn {
                     .gap(px(6.0))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
-                    // Worktree indicator
-                    .when(is_worktree, |d| {
-                        let tooltip_text = format!("Worktree of {}", main_repo_path);
+                    // Branch name (hidden for worktrees — shown in header badge instead)
+                    .when(!is_worktree, |d| {
                         d.child(
-                            div()
-                                .id("worktree-indicator")
-                                .px(px(4.0))
-                                .py(px(1.0))
-                                .rounded(px(3.0))
-                                .bg(rgb(t.border_active))
-                                .text_size(px(9.0))
-                                .text_color(rgb(t.bg_primary))
-                                .child("WT")
-                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+                            h_flex()
+                                .gap(px(3.0))
+                                .child(
+                                    svg()
+                                        .path("icons/git-branch.svg")
+                                        .size(px(10.0))
+                                        .text_color(rgb(t.text_muted))
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(t.text_secondary))
+                                        .max_w(px(100.0))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(status.branch.clone().unwrap_or_default())
+                                )
                         )
                     })
-                    // Branch name
-                    .child(
-                        h_flex()
-                            .gap(px(3.0))
-                            .child(
-                                svg()
-                                    .path("icons/git-branch.svg")
-                                    .size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_secondary))
-                                    .max_w(px(100.0))
-                                    .text_ellipsis()
-                                    .overflow_hidden()
-                                    .child(status.branch.clone().unwrap_or_default())
-                            )
-                    )
                     // Diff stats (clickable, only if there are changes)
                     .when(has_changes, |d: Div| {
                         d.child(
@@ -818,14 +801,59 @@ impl ProjectColumn {
                             .text_ellipsis()
                             .child(display_name)
                     })
+                    // Worktree branch badge (shown after project name for worktree projects)
+                    .when(project.worktree_info.is_some(), |d| {
+                        // Get branch name from git watcher (same source as render_git_status)
+                        let branch = self.git_watcher.as_ref()
+                            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+                            .or_else(|| {
+                                project.remote_git_status.as_ref().map(|g| git::GitStatus {
+                                    branch: g.branch.clone(),
+                                    lines_added: g.lines_added,
+                                    lines_removed: g.lines_removed,
+                                })
+                            })
+                            .and_then(|s| s.branch)
+                            .unwrap_or_else(|| project.name.clone());
+                        d.child(
+                            h_flex()
+                                .flex_shrink_0()
+                                .gap(px(3.0))
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(t.bg_hover))
+                                .items_center()
+                                .child(
+                                    svg()
+                                        .path("icons/git-branch.svg")
+                                        .size(px(10.0))
+                                        .text_color(rgb(t.text_muted))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.text_secondary))
+                                        .line_height(px(12.0))
+                                        .child(branch)
+                                )
+                        )
+                    })
                     .child(
+                        // Left-truncate: flex + justify_end clips from the left
                         div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_muted))
-                            .line_height(px(12.0))
-                            .text_ellipsis()
+                            .max_w(px(300.0))
                             .overflow_hidden()
-                            .child(project.path.clone()),
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .line_height(px(12.0))
+                                    .child(project.path.clone()),
+                            )
                     )
                     .child(self.render_git_status(project, t, cx)),
             )
