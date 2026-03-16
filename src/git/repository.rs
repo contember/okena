@@ -204,6 +204,7 @@ pub fn get_status(path: &Path) -> Option<GitStatus> {
         branch,
         lines_added,
         lines_removed,
+        pr_info: None,
     })
 }
 
@@ -545,6 +546,41 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
         }
     }
     result
+}
+
+/// Get PR info for the current branch (if any PR exists).
+/// Uses `gh pr view` which requires the GitHub CLI to be installed and authenticated.
+pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
+    let path_str = path.to_str()?;
+
+    let output = command("gh")
+        .args(["pr", "view", "--json", "url,state,isDraft", "--jq", "[.url, .state, .isDraft] | @tsv"])
+        .current_dir(path_str)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.trim();
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 && parts[0].starts_with("http") {
+            let url = parts[0].to_string();
+            let is_draft = parts[2] == "true";
+            let state = if is_draft {
+                super::PrState::Draft
+            } else {
+                match parts[1] {
+                    "OPEN" => super::PrState::Open,
+                    "MERGED" => super::PrState::Merged,
+                    "CLOSED" => super::PrState::Closed,
+                    _ => super::PrState::Open,
+                }
+            };
+            return Some(super::PrInfo { url, state });
+        }
+    }
+
+    None
 }
 
 /// Normalize a path by resolving `.` and `..` components without filesystem access.

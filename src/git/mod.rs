@@ -33,6 +33,22 @@ use std::time::{Duration, Instant};
 /// Cache TTL - how long before status is considered stale
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
+/// PR state from GitHub
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+    Draft,
+}
+
+/// Pull request info
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrInfo {
+    pub url: String,
+    pub state: PrState,
+}
+
 /// Git status information for display in project header
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GitStatus {
@@ -42,6 +58,9 @@ pub struct GitStatus {
     pub lines_added: usize,
     /// Lines removed in working directory (unstaged + staged)
     pub lines_removed: usize,
+    /// Pull request info for the current branch (if any)
+    #[serde(default)]
+    pub pr_info: Option<PrInfo>,
 }
 
 /// Per-file diff summary for popover display

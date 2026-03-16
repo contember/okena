@@ -624,6 +624,7 @@ impl ProjectColumn {
                     branch: g.branch.clone(),
                     lines_added: g.lines_added,
                     lines_removed: g.lines_removed,
+                    pr_info: None,
                 })
             });
         let is_worktree = project.worktree_info.is_some();
@@ -644,14 +645,42 @@ impl ProjectColumn {
                     .line_height(px(12.0))
                     // Branch name (hidden for worktrees — shown in header badge instead)
                     .when(!is_worktree, |d| {
+                        let pr_info = status.pr_info.clone();
+                        let (icon_path, icon_color) = if let Some(ref pr) = pr_info {
+                            let color = match &pr.state {
+                                git::PrState::Open => t.term_green,
+                                git::PrState::Draft => t.text_muted,
+                                git::PrState::Merged => t.term_magenta,
+                                git::PrState::Closed => t.term_red,
+                            };
+                            ("icons/git-pull-request.svg", color)
+                        } else {
+                            ("icons/git-branch.svg", t.text_muted)
+                        };
+                        let has_pr = pr_info.is_some();
+                        let pr_url = pr_info.map(|p| p.url);
                         d.child(
                             h_flex()
+                                .id("branch-status")
                                 .gap(px(3.0))
+                                .when(has_pr, |d: Stateful<Div>| {
+                                    d.cursor_pointer()
+                                        .rounded(px(3.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                })
+                                .when_some(pr_url, |d, url| {
+                                    d.on_click(move |_, _, _cx| {
+                                        crate::process::open_url(&url);
+                                    })
+                                })
                                 .child(
                                     svg()
-                                        .path("icons/git-branch.svg")
+                                        .path(icon_path)
                                         .size(px(10.0))
-                                        .text_color(rgb(t.text_muted))
+                                        .text_color(rgb(icon_color))
                                 )
                                 .child(
                                     div()
@@ -801,34 +830,71 @@ impl ProjectColumn {
                             .text_ellipsis()
                             .child(display_name)
                     })
-                    // Worktree branch badge (shown after project name for worktree projects)
+                    // Branch badge — for worktrees, also acts as PR button with color-coded icon
                     .when(project.worktree_info.is_some(), |d| {
-                        // Get branch name from git watcher (same source as render_git_status)
-                        let branch = self.git_watcher.as_ref()
+                        // Get git status with branch + PR info
+                        let git_status = self.git_watcher.as_ref()
                             .and_then(|w| w.read(cx).get(&self.project_id).cloned())
                             .or_else(|| {
                                 project.remote_git_status.as_ref().map(|g| git::GitStatus {
                                     branch: g.branch.clone(),
                                     lines_added: g.lines_added,
                                     lines_removed: g.lines_removed,
+                                    pr_info: None,
                                 })
-                            })
-                            .and_then(|s| s.branch)
+                            });
+                        let branch = git_status.as_ref()
+                            .and_then(|s| s.branch.clone())
                             .unwrap_or_else(|| project.name.clone());
+                        let pr_info = git_status.and_then(|s| s.pr_info);
+
+                        let (icon_path, icon_color, tooltip_text) = if let Some(ref pr) = pr_info {
+                            let color = match &pr.state {
+                                git::PrState::Open => t.term_green,
+                                git::PrState::Draft => t.text_muted,
+                                git::PrState::Merged => t.term_magenta,
+                                git::PrState::Closed => t.term_red,
+                            };
+                            let label = match &pr.state {
+                                git::PrState::Open => "Open",
+                                git::PrState::Draft => "Draft",
+                                git::PrState::Merged => "Merged",
+                                git::PrState::Closed => "Closed",
+                            };
+                            ("icons/git-pull-request.svg", color, format!("Pull Request ({})", label))
+                        } else {
+                            ("icons/git-branch.svg", t.text_muted, branch.clone())
+                        };
+
+                        let has_pr = pr_info.is_some();
+                        let pr_url = pr_info.map(|p| p.url);
+
                         d.child(
                             h_flex()
+                                .id("branch-badge")
                                 .flex_shrink_0()
                                 .gap(px(3.0))
                                 .px(px(4.0))
                                 .py(px(1.0))
                                 .rounded(px(3.0))
-                                .bg(rgb(t.bg_hover))
                                 .items_center()
+                                .when(has_pr, |d| {
+                                    d.cursor_pointer()
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                })
+                                .when_some(pr_url, |d, url| {
+                                    d.on_click(move |_, _, _cx| {
+                                        crate::process::open_url(&url);
+                                    })
+                                })
                                 .child(
                                     svg()
-                                        .path("icons/git-branch.svg")
+                                        .path(icon_path)
                                         .size(px(10.0))
-                                        .text_color(rgb(t.text_muted))
+                                        .text_color(rgb(icon_color))
                                 )
                                 .child(
                                     div()
@@ -837,6 +903,7 @@ impl ProjectColumn {
                                         .line_height(px(12.0))
                                         .child(branch)
                                 )
+                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
                         )
                     })
                     .child(
