@@ -97,6 +97,7 @@ pub fn sidebar_name_label(
         .flex_1()
         .min_w_0()
         .overflow_hidden()
+        .whitespace_nowrap()
         .text_size(px(12.0))
         .text_color(rgb(t.text_primary))
         .text_ellipsis()
@@ -184,6 +185,28 @@ pub fn sidebar_group_header(
                 .rounded(px(3.0))
                 .bg(rgb(t.bg_secondary))
                 .text_size(px(9.0))
+                .text_color(rgb(t.text_muted))
+                .child(format!("{}", count)),
+        )
+}
+
+/// Worktree count badge (git-branch icon + number).
+/// Shown on parent projects that have active worktrees.
+pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            svg()
+                .path("icons/git-branch.svg")
+                .size(px(10.0))
+                .text_color(rgb(t.text_muted)),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
                 .text_color(rgb(t.text_muted))
                 .child(format!("{}", count)),
         )

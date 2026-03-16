@@ -417,6 +417,9 @@ fn main() {
         // Initialize toast notification system
         cx.set_global(ToastManager::new());
 
+        // Initialize hook execution monitor
+        cx.set_global(workspace::hook_monitor::HookMonitor::new());
+
         // Initialize global settings entity (must be before workspace load)
         let settings_entity = settings::init_settings(cx);
         let app_settings = settings_entity.read(cx).get().clone();

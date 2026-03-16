@@ -80,6 +80,33 @@ pub struct WorktreeMetadata {
     pub worktree_path: String,
 }
 
+/// Status of a hook terminal in the service panel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HookTerminalStatus {
+    Running,
+    Succeeded,
+    Failed { exit_code: i32 },
+}
+
+/// Entry for a hook terminal displayed in the service panel.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct HookTerminalEntry {
+    pub hook_type: &'static str,
+    pub label: String,
+    pub status: HookTerminalStatus,
+}
+
+/// Pending worktree close operation waiting for a hook to complete.
+#[derive(Clone, Debug)]
+pub struct PendingWorktreeClose {
+    pub project_id: String,
+    pub hook_terminal_id: String,
+    /// Data needed for the worktree_removed hook after removal
+    pub branch: String,
+    pub main_repo_path: String,
+}
+
 /// A single project with its layout tree
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectData {
@@ -125,6 +152,9 @@ pub struct ProjectData {
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<crate::terminal::shell_config::ShellType>,
+    /// Hook terminals currently displayed in the service panel (transient, not persisted)
+    #[serde(skip)]
+    pub hook_terminals: HashMap<String, HookTerminalEntry>,
 }
 
 impl ProjectData {
@@ -251,6 +281,12 @@ pub struct Workspace {
     /// the project ID is recorded here. On the next sync, we detect the
     /// new terminal and focus it.
     pub pending_remote_focus: HashSet<String>,
+    /// Pending worktree close operations waiting for a hook terminal to exit.
+    /// Key is the hook terminal_id.
+    pub pending_worktree_closes: HashMap<String, PendingWorktreeClose>,
+    /// Project IDs currently being closed (hook running or git worktree remove in progress).
+    /// Used by the sidebar to show a visual "closing" indicator.
+    pub closing_projects: HashSet<String>,
 }
 
 impl Workspace {
@@ -262,6 +298,8 @@ impl Workspace {
             data_version: 0,
             active_folder_filter: None,
             pending_remote_focus: HashSet::new(),
+            pending_worktree_closes: HashMap::new(),
+            closing_projects: HashSet::new(),
         }
     }
 
@@ -332,6 +370,169 @@ impl Workspace {
         }
     }
 
+    pub fn register_hook_terminal(
+        &mut self,
+        project_id: &str,
+        terminal_id: &str,
+        entry: HookTerminalEntry,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            let label = entry.label.clone();
+            project.hook_terminals.insert(terminal_id.to_string(), entry);
+
+            // Add the hook terminal to the project's layout so it renders in a pane.
+            // If there are already hook terminals, group them in Tabs to avoid nested splits
+            // that progressively shrink the main terminal area.
+            let hook_node = LayoutNode::Terminal {
+                terminal_id: Some(terminal_id.to_string()),
+                minimized: false,
+                detached: false,
+                shell_type: crate::terminal::shell_config::ShellType::Default,
+                zoom_level: 1.0,
+            };
+            if let Some(ref mut existing) = project.layout {
+                // Check if the layout is already a horizontal split with hook terminals
+                // on the right side — if so, add to existing Tabs group.
+                let added_to_existing = if let LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    children, ..
+                } = existing {
+                    if children.len() == 2 {
+                        match &mut children[1] {
+                            LayoutNode::Tabs { children: tab_children, active_tab } => {
+                                // Already a Tabs group — append and switch to new tab
+                                tab_children.push(hook_node.clone());
+                                *active_tab = tab_children.len() - 1;
+                                true
+                            }
+                            other @ LayoutNode::Terminal { .. } => {
+                                // Single hook terminal — convert to Tabs for the new one.
+                                // Check layout structure directly instead of relying on
+                                // hook_terminals count which can be stale after removals.
+                                let prev = other.clone();
+                                *other = LayoutNode::Tabs {
+                                    children: vec![prev, hook_node.clone()],
+                                    active_tab: 1,
+                                };
+                                true
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !added_to_existing {
+                    let existing = existing.clone();
+                    project.layout = Some(LayoutNode::Split {
+                        direction: SplitDirection::Horizontal,
+                        children: vec![existing, hook_node],
+                        sizes: vec![0.7, 0.3],
+                    });
+                }
+            } else {
+                project.layout = Some(hook_node);
+            }
+            // Set the terminal name to the hook label
+            project.terminal_names.insert(terminal_id.to_string(), label);
+
+            // Use cx.notify() instead of notify_data() — hook terminals are transient
+            // and should not trigger a workspace save to disk.
+            cx.notify();
+        }
+    }
+
+    /// Register hook terminal results from a hook execution.
+    /// Convenience wrapper that converts `HookTerminalResult`s into `HookTerminalEntry`s.
+    pub fn register_hook_results(
+        &mut self,
+        results: Vec<crate::workspace::hooks::HookTerminalResult>,
+        cx: &mut Context<Self>,
+    ) {
+        for result in results {
+            self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
+                hook_type: result.hook_type,
+                label: result.label,
+                status: HookTerminalStatus::Running,
+            }, cx);
+        }
+    }
+
+    pub fn update_hook_terminal_status(
+        &mut self,
+        terminal_id: &str,
+        status: HookTerminalStatus,
+        cx: &mut Context<Self>,
+    ) {
+        for project in &mut self.data.projects {
+            if let Some(entry) = project.hook_terminals.get_mut(terminal_id) {
+                if entry.status != status {
+                    entry.status = status;
+                    cx.notify();
+                }
+                return;
+            }
+        }
+    }
+
+    pub fn remove_hook_terminal(
+        &mut self,
+        terminal_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        for project in &mut self.data.projects {
+            if project.hook_terminals.remove(terminal_id).is_some() {
+                // Also remove from the layout tree
+                if let Some(ref layout) = project.layout {
+                    if let Some(path) = layout.find_terminal_path(terminal_id) {
+                        if path.is_empty() {
+                            // Hook terminal is the root layout node — clear it entirely
+                            project.layout = None;
+                        } else if let Some(ref mut layout) = project.layout {
+                            layout.remove_at_path(&path);
+                        }
+                    }
+                }
+                project.terminal_names.remove(terminal_id);
+                // Use cx.notify() instead of notify_data() — hook terminals are transient
+                // and should not trigger a workspace save to disk.
+                cx.notify();
+                return;
+            }
+        }
+    }
+
+    pub fn is_hook_terminal(&self, terminal_id: &str) -> Option<String> {
+        for project in &self.data.projects {
+            if project.hook_terminals.contains_key(terminal_id) {
+                return Some(project.id.clone());
+            }
+        }
+        None
+    }
+
+    /// Register a pending worktree close that will execute when the hook terminal exits.
+    pub fn register_pending_worktree_close(&mut self, pending: PendingWorktreeClose) {
+        self.closing_projects.insert(pending.project_id.clone());
+        self.pending_worktree_closes.insert(pending.hook_terminal_id.clone(), pending);
+    }
+
+    /// Take a pending worktree close for the given terminal ID (removes it).
+    pub fn take_pending_worktree_close(&mut self, terminal_id: &str) -> Option<PendingWorktreeClose> {
+        self.pending_worktree_closes.remove(terminal_id)
+    }
+
+    /// Cancel a pending worktree close: remove it and unmark the project as closing.
+    pub fn cancel_pending_worktree_close(&mut self, terminal_id: &str) {
+        if let Some(pending) = self.take_pending_worktree_close(terminal_id) {
+            self.closing_projects.remove(&pending.project_id);
+        }
+    }
+
     pub fn projects(&self) -> &[ProjectData] {
         &self.data.projects
     }
@@ -348,17 +549,37 @@ impl Workspace {
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
         let focused = self.focused_project_id();
         let folder_filter = self.active_folder_filter.as_ref();
+
+        // If the focused project is a worktree child, resolve to its parent
+        // so that all sibling worktrees and the parent are shown together
+        let effective_focused: Option<&String> = focused.map(|fid| {
+            self.project(fid)
+                .and_then(|p| p.worktree_info.as_ref())
+                .map(|wi| &wi.parent_project_id)
+                .unwrap_or(fid)
+        });
+
+        // When a project is focused, also show its worktree children
+        let is_focused = |p: &ProjectData, fid: &String| -> bool {
+            &p.id == fid
+                || p.worktree_info
+                    .as_ref()
+                    .map_or(false, |wi| &wi.parent_project_id == fid)
+        };
+
         let mut result = Vec::new();
+        // Track worktree children already added via their parent's folder
+        let mut added_via_folder: HashSet<&str> = HashSet::new();
         for id in &self.data.project_order {
             if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
                 // When folder filter is active, skip folders that don't match
                 if let Some(filter_id) = folder_filter {
                     if &folder.id != filter_id {
-                        // Still allow the focused project through even if in wrong folder
-                        if let Some(fid) = focused {
+                        // Still allow the focused project (and its worktrees) through even if in wrong folder
+                        if let Some(fid) = effective_focused {
                             for pid in &folder.project_ids {
-                                if pid == fid {
-                                    if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
+                                if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
+                                    if is_focused(p, fid) {
                                         result.push(p);
                                     }
                                 }
@@ -367,24 +588,41 @@ impl Workspace {
                         continue;
                     }
                 }
-                // Folder: include its projects
+                // Folder: include its projects (and worktree children when folder filter is active,
+                // since they live in project_order rather than folder.project_ids)
                 for pid in &folder.project_ids {
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                        if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                             result.push(p);
+                        }
+                        if folder_filter.is_some() {
+                            for wt in &self.data.projects {
+                                if let Some(ref wi) = wt.worktree_info {
+                                    if wi.parent_project_id == *pid {
+                                        if effective_focused.map_or(wt.is_visible, |fid| is_focused(wt, fid)) {
+                                            result.push(wt);
+                                            added_via_folder.insert(&wt.id);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
+                // Skip worktree children already added via their parent's folder
+                if added_via_folder.contains(p.id.as_str()) {
+                    continue;
+                }
                 // Top-level project: hide when folder filter is active
                 if folder_filter.is_some() {
-                    // Still allow the focused project through
-                    if focused.map_or(false, |fid| &p.id == fid) {
+                    // Still allow the focused project (and its worktrees) through
+                    if effective_focused.map_or(false, |fid| is_focused(p, fid)) {
                         result.push(p);
                     }
                     continue;
                 }
-                if focused.map_or(p.is_visible, |fid| &p.id == fid) {
+                if effective_focused.map_or(p.is_visible, |fid| is_focused(p, fid)) {
                     result.push(p);
                 }
             }
@@ -556,10 +794,7 @@ impl LayoutNode {
             terminal_id: None,
             minimized: false,
             detached: false,
-            shell_type: ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), full_cmd],
-            },
+            shell_type: ShellType::for_command(full_cmd),
             zoom_level: 1.0,
         }
     }
@@ -1186,6 +1421,7 @@ mod tests {
             remote_host: None,
             remote_git_status: None,
             default_shell: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -2041,6 +2277,7 @@ mod tests {
 mod workspace_tests {
     use crate::workspace::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData,
+        WorktreeMetadata,
     };
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
@@ -2072,6 +2309,7 @@ mod workspace_tests {
             remote_host: None,
             remote_git_status: None,
             default_shell: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -2284,6 +2522,100 @@ mod workspace_tests {
     }
 
     #[test]
+    fn test_visible_projects_worktree_focus_shows_all_siblings() {
+        // Parent p1 with worktree children w1, w2
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut w2 = make_project("w2", true);
+        w2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+
+        let data = make_workspace_data(
+            vec![make_project("p1", true), w1, w2, make_project("p2", true)],
+            vec!["p1", "w1", "w2", "p2"],
+        );
+        let mut ws = Workspace::new(data);
+
+        // Focus on parent p1 — should show p1 + w1 + w2
+        ws.focus_manager.set_focused_project_id(Some("p1".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // Focus on worktree child w1 — should ALSO show p1 + w1 + w2 (resolve to parent)
+        ws.focus_manager.set_focused_project_id(Some("w1".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // Focus on worktree child w2 — same result
+        ws.focus_manager.set_focused_project_id(Some("w2".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // No focus — all 4 projects visible (including p2)
+        ws.focus_manager.set_focused_project_id(None);
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 4);
+    }
+
+    #[test]
+    fn test_folder_filter_includes_worktree_children() {
+        // p1 is in folder f1, with worktree children w1, w2 (in project_order, not in folder)
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut w2 = make_project("w2", true);
+        w2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), w1, w2, make_project("p2", true)],
+            vec!["f1", "w1", "w2", "p2"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+
+        // No filter: all 4 visible
+        assert_eq!(ws.visible_projects().len(), 4);
+
+        // Filter to f1: should show p1 + w1 + w2 (worktree children of p1)
+        ws.active_folder_filter = Some("f1".to_string());
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+    }
+
+    #[test]
     fn test_folder_filter_with_focus_override() {
         let mut data = make_workspace_data(
             vec![
@@ -2317,7 +2649,7 @@ mod workspace_tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
@@ -2348,6 +2680,7 @@ mod gpui_tests {
             remote_host: None,
             remote_git_status: None,
             default_shell: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
@@ -2568,6 +2901,166 @@ mod gpui_tests {
             assert_eq!(visible.len(), 2);
             assert_eq!(visible[0].id, "local1");
             assert_eq!(visible[1].id, "remote:conn1:p1");
+        });
+    }
+
+    // ── register_hook_terminal layout tests ──────────────────────────────
+
+    fn make_hook_entry(hook_type: &'static str) -> HookTerminalEntry {
+        HookTerminalEntry {
+            hook_type,
+            label: format!("{} (test)", hook_type),
+            status: HookTerminalStatus::Running,
+        }
+    }
+
+    #[gpui::test]
+    fn test_register_hook_terminal_no_layout(cx: &mut gpui::TestAppContext) {
+        let mut p = make_project("p1");
+        p.layout = None;
+        let data = make_workspace_data(vec![p], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            assert!(matches!(layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_hook_terminal_creates_split(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { direction, children, sizes } => {
+                    assert_eq!(*direction, SplitDirection::Horizontal);
+                    assert_eq!(children.len(), 2);
+                    assert!((sizes[0] - 0.7).abs() < 0.01);
+                    assert!((sizes[1] - 0.3).abs() < 0.01);
+                    // Original terminal on left
+                    assert!(matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "term_p1"));
+                    // Hook terminal on right
+                    assert!(matches!(&children[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+                }
+                _ => panic!("Expected horizontal split, got {:?}", layout),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_second_hook_creates_tabs(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { children, .. } => {
+                    assert_eq!(children.len(), 2);
+                    match &children[1] {
+                        LayoutNode::Tabs { children: tabs, active_tab } => {
+                            assert_eq!(tabs.len(), 2);
+                            assert_eq!(*active_tab, 1);
+                            assert!(matches!(&tabs[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+                            assert!(matches!(&tabs[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-2"));
+                        }
+                        _ => panic!("Expected Tabs node for second hook"),
+                    }
+                }
+                _ => panic!("Expected split layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_register_third_hook_appends_to_tabs(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+            ws.register_hook_terminal("p1", "hook-3", make_hook_entry("post_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            match layout {
+                LayoutNode::Split { children, .. } => {
+                    match &children[1] {
+                        LayoutNode::Tabs { children: tabs, active_tab } => {
+                            assert_eq!(tabs.len(), 3);
+                            assert_eq!(*active_tab, 2);
+                        }
+                        _ => panic!("Expected Tabs"),
+                    }
+                }
+                _ => panic!("Expected split layout"),
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_remove_hook_terminal_cleans_layout(cx: &mut gpui::TestAppContext) {
+        let mut p = make_project("p1");
+        p.layout = None;
+        let data = make_workspace_data(vec![p], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+        });
+
+        // Verify terminal is there
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.project("p1").unwrap().layout.is_some());
+            assert!(ws.project("p1").unwrap().hook_terminals.contains_key("hook-1"));
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.remove_hook_terminal("hook-1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let p = ws.project("p1").unwrap();
+            assert!(p.layout.is_none());
+            assert!(p.hook_terminals.is_empty());
+            assert!(!p.terminal_names.contains_key("hook-1"));
+        });
+    }
+
+    #[gpui::test]
+    fn test_hook_terminal_sets_name(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
+                hook_type: "on_project_open",
+                label: "on_project_open (feature/foo)".to_string(),
+                status: HookTerminalStatus::Running,
+            }, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let name = ws.project("p1").unwrap().terminal_names.get("hook-1").unwrap();
+            assert_eq!(name, "on_project_open (feature/foo)");
         });
     }
 }

@@ -6,6 +6,7 @@ pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_optio
 pub use repository::{
     create_worktree,
     remove_worktree,
+    remove_worktree_fast,
     get_available_branches_for_worktree,
     get_repo_root,
     has_uncommitted_changes,

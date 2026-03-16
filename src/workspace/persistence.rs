@@ -381,6 +381,7 @@ pub fn default_workspace() -> WorkspaceData {
             remote_host: None,
             remote_git_status: None,
             default_shell: None,
+            hook_terminals: HashMap::new(),
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
@@ -413,6 +414,7 @@ mod tests {
             remote_host: None,
             remote_git_status: None,
             default_shell: None,
+            hook_terminals: HashMap::new(),
         }
     }
 
