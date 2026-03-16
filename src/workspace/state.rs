@@ -93,6 +93,12 @@ pub enum HookTerminalStatus {
 pub struct HookTerminalEntry {
     pub label: String,
     pub status: HookTerminalStatus,
+    /// Which hook triggered this terminal (e.g. "on_project_open").
+    pub hook_type: String,
+    /// The full command string with env vars baked in (ready to re-execute).
+    pub command: String,
+    /// Working directory for the hook command.
+    pub cwd: String,
 }
 
 /// Pending worktree close operation waiting for a hook to complete.
@@ -458,6 +464,9 @@ impl Workspace {
             self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
                 label: result.label,
                 status: HookTerminalStatus::Running,
+                hook_type: result.hook_type.to_string(),
+                command: result.command,
+                cwd: result.cwd,
             }, cx);
         }
     }
@@ -513,6 +522,45 @@ impl Workspace {
             }
         }
         None
+    }
+
+    /// Get all hook terminal IDs for a project (for cleanup before deletion).
+    pub fn hook_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        self.project(project_id)
+            .map(|p| p.hook_terminals.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
+    /// Resets status back to Running.
+    pub fn swap_hook_terminal_id(
+        &mut self,
+        project_id: &str,
+        old_id: &str,
+        new_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) else {
+            return;
+        };
+
+        // Swap in hook_terminals HashMap
+        if let Some(mut entry) = project.hook_terminals.remove(old_id) {
+            entry.status = HookTerminalStatus::Running;
+            project.hook_terminals.insert(new_id.to_string(), entry);
+        }
+
+        // Swap in layout tree
+        if let Some(ref mut layout) = project.layout {
+            layout.replace_terminal_id(old_id, new_id);
+        }
+
+        // Swap in terminal_names
+        if let Some(name) = project.terminal_names.remove(old_id) {
+            project.terminal_names.insert(new_id.to_string(), name);
+        }
+
+        cx.notify();
     }
 
     /// Register a pending worktree close that will execute when the hook terminal exits.
@@ -827,6 +875,22 @@ impl LayoutNode {
         }
     }
 
+    /// Replace a terminal ID in the layout tree (for hook rerun).
+    pub fn replace_terminal_id(&mut self, old_id: &str, new_id: &str) {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if terminal_id.as_deref() == Some(old_id) {
+                    *terminal_id = Some(new_id.to_string());
+                }
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.replace_terminal_id(old_id, new_id);
+                }
+            }
+        }
+    }
+
     /// Create a new empty terminal node
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
@@ -1131,6 +1195,32 @@ impl LayoutNode {
                     first_child.find_first_terminal_path_recursive(child_path)
                 } else {
                     current_path
+                }
+            }
+        }
+    }
+
+    /// Find path to the first visible terminal (follows active tabs).
+    pub fn find_visible_terminal_path(&self) -> Vec<usize> {
+        match self {
+            LayoutNode::Terminal { .. } => vec![],
+            LayoutNode::Split { children, .. } => {
+                if let Some(first_child) = children.first() {
+                    let mut path = vec![0];
+                    path.extend(first_child.find_visible_terminal_path());
+                    path
+                } else {
+                    vec![]
+                }
+            }
+            LayoutNode::Tabs { children, active_tab, .. } => {
+                let idx = (*active_tab).min(children.len().saturating_sub(1));
+                if let Some(child) = children.get(idx) {
+                    let mut path = vec![idx];
+                    path.extend(child.find_visible_terminal_path());
+                    path
+                } else {
+                    vec![]
                 }
             }
         }
@@ -3165,6 +3255,9 @@ mod gpui_tests {
         HookTerminalEntry {
             label: format!("{} (test)", hook_type),
             status: HookTerminalStatus::Running,
+            hook_type: hook_type.to_string(),
+            command: "echo test".to_string(),
+            cwd: ".".to_string(),
         }
     }
 
@@ -3308,12 +3401,92 @@ mod gpui_tests {
             ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
                 label: "on_project_open (feature/foo)".to_string(),
                 status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo test".to_string(),
+                cwd: ".".to_string(),
             }, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let name = ws.project("p1").unwrap().terminal_names.get("hook-1").unwrap();
             assert_eq!(name, "on_project_open (feature/foo)");
+        });
+    }
+
+    #[gpui::test]
+    fn test_swap_hook_terminal_id(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.update_hook_terminal_status("hook-1", HookTerminalStatus::Succeeded, cx);
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.swap_hook_terminal_id("p1", "hook-1", "hook-1-new", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let project = ws.project("p1").unwrap();
+            // Old ID gone
+            assert!(!project.hook_terminals.contains_key("hook-1"));
+            // New ID present with Running status (reset)
+            let entry = project.hook_terminals.get("hook-1-new").unwrap();
+            assert_eq!(entry.status, HookTerminalStatus::Running);
+            assert_eq!(entry.hook_type, "on_project_open");
+            // Layout updated
+            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1").is_none());
+            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1-new").is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn test_replace_terminal_id_in_layout(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Register two hook terminals to get them into layout as tabs
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        // Replace hook-1 with hook-1-new in the layout tree directly
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            if let Some(ref mut layout) = ws.data.projects.iter_mut().find(|p| p.id == "p1").unwrap().layout {
+                layout.replace_terminal_id("hook-1", "hook-1-new");
+            }
+            cx.notify();
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            assert!(layout.find_terminal_path("hook-1").is_none());
+            assert!(layout.find_terminal_path("hook-1-new").is_some());
+            // Other terminals unaffected
+            assert!(layout.find_terminal_path("hook-2").is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn test_hook_terminal_ids_for_project(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let ids = ws.hook_terminal_ids_for_project("p1");
+            assert_eq!(ids.len(), 2);
+            assert!(ids.contains(&"hook-1".to_string()));
+            assert!(ids.contains(&"hook-2".to_string()));
+
+            // Non-existent project returns empty
+            assert!(ws.hook_terminal_ids_for_project("nonexistent").is_empty());
         });
     }
 }

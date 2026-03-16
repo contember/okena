@@ -1167,6 +1167,9 @@ pub(super) struct SidebarHookInfo {
     pub terminal_id: String,
     pub label: String,
     pub status: crate::workspace::state::HookTerminalStatus,
+    pub hook_type: String,
+    pub command: String,
+    pub cwd: String,
 }
 
 /// Lightweight projection of ProjectData for sidebar rendering.
@@ -1239,6 +1242,9 @@ impl SidebarProjectInfo {
                     terminal_id: tid.clone(),
                     label: entry.label.clone(),
                     status: entry.status.clone(),
+                    hook_type: entry.hook_type.clone(),
+                    command: entry.command.clone(),
+                    cwd: entry.cwd.clone(),
                 }
             }).collect(),
             is_closing: false,
@@ -1556,20 +1562,22 @@ impl Render for Sidebar {
 
                     // Expanded terminals and services (grouped) — only for projects without worktrees
                     if project.worktree_count == 0 && self.expanded_projects.contains(&project.id) {
-                        self.render_expanded_children(&project, 28.0, 40.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                        self.render_expanded_children(&project, 20.0, 32.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                     }
 
                     // Worktree children (includes main worktree as first entry when present)
-                    for (wt_idx, child) in worktree_children.iter().enumerate() {
-                        let is_cursor = cursor_index == Some(flat_idx);
-                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
-                        flat_elements.push(
-                            self.render_worktree_item(child, 28.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
-                        );
-                        flat_idx += 1;
+                    if !self.collapsed_worktrees.contains(&project.id) {
+                        for (wt_idx, child) in worktree_children.iter().enumerate() {
+                            let is_cursor = cursor_index == Some(flat_idx);
+                            let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                            flat_elements.push(
+                                self.render_worktree_item(child, 20.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                            );
+                            flat_idx += 1;
 
-                        if self.expanded_projects.contains(&child.id) {
-                            self.render_expanded_children(child, 48.0, 60.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            if self.expanded_projects.contains(&child.id) {
+                                self.render_expanded_children(child, 32.0, 44.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            }
                         }
                     }
                 }
@@ -1599,7 +1607,7 @@ impl Render for Sidebar {
                                 || focused_parent_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
-                                    self.render_worktree_item(fp, 28.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_worktree_item(fp, 20.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
                                 );
                             } else {
                                 flat_elements.push(
@@ -1610,21 +1618,23 @@ impl Render for Sidebar {
 
                             // Expanded terminals and services for folder project (grouped) — only without worktrees
                             if fp.worktree_count == 0 && self.expanded_projects.contains(&fp.id) {
-                                self.render_expanded_children(fp, 40.0, 52.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                self.render_expanded_children(fp, 32.0, 44.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }
 
                             // Worktree children for folder project
-                            if let Some(wt_children) = worktree_children.get(&fp.id) {
-                                for (wt_idx, child) in wt_children.iter().enumerate() {
-                                    let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
-                                    flat_elements.push(
-                                        self.render_worktree_item(child, 48.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
-                                    );
-                                    flat_idx += 1;
+                            if !self.collapsed_worktrees.contains(&fp.id) {
+                                if let Some(wt_children) = worktree_children.get(&fp.id) {
+                                    for (wt_idx, child) in wt_children.iter().enumerate() {
+                                        let is_cursor = cursor_index == Some(flat_idx);
+                                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                                        flat_elements.push(
+                                            self.render_worktree_item(child, 32.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        );
+                                        flat_idx += 1;
 
-                                    if self.expanded_projects.contains(&child.id) {
-                                        self.render_expanded_children(child, 68.0, 80.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                        if self.expanded_projects.contains(&child.id) {
+                                            self.render_expanded_children(child, 44.0, 56.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                        }
                                     }
                                 }
                             }
