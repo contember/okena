@@ -327,6 +327,10 @@ impl Workspace {
     /// Create a worktree project from an existing project.
     /// `repo_path` is the git repository root to create the worktree from.
     /// Returns the new project ID on success.
+    ///
+    /// This is a synchronous/blocking operation (calls `git worktree add`).
+    /// For non-blocking creation, use `register_worktree_project` after
+    /// creating the git worktree on a background thread.
     pub fn create_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -337,18 +341,33 @@ impl Workspace {
         create_branch: bool,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
+        // Create the git worktree at the repo-level target path
+        let target = std::path::PathBuf::from(worktree_path);
+        crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
+
+        // Register in workspace state
+        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, cx)
+    }
+
+    /// Register a worktree project in workspace state.
+    /// The git worktree must already exist on disk.
+    /// Returns the new project ID on success.
+    pub fn register_worktree_project(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
         // Get parent project info
         let parent = self.project(parent_project_id)
             .ok_or_else(|| "Parent project not found".to_string())?;
 
-        let parent_path = parent.path.clone();
         let parent_layout = parent.layout.clone();
         let parent_hooks = parent.hooks.clone();
         let parent_color = parent.folder_color;
-
-        // Create the git worktree at the repo-level target path
-        let target = std::path::PathBuf::from(worktree_path);
-        crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
 
         // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
@@ -484,45 +503,17 @@ impl Workspace {
         // Note: caller is responsible for calling notify_data
     }
 
-    /// Quick-create a worktree with an auto-generated Czech bakery branch name.
-    /// Returns the new project ID on success.
-    pub fn quick_create_worktree(
-        &mut self,
+    /// Gather the data needed for quick worktree creation without blocking.
+    /// Returns (parent_path, main_repo_path) or None if parent not found.
+    pub fn prepare_quick_create(
+        &self,
         parent_project_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Result<String, String> {
-        let parent = self.project(parent_project_id)
-            .ok_or_else(|| "Parent project not found".to_string())?;
-
-        let project_path = std::path::PathBuf::from(&parent.path);
-
-        // Determine git root
-        let git_root = parent.worktree_info.as_ref()
-            .map(|wt| std::path::PathBuf::from(&wt.main_repo_path))
-            .or_else(|| crate::git::get_repo_root(&project_path))
-            .ok_or_else(|| "Not a git repository".to_string())?;
-
-        // Compute subdir
-        let normalized_project = crate::git::repository::normalize_path(&project_path);
-        let normalized_root = crate::git::repository::normalize_path(&git_root);
-        let subdir = normalized_project.strip_prefix(&normalized_root)
-            .unwrap_or(std::path::Path::new(""))
-            .to_path_buf();
-
-        // Generate branch name
-        let branch = crate::git::branch_names::generate_branch_name(&git_root);
-
-        // Compute paths
-        let path_template = crate::settings::settings(cx).worktree.path_template;
-        let (worktree_path, project_path) = crate::git::repository::compute_target_paths(
-            &git_root, &subdir, &path_template, &branch,
-        );
-
-        // Create the worktree project (always create_branch=true for generated names)
-        self.create_worktree_project(
-            parent_project_id, &branch, &git_root,
-            &worktree_path, &project_path, true, cx,
-        )
+    ) -> Option<(String, Option<String>)> {
+        let parent = self.project(parent_project_id)?;
+        Some((
+            parent.path.clone(),
+            parent.worktree_info.as_ref().map(|wt| wt.main_repo_path.clone()),
+        ))
     }
 
     /// Remove a worktree project and its git worktree

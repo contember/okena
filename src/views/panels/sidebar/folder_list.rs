@@ -485,12 +485,7 @@ impl Sidebar {
                                 let project_id = quick_create_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    let result = this.workspace.update(cx, |ws, cx| {
-                                        ws.quick_create_worktree(&project_id, cx)
-                                    });
-                                    if let Err(e) = result {
-                                        log::error!("Quick worktree creation failed: {}", e);
-                                    }
+                                    this.spawn_quick_create_worktree(&project_id, cx);
                                 }
                             }))
                             .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))

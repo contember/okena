@@ -475,11 +475,13 @@ pub fn is_git_repo(path: &Path) -> bool {
     .map(|o| o.status.success())
     .unwrap_or(false);
 
-    // Store in cache
+    // Store in cache and evict entries older than 5 minutes
     {
         let mut guard = CACHE.lock();
         let cache = guard.get_or_insert_with(HashMap::new);
-        cache.insert(path_buf, (result, Instant::now()));
+        let now = Instant::now();
+        cache.insert(path_buf, (result, now));
+        cache.retain(|_, (_, ts)| now.duration_since(*ts) < Duration::from_secs(300));
     }
 
     result

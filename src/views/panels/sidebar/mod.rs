@@ -81,7 +81,10 @@ pub struct Sidebar {
     workspace: Entity<Workspace>,
     pub(super) request_broker: Entity<RequestBroker>,
     expanded_projects: HashSet<String>,
-    /// Projects whose worktree children list is collapsed
+    /// Projects whose worktree children list is collapsed.
+    /// Uses negative-sense (collapsed) because worktrees should be visible by default.
+    /// This is the inverse of `expanded_projects` which uses positive-sense because
+    /// terminal details should be hidden by default.
     collapsed_worktrees: HashSet<String>,
     pub(super) terminals: TerminalsRegistry,
     /// Terminal rename state: (project_id, terminal_id)
@@ -212,6 +215,74 @@ impl Sidebar {
         } else {
             self.collapsed_worktrees.insert(project_id.to_string());
         }
+    }
+
+    /// Spawn quick worktree creation on a background thread.
+    /// All blocking git operations (branch name generation, worktree creation)
+    /// run off the main thread to avoid UI jank.
+    pub(super) fn spawn_quick_create_worktree(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let parent_id = project_id.to_string();
+
+        // Collect data from workspace and settings (non-blocking reads)
+        let prep = self.workspace.read(cx).prepare_quick_create(project_id);
+        let path_template = crate::settings::settings(cx).worktree.path_template.clone();
+        let Some((parent_path, main_repo_path)) = prep else {
+            log::error!("Quick worktree creation failed: parent project not found");
+            return;
+        };
+
+        cx.spawn(async move |_sidebar, cx| {
+            // Background thread: all blocking git operations
+            let result = smol::unblock(move || -> Result<(String, std::path::PathBuf, String, String), String> {
+                let project_path = std::path::PathBuf::from(&parent_path);
+
+                // Determine git root
+                let git_root = main_repo_path
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| crate::git::get_repo_root(&project_path))
+                    .ok_or_else(|| "Not a git repository".to_string())?;
+
+                // Compute subdir (project path relative to git root)
+                let normalized_project = crate::git::repository::normalize_path(&project_path);
+                let normalized_root = crate::git::repository::normalize_path(&git_root);
+                let subdir = normalized_project.strip_prefix(&normalized_root)
+                    .unwrap_or(std::path::Path::new(""))
+                    .to_path_buf();
+
+                // Generate branch name (spawns git subprocesses)
+                let branch = crate::git::branch_names::generate_branch_name(&git_root);
+
+                // Compute target paths
+                let (worktree_path, project_path) = crate::git::repository::compute_target_paths(
+                    &git_root, &subdir, &path_template, &branch,
+                );
+
+                // Create the git worktree on disk
+                let target = std::path::PathBuf::from(&worktree_path);
+                crate::git::create_worktree(&git_root, &branch, &target, true)?;
+
+                Ok((branch, git_root, worktree_path, project_path))
+            }).await;
+
+            match result {
+                Ok((branch, git_root, worktree_path, project_path)) => {
+                    let _ = cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            if let Err(e) = ws.register_worktree_project(
+                                &parent_id, &branch, &git_root,
+                                &worktree_path, &project_path, cx,
+                            ) {
+                                log::error!("Quick worktree creation failed: {}", e);
+                            }
+                        });
+                    });
+                }
+                Err(e) => {
+                    log::error!("Quick worktree creation failed: {}", e);
+                }
+            }
+        }).detach();
     }
 
     fn toggle_group(&mut self, project_id: &str, group: GroupKind) {
