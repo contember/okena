@@ -281,13 +281,10 @@ impl Workspace {
 
         // Insert at new position (parent first, then children in original relative order)
         let target = new_index.min(self.data.project_order.len());
-        // Put parent first, then children (preserving their relative order from `removed`)
-        let mut to_insert: Vec<String> = Vec::with_capacity(removed.len());
-        // Parent first
-        if let Some(pos) = removed.iter().position(|id| id == project_id) {
-            to_insert.push(removed[pos].clone());
-        }
-        // Then children in their original order
+        let mut to_insert: Vec<String> = Vec::with_capacity(removed.len() + 1);
+        // Parent first (always insert, even if it wasn't in project_order before)
+        to_insert.push(project_id.to_string());
+        // Then worktree children in their original order
         for id in &removed {
             if id != project_id {
                 to_insert.push(id.clone());

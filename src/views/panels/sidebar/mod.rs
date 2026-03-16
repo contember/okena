@@ -1397,10 +1397,8 @@ impl Render for Sidebar {
             }
         }
 
-        // Index for trailing drop zone (after last item in project_order)
-        let end_index = items.last().map_or(0, |item| match item {
-            SidebarItem::Project { index, .. } | SidebarItem::Folder { index, .. } => index + 1,
-        });
+        // Index for trailing drop zone — must be project_order.len() to place after everything
+        let end_index = workspace.data().project_order.len();
 
         let color_picker_project_id = self.color_picker_project_id.clone();
         let color_picker_folder_id = self.color_picker_folder_id.clone();
@@ -1421,6 +1419,31 @@ impl Render for Sidebar {
         // Build flat elements with cursor tracking
         let mut flat_elements: Vec<AnyElement> = Vec::new();
         let mut flat_idx: usize = 0;
+
+        // Leading drop zone so items can be dropped before the first entry
+        flat_elements.push(
+            div()
+                .id("sidebar-drop-head")
+                .h(px(4.0))
+                .w_full()
+                .drag_over::<ProjectDrag>(move |style, _, _, _| {
+                    style.h(px(8.0)).border_b_2().border_color(rgb(t.border_active))
+                })
+                .on_drop(cx.listener(move |this, drag: &ProjectDrag, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.move_project(&drag.project_id, 0, cx);
+                    });
+                }))
+                .drag_over::<FolderDrag>(move |style, _, _, _| {
+                    style.h(px(8.0)).border_b_2().border_color(rgb(t.border_active))
+                })
+                .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.move_item_in_order(&drag.folder_id, 0, cx);
+                    });
+                }))
+                .into_any_element()
+        );
 
         for item in items {
             match item {

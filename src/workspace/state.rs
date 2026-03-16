@@ -600,36 +600,36 @@ impl Workspace {
         }
 
         // Group worktree children right after their parent project.
-        // Build a new list: for each non-worktree project, append it followed
-        // by any worktree children that were in the result.
+        // Only moves worktrees whose parent IS in the result; orphan worktrees
+        // (parent not visible or in a folder) stay at their original position.
         let worktree_children: HashMap<&str, Vec<&ProjectData>> = {
             let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
             for p in &result {
                 if let Some(ref wi) = p.worktree_info {
-                    map.entry(wi.parent_project_id.as_str())
-                        .or_default()
-                        .push(p);
+                    // Only group if parent is in the result
+                    if result.iter().any(|r| r.id == wi.parent_project_id) {
+                        map.entry(wi.parent_project_id.as_str())
+                            .or_default()
+                            .push(p);
+                    }
                 }
             }
             map
         };
         if !worktree_children.is_empty() {
+            let grouped_child_ids: HashSet<&str> = worktree_children.values()
+                .flat_map(|children| children.iter().map(|p| p.id.as_str()))
+                .collect();
             let mut grouped = Vec::with_capacity(result.len());
             for p in &result {
-                if p.worktree_info.is_some() {
-                    continue; // will be added after parent
+                // Skip worktrees that will be grouped after their parent
+                if grouped_child_ids.contains(p.id.as_str()) {
+                    continue;
                 }
                 grouped.push(*p);
+                // Insert grouped children after their parent
                 if let Some(children) = worktree_children.get(p.id.as_str()) {
                     grouped.extend(children);
-                }
-            }
-            // Add orphan worktrees whose parent isn't in the result
-            for p in &result {
-                if let Some(ref wi) = p.worktree_info {
-                    if !result.iter().any(|r| r.id == wi.parent_project_id) {
-                        grouped.push(p);
-                    }
                 }
             }
             return grouped;

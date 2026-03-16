@@ -86,14 +86,15 @@ impl Sidebar {
                     }
                 }
             }))
-            // Drop target for reordering projects above this folder
+            // Drop target for moving projects into this folder
             .drag_over::<ProjectDrag>(move |style, _, _, _| {
-                style.border_t_2().border_color(rgb(t.border_active))
+                style.bg(rgb(t.bg_selection))
             })
             .on_drop(cx.listener({
+                let folder_id = folder_id.clone();
                 move |this, drag: &ProjectDrag, _window, cx| {
                     this.workspace.update(cx, |ws, cx| {
-                        ws.move_project(&drag.project_id, index, cx);
+                        ws.move_project_to_folder(&drag.project_id, &folder_id, None, cx);
                     });
                 }
             }))
