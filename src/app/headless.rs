@@ -142,13 +142,33 @@ impl HeadlessApp {
             let service_manager = service_manager.clone();
             let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
                 Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+            // Initial load of services for projects that already exist at startup
+            {
+                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
+                    .read(cx)
+                    .data()
+                    .projects
+                    .iter()
+                    .filter(|p| !p.is_remote)
+                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
+                    .collect();
+                let mut known = known_project_ids.lock();
+                for (id, path, saved_terminals) in &local_projects {
+                    service_manager.update(cx, |sm, cx| {
+                        sm.load_project_services(id, path, saved_terminals, cx);
+                    });
+                    known.insert(id.clone());
+                }
+            }
+
             cx.observe(&workspace, move |_this, workspace, cx| {
                 let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
                     .read(cx)
                     .data()
                     .projects
                     .iter()
-                    .filter(|p| !p.is_remote && p.is_visible)
+                    .filter(|p| !p.is_remote)
                     .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
                     .collect();
 

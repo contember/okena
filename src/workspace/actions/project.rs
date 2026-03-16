@@ -22,13 +22,13 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Toggle project visibility (also toggles all worktree children)
-    pub fn toggle_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let new_visible = self.project(project_id).map(|p| !p.is_visible);
+    /// Toggle project overview visibility (also toggles all worktree children)
+    pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let new_visible = self.project(project_id).map(|p| !p.show_in_overview);
         let Some(new_visible) = new_visible else { return };
 
         self.with_project(project_id, cx, |project| {
-            project.is_visible = new_visible;
+            project.show_in_overview = new_visible;
             true
         });
 
@@ -39,7 +39,7 @@ impl Workspace {
             .collect();
         for child_id in child_ids {
             self.with_project(&child_id, cx, |project| {
-                project.is_visible = new_visible;
+                project.show_in_overview = new_visible;
                 true
             });
         }
@@ -64,7 +64,7 @@ impl Workspace {
             id: id.clone(),
             name: name.clone(),
             path: path.clone(),
-            is_visible: true,
+            show_in_overview: true,
             layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -303,7 +303,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: new_layout,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -356,6 +356,81 @@ impl Workspace {
         Ok(id)
     }
 
+    /// Add a worktree project discovered by the periodic sync watcher.
+    /// Does NOT fire hooks (the worktree was created outside Okena).
+    pub fn add_discovered_worktree(
+        &mut self,
+        wt_path: &str,
+        branch: &str,
+        parent_id: &str,
+        main_repo_path: &str,
+    ) {
+        // Double-check it's not already tracked
+        if self.data.projects.iter().any(|p| p.path == wt_path) {
+            return;
+        }
+
+        let dir_name = std::path::Path::new(wt_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("worktree");
+        let project_name = format!("{} ({})", dir_name, branch);
+        let id = uuid::Uuid::new_v4().to_string();
+
+        let project = ProjectData {
+            id: id.clone(),
+            name: project_name,
+            path: wt_path.to_string(),
+            show_in_overview: true,
+            layout: Some(LayoutNode::new_terminal()),
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: Some(crate::workspace::state::WorktreeMetadata {
+                parent_project_id: parent_id.to_string(),
+                main_repo_path: main_repo_path.to_string(),
+                worktree_path: wt_path.to_string(),
+            }),
+            default_shell: None,
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            remote_services: Vec::new(),
+            remote_host: None,
+            remote_git_status: None,
+            hook_terminals: HashMap::new(),
+        };
+
+        // Insert after parent in project_order
+        self.data.projects.push(project);
+        if let Some(parent_index) = self.data.project_order.iter().position(|pid| pid == parent_id) {
+            self.data.project_order.insert(parent_index + 1, id);
+        } else {
+            self.data.project_order.push(id);
+        }
+        // Note: caller is responsible for calling notify_data
+    }
+
+    /// Remove a stale worktree project whose directory no longer exists.
+    /// Does NOT fire hooks or call git worktree remove (the directory is already gone).
+    pub fn remove_stale_worktree(&mut self, project_id: &str) {
+        // Only remove if it's actually a worktree project
+        let is_worktree = self.data.projects.iter()
+            .any(|p| p.id == project_id && p.worktree_info.is_some());
+        if !is_worktree {
+            return;
+        }
+
+        self.data.projects.retain(|p| p.id != project_id);
+        self.data.project_order.retain(|id| id != project_id);
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != project_id);
+        }
+        self.data.project_widths.remove(project_id);
+        // Note: caller is responsible for calling notify_data
+    }
+
     /// Remove a worktree project and its git worktree
     pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
@@ -402,7 +477,7 @@ mod tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -531,7 +606,7 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            is_visible: true,
+            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

@@ -4,6 +4,7 @@ mod remote_commands;
 mod update_checker;
 
 use crate::git::watcher::GitStatusWatcher;
+use crate::workspace::worktree_sync::WorktreeSyncWatcher;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
@@ -45,6 +46,9 @@ pub struct Okena {
     // ── Git status watcher ────────────────────────────────────────────
     #[allow(dead_code)]
     git_watcher: Entity<GitStatusWatcher>,
+    // ── Worktree sync watcher ────────────────────────────────────────
+    #[allow(dead_code)]
+    worktree_sync: Entity<WorktreeSyncWatcher>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
     // ── Remote control fields ───────────────────────────────────────────
     remote_server: Option<RemoteServer>,
@@ -181,6 +185,12 @@ impl Okena {
             |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
         });
 
+        // ── Worktree sync watcher ─────────────────────────────────────
+        let worktree_sync = cx.new({
+            let workspace = workspace.clone();
+            |cx| WorktreeSyncWatcher::new(workspace, cx)
+        });
+
         // Pass git_watcher to root view so ProjectColumns can observe it
         root_view.update(cx, |rv, cx| {
             rv.set_git_watcher(git_watcher.clone(), cx);
@@ -213,6 +223,7 @@ impl Okena {
             opened_detached_windows: HashSet::new(),
             save_pending,
             git_watcher,
+            worktree_sync,
             git_status_tx: git_status_tx.clone(),
             remote_server: None,
             auth_store: auth_store.clone(),
@@ -243,6 +254,26 @@ impl Okena {
             let service_manager = service_manager.clone();
             let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
                 Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+            // Initial load of services for projects that already exist at startup
+            {
+                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
+                    .read(cx)
+                    .data()
+                    .projects
+                    .iter()
+                    .filter(|p| !p.is_remote)
+                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
+                    .collect();
+                let mut known = known_project_ids.lock();
+                for (id, path, saved_terminals) in &local_projects {
+                    service_manager.update(cx, |sm, cx| {
+                        sm.load_project_services(id, path, saved_terminals, cx);
+                    });
+                    known.insert(id.clone());
+                }
+            }
+
             cx.observe(&workspace, move |_this, workspace, cx| {
                 // Snapshot project info to avoid borrow conflicts with service_manager.update()
                 let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
@@ -250,7 +281,7 @@ impl Okena {
                     .data()
                     .projects
                     .iter()
-                    .filter(|p| !p.is_remote && p.is_visible)
+                    .filter(|p| !p.is_remote)
                     .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
                     .collect();
 

@@ -38,7 +38,8 @@ pub struct ApiProject {
     pub id: String,
     pub name: String,
     pub path: String,
-    pub is_visible: bool,
+    #[serde(alias = "is_visible")]
+    pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,7 +319,7 @@ mod tests {
                 id: "p1".into(),
                 name: "Test".into(),
                 path: "/tmp".into(),
-                is_visible: true,
+                show_in_overview: true,
                 layout: Some(ApiLayoutNode::Split {
                     direction: SplitDirection::Horizontal,
                     sizes: vec![50.0, 50.0],

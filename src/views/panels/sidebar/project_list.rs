@@ -169,21 +169,21 @@ impl Sidebar {
             })
             .child(
                 div()
-                    .when(!project.is_visible, |d| d.opacity(0.0))
+                    .when(!project.show_in_overview, |d| d.opacity(0.0))
                     .group_hover("project-item", |s| s.opacity(1.0))
                     .child({
-                        let is_visible = project.is_visible;
-                        let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                        let show_in_overview = project.show_in_overview;
+                        let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
                         sidebar_visibility_toggle(
                             ElementId::Name(format!("visibility-{}", project.id).into()),
-                            is_visible,
+                            show_in_overview,
                             &t,
                         )
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             move |this, _, _window, cx| {
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_visibility(&project_id, cx);
+                                    ws.toggle_project_overview_visibility(&project_id, cx);
                                 });
                                 cx.stop_propagation();
                             }
@@ -198,11 +198,11 @@ impl Sidebar {
     }
 
     /// Renders a worktree project nested under its parent
-    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, left_padding: f32, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
-        let is_visible = project.is_visible;
+        let is_visible = project.show_in_overview;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
@@ -223,7 +223,7 @@ impl Sidebar {
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
             .group("worktree-item")
             .h(px(24.0))
-            .pl(px(left_padding))
+            .pl(px(indent))  // Indented under parent project
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -280,7 +280,7 @@ impl Sidebar {
                             .text_color(if project.is_orphan {
                                 rgb(t.warning)
                             } else {
-                                rgb(t.text_secondary)
+                                rgb(t.get_folder_color(project.folder_color))
                             })
                     )
             )
@@ -336,20 +336,21 @@ impl Sidebar {
             .when(!is_closing, |d| {
                 d.child(
                     div()
-                        .when(!is_visible, |d| d.opacity(0.0))
+                        .when(!project.show_in_overview, |d| d.opacity(0.0))
                         .group_hover("worktree-item", |s| s.opacity(1.0))
                         .child({
-                            let visibility_tooltip = if is_visible { "Hide Project" } else { "Show Project" };
+                            let show_in_overview = project.show_in_overview;
+                            let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
                             sidebar_visibility_toggle(
                                 ElementId::Name(format!("visibility-wt-{}", project_id).into()),
-                                is_visible,
+                                show_in_overview,
                                 &t,
                             )
                             .on_click(cx.listener({
                                 let project_id = project_id.clone();
                                 move |this, _, _window, cx| {
                                     this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_project_visibility(&project_id, cx);
+                                        ws.toggle_project_overview_visibility(&project_id, cx);
                                     });
                                     cx.stop_propagation();
                                 }

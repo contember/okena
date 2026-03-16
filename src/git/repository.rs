@@ -519,7 +519,6 @@ pub fn count_unpushed_commits(path: &Path) -> usize {
 
 /// List all worktrees in a repository.
 /// Returns vec of (path, branch_name) pairs.
-#[allow(dead_code)]
 pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     let path_str = match repo_path.to_str() {
         Some(s) => s,

@@ -851,7 +851,7 @@ impl ProjectColumn {
                                     .on_click(move |_, _window, cx| {
                                         cx.stop_propagation();
                                         workspace_for_hide.update(cx, |ws, cx| {
-                                            ws.toggle_project_visibility(&project_id_for_hide, cx);
+                                            ws.toggle_project_overview_visibility(&project_id_for_hide, cx);
                                         });
                                     })
                                     .child(

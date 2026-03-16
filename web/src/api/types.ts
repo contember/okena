@@ -21,7 +21,7 @@ export interface ApiProject {
   id: string;
   name: string;
   path: string;
-  is_visible: boolean;
+  show_in_overview: boolean;
   layout: ApiLayoutNode | null;
   terminal_names: Record<string, string>;
   git_status?: ApiGitStatus | null;

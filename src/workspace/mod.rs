@@ -8,3 +8,4 @@ pub mod requests;
 pub mod sessions;
 pub mod settings;
 pub mod state;
+pub mod worktree_sync;

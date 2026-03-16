@@ -88,9 +88,14 @@ impl ServiceManager {
         saved_terminal_ids: &HashMap<String, String>,
         cx: &mut Context<Self>,
     ) {
+        log::info!("[services] load_project_services project_id={} path={}", project_id, project_path);
         let config = match load_project_config(project_path) {
-            Ok(Some(config)) => config,
+            Ok(Some(config)) => {
+                log::info!("[services] Found okena.yaml with {} services", config.services.len());
+                config
+            }
             Ok(None) => {
+                log::info!("[services] No okena.yaml found at {}", project_path);
                 // No okena.yaml — still try Docker Compose auto-detection
                 self.project_paths
                     .insert(project_id.to_string(), project_path.to_string());

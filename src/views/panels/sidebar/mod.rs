@@ -1146,7 +1146,7 @@ pub(super) struct SidebarHookInfo {
 pub(super) struct SidebarProjectInfo {
     pub id: String,
     pub name: String,
-    pub is_visible: bool,
+    pub show_in_overview: bool,
     pub folder_color: FolderColor,
     pub has_layout: bool,
     pub terminal_ids: Vec<String>,
@@ -1175,7 +1175,7 @@ impl SidebarProjectInfo {
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
-            is_visible: project.is_visible,
+            show_in_overview: project.show_in_overview,
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout
@@ -1293,6 +1293,10 @@ impl Render for Sidebar {
                 if all_project_ids.contains(wt_info.parent_project_id.as_str()) {
                     let mut info = SidebarProjectInfo::from_project(project);
                     info.is_closing = workspace.closing_projects.contains(&project.id);
+                    // Inherit parent project's color for visual association
+                    if let Some(parent) = all_projects.get(wt_info.parent_project_id.as_str()) {
+                        info.folder_color = parent.folder_color;
+                    }
                     worktree_children_map
                         .entry(wt_info.parent_project_id.clone())
                         .or_default()
@@ -1447,7 +1451,7 @@ impl Render for Sidebar {
                         && project.worktree_count == 0;
                     if project.is_orphan {
                         flat_elements.push(
-                            self.render_worktree_item(&project, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(&project, 8.0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                     } else {
                         flat_elements.push(
@@ -1466,12 +1470,12 @@ impl Render for Sidebar {
                         let is_cursor = cursor_index == Some(flat_idx);
                         let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                         flat_elements.push(
-                            self.render_worktree_item(child, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_worktree_item(child, 28.0, is_cursor, is_focused_project, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
                         if self.expanded_projects.contains(&child.id) {
-                            self.render_expanded_children(child, 40.0, 52.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            self.render_expanded_children(child, 48.0, 60.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                         }
                     }
                 }
@@ -1499,7 +1503,7 @@ impl Render for Sidebar {
                                 && fp.worktree_count == 0;
                             if fp.is_orphan {
                                 flat_elements.push(
-                                    self.render_worktree_item(fp, 20.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_worktree_item(fp, 28.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                 );
                             } else {
                                 flat_elements.push(
@@ -1519,12 +1523,12 @@ impl Render for Sidebar {
                                     let is_cursor = cursor_index == Some(flat_idx);
                                     let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                                     flat_elements.push(
-                                        self.render_worktree_item(child, 32.0, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        self.render_worktree_item(child, 48.0, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 
                                     if self.expanded_projects.contains(&child.id) {
-                                        self.render_expanded_children(child, 52.0, 64.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                        self.render_expanded_children(child, 68.0, 80.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                                     }
                                 }
                             }

@@ -13,6 +13,8 @@ use time::OffsetDateTime;
 
 use super::claude_status::ClaudeStatus;
 use super::claude_usage::ClaudeUsage;
+use super::codex_status::CodexStatus;
+use super::codex_usage::CodexUsage;
 
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -73,6 +75,8 @@ pub struct StatusBar {
     cache: Arc<Mutex<SystemInfoCache>>,
     claude_status: Entity<ClaudeStatus>,
     claude_usage: Entity<ClaudeUsage>,
+    codex_status: Entity<CodexStatus>,
+    codex_usage: Entity<CodexUsage>,
     sidebar_open: bool,
 }
 
@@ -105,11 +109,13 @@ impl StatusBar {
 
         let claude_status = cx.new(|cx| ClaudeStatus::new(cx));
         let claude_usage = cx.new(|cx| ClaudeUsage::new(cx));
+        let codex_status = cx.new(|cx| CodexStatus::new(cx));
+        let codex_usage = cx.new(|cx| CodexUsage::new(cx));
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        Self { workspace, cache, claude_status, claude_usage, sidebar_open: true }
+        Self { workspace, cache, claude_status, claude_usage, codex_status, codex_usage, sidebar_open: true }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -233,6 +239,11 @@ impl Render for StatusBar {
                     .when(settings_entity(cx).read(cx).settings.claude_code_integration, |d| {
                         d.child(self.claude_status.clone())
                             .child(self.claude_usage.clone())
+                    })
+                    // Codex status + usage
+                    .when(settings_entity(cx).read(cx).settings.codex_integration, |d| {
+                        d.child(self.codex_status.clone())
+                            .child(self.codex_usage.clone())
                     })
             })
             // Right side - remote info + version + time
