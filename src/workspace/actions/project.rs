@@ -324,11 +324,17 @@ impl Workspace {
             hook_terminals: HashMap::new(),
         };
 
-        // Insert after parent project in order
+        // Insert after parent project in order (or after its folder if parent is inside one)
         let parent_index = self.data.project_order
             .iter()
             .position(|pid| pid == parent_project_id)
-            .unwrap_or(self.data.project_order.len());
+            .or_else(|| {
+                // Parent is inside a folder — find the folder containing it
+                self.data.folders.iter()
+                    .find(|f| f.project_ids.contains(&parent_project_id.to_string()))
+                    .and_then(|f| self.data.project_order.iter().position(|pid| pid == &f.id))
+            })
+            .unwrap_or(self.data.project_order.len().saturating_sub(1));
 
         let new_project_hooks = project.hooks.clone();
         let new_project_name = project.name.clone();
