@@ -2258,6 +2258,7 @@ mod tests {
 mod workspace_tests {
     use crate::workspace::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData,
+        WorktreeMetadata,
     };
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;
@@ -2499,6 +2500,58 @@ mod workspace_tests {
         // p3 is top-level and should be hidden
         assert_eq!(visible.len(), 2);
         assert!(visible.iter().all(|p| p.id != "p3"));
+    }
+
+    #[test]
+    fn test_visible_projects_worktree_focus_shows_all_siblings() {
+        // Parent p1 with worktree children w1, w2
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+        let mut w2 = make_project("w2", true);
+        w2.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt2".to_string(),
+        });
+
+        let data = make_workspace_data(
+            vec![make_project("p1", true), w1, w2, make_project("p2", true)],
+            vec!["p1", "w1", "w2", "p2"],
+        );
+        let mut ws = Workspace::new(data);
+
+        // Focus on parent p1 — should show p1 + w1 + w2
+        ws.focus_manager.set_focused_project_id(Some("p1".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // Focus on worktree child w1 — should ALSO show p1 + w1 + w2 (resolve to parent)
+        ws.focus_manager.set_focused_project_id(Some("w1".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // Focus on worktree child w2 — same result
+        ws.focus_manager.set_focused_project_id(Some("w2".to_string()));
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "w2");
+
+        // No focus — all 4 projects visible (including p2)
+        ws.focus_manager.set_focused_project_id(None);
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 4);
     }
 
     #[test]
