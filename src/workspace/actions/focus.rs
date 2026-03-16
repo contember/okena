@@ -8,19 +8,19 @@ use gpui::*;
 impl Workspace {
     /// Set focused project (focus mode)
     ///
-    /// This also focuses the first terminal in the project if one exists.
+    /// This zooms the main view to show only this project.
+    /// Also focuses the first terminal in the project if one exists.
     pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         // Clear fullscreen without restoring old project_id (we're overriding it)
         self.focus_manager.clear_fullscreen_without_restore();
 
-        // Set the focused project via FocusManager
+        // Set the focused project via FocusManager (controls main view zoom)
         self.focus_manager.set_focused_project_id(project_id.clone());
 
         // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
             if let Some(project) = self.project(pid) {
                 if let Some(ref layout) = project.layout {
-                    // Find the first terminal's path
                     if let Some(first_path) = Self::find_first_terminal_path(layout) {
                         self.focus_manager.focus_terminal(pid.clone(), first_path);
                     }
@@ -47,6 +47,20 @@ impl Workspace {
             }
         }
 
+        cx.notify();
+    }
+
+    /// Focus a project's first terminal without zooming the main view.
+    /// Used by sidebar clicks to highlight and focus without hiding other projects.
+    pub fn focus_project_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if let Some(project) = self.project(project_id) {
+            if let Some(ref layout) = project.layout {
+                if let Some(first_path) = Self::find_first_terminal_path(layout) {
+                    self.focus_manager.focus_terminal(project_id.to_string(), first_path);
+                }
+            }
+        }
+        self.touch_project(project_id);
         cx.notify();
     }
 

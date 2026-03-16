@@ -828,7 +828,7 @@ impl Sidebar {
             SidebarCursorItem::Project { project_id } |
             SidebarCursorItem::WorktreeProject { project_id } => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(Some(project_id), cx);
+                    ws.focus_project_terminal(&project_id, cx);
                 });
                 // Restore focus to terminal
                 self.cursor_index = None;
@@ -884,7 +884,7 @@ impl Sidebar {
             SidebarCursorItem::RemoteProject { project_id, .. } => {
                 // Remote projects are now materialized in workspace, use unified focus
                 self.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(Some(project_id), cx);
+                    ws.focus_project_terminal(&project_id, cx);
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -1530,7 +1530,6 @@ impl Render for Sidebar {
                 .on_drop(cx.listener(move |this, drag: &ProjectDrag, _window, cx| {
                     this.workspace.update(cx, |ws, cx| {
                         ws.move_project(&drag.project_id, end_index, cx);
-                        ws.set_focused_project(None, cx);
                     });
                 }))
                 .drag_over::<FolderDrag>(move |style, _, _, _| {

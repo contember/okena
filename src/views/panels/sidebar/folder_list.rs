@@ -94,7 +94,6 @@ impl Sidebar {
                 move |this, drag: &ProjectDrag, _window, cx| {
                     this.workspace.update(cx, |ws, cx| {
                         ws.move_project(&drag.project_id, index, cx);
-                        ws.set_focused_project(None, cx);
                     });
                 }
             }))
@@ -327,7 +326,6 @@ impl Sidebar {
                         if let Some(pos) = pos {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
-                                ws.set_focused_project(None, cx);
                             });
                             // Send reorder to server for remote folders
                             if folder_id.starts_with("remote-folder:") {
@@ -360,7 +358,7 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
@@ -428,7 +426,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();

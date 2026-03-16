@@ -68,8 +68,6 @@ impl Sidebar {
                     if drag.project_id != project_id {
                         this.workspace.update(cx, |ws, cx| {
                             ws.move_project(&drag.project_id, index, cx);
-                            // Clear zoom so all projects are visible after reorder
-                            ws.set_focused_project(None, cx);
                         });
                     }
                 }
@@ -95,7 +93,7 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
@@ -163,7 +161,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -287,11 +285,7 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        if is_main_worktree {
-                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                        } else {
-                            ws.set_focused_project(Some(project_id.clone()), cx);
-                        }
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
@@ -352,11 +346,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    if is_main_worktree {
-                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                    } else {
-                                        ws.set_focused_project(Some(project_id.clone()), cx);
-                                    }
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();
