@@ -805,6 +805,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
         });
 
         let mut data = make_workspace(
@@ -828,6 +829,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
         });
 
         let mut data = make_workspace(
@@ -856,6 +858,7 @@ mod tests {
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
+            worktree_path: String::new(),
         });
 
         let mut data = make_workspace(
@@ -959,6 +962,7 @@ mod tests {
         existing_wt.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: repo_path.to_string_lossy().to_string(),
+            worktree_path: wt_path.to_string_lossy().to_string(),
         });
 
         let mut data = make_workspace(
