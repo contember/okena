@@ -126,11 +126,7 @@ pub fn sidebar_terminal_badge(
             .child(format!("{}", count))
             .into_any_element()
     } else {
-        // Invisible placeholder to keep eye icons aligned
-        div()
-            .flex_shrink_0()
-            .min_w(px(18.0))
-            .into_any_element()
+        div().into_any_element()
     }
 }
 

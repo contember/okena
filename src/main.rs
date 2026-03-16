@@ -57,7 +57,7 @@ use crate::assets::{Assets, embedded_fonts};
 use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
-use crate::theme::{AppTheme, GlobalTheme};
+use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
 use crate::views::panels::toast::{Toast, ToastManager};
 use crate::workspace::persistence;
 use crate::workspace::state::GlobalWorkspace;
@@ -441,8 +441,21 @@ fn main() {
             persistence::default_workspace()
         });
 
-        // Create theme entity from settings
-        let theme_entity = cx.new(|_cx| AppTheme::new(app_settings.theme_mode, true)); // Default to dark for initial
+        // Create theme entity from settings, restoring custom theme if applicable
+        let theme_entity = cx.new(|_cx| {
+            let mut theme = AppTheme::new(app_settings.theme_mode, true);
+            if app_settings.theme_mode == ThemeMode::Custom {
+                if let Some(ref custom_id) = app_settings.custom_theme_id {
+                    for (info, colors) in crate::theme::load_custom_themes() {
+                        if info.id == format!("custom:{}", custom_id) {
+                            theme.set_custom_colors(colors);
+                            break;
+                        }
+                    }
+                }
+            }
+            theme
+        });
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
         // Create PTY manager with session backend from settings

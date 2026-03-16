@@ -180,35 +180,54 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .when(project.worktree_count == 0, |d| {
-                d.child(
-                    div()
-                        .when(!project.show_in_overview, |d| d.opacity(0.0))
-                        .group_hover("project-item", |s| s.opacity(1.0))
-                        .child({
-                            let show_in_overview = project.show_in_overview;
-                            let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
-                            sidebar_visibility_toggle(
-                                ElementId::Name(format!("visibility-{}", project.id).into()),
-                                show_in_overview,
-                                &t,
-                            )
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_project_overview_visibility(&project_id, cx);
-                                    });
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                        }),
-                )
-            })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
+            })
+            // Eye button — visible on hover, or always when project is hidden
+            .child({
+                let show_in_overview = project.show_in_overview;
+                let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
+                sidebar_visibility_toggle(
+                    ElementId::Name(format!("visibility-{}", project.id).into()),
+                    show_in_overview,
+                    &t,
+                )
+                .opacity(0.0)
+                .when(!show_in_overview, |d| d.opacity(1.0))
+                .group_hover("project-item", |s| s.opacity(1.0))
+                .on_click(cx.listener({
+                    let project_id = project_id.clone();
+                    move |this, _, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.toggle_project_overview_visibility(&project_id, cx);
+                        });
+                        cx.stop_propagation();
+                    }
+                }))
+                .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+            })
+            // Quick create button — after badges, only visible on hover
+            .when(show_quick_create, |d| {
+                d.child(
+                    sidebar_quick_create_button(
+                        ElementId::Name(format!("quick-wt-{}", quick_create_id).into()),
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .group_hover("project-item", |s| s.opacity(1.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener({
+                        let project_id = quick_create_id.clone();
+                        move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.spawn_quick_create_worktree(&project_id, cx);
+                        }
+                    }))
+                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
             })
     }
 
@@ -325,7 +344,7 @@ impl Sidebar {
                     )
             )
             .child(
-                // Project name (or input if renaming)
+                // Worktree name (or input if renaming)
                 if is_renaming {
                     sidebar_rename_input("worktree-rename-input", &self.project_rename, &t)
                         .map(|el| el.into_any_element())
@@ -375,31 +394,30 @@ impl Sidebar {
                 )
             })
             .when(!is_closing, |d| {
-                d.child(
-                    div()
-                        .when(!project.show_in_overview, |d| d.opacity(0.0))
-                        .group_hover("worktree-item", |s| s.opacity(1.0))
-                        .child({
-                            let show_in_overview = project.show_in_overview;
-                            let visibility_tooltip = if show_in_overview { "Hide Worktree" } else { "Show Worktree" };
-                            sidebar_visibility_toggle(
-                                ElementId::Name(format!("visibility-wt-{}", project_id).into()),
-                                show_in_overview,
-                                &t,
-                            )
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_worktree_visibility(&project_id, cx);
-                                    });
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                        }),
-                )
-                .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+                d.child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+                // Eye button — visible on hover, or always when worktree is hidden
+                .child({
+                    let show_in_overview = project.show_in_overview;
+                    let visibility_tooltip = if show_in_overview { "Hide Worktree" } else { "Show Worktree" };
+                    sidebar_visibility_toggle(
+                        ElementId::Name(format!("visibility-wt-{}", project_id).into()),
+                        show_in_overview,
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .when(!show_in_overview, |d| d.opacity(1.0))
+                    .group_hover("worktree-item", |s| s.opacity(1.0))
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.toggle_worktree_visibility(&project_id, cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
+                })
             })
     }
 
