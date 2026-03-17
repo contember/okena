@@ -51,7 +51,7 @@ impl Sidebar {
         let is_running = matches!(&hook.status, HookTerminalStatus::Running);
 
         let (status_color, status_icon) = match &hook.status {
-            HookTerminalStatus::Running => (t.term_magenta, "icons/terminal.svg"),
+            HookTerminalStatus::Running => (t.term_yellow, "icons/terminal.svg"),
             HookTerminalStatus::Succeeded => (t.success, "icons/check.svg"),
             HookTerminalStatus::Failed { .. } => (t.error, "icons/close.svg"),
         };

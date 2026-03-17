@@ -613,6 +613,20 @@ impl Workspace {
             map
         });
 
+        // Pre-compute worktree children whose parent lives in a folder.
+        // These must only be added during folder expansion (not from project_order),
+        // because their position in project_order may not reflect the folder ordering.
+        let folder_owned_worktrees: HashSet<&str> = {
+            let folder_project_ids: HashSet<&str> = self.data.folders.iter()
+                .flat_map(|f| f.project_ids.iter().map(|id| id.as_str()))
+                .collect();
+            self.data.projects.iter()
+                .filter(|p| p.worktree_info.as_ref()
+                    .map_or(false, |wi| folder_project_ids.contains(wi.parent_project_id.as_str())))
+                .map(|p| p.id.as_str())
+                .collect()
+        };
+
         let mut result = Vec::new();
         // Track worktree children already added via their parent's folder
         let mut added_via_folder: HashSet<&str> = HashSet::new();
@@ -632,9 +646,14 @@ impl Workspace {
                         continue;
                     }
                 }
-                // Folder: include its projects (and worktree children when folder filter is active,
-                // since they live in project_order rather than folder.project_ids)
+                // Folder: include its projects and their worktree children.
+                // Worktree children live in project_order (not folder.project_ids),
+                // so we expand them here to keep them positioned within their folder's section.
                 for pid in &folder.project_ids {
+                    // Skip if already added as a worktree child of a previous folder project
+                    if added_via_folder.contains(pid.as_str()) {
+                        continue;
+                    }
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
                         self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
                         if folder_filter.is_some() {
@@ -645,8 +664,9 @@ impl Workspace {
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
-                // Skip worktree children already added via their parent's folder
-                if added_via_folder.contains(p.id.as_str()) {
+                // Skip worktree children that belong to folder projects —
+                // they'll be added during their parent's folder expansion instead
+                if folder_owned_worktrees.contains(p.id.as_str()) || added_via_folder.contains(p.id.as_str()) {
                     continue;
                 }
                 // Top-level project: hide when folder filter is active
@@ -2809,6 +2829,184 @@ mod workspace_tests {
         let visible = ws.visible_projects();
         // p1 + w1, no duplicates
         assert_eq!(visible.len(), 2);
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_worktree_children_ordered_within_folder_section() {
+        // Bug: when worktree children of a folder project are in project_order
+        // before another folder, they'd appear before that folder's projects.
+        // project_order: [f2, w1, f1, p3] — w1 is before f1 in project_order
+        // but w1's parent (p1) is inside f2, so w1 should appear within f2's section.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), make_project("p2", true), w1, make_project("p3", true)],
+            // w1 sits between the two folders in project_order
+            vec!["f1", "w1", "f2", "p3"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should be grouped with f1 (after p1), NOT between f1 and f2
+        assert_eq!(visible.len(), 4);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");  // grouped within f1's section
+        assert_eq!(visible[2].id, "p2");  // f2's project
+        assert_eq!(visible[3].id, "p3");  // top-level
+    }
+
+    #[test]
+    fn test_worktree_before_parent_folder_in_project_order() {
+        // Real-world scenario: worktree appears in project_order BEFORE its
+        // parent's folder (e.g., folders were reordered after worktree creation).
+        // project_order: [w1, f1, f2] — w1 before f2, but w1's parent is in f2.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p2".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), make_project("p2", false), w1],
+            // w1 appears before BOTH folders
+            vec!["w1", "f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should NOT appear at project_order position (before f1).
+        // It should appear within f2's section (after p2, or alone if p2 hidden).
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "p1");  // f1's project
+        assert_eq!(visible[1].id, "w1");  // f2's section (parent p2 hidden)
+        // w1 must not be duplicated
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_worktree_children_ordered_when_parent_hidden() {
+        // Parent has show_in_overview=false but worktree child is visible.
+        // The worktree child should still appear within its folder's section.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", false), make_project("p2", true), w1],
+            // w1 before f2 in project_order
+            vec!["f1", "w1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // p1 hidden, w1 visible within f1's section, then p2 from f2
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "w1");  // within f1's section (parent hidden)
+        assert_eq!(visible[1].id, "p2");  // f2's project
+    }
+
+    #[test]
+    fn test_worktree_child_in_folder_not_duplicated() {
+        // w1 is a worktree child of p1 AND is also in folder.project_ids
+        // (e.g., user dragged it into the folder). It should appear only once.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), w1, make_project("p2", true)],
+            vec!["f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                // w1 is both a worktree child of p1 AND listed in folder.project_ids
+                project_ids: vec!["p1".to_string(), "w1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should appear exactly once (after p1), not duplicated
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "p2");
         assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
     }
 
