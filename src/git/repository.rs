@@ -561,11 +561,12 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
 pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
     let path_str = path.to_str()?;
 
-    let output = command("gh")
-        .args(["pr", "view", "--json", "url,state,isDraft", "--jq", "[.url, .state, .isDraft] | @tsv"])
-        .current_dir(path_str)
-        .output()
-        .ok()?;
+    let output = safe_output(
+        command("gh")
+            .args(["pr", "view", "--json", "url,state,isDraft", "--jq", "[.url, .state, .isDraft] | @tsv"])
+            .current_dir(path_str),
+    )
+    .ok()?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -581,7 +582,10 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
                     "OPEN" => super::PrState::Open,
                     "MERGED" => super::PrState::Merged,
                     "CLOSED" => super::PrState::Closed,
-                    _ => super::PrState::Open,
+                    other => {
+                        log::warn!("Unknown PR state '{}', defaulting to Open", other);
+                        super::PrState::Open
+                    }
                 }
             };
             return Some(super::PrInfo { url, state });

@@ -449,6 +449,7 @@ pub fn is_git_repo(path: &Path) -> bool {
 
     static CACHE: Mutex<Option<HashMap<PathBuf, (bool, Instant)>>> = Mutex::new(None);
     const TTL: Duration = Duration::from_secs(30);
+    const MAX_ENTRIES: usize = 256;
 
     let path_buf = path.to_path_buf();
 
@@ -475,13 +476,19 @@ pub fn is_git_repo(path: &Path) -> bool {
     .map(|o| o.status.success())
     .unwrap_or(false);
 
-    // Store in cache and evict entries older than 5 minutes
+    // Store in cache and evict stale entries
     {
         let mut guard = CACHE.lock();
         let cache = guard.get_or_insert_with(HashMap::new);
         let now = Instant::now();
         cache.insert(path_buf, (result, now));
-        cache.retain(|_, (_, ts)| now.duration_since(*ts) < Duration::from_secs(300));
+        // Evict entries older than 5 minutes, or all stale entries if at capacity
+        let evict_threshold = if cache.len() > MAX_ENTRIES {
+            TTL
+        } else {
+            Duration::from_secs(300)
+        };
+        cache.retain(|_, (_, ts)| now.duration_since(*ts) < evict_threshold);
     }
 
     result

@@ -28,10 +28,6 @@ pub use repository::{
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
-/// Cache TTL - how long before status is considered stale
-const CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// PR state from GitHub
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -82,24 +78,12 @@ impl GitStatus {
     }
 }
 
-/// Cached git status entry
-struct CacheEntry {
-    status: Option<GitStatus>,
-    timestamp: Instant,
-}
-
-impl CacheEntry {
-    fn is_fresh(&self) -> bool {
-        self.timestamp.elapsed() < CACHE_TTL
-    }
-}
-
 /// Global cache for git status
-static CACHE: Mutex<Option<HashMap<PathBuf, CacheEntry>>> = Mutex::new(None);
+static CACHE: Mutex<Option<HashMap<PathBuf, Option<GitStatus>>>> = Mutex::new(None);
 
 fn with_cache<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut HashMap<PathBuf, CacheEntry>) -> R,
+    F: FnOnce(&mut HashMap<PathBuf, Option<GitStatus>>) -> R,
 {
     let mut guard = CACHE.lock();
     let cache = guard.get_or_insert_with(HashMap::new);
@@ -107,71 +91,27 @@ where
 }
 
 /// Get git status for a directory path (with caching).
-/// Returns None if the path is not inside a git repository.
+/// Returns None if the path is not inside a git repository or not yet cached.
 ///
-/// On cache miss, returns stale data if available (non-blocking for UI).
+/// Always non-blocking: returns cached data immediately.
+/// Returns None on cache miss — the background watcher will populate it.
 /// Use `refresh_git_status` for a blocking fresh fetch (e.g. from a background watcher).
 pub fn get_git_status(path: &Path) -> Option<GitStatus> {
-    let path_buf = path.to_path_buf();
-
-    // Check cache — return fresh or stale data without blocking
-    let (cached, is_fresh) = with_cache(|cache| {
-        if let Some(entry) = cache.get(&path_buf) {
-            (Some(entry.status.clone()), entry.is_fresh())
-        } else {
-            (None, false)
-        }
-    });
-
-    if is_fresh {
-        return cached.unwrap();
-    }
-
-    // Have stale data — return it immediately (watcher will refresh)
-    if cached.is_some() {
-        return cached.unwrap();
-    }
-
-    // No cached data at all — must do initial fetch (only happens once per path)
-    let status = repository::get_status(path);
-
-    with_cache(|cache| {
-        cache.insert(
-            path_buf,
-            CacheEntry {
-                status: status.clone(),
-                timestamp: Instant::now(),
-            },
-        );
-    });
-
-    status
+    with_cache(|cache| cache.get(path).cloned().flatten())
 }
 
 /// Fetch fresh git status and update the cache. Intended for background watchers.
 pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
     let status = repository::get_status(path);
-
-    with_cache(|cache| {
-        cache.insert(
-            path_buf,
-            CacheEntry {
-                status: status.clone(),
-                timestamp: Instant::now(),
-            },
-        );
-    });
-
+    with_cache(|cache| { cache.insert(path_buf, status.clone()); });
     status
 }
 
 /// Invalidate cache for a specific path (call when you know files changed)
 #[allow(dead_code)]
 pub fn invalidate_cache(path: &Path) {
-    with_cache(|cache| {
-        cache.remove(path);
-    });
+    with_cache(|cache| { cache.remove(path); });
 }
 
 /// Get per-file diff summary for a repository.

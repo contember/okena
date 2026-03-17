@@ -71,26 +71,37 @@ impl GitStatusWatcher {
 
                 let check_prs = cycle % PR_POLL_EVERY_N_CYCLES == 0;
 
-                // Fetch git status for each project (on blocking thread)
-                let mut new_statuses: HashMap<String, Option<GitStatus>> = HashMap::new();
-                let mut new_pr_infos: HashMap<String, Option<super::PrInfo>> = HashMap::new();
-                for (id, path) in &projects {
+                // Phase 1: Fetch git status for all projects in parallel
+                let status_futures: Vec<_> = projects.iter().map(|(id, path)| {
+                    let id = id.clone();
                     let path = path.clone();
-                    let check_pr = check_prs;
-                    let (status, pr_info) = smol::unblock(move || {
-                        let status = git::refresh_git_status(Path::new(&path));
-                        let pr_info = if check_pr {
-                            git::repository::get_pr_info(Path::new(&path))
-                        } else {
-                            None
-                        };
-                        (status, pr_info)
-                    }).await;
-                    new_statuses.insert(id.clone(), status);
-                    if check_prs {
-                        new_pr_infos.insert(id.clone(), pr_info);
+                    async move {
+                        let status = smol::unblock(move || {
+                            git::refresh_git_status(Path::new(&path))
+                        }).await;
+                        (id, status)
                     }
-                }
+                }).collect();
+                let mut new_statuses: HashMap<String, Option<GitStatus>> =
+                    futures::future::join_all(status_futures).await.into_iter().collect();
+
+                // Phase 2: Fetch PR info in parallel (slower, network calls) — only on PR poll cycles.
+                // Runs after all statuses are updated so git status isn't delayed by PR checks.
+                let new_pr_infos: HashMap<String, Option<super::PrInfo>> = if check_prs {
+                    let pr_futures: Vec<_> = projects.iter().map(|(id, path)| {
+                        let id = id.clone();
+                        let path = path.clone();
+                        async move {
+                            let pr_info = smol::unblock(move || {
+                                git::repository::get_pr_info(Path::new(&path))
+                            }).await;
+                            (id, pr_info)
+                        }
+                    }).collect();
+                    futures::future::join_all(pr_futures).await.into_iter().collect()
+                } else {
+                    HashMap::new()
+                };
 
                 // Compare and update
                 let should_continue = this.update(cx, |this, cx| {

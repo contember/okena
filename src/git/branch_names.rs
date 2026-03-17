@@ -79,14 +79,13 @@ fn adjective_for(stem: &str, suffix_m: &str, suffix_f: &str, suffix_n: &str, goo
 }
 
 /// Per-repo username cache. Keyed by canonical repo path so that different
-/// repositories resolve to their own GitHub owner. Uses a simple Mutex
-/// instead of OnceLock to allow per-path caching.
-static USERNAME_CACHE: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, String>>> =
-    std::sync::Mutex::new(None);
+/// repositories resolve to their own GitHub owner.
+static USERNAME_CACHE: parking_lot::Mutex<Option<std::collections::HashMap<std::path::PathBuf, String>>> =
+    parking_lot::Mutex::new(None);
 
 fn detect_github_username(repo_path: &Path) -> String {
     let canonical = repo_path.canonicalize().unwrap_or_else(|_| repo_path.to_path_buf());
-    let mut guard = USERNAME_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = USERNAME_CACHE.lock();
     let cache = guard.get_or_insert_with(std::collections::HashMap::new);
     if let Some(cached) = cache.get(&canonical) {
         return cached.clone();
@@ -97,24 +96,24 @@ fn detect_github_username(repo_path: &Path) -> String {
 }
 
 fn detect_github_username_inner(repo_path: &Path) -> String {
-    // Tier 1: gh api user
-    if let Ok(output) = safe_output(command("gh").args(["api", "user", "--jq", ".login"])) {
-        if output.status.success() {
-            let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !login.is_empty() {
-                return login;
-            }
-        }
-    }
-
-    // Tier 2: parse git remote URL
+    // Tier 1: parse git remote URL (fast, no network call)
     if let Some(path_str) = repo_path.to_str() {
         if let Ok(output) = safe_output(command("git").args(["-C", path_str, "remote", "get-url", "origin"])) {
             if output.status.success() {
                 let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if let Some(username) = parse_github_username_from_remote(&url) {
-                    return username;
+                    return sanitize_username(&username);
                 }
+            }
+        }
+    }
+
+    // Tier 2: gh api user (requires network, may be slow)
+    if let Ok(output) = safe_output(command("gh").args(["api", "user", "--jq", ".login"])) {
+        if output.status.success() {
+            let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !login.is_empty() {
+                return sanitize_username(&login);
             }
         }
     }
@@ -143,12 +142,14 @@ fn parse_github_username_from_remote(url: &str) -> Option<String> {
             return Some(user.to_string());
         }
     }
-    // HTTPS: https://github.com/user/repo.git
-    if url.contains("github.com/") {
-        let after = url.split("github.com/").nth(1)?;
-        let user = after.split('/').next()?;
-        if !user.is_empty() {
-            return Some(user.to_string());
+    // HTTPS: https://github.com/user/repo.git or http://github.com/user/repo.git
+    for prefix in &["https://github.com/", "http://github.com/"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            if let Some(user) = rest.split('/').next() {
+                if !user.is_empty() {
+                    return Some(user.to_string());
+                }
+            }
         }
     }
     None
@@ -192,7 +193,8 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
         }
     }
 
-    // Phase 3: numeric suffix on adjective+good (capped to avoid unbounded loop)
+    // Phase 3: numeric suffix fallback (practically unreachable — Phase 1 covers 38,
+    // Phase 2 covers 380 combos, so 418+ branches must already exist for this user)
     for suffix_num in 2u32..1000 {
         for &(stem, sm, sf, sn) in ADJECTIVE_STEMS {
             for &i in &indices {
@@ -211,13 +213,8 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
 }
 
 fn collect_taken_branches(repo_path: &Path) -> HashSet<String> {
-    let mut taken = HashSet::new();
-    for b in super::repository::list_branches(repo_path) {
-        taken.insert(b);
-    }
-    for b in super::repository::get_worktree_branches(repo_path) {
-        taken.insert(b);
-    }
+    let mut taken: HashSet<String> = super::repository::list_branches(repo_path).into_iter().collect();
+    taken.extend(super::repository::get_worktree_branches(repo_path));
     taken
 }
 
