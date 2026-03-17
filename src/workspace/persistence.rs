@@ -1042,7 +1042,7 @@ mod tests {
             vec!["parent", "wt1", "wt2"],
             vec![],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         // Parent should now have worktree_ids populated
         let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
             vec!["parent", "wt1"],
             vec![],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         // wt1 should be removed from project_order (lives in parent.worktree_ids now)
         assert!(!data.project_order.contains(&"wt1".to_string()));
@@ -1076,7 +1076,7 @@ mod tests {
                 folder_color: FolderColor::default(),
             }],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         // wt1 should be removed from folder's project_ids
         assert_eq!(data.folders[0].project_ids, vec!["parent".to_string()]);
@@ -1092,7 +1092,7 @@ mod tests {
             vec!["parent"],
             vec![],
         );
-        validate_workspace_data(&mut data, false);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
 
         let parent = data.projects.iter().find(|p| p.id == "parent").unwrap();
         // Should preserve existing order, not overwrite
