@@ -421,6 +421,11 @@ impl LayoutContainer {
                 })
             });
 
+            // Check if this terminal is a hook terminal
+            let is_hook = terminal_id.as_ref().map_or(false, |tid| {
+                project_for_names.as_ref().map_or(false, |p| p.hook_terminals.contains_key(tid))
+            });
+
             // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
@@ -482,47 +487,35 @@ impl LayoutContainer {
                     let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
                         is_renaming(&self.tab_rename_state, tid)
                     });
-                    if is_renaming_this {
-                        if let Some(input) = rename_input(&self.tab_rename_state) {
-                            div()
-                                .id(format!("tab-rename-{}", i))
-                                .key_context("TerminalRename")
-                                .flex_1()
-                                .min_w(px(80.0))
-                                .bg(rgb(t.bg_secondary))
-                                .border_1()
-                                .border_color(rgb(t.border_active))
-                                .rounded(px(4.0))
-                                .child(SimpleInput::new(input).text_size(px(12.0)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_click(|_, _window, cx| {
-                                    cx.stop_propagation();
-                                })
-                                .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
-                                    this.cancel_tab_rename(cx);
-                                }))
-                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                                    cx.stop_propagation();
-                                    if event.keystroke.key.as_str() == "enter" {
-                                        this.finish_tab_rename(cx);
-                                    }
-                                }))
-                                .into_any_element()
-                        } else {
-                            let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
-                            h_flex()
-                                .gap(px(6.0))
-                                .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
-                                .child(tab_label.clone())
-                                .children(idle_label.as_ref().map(|d| {
-                                    div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
-                                }))
-                                .into_any_element()
-                        }
+                    if let Some(input) = is_renaming_this.then(|| rename_input(&self.tab_rename_state)).flatten() {
+                        div()
+                            .id(format!("tab-rename-{}", i))
+                            .key_context("TerminalRename")
+                            .flex_1()
+                            .min_w(px(80.0))
+                            .bg(rgb(t.bg_secondary))
+                            .border_1()
+                            .border_color(rgb(t.border_active))
+                            .rounded(px(4.0))
+                            .child(SimpleInput::new(input).text_size(px(12.0)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(|_, _window, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                                this.cancel_tab_rename(cx);
+                            }))
+                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                                cx.stop_propagation();
+                                if event.keystroke.key.as_str() == "enter" {
+                                    this.finish_tab_rename(cx);
+                                }
+                            }))
+                            .into_any_element()
                     } else {
-                        let icon_color = if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                         h_flex()
                             .gap(px(6.0))
                             .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))

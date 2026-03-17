@@ -798,12 +798,8 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::FilterToFolder { folder_id } => {
                     this.hide_folder_context_menu(cx);
-                    let is_active = this.workspace.read(cx).active_folder_filter() == Some(folder_id);
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_folder_filter(
-                            if is_active { None } else { Some(folder_id.clone()) },
-                            cx,
-                        );
+                        ws.toggle_folder_focus(folder_id, cx);
                     });
                 }
             }

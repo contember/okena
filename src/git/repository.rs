@@ -63,10 +63,18 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
 
     let mut args = vec!["-C", repo_str, "worktree", "add"];
 
+    // When creating a new branch, base it on the remote default branch
+    // (e.g. origin/main) so it starts from the latest remote state,
+    // not the potentially stale local main/master.
+    let start_point;
     if create_branch {
         args.push("-b");
         args.push(branch);
         args.push(target_str);
+        if let Some(default_branch) = get_default_branch(repo_path) {
+            start_point = format!("origin/{}", default_branch);
+            args.push(&start_point);
+        }
     } else {
         args.push(target_str);
         args.push(branch);
