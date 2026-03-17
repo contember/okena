@@ -994,6 +994,36 @@ impl ProjectColumn {
     }
 
     /// Render empty state for bookmark projects (no terminal)
+    fn render_creating_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        v_flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .gap(px(12.0))
+            .bg(rgb(t.bg_primary))
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(48.0))
+                    .text_color(rgb(t.text_muted))
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(rgb(t.text_secondary))
+                    .child("Setting up worktree\u{2026}")
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(t.text_muted))
+                    .max_w(px(240.0))
+                    .text_center()
+                    .child("Fetching latest changes and creating the branch. Terminals will start automatically.")
+            )
+    }
+
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let project_id = self.project_id.clone();
@@ -1968,7 +1998,9 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                // Content: either layout container or empty state
+                let is_creating = workspace.creating_projects.contains(&self.project_id);
+
+                // Content: layout, creating state, or empty bookmark state
                 let content = if has_layout {
                     // Ensure layout container exists (created once, not every render)
                     self.ensure_layout_container(project.path.clone(), cx);
@@ -1980,6 +2012,8 @@ impl Render for ProjectColumn {
                         .overflow_hidden()
                         .child(self.layout_container.clone().unwrap())
                         .into_any_element()
+                } else if is_creating {
+                    self.render_creating_state(cx).into_any_element()
                 } else {
                     // Empty state for bookmark projects
                     self.render_empty_state(cx).into_any_element()
