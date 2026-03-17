@@ -78,10 +78,13 @@ pub struct WorktreeMetadata {
     /// Path to the git worktree checkout directory (may differ from project path in monorepos)
     #[serde(default)]
     pub worktree_path: String,
+    /// Branch name at worktree creation time (stable even if project is renamed)
+    #[serde(default)]
+    pub branch_name: String,
 }
 
 /// Status of a hook terminal in the service panel.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HookTerminalStatus {
     Running,
     Succeeded,
@@ -89,12 +92,16 @@ pub enum HookTerminalStatus {
 }
 
 /// Entry for a hook terminal displayed in the service panel.
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookTerminalEntry {
-    pub hook_type: &'static str,
     pub label: String,
     pub status: HookTerminalStatus,
+    /// Which hook triggered this terminal (e.g. "on_project_open").
+    pub hook_type: String,
+    /// The full command string with env vars baked in (ready to re-execute).
+    pub command: String,
+    /// Working directory for the hook command.
+    pub cwd: String,
 }
 
 /// Pending worktree close operation waiting for a hook to complete.
@@ -155,8 +162,8 @@ pub struct ProjectData {
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<crate::terminal::shell_config::ShellType>,
-    /// Hook terminals currently displayed in the service panel (transient, not persisted)
-    #[serde(skip)]
+    /// Hook terminals displayed in the service panel (persisted across restarts)
+    #[serde(default)]
     pub hook_terminals: HashMap<String, HookTerminalEntry>,
 }
 
@@ -290,6 +297,13 @@ pub struct Workspace {
     /// Project IDs currently being closed (hook running or git worktree remove in progress).
     /// Used by the sidebar to show a visual "closing" indicator.
     pub closing_projects: HashSet<String>,
+    /// Worktree paths currently being removed in the background.
+    /// The sync watcher skips these to avoid re-adding a worktree
+    /// whose directory hasn't been fully deleted yet.
+    pub removing_worktree_paths: HashSet<String>,
+    /// Project IDs whose worktree is still being created on disk (git fetch + worktree add).
+    /// Sidebar shows a "Creating…" indicator and terminals are not spawned.
+    pub creating_projects: HashSet<String>,
 }
 
 impl Workspace {
@@ -303,6 +317,8 @@ impl Workspace {
             pending_remote_focus: HashSet::new(),
             pending_worktree_closes: HashMap::new(),
             closing_projects: HashSet::new(),
+            removing_worktree_paths: HashSet::new(),
+            creating_projects: HashSet::new(),
         }
     }
 
@@ -443,9 +459,7 @@ impl Workspace {
             // Set the terminal name to the hook label
             project.terminal_names.insert(terminal_id.to_string(), label);
 
-            // Use cx.notify() instead of notify_data() — hook terminals are transient
-            // and should not trigger a workspace save to disk.
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -458,9 +472,11 @@ impl Workspace {
     ) {
         for result in results {
             self.register_hook_terminal(&result.project_id, &result.terminal_id, HookTerminalEntry {
-                hook_type: result.hook_type,
                 label: result.label,
                 status: HookTerminalStatus::Running,
+                hook_type: result.hook_type.to_string(),
+                command: result.command,
+                cwd: result.cwd,
             }, cx);
         }
     }
@@ -501,9 +517,7 @@ impl Workspace {
                     }
                 }
                 project.terminal_names.remove(terminal_id);
-                // Use cx.notify() instead of notify_data() — hook terminals are transient
-                // and should not trigger a workspace save to disk.
-                cx.notify();
+                self.notify_data(cx);
                 return;
             }
         }
@@ -516,6 +530,45 @@ impl Workspace {
             }
         }
         None
+    }
+
+    /// Get all hook terminal IDs for a project (for cleanup before deletion).
+    pub fn hook_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
+        self.project(project_id)
+            .map(|p| p.hook_terminals.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Swap a hook terminal's ID (for rerun). Updates hook_terminals, layout tree, and terminal_names.
+    /// Resets status back to Running.
+    pub fn swap_hook_terminal_id(
+        &mut self,
+        project_id: &str,
+        old_id: &str,
+        new_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.data.projects.iter_mut().find(|p| p.id == project_id) else {
+            return;
+        };
+
+        // Swap in hook_terminals HashMap
+        if let Some(mut entry) = project.hook_terminals.remove(old_id) {
+            entry.status = HookTerminalStatus::Running;
+            project.hook_terminals.insert(new_id.to_string(), entry);
+        }
+
+        // Swap in layout tree
+        if let Some(ref mut layout) = project.layout {
+            layout.replace_terminal_id(old_id, new_id);
+        }
+
+        // Swap in terminal_names
+        if let Some(name) = project.terminal_names.remove(old_id) {
+            project.terminal_names.insert(new_id.to_string(), name);
+        }
+
+        self.notify_data(cx);
     }
 
     /// Register a pending worktree close that will execute when the hook terminal exits.
@@ -554,6 +607,34 @@ impl Workspace {
         let focus_individual = self.focus_manager.is_focus_individual();
         let folder_filter = self.active_folder_filter.as_ref();
 
+        // Pre-build worktree children lookup only when folder filter is active
+        // (it's the only code path that needs parent→children resolution)
+        let wt_children_by_parent: Option<HashMap<&str, Vec<&ProjectData>>> = folder_filter.map(|_| {
+            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
+            for p in &self.data.projects {
+                if let Some(ref wi) = p.worktree_info {
+                    map.entry(wi.parent_project_id.as_str())
+                        .or_default()
+                        .push(p);
+                }
+            }
+            map
+        });
+
+        // Pre-compute worktree children whose parent lives in a folder.
+        // These must only be added during folder expansion (not from project_order),
+        // because their position in project_order may not reflect the folder ordering.
+        let folder_owned_worktrees: HashSet<&str> = {
+            let folder_project_ids: HashSet<&str> = self.data.folders.iter()
+                .flat_map(|f| f.project_ids.iter().map(|id| id.as_str()))
+                .collect();
+            self.data.projects.iter()
+                .filter(|p| p.worktree_info.as_ref()
+                    .map_or(false, |wi| folder_project_ids.contains(wi.parent_project_id.as_str())))
+                .map(|p| p.id.as_str())
+                .collect()
+        };
+
         let mut result = Vec::new();
         // Track worktree children already added via their parent's folder
         let mut added_via_folder: HashSet<&str> = HashSet::new();
@@ -573,9 +654,14 @@ impl Workspace {
                         continue;
                     }
                 }
-                // Folder: include its projects (and worktree children when folder filter is active,
-                // since they live in project_order rather than folder.project_ids)
+                // Folder: include its projects and their worktree children.
+                // Worktree children live in project_order (not folder.project_ids),
+                // so we expand them here to keep them positioned within their folder's section.
                 for pid in &folder.project_ids {
+                    // Skip if already added as a worktree child of a previous folder project
+                    if added_via_folder.contains(pid.as_str()) {
+                        continue;
+                    }
                     if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
                         self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
                         if folder_filter.is_some() {
@@ -586,8 +672,9 @@ impl Workspace {
                     }
                 }
             } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
-                // Skip worktree children already added via their parent's folder
-                if added_via_folder.contains(p.id.as_str()) {
+                // Skip worktree children that belong to folder projects —
+                // they'll be added during their parent's folder expansion instead
+                if folder_owned_worktrees.contains(p.id.as_str()) || added_via_folder.contains(p.id.as_str()) {
                     continue;
                 }
                 // Top-level project: hide when folder filter is active
@@ -601,6 +688,44 @@ impl Workspace {
                 self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
             }
         }
+
+        // Group worktree children right after their parent project.
+        // Only moves worktrees whose parent IS in the result; orphan worktrees
+        // (parent not visible or in a folder) stay at their original position.
+        let worktree_children: HashMap<&str, Vec<&ProjectData>> = {
+            let result_ids: HashSet<&str> = result.iter().map(|p| p.id.as_str()).collect();
+            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
+            for p in &result {
+                if let Some(ref wi) = p.worktree_info {
+                    // Only group if parent is in the result (O(1) lookup)
+                    if result_ids.contains(wi.parent_project_id.as_str()) {
+                        map.entry(wi.parent_project_id.as_str())
+                            .or_default()
+                            .push(p);
+                    }
+                }
+            }
+            map
+        };
+        if !worktree_children.is_empty() {
+            let grouped_child_ids: HashSet<&str> = worktree_children.values()
+                .flat_map(|children| children.iter().map(|p| p.id.as_str()))
+                .collect();
+            let mut grouped = Vec::with_capacity(result.len());
+            for p in &result {
+                // Skip worktrees that will be grouped after their parent
+                if grouped_child_ids.contains(p.id.as_str()) {
+                    continue;
+                }
+                grouped.push(*p);
+                // Insert grouped children after their parent
+                if let Some(children) = worktree_children.get(p.id.as_str()) {
+                    grouped.extend(children);
+                }
+            }
+            return grouped;
+        }
+
         result
     }
 
@@ -649,6 +774,14 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// Get IDs of worktree children for a given parent project.
+    pub fn worktree_child_ids(&self, parent_id: &str) -> Vec<String> {
+        self.data.projects.iter()
+            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == parent_id))
+            .map(|p| p.id.clone())
+            .collect()
     }
 
     /// Get a project by ID
@@ -784,6 +917,22 @@ impl LayoutNode {
         }
     }
 
+    /// Replace a terminal ID in the layout tree (for hook rerun).
+    pub fn replace_terminal_id(&mut self, old_id: &str, new_id: &str) {
+        match self {
+            LayoutNode::Terminal { terminal_id, .. } => {
+                if terminal_id.as_deref() == Some(old_id) {
+                    *terminal_id = Some(new_id.to_string());
+                }
+            }
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for child in children {
+                    child.replace_terminal_id(old_id, new_id);
+                }
+            }
+        }
+    }
+
     /// Create a new empty terminal node
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
@@ -873,15 +1022,25 @@ impl LayoutNode {
     /// Clear all terminal IDs in this layout tree (used on app restart)
     /// Also resets minimized and detached state since terminals need to be created first
     pub fn clear_terminal_ids(&mut self) {
+        self.clear_terminal_ids_except(&HashSet::new());
+    }
+
+    /// Clear terminal IDs except those in the `keep` set (e.g. hook terminals).
+    /// Kept terminals preserve their ID, minimized, and detached state.
+    pub fn clear_terminal_ids_except(&mut self, keep: &HashSet<&str>) {
         match self {
             LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
-                *terminal_id = None;
-                *minimized = false;
-                *detached = false;
+                let should_keep = terminal_id.as_deref()
+                    .map_or(false, |id| keep.contains(id));
+                if !should_keep {
+                    *terminal_id = None;
+                    *minimized = false;
+                    *detached = false;
+                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
-                    child.clear_terminal_ids();
+                    child.clear_terminal_ids_except(keep);
                 }
             }
         }
@@ -1075,17 +1234,42 @@ impl LayoutNode {
 
     /// Find the path to the first terminal in this layout subtree
     pub fn find_first_terminal_path(&self) -> Vec<usize> {
-        self.find_first_terminal_path_recursive(vec![])
+        self.find_terminal_path_by_strategy(false)
     }
 
-    fn find_first_terminal_path_recursive(&self, current_path: Vec<usize>) -> Vec<usize> {
+    /// Find path to the first visible terminal (follows active tabs).
+    pub fn find_visible_terminal_path(&self) -> Vec<usize> {
+        self.find_terminal_path_by_strategy(true)
+    }
+
+    /// Shared implementation: when `follow_active_tab` is true, Tabs nodes
+    /// pick the active child; otherwise they always pick child 0.
+    fn find_terminal_path_by_strategy(&self, follow_active_tab: bool) -> Vec<usize> {
+        self.find_terminal_path_recursive_impl(vec![], follow_active_tab)
+    }
+
+    fn find_terminal_path_recursive_impl(&self, current_path: Vec<usize>, follow_active_tab: bool) -> Vec<usize> {
         match self {
             LayoutNode::Terminal { .. } => current_path,
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            LayoutNode::Split { children, .. } => {
                 if let Some(first_child) = children.first() {
                     let mut child_path = current_path;
                     child_path.push(0);
-                    first_child.find_first_terminal_path_recursive(child_path)
+                    first_child.find_terminal_path_recursive_impl(child_path, follow_active_tab)
+                } else {
+                    current_path
+                }
+            }
+            LayoutNode::Tabs { children, active_tab, .. } => {
+                let idx = if follow_active_tab {
+                    (*active_tab).min(children.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                if let Some(child) = children.get(idx) {
+                    let mut child_path = current_path;
+                    child_path.push(idx);
+                    child.find_terminal_path_recursive_impl(child_path, follow_active_tab)
                 } else {
                     current_path
                 }
@@ -2554,12 +2738,14 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: "branch-w2".to_string(),
         });
 
         let data = make_workspace_data(
@@ -2598,12 +2784,14 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: "branch-w2".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2630,6 +2818,258 @@ mod workspace_tests {
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "w1");
         assert_eq!(visible[2].id, "w2");
+    }
+
+    #[test]
+    fn test_folder_filter_worktree_children_not_duplicated() {
+        // w1 is a worktree child of p1. Both p1 and w1 are in project_order.
+        // When folder filter is active for f1 (containing p1), w1 should appear
+        // exactly once — not duplicated from both the folder expansion and project_order.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let mut p1 = make_project("p1", true);
+        p1.worktree_ids = vec!["w1".to_string()];
+
+        let mut data = make_workspace_data(
+            vec![p1, w1, make_project("p2", true)],
+            vec!["f1", "w1", "p2"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string()],
+            collapsed: false,
+            folder_color: FolderColor::default(),
+        }];
+
+        let mut ws = Workspace::new(data);
+        ws.active_folder_filter = Some("f1".to_string());
+
+        let visible = ws.visible_projects();
+        // p1 + w1, no duplicates
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_worktree_children_ordered_within_folder_section() {
+        // Bug: when worktree children of a folder project are in project_order
+        // before another folder, they'd appear before that folder's projects.
+        // project_order: [f2, w1, f1, p3] — w1 is before f1 in project_order
+        // but w1's parent (p1) is inside f2, so w1 should appear within f2's section.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let mut p1 = make_project("p1", true);
+        p1.worktree_ids = vec!["w1".to_string()];
+
+        let mut data = make_workspace_data(
+            vec![p1, make_project("p2", true), w1, make_project("p3", true)],
+            // w1 sits between the two folders in project_order
+            vec!["f1", "w1", "f2", "p3"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should be grouped with f1 (after p1), NOT between f1 and f2
+        assert_eq!(visible.len(), 4);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");  // grouped within f1's section
+        assert_eq!(visible[2].id, "p2");  // f2's project
+        assert_eq!(visible[3].id, "p3");  // top-level
+    }
+
+    #[test]
+    fn test_worktree_before_parent_folder_in_project_order() {
+        // Real-world scenario: worktree appears in project_order BEFORE its
+        // parent's folder (e.g., folders were reordered after worktree creation).
+        // project_order: [w1, f1, f2] — w1 before f2, but w1's parent is in f2.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p2".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let mut p2 = make_project("p2", false);
+        p2.worktree_ids = vec!["w1".to_string()];
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), p2, w1],
+            // w1 appears before BOTH folders
+            vec!["w1", "f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should NOT appear at project_order position (before f1).
+        // It should appear within f2's section (after p2, or alone if p2 hidden).
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "p1");  // f1's project
+        assert_eq!(visible[1].id, "w1");  // f2's section (parent p2 hidden)
+        // w1 must not be duplicated
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_worktree_children_ordered_when_parent_hidden() {
+        // Parent has show_in_overview=false but worktree child is visible.
+        // The worktree child should still appear within its folder's section.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let mut p1 = make_project("p1", false);
+        p1.worktree_ids = vec!["w1".to_string()];
+
+        let mut data = make_workspace_data(
+            vec![p1, make_project("p2", true), w1],
+            // w1 before f2 in project_order
+            vec!["f1", "w1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                project_ids: vec!["p1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // p1 hidden, w1 visible within f1's section, then p2 from f2
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "w1");  // within f1's section (parent hidden)
+        assert_eq!(visible[1].id, "p2");  // f2's project
+    }
+
+    #[test]
+    fn test_worktree_child_in_folder_not_duplicated() {
+        // w1 is a worktree child of p1 AND is also in folder.project_ids
+        // (e.g., user dragged it into the folder). It should appear only once.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let mut data = make_workspace_data(
+            vec![make_project("p1", true), w1, make_project("p2", true)],
+            vec!["f1", "f2"],
+        );
+        data.folders = vec![
+            FolderData {
+                id: "f1".to_string(),
+                name: "Folder 1".to_string(),
+                // w1 is both a worktree child of p1 AND listed in folder.project_ids
+                project_ids: vec!["p1".to_string(), "w1".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+            FolderData {
+                id: "f2".to_string(),
+                name: "Folder 2".to_string(),
+                project_ids: vec!["p2".to_string()],
+                collapsed: false,
+                folder_color: FolderColor::default(),
+            },
+        ];
+
+        let ws = Workspace::new(data);
+        let visible = ws.visible_projects();
+
+        // w1 should appear exactly once (after p1), not duplicated
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "w1");
+        assert_eq!(visible[2].id, "p2");
+        assert_eq!(visible.iter().filter(|p| p.id == "w1").count(), 1);
+    }
+
+    #[test]
+    fn test_orphan_worktree_shown_when_parent_not_in_result() {
+        // w1 is a worktree child of p1, but p1 is hidden. w1 should still
+        // appear as an orphan worktree in the result.
+        let mut w1 = make_project("w1", true);
+        w1.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".to_string(),
+            main_repo_path: "/tmp/repo".to_string(),
+            worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
+        });
+
+        let data = make_workspace_data(
+            vec![make_project("p1", false), w1],
+            vec!["p1", "w1"],
+        );
+        let ws = Workspace::new(data);
+
+        let visible = ws.visible_projects();
+        // p1 is hidden, w1 is visible as an orphan
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "w1");
     }
 
     #[test]
@@ -2671,12 +3111,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let ws = Workspace::new(data);
@@ -2697,6 +3139,7 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let other = make_project("other", true);
         let mut data = make_workspace_data(vec![parent, wt1, other], vec!["f1", "other"]);
@@ -2726,12 +3169,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
@@ -2753,12 +3198,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
@@ -2778,12 +3225,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
@@ -3062,11 +3511,13 @@ mod gpui_tests {
 
     // ── register_hook_terminal layout tests ──────────────────────────────
 
-    fn make_hook_entry(hook_type: &'static str) -> HookTerminalEntry {
+    fn make_hook_entry(hook_type: &str) -> HookTerminalEntry {
         HookTerminalEntry {
-            hook_type,
             label: format!("{} (test)", hook_type),
             status: HookTerminalStatus::Running,
+            hook_type: hook_type.to_string(),
+            command: "echo test".to_string(),
+            cwd: ".".to_string(),
         }
     }
 
@@ -3208,15 +3659,94 @@ mod gpui_tests {
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             ws.register_hook_terminal("p1", "hook-1", HookTerminalEntry {
-                hook_type: "on_project_open",
                 label: "on_project_open (feature/foo)".to_string(),
                 status: HookTerminalStatus::Running,
+                hook_type: "on_project_open".to_string(),
+                command: "echo test".to_string(),
+                cwd: ".".to_string(),
             }, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let name = ws.project("p1").unwrap().terminal_names.get("hook-1").unwrap();
             assert_eq!(name, "on_project_open (feature/foo)");
+        });
+    }
+
+    #[gpui::test]
+    fn test_swap_hook_terminal_id(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.update_hook_terminal_status("hook-1", HookTerminalStatus::Succeeded, cx);
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.swap_hook_terminal_id("p1", "hook-1", "hook-1-new", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let project = ws.project("p1").unwrap();
+            // Old ID gone
+            assert!(!project.hook_terminals.contains_key("hook-1"));
+            // New ID present with Running status (reset)
+            let entry = project.hook_terminals.get("hook-1-new").unwrap();
+            assert_eq!(entry.status, HookTerminalStatus::Running);
+            assert_eq!(entry.hook_type, "on_project_open");
+            // Layout updated
+            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1").is_none());
+            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1-new").is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn test_replace_terminal_id_in_layout(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // Register two hook terminals to get them into layout as tabs
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        // Replace hook-1 with hook-1-new in the layout tree directly
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            if let Some(ref mut layout) = ws.data.projects.iter_mut().find(|p| p.id == "p1").unwrap().layout {
+                layout.replace_terminal_id("hook-1", "hook-1-new");
+            }
+            cx.notify();
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
+            assert!(layout.find_terminal_path("hook-1").is_none());
+            assert!(layout.find_terminal_path("hook-1-new").is_some());
+            // Other terminals unaffected
+            assert!(layout.find_terminal_path("hook-2").is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn test_hook_terminal_ids_for_project(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
+            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let ids = ws.hook_terminal_ids_for_project("p1");
+            assert_eq!(ids.len(), 2);
+            assert!(ids.contains(&"hook-1".to_string()));
+            assert!(ids.contains(&"hook-2".to_string()));
+
+            // Non-existent project returns empty
+            assert!(ws.hook_terminal_ids_for_project("nonexistent").is_empty());
         });
     }
 }

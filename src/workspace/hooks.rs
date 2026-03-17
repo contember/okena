@@ -14,7 +14,7 @@ use std::time::Instant;
 /// Stored as a GPUI Global. All fields are Clone + Send + Sync.
 #[derive(Clone)]
 pub struct HookRunner {
-    backend: Arc<dyn TerminalBackend>,
+    pub backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
 }
 
@@ -33,17 +33,27 @@ pub struct HookTerminalResult {
     pub label: String,
     pub hook_type: &'static str,
     pub project_id: String,
+    /// The full command with env vars baked in (for rerun).
+    pub command: String,
+    /// Resolved working directory (for rerun).
+    pub cwd: String,
 }
 
 impl HookRunner {
     /// Create a PTY-backed terminal for a hook command.
-    /// Returns the terminal_id. The terminal is registered in the TerminalsRegistry.
+    /// Returns (terminal_id, full_cmd). The terminal is registered in the TerminalsRegistry.
+    ///
+    /// When `keep_alive` is true, the terminal starts a regular interactive shell and
+    /// types the command into it — the shell stays alive after the command finishes.
+    /// When false, uses `sh -c` so the PTY exits when the command completes (needed
+    /// for sync hooks that block on exit).
     fn create_hook_terminal(
         &self,
         command: &str,
         env_vars: &HashMap<String, String>,
         project_path: &str,
-    ) -> Result<String, String> {
+        keep_alive: bool,
+    ) -> Result<(String, String), String> {
         // Build the full command with env vars baked in.
         // Filter out any keys that aren't valid shell identifiers to prevent injection.
         let safe_env: Vec<_> = env_vars
@@ -59,9 +69,25 @@ impl HookRunner {
             .collect();
 
         let full_cmd = if cfg!(windows) {
+            // Escape all cmd.exe special characters in env var values.
+            // ^ must be escaped first since it's the cmd.exe escape character.
             let env_prefix = safe_env
                 .iter()
-                .map(|(k, v)| format!("set {}={}", k, v))
+                .map(|(k, v)| {
+                    // Escape all cmd.exe special characters.
+                    // ^ must be first since it's the escape character itself.
+                    let escaped = v
+                        .replace('^', "^^")
+                        .replace('%', "%%")
+                        .replace('"', "\\\"")
+                        .replace('&', "^&")
+                        .replace('|', "^|")
+                        .replace('<', "^<")
+                        .replace('>', "^>")
+                        .replace('(', "^(")
+                        .replace(')', "^)");
+                    format!("set \"{}={}\"", k, escaped)
+                })
                 .collect::<Vec<_>>()
                 .join(" && ");
             if env_prefix.is_empty() {
@@ -70,8 +96,10 @@ impl HookRunner {
                 format!("{} && {}", env_prefix, command)
             }
         } else {
-            // POSIX single-quote escaping: wrap values in '...' and escape embedded
-            // single quotes as '\''. Safe because hook terminals always use `sh -c`.
+            // POSIX single-quote escaping: wrap values in '...' and replace each
+            // embedded ' with the sequence '\'' (end current single-quoted string,
+            // insert an escaped literal quote, re-open single-quoted string).
+            // This is the standard POSIX single-quote escape pattern.
             let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))
@@ -84,22 +112,39 @@ impl HookRunner {
             }
         };
 
-        let shell = ShellType::for_command(full_cmd);
-
         let cwd = if project_path.is_empty() { "." } else { project_path };
 
-        let terminal_id = self.backend.create_terminal(cwd, Some(&shell))
-            .map_err(|e| format!("Failed to create hook terminal: {}", e))?;
+        let terminal_id = if keep_alive {
+            // Build a shell command that:
+            // 1. Exports env vars (available to the hook and the interactive shell)
+            // 2. Runs the hook command
+            // 3. Execs into the user's default shell so the terminal stays alive
+            // This avoids noisy export echoing and zsh session restore issues.
+            let mut script = String::new();
+            for (k, v) in &safe_env {
+                let escaped_v = v.replace('\'', "'\\''");
+                script.push_str(&format!("export {}='{}'; ", k, escaped_v));
+            }
+            script.push_str(command);
+            script.push_str("; exec \"${SHELL:-sh}\"");
+            let shell = ShellType::for_command(script);
+            self.backend.create_terminal(cwd, Some(&shell))
+        } else {
+            // Use sh -c so the PTY exits when the command completes.
+            let shell = ShellType::for_command(full_cmd.clone());
+            self.backend.create_terminal(cwd, Some(&shell))
+        }.map_err(|e| format!("Failed to create hook terminal: {}", e))?;
 
+        let transport = self.backend.transport();
         let terminal = Arc::new(Terminal::new(
             terminal_id.clone(),
             TerminalSize::default(),
-            self.backend.transport(),
+            transport.clone(),
             cwd.to_string(),
         ));
         self.terminals.lock().insert(terminal_id.clone(), terminal);
 
-        Ok(terminal_id)
+        Ok((terminal_id, full_cmd))
     }
 }
 
@@ -184,6 +229,7 @@ fn run_hook_actions(
     project_name: &str,
     runner: Option<&HookRunner>,
     project_id: &str,
+    keep_alive: bool,
 ) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
     let actions = parse_hook_actions(command);
     let mut terminal_actions = Vec::new();
@@ -192,7 +238,7 @@ fn run_hook_actions(
     for action in actions {
         match action {
             HookAction::Background(cmd) => {
-                if let Some(result) = run_hook(cmd, env_vars.clone(), monitor, hook_type, project_name, runner, project_id) {
+                if let Some(result) = run_hook(cmd, env_vars.clone(), monitor, hook_type, project_name, runner, project_id, keep_alive) {
                     hook_results.push(result);
                 }
             }
@@ -229,6 +275,10 @@ pub fn try_runner(cx: &App) -> Option<HookRunner> {
 /// Run a hook command asynchronously in a background thread.
 /// When a HookRunner is available, creates a PTY-backed terminal and returns a HookTerminalResult.
 /// Otherwise falls back to headless execution via `sh -c` (or `cmd /C` on Windows).
+///
+/// When `keep_alive` is true, the terminal stays interactive after the command finishes.
+/// When false, the PTY exits when the command completes (needed for hooks that gate
+/// operations like worktree removal).
 fn run_hook(
     command: String,
     env_vars: HashMap<String, String>,
@@ -237,21 +287,26 @@ fn run_hook(
     project_name: &str,
     runner: Option<&HookRunner>,
     project_id: &str,
+    keep_alive: bool,
 ) -> Option<HookTerminalResult> {
     // PTY path: create a real terminal so output is visible in the service panel
     if let Some(runner) = runner {
         let project_path = env_vars.get("OKENA_PROJECT_PATH").cloned().unwrap_or_default();
         let label = build_hook_label(hook_type, &env_vars, project_name);
+        let resolved_cwd = if project_path.is_empty() { ".".to_string() } else { project_path.clone() };
 
-        match runner.create_hook_terminal(&command, &env_vars, &project_path) {
-            Ok(terminal_id) => {
-                let _exec_id = monitor.map(|m| m.record_start(hook_type, &command, project_name, Some(terminal_id.clone())));
+        match runner.create_hook_terminal(&command, &env_vars, &project_path, keep_alive) {
+            Ok((terminal_id, full_cmd)) => {
+                // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
+                let _ = monitor.map(|m| m.record_start(hook_type, &command, project_name, Some(terminal_id.clone())));
                 log::info!("Hook '{}' started in terminal {} (label: {})", hook_type, terminal_id, label);
                 return Some(HookTerminalResult {
                     terminal_id,
                     label,
                     hook_type,
                     project_id: project_id.to_string(),
+                    command: full_cmd,
+                    cwd: resolved_cwd,
                 });
             }
             Err(e) => {
@@ -334,15 +389,25 @@ fn run_hook_sync(
     if let (Some(runner), Some(monitor)) = (runner, monitor) {
         let project_path = env_vars.get("OKENA_PROJECT_PATH").cloned().unwrap_or_default();
         let label = build_hook_label(hook_type, &env_vars, project_name);
+        let resolved_cwd = if project_path.is_empty() { ".".to_string() } else { project_path.clone() };
 
-        let terminal_id = runner.create_hook_terminal(command, &env_vars, &project_path)?;
+        let (terminal_id, full_cmd) = runner.create_hook_terminal(command, &env_vars, &project_path, false)?;
 
-        let _exec_id = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
+        // exec_id not needed — PTY hooks are finished via finish_by_terminal_id
+        let _ = monitor.record_start(hook_type, command, project_name, Some(terminal_id.clone()));
 
-        // Register exit waiter and block until the PTY process exits
+        // Register exit waiter and block until the PTY process exits (5 min timeout)
         let rx = monitor.register_exit_waiter(&terminal_id);
 
-        let exit_code = rx.recv().map_err(|_| "Hook terminal exit channel closed unexpectedly".to_string())?;
+        let exit_code = rx.recv_timeout(std::time::Duration::from_secs(300))
+            .map_err(|e| match e {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    format!("Hook '{}' timed out after 5 minutes — dismiss it from the sidebar to unblock", hook_type)
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    "Hook terminal exit channel closed unexpectedly".to_string()
+                }
+            })?;
 
         // Do NOT call record_finish here — the main thread's handle_hook_terminal_exits
         // calls finish_by_terminal_id which is the sole authority for PTY hook completion
@@ -355,6 +420,8 @@ fn run_hook_sync(
                 label,
                 hook_type,
                 project_id: project_id.to_string(),
+                command: full_cmd,
+                cwd: resolved_cwd,
             }));
         } else {
             let code = exit_code.map(|c| c as i32).unwrap_or(-1);
@@ -423,7 +490,7 @@ pub fn fire_on_project_open(
         log::info!("Running on_project_open hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
         let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_project_open", project_name, runner.as_ref(), project_id) {
+        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_project_open", project_name, runner.as_ref(), project_id, true) {
             return vec![result];
         }
     }
@@ -444,7 +511,7 @@ pub fn fire_on_project_close(
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id);
+        run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id, true);
     }
 }
 
@@ -464,7 +531,7 @@ pub fn fire_on_worktree_create(
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
         let monitor = try_monitor(cx);
         let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_worktree_create", project_name, runner.as_ref(), project_id) {
+        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "on_worktree_create", project_name, runner.as_ref(), project_id, true) {
             return vec![result];
         }
     }
@@ -485,7 +552,7 @@ pub fn fire_on_worktree_close(
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_worktree_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
-        run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id);
+        run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id, true);
     }
 }
 
@@ -548,7 +615,7 @@ pub fn fire_post_merge(
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.post_merge) {
         let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
         log::info!("Running post_merge hook for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "post_merge", project_name, runner, project_id) {
+        if let Some(result) = run_hook(cmd, env, monitor, "post_merge", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -596,7 +663,7 @@ pub fn fire_before_worktree_remove_async(
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
         log::info!("Running before_worktree_remove hook (async) for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id) {
+        if let Some(result) = run_hook(cmd, env, monitor, "before_worktree_remove", project_name, runner, project_id, false) {
             return vec![result];
         }
     }
@@ -623,7 +690,7 @@ pub fn fire_on_rebase_conflict(
         let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
         env.insert("OKENA_REBASE_ERROR".into(), rebase_error.into());
         log::info!("Running on_rebase_conflict hook for project '{}'", project_name);
-        return run_hook_actions(&cmd, env, monitor, "on_rebase_conflict", project_name, runner, project_id);
+        return run_hook_actions(&cmd, env, monitor, "on_rebase_conflict", project_name, runner, project_id, true);
     }
     (Vec::new(), Vec::new())
 }
@@ -645,7 +712,7 @@ pub fn fire_on_dirty_worktree_close(
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
-        return run_hook_actions(&cmd, env, monitor, "on_dirty_worktree_close", project_name, runner, project_id);
+        return run_hook_actions(&cmd, env, monitor, "on_dirty_worktree_close", project_name, runner, project_id, true);
     }
     (Vec::new(), Vec::new())
 }
@@ -667,7 +734,7 @@ pub fn fire_worktree_removed(
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
         log::info!("Running worktree_removed hook for project '{}'", project_name);
-        if let Some(result) = run_hook(cmd, env, monitor, "worktree_removed", project_name, runner, project_id) {
+        if let Some(result) = run_hook(cmd, env, monitor, "worktree_removed", project_name, runner, project_id, true) {
             return vec![result];
         }
     }
@@ -764,7 +831,7 @@ mod tests {
     fn run_hook_actions_returns_terminal_actions() {
         let mut env = HashMap::new();
         env.insert("KEY".into(), "val".into());
-        let (terminal_actions, _hook_results) = run_hook_actions("terminal: my-cmd\necho bg", env, None, "test", "proj", None, "proj-id");
+        let (terminal_actions, _hook_results) = run_hook_actions("terminal: my-cmd\necho bg", env, None, "test", "proj", None, "proj-id", true);
         assert_eq!(terminal_actions.len(), 1);
         assert_eq!(terminal_actions[0].0, "my-cmd");
         assert_eq!(terminal_actions[0].1.get("KEY").unwrap(), "val");

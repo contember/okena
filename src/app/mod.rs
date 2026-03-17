@@ -597,102 +597,101 @@ impl Okena {
                     .unwrap_or((None, None));
                 if success {
                     ws.remove_hook_terminal(&tid, cx);
+                    // Collect remaining hook terminal IDs before deleting the project
+                    let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
                     ws.delete_project(&pending.project_id, cx);
+                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids))
                 } else {
                     ws.closing_projects.remove(&pending.project_id);
+                    None
                 }
-                Some((pending, project_path_for_git, hook_info))
             });
 
-            if let Some((pending, project_path_for_git, hook_info)) = pending_data {
-                self.handle_pending_close_result(success, &tid, pending, project_path_for_git, hook_info, cx);
-            } else {
-                // Regular hook terminal — remove after brief delay
-                self.schedule_hook_terminal_cleanup(terminal_id.clone(), cx);
+            if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids)) = pending_data {
+                self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, cx);
             }
+            // Hook terminal persists — no auto-cleanup. User can dismiss manually or rerun.
         }
 
         hook_tids
     }
 
-    /// Handle the result of a pending worktree close after hook exit.
+    /// Handle the result of a pending worktree close after hook exit (success path only).
     fn handle_pending_close_result(
         &mut self,
-        success: bool,
         tid: &str,
         pending: crate::workspace::state::PendingWorktreeClose,
         project_path_for_git: Option<String>,
         hook_info: Option<(crate::workspace::persistence::HooksConfig, String, String)>,
+        remaining_hook_tids: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if success {
-            log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
+        log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
 
-            let global_hooks = crate::settings::settings(cx).hooks;
-            let monitor = crate::workspace::hooks::try_monitor(cx);
-            let runner = crate::workspace::hooks::try_runner(cx);
-            self.terminals.lock().remove(tid);
-
-            // Fire lifecycle hooks
-            if let Some((project_hooks, project_name, project_path)) = hook_info {
-                crate::workspace::hooks::fire_on_worktree_close(
-                    &project_hooks,
-                    &pending.project_id,
-                    &project_name,
-                    &project_path,
-                    cx,
-                );
-                let _ = crate::workspace::hooks::fire_worktree_removed(
-                    &project_hooks,
-                    &global_hooks,
-                    &pending.project_id,
-                    &project_name,
-                    &project_path,
-                    &pending.branch,
-                    &pending.main_repo_path,
-                    monitor.as_ref(),
-                    runner.as_ref(),
-                );
+        let global_hooks = crate::settings::settings(cx).hooks;
+        let monitor = crate::workspace::hooks::try_monitor(cx);
+        let runner = crate::workspace::hooks::try_runner(cx);
+        // Clean up primary and any other persisted hook terminals in a single lock
+        {
+            let mut guard = self.terminals.lock();
+            guard.remove(tid);
+            for hook_tid in &remaining_hook_tids {
+                guard.remove(hook_tid);
             }
-
-            // Git worktree remove in the background (fire-and-forget)
-            let pending_clone = pending.clone();
-            cx.spawn(async move |_this, _cx| {
-                if let Some(path) = project_path_for_git {
-                    let main_repo = pending_clone.main_repo_path.clone();
-                    let result = smol::unblock(move || {
-                        crate::git::remove_worktree_fast(
-                            &std::path::PathBuf::from(&path),
-                            &std::path::PathBuf::from(&main_repo),
-                        )
-                    }).await;
-                    if let Err(e) = result {
-                        log::error!("Background worktree remove failed: {}", e);
-                    }
-                }
-            }).detach();
-        } else {
-            // Hook failed — pending close and closing_projects already
-            // cleaned up in the atomic update above. Clean up hook terminal after delay.
-            log::warn!("Pending worktree close: hook failed, cancelling removal");
-            self.schedule_hook_terminal_cleanup(tid.to_string(), cx);
         }
-    }
 
-    /// Schedule removal of a hook terminal after a brief delay.
-    fn schedule_hook_terminal_cleanup(&self, terminal_id: String, cx: &mut Context<Self>) {
+        // Fire lifecycle hooks
+        if let Some((project_hooks, project_name, project_path)) = hook_info {
+            crate::workspace::hooks::fire_on_worktree_close(
+                &project_hooks,
+                &pending.project_id,
+                &project_name,
+                &project_path,
+                cx,
+            );
+            let _ = crate::workspace::hooks::fire_worktree_removed(
+                &project_hooks,
+                &global_hooks,
+                &pending.project_id,
+                &project_name,
+                &project_path,
+                &pending.branch,
+                &pending.main_repo_path,
+                monitor.as_ref(),
+                runner.as_ref(),
+            );
+        }
+
+        // Git worktree remove in the background
+        let pending_clone = pending.clone();
         let workspace = self.workspace.clone();
-        let terminals = self.terminals.clone();
-        cx.spawn(async move |_this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
-            let _ = cx.update(|cx| {
-                workspace.update(cx, |ws, cx| {
-                    ws.remove_hook_terminal(&terminal_id, cx);
-                });
-                terminals.lock().remove(&terminal_id);
+        if let Some(ref path) = project_path_for_git {
+            workspace.update(cx, |ws, _| {
+                ws.removing_worktree_paths.insert(path.clone());
             });
+        }
+        cx.spawn(async move |_this, cx| {
+            if let Some(path) = project_path_for_git {
+                let main_repo = pending_clone.main_repo_path.clone();
+                let path_clone = path.clone();
+                let result = smol::unblock(move || {
+                    crate::git::remove_worktree_fast(
+                        &std::path::PathBuf::from(&path_clone),
+                        &std::path::PathBuf::from(&main_repo),
+                    )
+                }).await;
+                if let Err(e) = result {
+                    log::error!("Background worktree remove failed: {}", e);
+                }
+                let _ = cx.update(|cx| {
+                    workspace.update(cx, |ws, _| {
+                        ws.removing_worktree_paths.remove(&path);
+                    });
+                });
+            }
         }).detach();
     }
+
 }
 
 impl Render for Okena {

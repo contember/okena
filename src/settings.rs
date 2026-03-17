@@ -138,9 +138,18 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Set the theme mode
+    /// Set the theme mode and optional custom theme ID.
     pub fn set_theme_mode(&mut self, value: ThemeMode, cx: &mut Context<Self>) {
         self.settings.theme_mode = value;
+        if value != ThemeMode::Custom {
+            self.settings.custom_theme_id = None;
+        }
+        self.save_and_notify(cx);
+    }
+
+    /// Set the custom theme ID (file stem, e.g. "example-theme").
+    pub fn set_custom_theme_id(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.settings.custom_theme_id = id;
         self.save_and_notify(cx);
     }
 

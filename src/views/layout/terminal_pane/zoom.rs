@@ -94,6 +94,9 @@ impl TerminalPane {
             "Terminal".to_string()
         };
 
+        let is_hook = self.terminal_id.as_ref().map_or(false, |tid| {
+            ws.project(&self.project_id).map_or(false, |p| p.hook_terminals.contains_key(tid))
+        });
         let all_terminals = ws
             .project(&self.project_id)
             .and_then(|p| p.layout.as_ref())
@@ -126,7 +129,7 @@ impl TerminalPane {
                         svg()
                             .path("icons/terminal.svg")
                             .size(px(12.0))
-                            .text_color(rgb(t.success)),
+                            .text_color(if is_hook { rgb(t.term_yellow) } else { rgb(t.success) }),
                     )
                     .child(
                         div()

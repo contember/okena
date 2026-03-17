@@ -8,24 +8,19 @@ use gpui::*;
 impl Workspace {
     /// Set focused project (focus mode)
     ///
-    /// This also focuses the first terminal in the project if one exists.
+    /// This zooms the main view to show only this project.
+    /// Also focuses the first terminal in the project if one exists.
+    /// If the project has no layout, drills into the first worktree child.
     pub fn set_focused_project(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         // Clear fullscreen without restoring old project_id (we're overriding it)
         self.focus_manager.clear_fullscreen_without_restore();
 
-        // Set the focused project via FocusManager
+        // Set the focused project via FocusManager (controls main view zoom)
         self.focus_manager.set_focused_project_id(project_id.clone());
 
         // Focus the first terminal in the project
         if let Some(ref pid) = project_id {
-            if let Some(project) = self.project(pid) {
-                if let Some(ref layout) = project.layout {
-                    // Find the first terminal's path
-                    if let Some(first_path) = Self::find_first_terminal_path(layout) {
-                        self.focus_manager.focus_terminal(pid.clone(), first_path);
-                    }
-                }
-            }
+            self.focus_first_terminal_in(pid);
         }
 
         cx.notify();
@@ -38,31 +33,53 @@ impl Workspace {
         self.focus_manager.set_focused_project_id_individual(project_id.clone());
 
         if let Some(ref pid) = project_id {
-            if let Some(project) = self.project(pid) {
-                if let Some(ref layout) = project.layout {
-                    if let Some(first_path) = Self::find_first_terminal_path(layout) {
-                        self.focus_manager.focus_terminal(pid.clone(), first_path);
-                    }
-                }
-            }
+            self.focus_first_terminal_in(pid);
         }
 
         cx.notify();
     }
 
-    /// Find the path to the first terminal in a layout tree
-    fn find_first_terminal_path(node: &crate::workspace::state::LayoutNode) -> Option<Vec<usize>> {
-        use crate::workspace::state::LayoutNode;
-        match node {
-            LayoutNode::Terminal { .. } => Some(vec![]),
-            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-                for (i, child) in children.iter().enumerate() {
-                    if let Some(mut path) = Self::find_first_terminal_path(child) {
-                        path.insert(0, i);
-                        return Some(path);
-                    }
+    /// Focus a project's first terminal without zooming the main view.
+    /// Used by sidebar clicks to highlight and focus without hiding other projects.
+    ///
+    /// If the project itself has no layout (e.g. it only has worktree children),
+    /// drills into the first worktree child that has a terminal.
+    pub fn focus_project_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.focus_first_terminal_in(project_id);
+        self.touch_project(project_id);
+        cx.notify();
+    }
+
+    /// Toggle folder selection: sets folder filter and focuses the first terminal inside.
+    /// If the folder is already selected, deselects it.
+    pub fn toggle_folder_focus(&mut self, folder_id: &str, cx: &mut Context<Self>) {
+        let selecting = self.active_folder_filter().map(|s| s.as_str()) != Some(folder_id);
+        if selecting {
+            self.set_folder_filter(Some(folder_id.to_string()), cx);
+            if let Some(first_pid) = self.folder(folder_id).and_then(|f| f.project_ids.first()).cloned() {
+                self.focus_project_terminal(&first_pid, cx);
+            }
+        } else {
+            self.set_folder_filter(None, cx);
+        }
+    }
+
+    /// Resolve a focusable project and focus its first terminal.
+    ///
+    /// If the project has no layout (e.g. only worktree children), drills into
+    /// the first worktree child that has a terminal.
+    fn focus_first_terminal_in(&mut self, project_id: &str) {
+        // Try the project itself first, then its worktree children
+        let candidates = std::iter::once(project_id.to_string())
+            .chain(self.worktree_child_ids(project_id));
+        for id in candidates {
+            if let Some(project) = self.project(&id) {
+                if project.layout.is_some() {
+                    // Focus the currently visible terminal (follows active tabs)
+                    let path = project.layout.as_ref().unwrap().find_visible_terminal_path();
+                    self.focus_manager.focus_terminal(id, path);
+                    return;
                 }
-                None
             }
         }
     }
@@ -159,9 +176,7 @@ impl Workspace {
                         }
                     }
                     self.notify_data(cx);
-                    // Switch to the terminal's project so it becomes visible
-                    self.set_focused_project(Some(project_id.to_string()), cx);
-                    // Use the unified focus method for consistent propagation
+                    // Focus the terminal without changing which projects are shown
                     self.set_focused_terminal(project_id.to_string(), path, cx);
                 }
             }

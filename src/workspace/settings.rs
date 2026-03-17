@@ -167,6 +167,10 @@ pub struct AppSettings {
     pub version: u32,
     #[serde(default)]
     pub theme_mode: ThemeMode,
+    /// Custom theme file stem (e.g. "example-theme" for themes/example-theme.json).
+    /// Only used when `theme_mode` is `Custom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_theme_id: Option<String>,
     /// Name of the currently active session (None = default workspace.json)
     #[serde(default)]
     pub active_session: Option<String>,
@@ -277,6 +281,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            custom_theme_id: None,
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),

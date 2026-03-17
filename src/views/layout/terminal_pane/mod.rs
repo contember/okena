@@ -366,14 +366,10 @@ impl TerminalPane {
             return;
         }
 
-        let shell = if self.shell_type == ShellType::Default {
-            self.workspace.read(cx)
-                .project(&self.project_id)
-                .and_then(|p| p.default_shell.clone())
-                .unwrap_or_else(|| settings(cx).default_shell.clone())
-        } else {
-            self.shell_type.clone()
-        };
+        let shell = self.shell_type.clone().resolve_default(
+            self.workspace.read(cx).project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings(cx).default_shell,
+        );
 
         match self
             .backend
@@ -403,14 +399,10 @@ impl TerminalPane {
             return;
         }
 
-        let shell = if self.shell_type == ShellType::Default {
-            self.workspace.read(cx)
-                .project(&self.project_id)
-                .and_then(|p| p.default_shell.clone())
-                .unwrap_or_else(|| settings(cx).default_shell.clone())
-        } else {
-            self.shell_type.clone()
-        };
+        let shell = self.shell_type.clone().resolve_default(
+            self.workspace.read(cx).project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings(cx).default_shell,
+        );
 
         // Read fresh path from workspace state (handles tilde-expanded paths)
         let project_path = self.workspace.read(cx)

@@ -428,6 +428,11 @@ pub fn spawn_uninitialized_terminals(
     terminals: &TerminalsRegistry,
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
+    // Don't spawn terminals for projects whose worktree is still being created
+    if ws.creating_projects.contains(project_id) {
+        return ActionResult::Ok(None);
+    }
+
     let project = match ws.project(project_id) {
         Some(p) => p,
         None => return ActionResult::Err(format!("project not found: {}", project_id)),
@@ -487,29 +492,7 @@ pub fn find_terminal_path(
 }
 
 /// Recursively collect paths to all Terminal nodes with `terminal_id: None`.
-pub fn collect_uninitialized_terminals(
-    node: &LayoutNode,
-    current_path: Vec<usize>,
-    result: &mut Vec<Vec<usize>>,
-) {
-    match node {
-        LayoutNode::Terminal {
-            terminal_id: None, ..
-        } => {
-            result.push(current_path);
-        }
-        LayoutNode::Terminal { .. } => {}
-        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
-            for (i, child) in children.iter().enumerate() {
-                let mut child_path = current_path.clone();
-                child_path.push(i);
-                collect_uninitialized_terminals(child, child_path, result);
-            }
-        }
-    }
-}
-
-/// Like `collect_uninitialized_terminals` but also returns each node's `shell_type`.
+/// Collect uninitialized terminals in a layout tree, returning their paths and shell types.
 fn collect_uninitialized_terminals_with_shell(
     node: &LayoutNode,
     current_path: Vec<usize>,

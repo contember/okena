@@ -65,14 +65,10 @@ impl RootView {
         });
 
         // Determine the actual shell to use (resolve Default → project default → global default)
-        let actual_shell = if shell_type == crate::terminal::shell_config::ShellType::Default {
-            self.workspace.read(cx)
-                .project(project_id)
-                .and_then(|p| p.default_shell.clone())
-                .unwrap_or_else(|| settings(cx).default_shell.clone())
-        } else {
-            shell_type
-        };
+        let actual_shell = shell_type.resolve_default(
+            self.workspace.read(cx).project(project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings(cx).default_shell,
+        );
 
         // Create new terminal with the new shell
         match self.backend.create_terminal(&project_path, Some(&actual_shell)) {
@@ -119,7 +115,7 @@ impl RootView {
                 ws.project(&id).map(|p| {
                     let project_path = p.path.clone();
                     let is_worktree = p.worktree_info.is_some();
-                    let is_git = crate::git::get_git_status(std::path::Path::new(&project_path)).is_some();
+                    let is_git = crate::git::is_git_repo(std::path::Path::new(&project_path));
                     (id, project_path, is_git, is_worktree)
                 })
             })

@@ -41,16 +41,22 @@ impl Workspace {
         });
 
         // Propagate to worktree children
-        let child_ids: Vec<String> = self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
-            .map(|p| p.id.clone())
-            .collect();
-        for child_id in child_ids {
+        for child_id in self.worktree_child_ids(project_id) {
             self.with_project(&child_id, cx, |project| {
                 project.show_in_overview = new_visible;
                 true
             });
         }
+    }
+
+    /// Toggle visibility of a single project without cascading to worktree children.
+    /// Used for worktree items (including the main worktree entry) so toggling one
+    /// worktree doesn't affect siblings or the parent project header.
+    pub fn toggle_single_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            project.show_in_overview = !project.show_in_overview;
+            true
+        });
     }
 
     /// Add a new project
@@ -173,11 +179,7 @@ impl Workspace {
             true
         });
         // Propagate color to worktree children
-        let child_ids: Vec<String> = self.data.projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |w| w.parent_project_id == project_id))
-            .map(|p| p.id.clone())
-            .collect();
-        for child_id in child_ids {
+        for child_id in self.worktree_child_ids(project_id) {
             self.with_project(&child_id, cx, |project| {
                 project.folder_color = color;
                 true
@@ -239,30 +241,49 @@ impl Workspace {
 
     /// Move a project to a new position in the top-level order.
     /// Also removes the project from any folder it may be in.
+    /// Worktree children are moved along with their parent.
     pub fn move_project(&mut self, project_id: &str, new_index: usize, cx: &mut Context<Self>) {
         // Remove from any folder first
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
 
-        // Find current index in project_order
-        if let Some(current_index) = self.data.project_order.iter().position(|id| id == project_id) {
-            // Remove from current position
-            let id = self.data.project_order.remove(current_index);
-            // Adjust target index if needed
-            let target = if new_index > current_index {
-                new_index.saturating_sub(1)
-            } else {
-                new_index
-            };
-            // Insert at new position
-            let target = target.min(self.data.project_order.len());
-            self.data.project_order.insert(target, id);
-        } else {
-            // Project wasn't in project_order (was only in a folder) - insert at target
-            let target = new_index.min(self.data.project_order.len());
-            self.data.project_order.insert(target, project_id.to_string());
+        // Collect worktree children IDs that should move with this project
+        let wt_child_ids = self.worktree_child_ids(project_id);
+
+        // Remove parent and its worktree children from project_order
+        let removed: Vec<String> = {
+            let ids_to_remove: std::collections::HashSet<&str> = std::iter::once(project_id)
+                .chain(wt_child_ids.iter().map(|s| s.as_str()))
+                .collect();
+            let mut removed = Vec::new();
+            self.data.project_order.retain(|id| {
+                if ids_to_remove.contains(id.as_str()) {
+                    removed.push(id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        };
+
+        // Insert at new position (parent first, then children in original relative order)
+        let target = new_index.min(self.data.project_order.len());
+        let mut to_insert: Vec<String> = Vec::with_capacity(removed.len() + 1);
+        // Parent first (always insert, even if it wasn't in project_order before)
+        to_insert.push(project_id.to_string());
+        // Then worktree children in their original order
+        for id in &removed {
+            if id != project_id {
+                to_insert.push(id.clone());
+            }
         }
+        for (offset, id) in to_insert.into_iter().enumerate() {
+            let insert_at = (target + offset).min(self.data.project_order.len());
+            self.data.project_order.insert(insert_at, id);
+        }
+
         self.notify_data(cx);
     }
 
@@ -306,6 +327,10 @@ impl Workspace {
     /// Create a worktree project from an existing project.
     /// `repo_path` is the git repository root to create the worktree from.
     /// Returns the new project ID on success.
+    ///
+    /// This is a synchronous/blocking operation (calls `git worktree add`).
+    /// For non-blocking creation, use `register_worktree_project` after
+    /// creating the git worktree on a background thread.
     pub fn create_worktree_project(
         &mut self,
         parent_project_id: &str,
@@ -316,28 +341,66 @@ impl Workspace {
         create_branch: bool,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        // Get parent project info
-        let parent = self.project(parent_project_id)
-            .ok_or_else(|| "Parent project not found".to_string())?;
-
-        let parent_path = parent.path.clone();
-        let parent_layout = parent.layout.clone();
-        let parent_hooks = parent.hooks.clone();
-        let parent_color = parent.folder_color;
-
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
         crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
 
+        // Register in workspace state
+        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, cx)
+    }
+
+    /// Register a worktree project in workspace state.
+    /// When `fire_hooks` is true the worktree must already exist on disk
+    /// (hooks may cd into the project path). Pass `false` to defer hooks
+    /// and call `fire_worktree_hooks` after the directory is ready.
+    /// Returns the new project ID on success.
+    pub fn register_worktree_project(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, cx)
+    }
+
+    /// Same as `register_worktree_project` but defers on_worktree_create hooks.
+    /// Call `fire_worktree_hooks` once the worktree directory exists on disk.
+    pub fn register_worktree_project_deferred_hooks(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, cx)
+    }
+
+    fn register_worktree_project_inner(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        fire_hooks: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        // Get parent project info
+        let parent = self.project(parent_project_id)
+            .ok_or_else(|| "Parent project not found".to_string())?;
+
+        let parent_layout = parent.layout.clone();
+        let parent_hooks = parent.hooks.clone();
+        let parent_color = parent.folder_color;
+
         // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
-        let project_name = format!("{} ({})",
-            std::path::Path::new(&parent_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Project"),
-            branch
-        );
+        let project_name = branch.to_string();
 
         let new_layout = parent_layout
             .as_ref()
@@ -348,13 +411,16 @@ impl Workspace {
             name: project_name,
             path: project_path.to_string(),
             show_in_overview: true,
-            layout: new_layout,
+            // When hooks are deferred the worktree directory doesn't exist yet.
+            // Use None so no terminals are spawned until creation finishes.
+            layout: if fire_hooks { new_layout } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
                 main_repo_path: repo_path.to_string_lossy().to_string(),
                 worktree_path: worktree_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             folder_color: parent_color,
@@ -380,17 +446,56 @@ impl Workspace {
 
         self.notify_data(cx);
 
+        if fire_hooks {
+            let hook_results = hooks::fire_on_worktree_create(
+                &new_project_hooks,
+                &id,
+                &new_project_name,
+                project_path,
+                branch,
+                cx,
+            );
+            self.register_hook_results(hook_results, cx);
+        }
+
+        Ok(id)
+    }
+
+    /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
+    /// Called once the worktree directory exists on disk.
+    pub fn fire_worktree_hooks(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.project(project_id) else { return };
+        let hooks_config = project.hooks.clone();
+        let name = project.name.clone();
+        let path = project.path.clone();
+        // Read branch from metadata (stable), falling back to name for old data
+        let branch = project.worktree_info.as_ref()
+            .map(|wt| &wt.branch_name)
+            .filter(|b| !b.is_empty())
+            .cloned()
+            .unwrap_or_else(|| name.clone());
+
+        // If layout is still None (deferred creation), clone it from the parent
+        if project.layout.is_none() {
+            let parent_layout = project.worktree_info.as_ref()
+                .and_then(|wt| self.project(&wt.parent_project_id))
+                .and_then(|p| p.layout.as_ref())
+                .map(|l| l.clone_structure());
+            let layout = parent_layout.or_else(|| Some(crate::workspace::state::LayoutNode::new_terminal()));
+            if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+                p.layout = layout;
+            }
+        }
+
         let hook_results = hooks::fire_on_worktree_create(
-            &new_project_hooks,
-            &id,
-            &new_project_name,
-            project_path,
-            branch,
+            &hooks_config,
+            project_id,
+            &name,
+            &path,
+            &branch,
             cx,
         );
         self.register_hook_results(hook_results, cx);
-
-        Ok(id)
     }
 
     /// Add a worktree project discovered by the periodic sync watcher.
@@ -418,7 +523,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: wt_path.to_string(),
-            show_in_overview: true,
+            show_in_overview: false,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -426,6 +531,7 @@ impl Workspace {
                 parent_project_id: parent_id.to_string(),
                 main_repo_path: main_repo_path.to_string(),
                 worktree_path: wt_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             default_shell: None,
@@ -467,6 +573,19 @@ impl Workspace {
         }
         self.data.project_widths.remove(project_id);
         // Note: caller is responsible for calling notify_data
+    }
+
+    /// Gather the data needed for quick worktree creation without blocking.
+    /// Returns (parent_path, main_repo_path) or None if parent not found.
+    pub fn prepare_quick_create(
+        &self,
+        parent_project_id: &str,
+    ) -> Option<(String, Option<String>)> {
+        let parent = self.project(parent_project_id)?;
+        Some((
+            parent.path.clone(),
+            parent.worktree_info.as_ref().map(|wt| wt.main_repo_path.clone()),
+        ))
     }
 
     /// Remove a worktree project and its git worktree
@@ -746,6 +865,7 @@ mod gpui_tests {
             parent_project_id: parent_id.to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
+            branch_name: String::new(),
         });
         p
     }

@@ -1,6 +1,6 @@
 use crate::terminal::session_backend::SessionBackend;
 use crate::theme::FolderColor;
-use crate::workspace::state::{LayoutNode, ProjectData, WorkspaceData, WorktreeMetadata};
+use crate::workspace::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData, WorktreeMetadata};
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -133,6 +133,7 @@ pub(crate) fn validate_workspace_data(
     // Optionally clear terminal IDs (on app restart without session persistence).
     // On Windows, WSL projects may have their own session backend (dtach/tmux/screen)
     // even though the host has none — preserve their terminal IDs for reconnection.
+    // Hook terminal IDs are always preserved so they retain their hook identity.
     if clear_terminal_ids {
         for project in &mut data.projects {
             #[cfg(windows)]
@@ -149,10 +150,20 @@ pub(crate) fn validate_workspace_data(
                     }
                 }
             }
+            // Preserve hook terminal IDs so they're recognized after restart
+            let hook_ids: std::collections::HashSet<&str> = project.hook_terminals
+                .keys().map(|s| s.as_str()).collect();
             if let Some(ref mut layout) = project.layout {
-                layout.clear_terminal_ids();
+                layout.clear_terminal_ids_except(&hook_ids);
             }
             project.service_terminals.clear();
+
+            // Reset Running hooks to Succeeded (the process is dead after restart)
+            for entry in project.hook_terminals.values_mut() {
+                if entry.status == HookTerminalStatus::Running {
+                    entry.status = HookTerminalStatus::Succeeded;
+                }
+            }
         }
     }
 
@@ -246,7 +257,7 @@ pub(crate) fn validate_workspace_data(
 /// If the file is corrupted, backs it up as `workspace.json.bak` and returns an error.
 /// On error, the caller should fall back to `default_workspace()` — auto-save is
 /// automatically blocked to prevent overwriting valid data on disk.
-pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
+pub fn load_workspace(backend: SessionBackend, worktree_path_template: &str) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     // If workspace.json is missing, try to auto-recover from backup
@@ -294,7 +305,7 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, worktree_path_template);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
@@ -399,11 +410,12 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
 
 /// Discover worktrees from git and sync them into workspace data.
 ///
-/// For each non-worktree, non-remote project, calls `list_git_worktrees` and
-/// adds any worktree paths not already tracked as projects. Also removes
+/// For each non-worktree, non-remote project, discovers worktrees via
+/// `git worktree list` and the configured path template directory.
+/// Adds any worktree paths not already tracked as projects. Also removes
 /// worktree projects whose directories no longer exist on disk.
-pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
-    use crate::git::list_git_worktrees;
+pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
+    use crate::git::{list_git_worktrees, list_template_worktrees};
 
     // Collect existing project paths for dedup
     let existing_paths: std::collections::HashSet<String> = data.projects.iter()
@@ -432,9 +444,14 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
         .collect();
 
     // Discovery: add new worktree projects
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (parent_id, parent_path, canonical_parent) in &parents {
-        let worktrees = list_git_worktrees(Path::new(parent_path));
-        for (wt_path, branch) in worktrees {
+        let git_root = crate::git::get_repo_root(Path::new(parent_path))
+            .unwrap_or_else(|| parent_path.into());
+        let mut candidates = list_git_worktrees(Path::new(parent_path));
+        candidates.extend(list_template_worktrees(&git_root, path_template));
+
+        for (wt_path, branch) in candidates {
             // Skip the main repo's own path (compare canonical)
             if wt_path == *parent_path || wt_path == *canonical_parent {
                 continue;
@@ -445,6 +462,10 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
             }
             // Skip if directory doesn't exist
             if !Path::new(&wt_path).exists() {
+                continue;
+            }
+            // Dedup across git list and template scan
+            if !seen_paths.insert(wt_path.clone()) {
                 continue;
             }
 
@@ -460,7 +481,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
                 id: new_id.clone(),
                 name: project_name,
                 path: wt_path,
-                show_in_overview: true,
+                show_in_overview: false,
                 layout: Some(LayoutNode::new_terminal()),
                 terminal_names: HashMap::new(),
                 hidden_terminals: HashMap::new(),
@@ -468,6 +489,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
                     parent_project_id: parent_id.clone(),
                     main_repo_path: parent_path.clone(),
                     worktree_path: wt_path_clone,
+                    branch_name: branch.clone(),
                 }),
                 worktree_ids: Vec::new(),
                 default_shell: None,
@@ -651,6 +673,63 @@ mod tests {
             _ => panic!("Expected terminal"),
         }
         assert!(data.projects[0].service_terminals.is_empty());
+    }
+
+    #[test]
+    fn validate_preserves_hook_terminal_ids() {
+        use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, SplitDirection};
+
+        let mut project = make_project("p1");
+        project.layout = Some(LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![0.7, 0.3],
+            children: vec![
+                LayoutNode::Terminal {
+                    terminal_id: Some("regular-term".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: crate::terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+                LayoutNode::Terminal {
+                    terminal_id: Some("hook-term".to_string()),
+                    minimized: false,
+                    detached: false,
+                    shell_type: crate::terminal::shell_config::ShellType::Default,
+                    zoom_level: 1.0,
+                },
+            ],
+        });
+        project.hook_terminals.insert("hook-term".to_string(), HookTerminalEntry {
+            label: "on_project_open".to_string(),
+            status: HookTerminalStatus::Running,
+            hook_type: "on_project_open".to_string(),
+            command: "echo hello".to_string(),
+            cwd: "/tmp".to_string(),
+        });
+
+        let mut data = make_workspace(vec![project], vec!["p1"], vec![]);
+        validate_workspace_data(&mut data, true, SessionBackend::None);
+
+        let layout = data.projects[0].layout.as_ref().unwrap();
+        match layout {
+            LayoutNode::Split { children, .. } => {
+                // Regular terminal should have its ID cleared
+                if let LayoutNode::Terminal { terminal_id, .. } = &children[0] {
+                    assert!(terminal_id.is_none(), "regular terminal ID should be cleared");
+                }
+                // Hook terminal should keep its ID
+                if let LayoutNode::Terminal { terminal_id, .. } = &children[1] {
+                    assert_eq!(terminal_id.as_deref(), Some("hook-term"), "hook terminal ID should be preserved");
+                }
+            }
+            _ => panic!("Expected split"),
+        }
+
+        // Hook terminal entry should still exist with status reset to Succeeded
+        let entry = &data.projects[0].hook_terminals["hook-term"];
+        assert_eq!(entry.status, HookTerminalStatus::Succeeded);
+        assert_eq!(entry.label, "on_project_open");
     }
 
     #[test]
@@ -847,6 +926,7 @@ mod tests {
             parent_project_id: parent_id.to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
+            branch_name: String::new(),
         });
         p
     }
@@ -861,6 +941,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -869,7 +950,7 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, "");
 
         // Stale worktree should be removed
         assert_eq!(data.projects.len(), 1);
@@ -885,6 +966,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -899,7 +981,7 @@ mod tests {
             }],
         );
 
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, "");
 
         assert_eq!(data.folders[0].project_ids, vec!["p1".to_string()]);
     }
@@ -914,6 +996,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -922,7 +1005,7 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, "");
 
         // Should still have both projects
         assert_eq!(data.projects.len(), 2);
@@ -968,7 +1051,7 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, "");
 
         // Should discover the worktree
         assert_eq!(data.projects.len(), 2, "should discover one worktree");
@@ -1018,6 +1101,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: repo_path.to_string_lossy().to_string(),
             worktree_path: wt_path.to_string_lossy().to_string(),
+            branch_name: "test-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -1026,7 +1110,7 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data);
+        sync_worktrees(&mut data, "");
 
         // Should NOT create a duplicate
         assert_eq!(data.projects.len(), 2);

@@ -7,6 +7,7 @@ use crate::theme::ThemeColors;
 use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
 use gpui::prelude::*;
+use gpui_component::tooltip::Tooltip;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
 ///
@@ -126,11 +127,7 @@ pub fn sidebar_terminal_badge(
             .child(format!("{}", count))
             .into_any_element()
     } else {
-        // Invisible placeholder to keep eye icons aligned
-        div()
-            .flex_shrink_0()
-            .min_w(px(18.0))
-            .into_any_element()
+        div().into_any_element()
     }
 }
 
@@ -212,6 +209,32 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
         )
 }
 
+/// Quick worktree creation button (+).
+///
+/// Caller chains `.on_click()` to trigger quick worktree creation.
+pub fn sidebar_quick_create_button(
+    id: impl Into<ElementId>,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .cursor_pointer()
+        .w(px(18.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(
+            svg()
+                .path("icons/plus.svg")
+                .size(px(12.0))
+                .text_color(rgb(t.text_secondary)),
+        )
+}
+
 /// Visibility toggle (eye / eye-off).
 ///
 /// Caller chains `.on_click()` to toggle visibility.
@@ -247,4 +270,20 @@ pub fn sidebar_visibility_toggle(
         )
 }
 
-
+/// Visibility toggle button with hover-reveal behavior.
+///
+/// Shows on hover via `group_name`, or always when `show_in_overview` is false.
+/// Caller chains `.on_click()` to handle the toggle action.
+pub fn sidebar_visibility_button(
+    id: impl Into<ElementId>,
+    show_in_overview: bool,
+    group_name: &'static str,
+    tooltip_text: &'static str,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    sidebar_visibility_toggle(id, show_in_overview, t)
+        .opacity(0.0)
+        .when(!show_in_overview, |d| d.opacity(1.0))
+        .group_hover(group_name, |s| s.opacity(1.0))
+        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+}

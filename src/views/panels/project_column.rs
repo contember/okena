@@ -615,21 +615,8 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        // Try local git watcher first, then fall back to remote git status from server sync
-        let status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                project.remote_git_status.as_ref().map(|g| git::GitStatus {
-                    branch: g.branch.clone(),
-                    lines_added: g.lines_added,
-                    lines_removed: g.lines_removed,
-                })
-            });
+    fn render_git_status(&self, project: &ProjectData, status: Option<git::GitStatus>, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let is_worktree = project.worktree_info.is_some();
-        let main_repo_path = project.worktree_info.as_ref()
-            .map(|w| w.main_repo_path.clone())
-            .unwrap_or_default();
         let entity_handle = cx.entity().clone();
 
         match status {
@@ -645,41 +632,49 @@ impl ProjectColumn {
                     .gap(px(6.0))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
-                    // Worktree indicator
-                    .when(is_worktree, |d| {
-                        let tooltip_text = format!("Worktree of {}", main_repo_path);
+                    // Branch name (hidden for worktrees — shown in header badge instead)
+                    .when(!is_worktree, |d| {
+                        let pr_info = status.pr_info.clone();
+                        let (icon_path, icon_color) = if let Some(ref pr) = pr_info {
+                            ("icons/git-pull-request.svg", pr.state.color(&t))
+                        } else {
+                            ("icons/git-branch.svg", t.text_muted)
+                        };
+                        let has_pr = pr_info.is_some();
+                        let pr_url = pr_info.map(|p| p.url);
                         d.child(
-                            div()
-                                .id("worktree-indicator")
-                                .px(px(4.0))
-                                .py(px(1.0))
-                                .rounded(px(3.0))
-                                .bg(rgb(t.border_active))
-                                .text_size(px(9.0))
-                                .text_color(rgb(t.bg_primary))
-                                .child("WT")
-                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+                            h_flex()
+                                .id("branch-status")
+                                .gap(px(3.0))
+                                .when(has_pr, |d: Stateful<Div>| {
+                                    d.cursor_pointer()
+                                        .rounded(px(3.0))
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                })
+                                .when_some(pr_url, |d, url| {
+                                    d.on_click(move |_, _, _cx| {
+                                        crate::process::open_url(&url);
+                                    })
+                                })
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size(px(10.0))
+                                        .text_color(rgb(icon_color))
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(t.text_secondary))
+                                        .max_w(px(100.0))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(status.branch.clone().unwrap_or_default())
+                                )
                         )
                     })
-                    // Branch name
-                    .child(
-                        h_flex()
-                            .gap(px(3.0))
-                            .child(
-                                svg()
-                                    .path("icons/git-branch.svg")
-                                    .size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(t.text_secondary))
-                                    .max_w(px(100.0))
-                                    .text_ellipsis()
-                                    .overflow_hidden()
-                                    .child(status.branch.clone().unwrap_or_default())
-                            )
-                    )
                     // Diff stats (clickable, only if there are changes)
                     .when(has_changes, |d: Div| {
                         d.child(
@@ -767,6 +762,17 @@ impl ProjectColumn {
         };
         let folder_color = t.get_folder_color(effective_color);
 
+        // Fetch git status once for both header badge and git status area
+        let git_status = self.git_watcher.as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                project.remote_git_status.as_ref().map(|g| git::GitStatus {
+                    branch: g.branch.clone(),
+                    lines_added: g.lines_added,
+                    lines_removed: g.lines_removed,
+                    pr_info: None,
+                })
+            });
         v_flex()
             // Colored accent bar
             .child(
@@ -799,7 +805,16 @@ impl ProjectColumn {
                             .rounded(px(4.0))
                             .bg(rgb(folder_color))
                     )
-                    .child(
+                    .child({
+                        // For worktree projects, show parent project's name
+                        let display_name = if let Some(ref wt_info) = project.worktree_info {
+                            let ws = self.workspace.read(cx);
+                            ws.project(&wt_info.parent_project_id)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| project.name.clone())
+                        } else {
+                            project.name.clone()
+                        };
                         div()
                             .flex_shrink_0()
                             .text_size(px(12.0))
@@ -807,18 +822,81 @@ impl ProjectColumn {
                             .text_color(rgb(t.text_primary))
                             .line_height(px(14.0))
                             .text_ellipsis()
-                            .child(project.name.clone()),
-                    )
+                            .child(display_name)
+                    })
+                    // Branch badge — for worktrees, also acts as PR button with color-coded icon
+                    .when(project.worktree_info.is_some(), |d| {
+                        let branch = git_status.as_ref()
+                            .and_then(|s| s.branch.clone())
+                            .unwrap_or_else(|| project.name.clone());
+                        let pr_info = git_status.as_ref().and_then(|s| s.pr_info.clone());
+
+                        let (icon_path, icon_color, tooltip_text) = if let Some(ref pr) = pr_info {
+                            ("icons/git-pull-request.svg", pr.state.color(&t), format!("Pull Request ({})", pr.state.label()))
+                        } else {
+                            ("icons/git-branch.svg", t.text_muted, branch.clone())
+                        };
+
+                        let has_pr = pr_info.is_some();
+                        let pr_url = pr_info.map(|p| p.url);
+
+                        d.child(
+                            h_flex()
+                                .id("branch-badge")
+                                .flex_shrink_0()
+                                .gap(px(3.0))
+                                .px(px(4.0))
+                                .py(px(1.0))
+                                .rounded(px(3.0))
+                                .items_center()
+                                .when(has_pr, |d| {
+                                    d.cursor_pointer()
+                                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                })
+                                .when_some(pr_url, |d, url| {
+                                    d.on_click(move |_, _, _cx| {
+                                        crate::process::open_url(&url);
+                                    })
+                                })
+                                .child(
+                                    svg()
+                                        .path(icon_path)
+                                        .size(px(10.0))
+                                        .text_color(rgb(icon_color))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(t.text_secondary))
+                                        .line_height(px(12.0))
+                                        .max_w(px(120.0))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
+                                        .child(branch)
+                                )
+                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
+                        )
+                    })
                     .child(
+                        // Left-truncate: flex + justify_end clips from the left
                         div()
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_muted))
-                            .line_height(px(12.0))
-                            .text_ellipsis()
+                            .max_w(px(300.0))
                             .overflow_hidden()
-                            .child(project.path.clone()),
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(t.text_muted))
+                                    .line_height(px(12.0))
+                                    .child(project.path.clone()),
+                            )
                     )
-                    .child(self.render_git_status(project, t, cx)),
+                    .child(self.render_git_status(project, git_status, t, cx)),
             )
             .child(
                 // Right side: minimized taskbar + controls
@@ -898,6 +976,36 @@ impl ProjectColumn {
     }
 
     /// Render empty state for bookmark projects (no terminal)
+    fn render_creating_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        v_flex()
+            .items_center()
+            .justify_center()
+            .size_full()
+            .gap(px(12.0))
+            .bg(rgb(t.bg_primary))
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(48.0))
+                    .text_color(rgb(t.text_muted))
+            )
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(rgb(t.text_secondary))
+                    .child("Setting up worktree\u{2026}")
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(t.text_muted))
+                    .max_w(px(240.0))
+                    .text_center()
+                    .child("Fetching latest changes and creating the branch. Terminals will start automatically.")
+            )
+    }
+
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let project_id = self.project_id.clone();
@@ -1872,7 +1980,9 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                // Content: either layout container or empty state
+                let is_creating = workspace.creating_projects.contains(&self.project_id);
+
+                // Content: layout, creating state, or empty bookmark state
                 let content = if has_layout {
                     // Ensure layout container exists (created once, not every render)
                     self.ensure_layout_container(project.path.clone(), cx);
@@ -1884,6 +1994,8 @@ impl Render for ProjectColumn {
                         .overflow_hidden()
                         .child(self.layout_container.clone().unwrap())
                         .into_any_element()
+                } else if is_creating {
+                    self.render_creating_state(cx).into_any_element()
                 } else {
                     // Empty state for bookmark projects
                     self.render_empty_state(cx).into_any_element()

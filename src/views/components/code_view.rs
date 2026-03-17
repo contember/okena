@@ -249,15 +249,13 @@ pub fn get_selected_text(lines: &[HighlightedLine], selection: &CodeSelection) -
 /// Word characters are alphanumeric or underscore. Returns (start, end) byte
 /// offsets bounding the word at `col` (character offset).
 pub fn find_word_boundaries(text: &str, col: usize) -> (usize, usize) {
+    use super::simple_input::is_word_char;
+
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return (0, 0);
     }
     let col = col.min(chars.len().saturating_sub(1));
-
-    fn is_word_char(c: char) -> bool {
-        c.is_alphanumeric() || c == '_'
-    }
 
     // Scan backwards for start
     let mut start = col;

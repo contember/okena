@@ -150,7 +150,18 @@ impl ThemeSelector {
         });
 
         // Save to settings via SettingsState (ensures in-memory and disk stay in sync)
-        settings_entity(cx).update(cx, |s, cx| s.set_theme_mode(mode, cx));
+        let custom_id = if mode == ThemeMode::Custom {
+            // Extract file stem from "custom:stem" ID
+            theme_entry.info.id.strip_prefix("custom:").map(|s| s.to_string())
+        } else {
+            None
+        };
+        settings_entity(cx).update(cx, |s, cx| {
+            s.set_theme_mode(mode, cx);
+            if custom_id.is_some() {
+                s.set_custom_theme_id(custom_id, cx);
+            }
+        });
 
         self.state.selected_index = index;
         cx.notify();

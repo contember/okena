@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::GitStatus;
 use crate::process::{command, safe_output};
@@ -23,7 +23,7 @@ pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
 }
 
 /// Get branches that are already checked out in worktrees
-fn get_worktree_branches(path: &Path) -> Vec<String> {
+pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return vec![],
@@ -63,13 +63,53 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
 
     let mut args = vec!["-C", repo_str, "worktree", "add"];
 
+    // When creating a new branch, fetch the remote default branch first,
+    // then base the worktree on origin/{default} so it starts from the
+    // latest remote state instead of a potentially stale local ref.
+    let start_point;
     if create_branch {
         args.push("-b");
         args.push(branch);
         args.push(target_str);
+        if let Some(default_branch) = get_default_branch(repo_path) {
+            let _ = safe_output(command("git").args(["-C", repo_str, "fetch", "origin", &default_branch]));
+            start_point = format!("origin/{}", default_branch);
+            args.push(&start_point);
+        }
     } else {
         args.push(target_str);
         args.push(branch);
+    }
+
+    let output = safe_output(command("git").args(&args))
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+/// Create a new worktree with an optional pre-fetched start point.
+/// If `start_branch` is Some, creates `-b <branch> <target> origin/<start_branch>`
+/// without re-fetching (caller is expected to have fetched already).
+pub fn create_worktree_with_start_point(
+    repo_path: &Path,
+    branch: &str,
+    target_path: &Path,
+    start_branch: Option<&str>,
+) -> Result<(), String> {
+    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let target_str = target_path.to_str().ok_or("Invalid target path")?;
+
+    let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
+
+    let start_point;
+    if let Some(sb) = start_branch {
+        start_point = format!("origin/{}", sb);
+        args.push(&start_point);
     }
 
     let output = safe_output(command("git").args(&args))
@@ -137,7 +177,7 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Resu
 }
 
 /// List all branches in a repository
-fn list_branches(path: &Path) -> Vec<String> {
+pub(crate) fn list_branches(path: &Path) -> Vec<String> {
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return vec![],
@@ -204,6 +244,7 @@ pub fn get_status(path: &Path) -> Option<GitStatus> {
         branch,
         lines_added,
         lines_removed,
+        pr_info: None,
     })
 }
 
@@ -547,6 +588,156 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     result
 }
 
+/// Get PR info for the current branch (if any PR exists).
+/// Uses `gh pr view` which requires the GitHub CLI to be installed and authenticated.
+pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
+    let path_str = path.to_str()?;
+
+    let output = safe_output(
+        command("gh")
+            .args(["pr", "view", "--json", "url,state,isDraft", "--jq", "[.url, .state, .isDraft] | @tsv"])
+            .current_dir(path_str),
+    )
+    .ok()?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout.trim();
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 && parts[0].starts_with("http") {
+            let url = parts[0].to_string();
+            let is_draft = parts[2] == "true";
+            let state = if is_draft {
+                super::PrState::Draft
+            } else {
+                match parts[1] {
+                    "OPEN" => super::PrState::Open,
+                    "MERGED" => super::PrState::Merged,
+                    "CLOSED" => super::PrState::Closed,
+                    other => {
+                        log::warn!("Unknown PR state '{}', defaulting to Open", other);
+                        super::PrState::Open
+                    }
+                }
+            };
+            return Some(super::PrInfo { url, state });
+        }
+    }
+
+    None
+}
+
+/// List worktrees found in the template container directory.
+/// Scans the parent directory derived from the path template for subdirectories
+/// that are git working trees. Returns vec of (path, branch_name) pairs.
+pub fn list_template_worktrees(git_root: &Path, template: &str) -> Vec<(String, String)> {
+    let repo_name = match git_root.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return vec![],
+    };
+    let expanded = template.replace("{repo}", repo_name);
+
+    // Split at {branch} to get the container directory prefix
+    let prefix = match expanded.split("{branch}").next() {
+        Some(p) if p != expanded => p,
+        _ => return vec![],
+    };
+
+    let container = {
+        let path = PathBuf::from(prefix);
+        if path.is_relative() {
+            normalize_path(&git_root.join(&path))
+        } else {
+            path
+        }
+    };
+
+    let entries = match std::fs::read_dir(&container) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut result = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(".git").exists() {
+            continue;
+        }
+        let path_str = match path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        if let Ok(output) = safe_output(command("git").args(["-C", path_str, "rev-parse", "--abbrev-ref", "HEAD"])) {
+            if output.status.success() {
+                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !branch.is_empty() && branch != "HEAD" {
+                    result.push((path.to_string_lossy().to_string(), branch));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Normalize a path by resolving `.` and `..` components without filesystem access.
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => { result.pop(); }
+            Component::CurDir => {}
+            other => result.push(other),
+        }
+    }
+    result
+}
+
+/// Given a worktree checkout path and a subdir, return the project path.
+/// If subdir is empty, returns the worktree path as-is.
+pub(crate) fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
+    if subdir.as_os_str().is_empty() {
+        worktree_path.to_string()
+    } else {
+        PathBuf::from(worktree_path)
+            .join(subdir)
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+/// Compute worktree and project paths from template, git root, and subdir.
+/// Returns (worktree_path, project_path).
+pub(crate) fn compute_target_paths(
+    git_root: &Path,
+    subdir: &Path,
+    template: &str,
+    branch: &str,
+) -> (String, String) {
+    let repo_name = git_root.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+    let safe_branch = branch.replace('/', "-");
+
+    let expanded = template
+        .replace("{repo}", repo_name)
+        .replace("{branch}", &safe_branch);
+
+    let worktree_path = {
+        let path = PathBuf::from(&expanded);
+        if path.is_relative() {
+            normalize_path(&git_root.join(&expanded))
+                .to_string_lossy()
+                .to_string()
+        } else {
+            expanded
+        }
+    };
+
+    let project_path = project_path_in_worktree(&worktree_path, subdir);
+
+    (worktree_path, project_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,5 +825,60 @@ mod tests {
     fn list_git_worktrees_returns_empty_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(list_git_worktrees(&path).is_empty());
+    }
+
+    /// Compare computed paths as `Path` objects for cross-platform correctness
+    fn assert_paths_eq(actual: &str, expected: &Path) {
+        assert_eq!(Path::new(actual), expected);
+    }
+
+    #[test]
+    fn target_path_simple_repo() {
+        let git_root = PathBuf::from("/projects/myrepo");
+        let subdir = Path::new("");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let expected = PathBuf::from("/projects").join("myrepo-wt").join("feature");
+        assert_paths_eq(&wt, &expected);
+        assert_paths_eq(&proj, &expected);
+    }
+
+    #[test]
+    fn target_path_monorepo() {
+        let git_root = PathBuf::from("/projects/monorepo");
+        let subdir = Path::new("app-in-monorepo");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature");
+        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("feature");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("app-in-monorepo"));
+    }
+
+    #[test]
+    fn target_path_nested_monorepo_subdir() {
+        let git_root = PathBuf::from("/projects/monorepo");
+        let subdir = Path::new("packages/app");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "fix-bug");
+        let expected_wt = PathBuf::from("/projects").join("monorepo-wt").join("fix-bug");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("packages").join("app"));
+    }
+
+    #[test]
+    fn target_path_absolute_template() {
+        let git_root = PathBuf::from("/projects/monorepo");
+        let subdir = Path::new("app");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "/tmp/worktrees/{repo}/{branch}", "main");
+        let expected_wt = PathBuf::from("/tmp").join("worktrees").join("monorepo").join("main");
+        assert_paths_eq(&wt, &expected_wt);
+        assert_paths_eq(&proj, &expected_wt.join("app"));
+    }
+
+    #[test]
+    fn target_path_branch_with_slashes() {
+        let git_root = PathBuf::from("/projects/repo");
+        let subdir = Path::new("");
+        let (wt, proj) = compute_target_paths(&git_root, subdir, "../{repo}-wt/{branch}", "feature/my-branch");
+        let expected = PathBuf::from("/projects").join("repo-wt").join("feature-my-branch");
+        assert_paths_eq(&wt, &expected);
+        assert_paths_eq(&proj, &expected);
     }
 }

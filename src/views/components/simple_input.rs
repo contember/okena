@@ -144,7 +144,8 @@ impl SimpleInputState {
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         // Delete selection first if any
         if let Some(range) = self.selection.take() {
-            self.value.replace_range(range.clone(), "");
+            self.value
+                .replace_range(self.byte_range_for_chars(&range), "");
             self.cursor_position = range.start;
         }
 
@@ -157,47 +158,90 @@ impl SimpleInputState {
         cx.notify();
     }
 
-    fn delete_backward(&mut self, cx: &mut Context<Self>) {
-        let had_content = !self.value.is_empty() || self.selection.is_some();
+    /// Run a delete operation: clears selection if present, otherwise calls `delete_fn`,
+    /// then emits `InputChangedEvent` only if the value actually changed.
+    fn delete_with(
+        &mut self,
+        delete_fn: impl FnOnce(&mut Self),
+        cx: &mut Context<Self>,
+    ) {
+        let old_len = self.value.len();
         if let Some(range) = self.selection.take() {
-            // Delete selection
-            self.value
-                .replace_range(self.byte_range_for_chars(&range), "");
-            self.cursor_position = range.start;
-        } else if self.cursor_position > 0 {
-            // Delete character before cursor
-            let prev_pos = self.cursor_position - 1;
-            let byte_range = self.byte_range_for_chars(&(prev_pos..self.cursor_position));
-            self.value.replace_range(byte_range, "");
-            self.cursor_position = prev_pos;
-        }
-        self.reset_cursor_blink();
-        if had_content {
-            cx.emit(InputChangedEvent);
-        }
-        cx.notify();
-    }
-
-    fn delete_forward(&mut self, cx: &mut Context<Self>) {
-        let had_content = !self.value.is_empty() || self.selection.is_some();
-        if let Some(range) = self.selection.take() {
-            // Delete selection
             self.value
                 .replace_range(self.byte_range_for_chars(&range), "");
             self.cursor_position = range.start;
         } else {
-            let char_count = self.value.chars().count();
-            if self.cursor_position < char_count {
-                let next_pos = self.cursor_position + 1;
-                let byte_range = self.byte_range_for_chars(&(self.cursor_position..next_pos));
-                self.value.replace_range(byte_range, "");
-            }
+            delete_fn(self);
         }
         self.reset_cursor_blink();
-        if had_content {
+        if self.value.len() != old_len {
             cx.emit(InputChangedEvent);
+            cx.notify();
         }
-        cx.notify();
+    }
+
+    fn delete_backward(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            if this.cursor_position > 0 {
+                let prev_pos = this.cursor_position - 1;
+                let byte_range = this.byte_range_for_chars(&(prev_pos..this.cursor_position));
+                this.value.replace_range(byte_range, "");
+                this.cursor_position = prev_pos;
+            }
+        }, cx);
+    }
+
+    fn delete_forward(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            let char_count = this.value.chars().count();
+            if this.cursor_position < char_count {
+                let next_pos = this.cursor_position + 1;
+                let byte_range = this.byte_range_for_chars(&(this.cursor_position..next_pos));
+                this.value.replace_range(byte_range, "");
+            }
+        }, cx);
+    }
+
+    fn delete_word_backward(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            if this.cursor_position > 0 {
+                let pos = this.word_boundary_left();
+                let byte_range = this.byte_range_for_chars(&(pos..this.cursor_position));
+                this.value.replace_range(byte_range, "");
+                this.cursor_position = pos;
+            }
+        }, cx);
+    }
+
+    fn delete_word_forward(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            let chars_len = this.value.chars().count();
+            if this.cursor_position < chars_len {
+                let pos = this.word_boundary_right();
+                let byte_range = this.byte_range_for_chars(&(this.cursor_position..pos));
+                this.value.replace_range(byte_range, "");
+            }
+        }, cx);
+    }
+
+    fn delete_to_start(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            if this.cursor_position > 0 {
+                let byte_range = this.byte_range_for_chars(&(0..this.cursor_position));
+                this.value.replace_range(byte_range, "");
+                this.cursor_position = 0;
+            }
+        }, cx);
+    }
+
+    fn delete_to_end(&mut self, cx: &mut Context<Self>) {
+        self.delete_with(|this| {
+            let char_count = this.value.chars().count();
+            if this.cursor_position < char_count {
+                let byte_range = this.byte_range_for_chars(&(this.cursor_position..char_count));
+                this.value.replace_range(byte_range, "");
+            }
+        }, cx);
     }
 
     fn move_cursor_left(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
@@ -274,6 +318,35 @@ impl SimpleInputState {
         cx.notify();
     }
 
+    fn move_word_left(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        if self.cursor_position > 0 {
+            let old_pos = self.cursor_position;
+            self.cursor_position = self.word_boundary_left();
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else {
+                self.selection = None;
+            }
+            self.reset_cursor_blink();
+            cx.notify();
+        }
+    }
+
+    fn move_word_right(&mut self, extend_selection: bool, cx: &mut Context<Self>) {
+        let chars_len = self.value.chars().count();
+        if self.cursor_position < chars_len {
+            let old_pos = self.cursor_position;
+            self.cursor_position = self.word_boundary_right();
+            if extend_selection {
+                self.extend_selection(old_pos, self.cursor_position);
+            } else {
+                self.selection = None;
+            }
+            self.reset_cursor_blink();
+            cx.notify();
+        }
+    }
+
     /// Extend selection from anchor to new position
     fn extend_selection(&mut self, anchor: usize, new_pos: usize) {
         let (start, end) = if let Some(ref sel) = self.selection {
@@ -323,6 +396,32 @@ impl SimpleInputState {
             self.reset_cursor_blink();
             cx.notify();
         }
+    }
+
+    /// Find the previous word boundary (char position) scanning left from `cursor_position`.
+    fn word_boundary_left(&self) -> usize {
+        let chars: Vec<char> = self.value.chars().collect();
+        let mut pos = self.cursor_position;
+        while pos > 0 && !is_word_char(chars[pos - 1]) {
+            pos -= 1;
+        }
+        while pos > 0 && is_word_char(chars[pos - 1]) {
+            pos -= 1;
+        }
+        pos
+    }
+
+    /// Find the next word boundary (char position) scanning right from `cursor_position`.
+    fn word_boundary_right(&self) -> usize {
+        let chars: Vec<char> = self.value.chars().collect();
+        let mut pos = self.cursor_position;
+        while pos < chars.len() && is_word_char(chars[pos]) {
+            pos += 1;
+        }
+        while pos < chars.len() && !is_word_char(chars[pos]) {
+            pos += 1;
+        }
+        pos
     }
 
     fn byte_position_for_char(&self, char_pos: usize) -> usize {
@@ -484,8 +583,24 @@ impl SimpleInputState {
 
         // Handle special keys
         match key {
+            "backspace" if modifiers.platform => {
+                self.delete_to_start(cx);
+                return KeyHandled::Handled;
+            }
+            "backspace" if modifiers.alt => {
+                self.delete_word_backward(cx);
+                return KeyHandled::Handled;
+            }
             "backspace" => {
                 self.delete_backward(cx);
+                return KeyHandled::Handled;
+            }
+            "delete" if modifiers.platform => {
+                self.delete_to_end(cx);
+                return KeyHandled::Handled;
+            }
+            "delete" if modifiers.alt => {
+                self.delete_word_forward(cx);
                 return KeyHandled::Handled;
             }
             "delete" => {
@@ -495,6 +610,8 @@ impl SimpleInputState {
             "left" => {
                 if modifiers.platform || modifiers.control {
                     self.move_to_start(extend_selection, cx);
+                } else if modifiers.alt {
+                    self.move_word_left(extend_selection, cx);
                 } else {
                     self.move_cursor_left(extend_selection, cx);
                 }
@@ -503,6 +620,8 @@ impl SimpleInputState {
             "right" => {
                 if modifiers.platform || modifiers.control {
                     self.move_to_end(extend_selection, cx);
+                } else if modifiers.alt {
+                    self.move_word_right(extend_selection, cx);
                 } else {
                     self.move_cursor_right(extend_selection, cx);
                 }
@@ -604,6 +723,11 @@ impl SimpleInputState {
         KeyHandled::Ignored
     }
 
+}
+
+/// Whether a character is a "word" character (alphanumeric or underscore).
+pub fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// Parse text into segments of (text, is_variable) based on `{...}` patterns.

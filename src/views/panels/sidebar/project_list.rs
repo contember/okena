@@ -15,7 +15,8 @@ use std::collections::HashMap;
 impl Sidebar {
     pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
+        let has_worktrees = project.worktree_count > 0;
+        let is_expanded = self.is_project_expanded(&project.id, has_worktrees);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
@@ -23,6 +24,10 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Show quick create button for git repos that aren't themselves worktrees
+        let show_quick_create = project.is_git_repo && !project.is_worktree;
+        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -84,12 +89,13 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
             .child({
-                if project.worktree_count == 0 {
+                let has_expandable_content = has_layout || has_worktrees;
+                if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-{}", project.id).into()),
                         is_expanded,
@@ -98,14 +104,17 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
+                            if has_worktrees {
+                                this.toggle_worktrees_collapsed(&project_id);
+                            } else {
+                                this.toggle_expanded(&project_id);
+                            }
                             cx.notify();
                             cx.stop_propagation();
                         }
                     }))
                     .into_any_element()
                 } else {
-                    // Spacer when worktrees are shown (no expand arrow needed)
                     div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
                 }
             })
@@ -148,7 +157,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -167,36 +176,50 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .when(project.worktree_count == 0, |d| {
-                d.child(
-                    div()
-                        .when(!project.show_in_overview, |d| d.opacity(0.0))
-                        .group_hover("project-item", |s| s.opacity(1.0))
-                        .child({
-                            let show_in_overview = project.show_in_overview;
-                            let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
-                            sidebar_visibility_toggle(
-                                ElementId::Name(format!("visibility-{}", project.id).into()),
-                                show_in_overview,
-                                &t,
-                            )
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_project_overview_visibility(&project_id, cx);
-                                    });
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                        }),
-                )
-            })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
             })
+            // Quick create button — only visible on hover
+            .when(show_quick_create, |d| {
+                d.child(
+                    sidebar_quick_create_button(
+                        ElementId::Name(format!("quick-wt-{}", quick_create_id).into()),
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .group_hover("project-item", |s| s.opacity(1.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener({
+                        let project_id = quick_create_id.clone();
+                        move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.spawn_quick_create_worktree(&project_id, cx);
+                        }
+                    }))
+                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
+            })
+            .child(
+                sidebar_visibility_button(
+                    ElementId::Name(format!("visibility-{}", project.id).into()),
+                    project.show_in_overview,
+                    "project-item",
+                    if project.show_in_overview { "Hide Project" } else { "Show Project" },
+                    &t,
+                )
+                .on_click(cx.listener({
+                    let project_id = project_id.clone();
+                    move |this, _, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.toggle_project_overview_visibility(&project_id, cx);
+                        });
+                        cx.stop_propagation();
+                    }
+                }))
+            )
     }
 
     /// Renders a worktree project nested under its parent
@@ -204,7 +227,8 @@ impl Sidebar {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
-        let is_visible = project.show_in_overview;
+        let is_creating = project.is_creating;
+        let is_busy = is_closing || is_creating;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let parent_id = project.parent_project_id.clone().unwrap_or_default();
@@ -231,10 +255,10 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .when(!is_closing, |d| d.cursor_pointer())
-            .when(is_closing, |d| d.opacity(0.5))
-            .when(!is_closing, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-            .when(is_focused_project && !is_closing, |d| d.bg(rgb(t.bg_hover)))
+            .when(!is_busy, |d| d.cursor_pointer())
+            .when(is_busy, |d| d.opacity(0.5))
+            .when(!is_busy, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .when(is_focused_project && !is_busy, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for worktree reordering
             .when(!parent_id.is_empty(), |d| {
@@ -273,11 +297,7 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        if is_main_worktree {
-                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                        } else {
-                            ws.set_focused_project(Some(project_id.clone()), cx);
-                        }
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
@@ -317,7 +337,7 @@ impl Sidebar {
                     )
             )
             .child(
-                // Project name (or input if renaming)
+                // Worktree name (or input if renaming)
                 if is_renaming {
                     sidebar_rename_input("worktree-rename-input", &self.project_rename, &t)
                         .map(|el| el.into_any_element())
@@ -338,11 +358,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    if is_main_worktree {
-                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                    } else {
-                                        ws.set_focused_project(Some(project_id.clone()), cx);
-                                    }
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -351,7 +367,7 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0 && !is_closing, |d| {
+            .when(idle_count > 0 && !is_busy, |d| {
                 d.child(
                     div()
                         .flex_shrink_0()
@@ -361,41 +377,35 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .when(is_closing, |d| {
+            .when(is_busy, |d| {
                 d.child(
                     div()
                         .ml_auto()
                         .text_size(px(10.0))
                         .text_color(rgb(t.text_secondary))
-                        .child("Closing\u{2026}")
+                        .child(if is_creating { "Creating\u{2026}" } else { "Closing\u{2026}" })
                 )
             })
-            .when(!is_closing, |d| {
-                d.child(
-                    div()
-                        .when(!project.show_in_overview, |d| d.opacity(0.0))
-                        .group_hover("worktree-item", |s| s.opacity(1.0))
-                        .child({
-                            let show_in_overview = project.show_in_overview;
-                            let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
-                            sidebar_visibility_toggle(
-                                ElementId::Name(format!("visibility-wt-{}", project_id).into()),
-                                show_in_overview,
-                                &t,
-                            )
-                            .on_click(cx.listener({
-                                let project_id = project_id.clone();
-                                move |this, _, _window, cx| {
-                                    this.workspace.update(cx, |ws, cx| {
-                                        ws.toggle_worktree_visibility(&project_id, cx);
-                                    });
-                                    cx.stop_propagation();
-                                }
-                            }))
-                            .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                        }),
+            .when(!is_busy, |d| {
+                d.child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+                .child(
+                    sidebar_visibility_button(
+                        ElementId::Name(format!("visibility-wt-{}", project_id).into()),
+                        project.show_in_overview,
+                        "worktree-item",
+                        if project.show_in_overview { "Hide Worktree" } else { "Show Worktree" },
+                        &t,
+                    )
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.toggle_worktree_visibility(&project_id, cx);
+                            });
+                            cx.stop_propagation();
+                        }
+                    }))
                 )
-                .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             })
     }
 

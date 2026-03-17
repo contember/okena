@@ -46,6 +46,7 @@ impl Sidebar {
         project_count: usize,
         idle_terminal_count: usize,
         is_cursor: bool,
+        is_focused: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -55,6 +56,7 @@ impl Sidebar {
         let is_collapsed = folder.collapsed;
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
+        let is_active_filter = self.workspace.read(cx).active_folder_filter() == Some(&folder.id);
 
         // Folder header row
         div()
@@ -67,6 +69,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
+            .when(is_focused || is_active_filter, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for folder reordering
             .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {
@@ -86,7 +89,7 @@ impl Sidebar {
                     }
                 }
             }))
-            // Drop target for projects being dragged onto folder
+            // Drop target for moving projects into this folder
             .drag_over::<ProjectDrag>(move |style, _, _, _| {
                 style.bg(rgb(t.bg_selection))
             })
@@ -118,7 +121,7 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_collapsed(&folder_id, cx);
+                        ws.toggle_folder_focus(&folder_id, cx);
                     });
                 }
             }))
@@ -176,7 +179,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_folder_collapsed(&folder_id, cx);
+                                    ws.toggle_folder_focus(&folder_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -257,7 +260,8 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
+        let has_worktrees = project.worktree_count > 0;
+        let is_expanded = self.is_project_expanded(&project.id, has_worktrees);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let folder_id = folder_id.to_string();
@@ -266,6 +270,10 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
+
+        // Show quick create button for git repos that aren't themselves worktrees
+        let show_quick_create = project.is_git_repo && !project.is_worktree;
+        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -337,12 +345,13 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id.clone()), cx);
+                        ws.focus_project_terminal(&project_id, cx);
                     });
                 }
             }))
             .child({
-                if project.worktree_count == 0 {
+                let has_expandable_content = has_layout || has_worktrees;
+                if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-fp-{}", project.id).into()),
                         is_expanded,
@@ -351,7 +360,11 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
+                            if has_worktrees {
+                                this.toggle_worktrees_collapsed(&project_id);
+                            } else {
+                                this.toggle_expanded(&project_id);
+                            }
                             cx.notify();
                             cx.stop_propagation();
                         }
@@ -400,7 +413,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project(Some(project_id.clone()), cx);
+                                    ws.focus_project_terminal(&project_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -419,30 +432,46 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .child(
-                div()
-                    .when(!project.show_in_overview, |d| d.opacity(0.0))
-                    .group_hover("folder-project-item", |s| s.opacity(1.0))
-                    .child({
-                        let show_in_overview = project.show_in_overview;
-                        let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
-                        sidebar_visibility_toggle(
-                            ElementId::Name(format!("fp-visibility-{}", project.id).into()),
-                            show_in_overview,
-                            &t,
-                        )
-                        .on_click(cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, _, _window, cx| {
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_project_overview_visibility(&project_id, cx);
-                                });
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-                    }),
-            )
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+            // Quick create button — only visible on hover
+            .when(show_quick_create, |d| {
+                d.child(
+                    sidebar_quick_create_button(
+                        ElementId::Name(format!("fp-quick-wt-{}", quick_create_id).into()),
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .group_hover("folder-project-item", |s| s.opacity(1.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener({
+                        let project_id = quick_create_id.clone();
+                        move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.spawn_quick_create_worktree(&project_id, cx);
+                        }
+                    }))
+                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
+            })
+            .child(
+                sidebar_visibility_button(
+                    ElementId::Name(format!("fp-visibility-{}", project.id).into()),
+                    project.show_in_overview,
+                    "folder-project-item",
+                    if project.show_in_overview { "Hide Project" } else { "Show Project" },
+                    &t,
+                )
+                .on_click(cx.listener({
+                    let project_id = project_id.clone();
+                    move |this, _, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.toggle_project_overview_visibility(&project_id, cx);
+                        });
+                        cx.stop_propagation();
+                    }
+                }))
+            )
     }
 }

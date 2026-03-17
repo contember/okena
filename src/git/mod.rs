@@ -1,13 +1,15 @@
+pub mod branch_names;
 pub mod diff;
-mod repository;
+pub(crate) mod repository;
 pub mod watcher;
 
-pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
+pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, batch_is_git_repo, get_file_contents_for_diff};
 pub use repository::{
     create_worktree,
     remove_worktree,
     remove_worktree_fast,
     list_git_worktrees,
+    list_template_worktrees,
     get_available_branches_for_worktree,
     get_repo_root,
     has_uncommitted_changes,
@@ -27,10 +29,44 @@ pub use repository::{
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-/// Cache TTL - how long before status is considered stale
-const CACHE_TTL: Duration = Duration::from_secs(5);
+/// PR state from GitHub
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+    Draft,
+}
+
+impl PrState {
+    /// Theme color for this PR state
+    pub fn color(&self, t: &crate::theme::ThemeColors) -> u32 {
+        match self {
+            PrState::Open => t.term_green,
+            PrState::Draft => t.text_muted,
+            PrState::Merged => t.term_magenta,
+            PrState::Closed => t.term_red,
+        }
+    }
+
+    /// Display label for this PR state
+    pub fn label(&self) -> &'static str {
+        match self {
+            PrState::Open => "Open",
+            PrState::Draft => "Draft",
+            PrState::Merged => "Merged",
+            PrState::Closed => "Closed",
+        }
+    }
+}
+
+/// Pull request info
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrInfo {
+    pub url: String,
+    pub state: PrState,
+}
 
 /// Git status information for display in project header
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,6 +77,9 @@ pub struct GitStatus {
     pub lines_added: usize,
     /// Lines removed in working directory (unstaged + staged)
     pub lines_removed: usize,
+    /// Pull request info for the current branch (if any)
+    #[serde(default)]
+    pub pr_info: Option<PrInfo>,
 }
 
 /// Per-file diff summary for popover display
@@ -62,24 +101,12 @@ impl GitStatus {
     }
 }
 
-/// Cached git status entry
-struct CacheEntry {
-    status: Option<GitStatus>,
-    timestamp: Instant,
-}
-
-impl CacheEntry {
-    fn is_fresh(&self) -> bool {
-        self.timestamp.elapsed() < CACHE_TTL
-    }
-}
-
 /// Global cache for git status
-static CACHE: Mutex<Option<HashMap<PathBuf, CacheEntry>>> = Mutex::new(None);
+static CACHE: Mutex<Option<HashMap<PathBuf, Option<GitStatus>>>> = Mutex::new(None);
 
 fn with_cache<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut HashMap<PathBuf, CacheEntry>) -> R,
+    F: FnOnce(&mut HashMap<PathBuf, Option<GitStatus>>) -> R,
 {
     let mut guard = CACHE.lock();
     let cache = guard.get_or_insert_with(HashMap::new);
@@ -87,47 +114,27 @@ where
 }
 
 /// Get git status for a directory path (with caching).
-/// Returns None if the path is not inside a git repository.
+/// Returns None if the path is not inside a git repository or not yet cached.
+///
+/// Always non-blocking: returns cached data immediately.
+/// Returns None on cache miss — the background watcher will populate it.
+/// Use `refresh_git_status` for a blocking fresh fetch (e.g. from a background watcher).
 pub fn get_git_status(path: &Path) -> Option<GitStatus> {
+    with_cache(|cache| cache.get(path).cloned().flatten())
+}
+
+/// Fetch fresh git status and update the cache. Intended for background watchers.
+pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
-
-    // Check cache first
-    let cached = with_cache(|cache| {
-        if let Some(entry) = cache.get(&path_buf) {
-            if entry.is_fresh() {
-                return Some(entry.status.clone());
-            }
-        }
-        None
-    });
-
-    if let Some(status) = cached {
-        return status;
-    }
-
-    // Cache miss or stale - fetch fresh status
     let status = repository::get_status(path);
-
-    // Update cache
-    with_cache(|cache| {
-        cache.insert(
-            path_buf,
-            CacheEntry {
-                status: status.clone(),
-                timestamp: Instant::now(),
-            },
-        );
-    });
-
+    with_cache(|cache| { cache.insert(path_buf, status.clone()); });
     status
 }
 
 /// Invalidate cache for a specific path (call when you know files changed)
 #[allow(dead_code)]
 pub fn invalidate_cache(path: &Path) {
-    with_cache(|cache| {
-        cache.remove(path);
-    });
+    with_cache(|cache| { cache.remove(path); });
 }
 
 /// Get per-file diff summary for a repository.
