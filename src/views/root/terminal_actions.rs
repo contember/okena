@@ -115,7 +115,7 @@ impl RootView {
                 ws.project(&id).map(|p| {
                     let project_path = p.path.clone();
                     let is_worktree = p.worktree_info.is_some();
-                    let is_git = crate::git::get_git_status(std::path::Path::new(&project_path)).is_some();
+                    let is_git = crate::git::is_git_repo(std::path::Path::new(&project_path));
                     (id, project_path, is_git, is_worktree)
                 })
             })

@@ -615,18 +615,7 @@ impl ProjectColumn {
             .into_any_element()
     }
 
-    fn render_git_status(&self, project: &ProjectData, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
-        // Try local git watcher first, then fall back to remote git status from server sync
-        let status = self.git_watcher.as_ref()
-            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-            .or_else(|| {
-                project.remote_git_status.as_ref().map(|g| git::GitStatus {
-                    branch: g.branch.clone(),
-                    lines_added: g.lines_added,
-                    lines_removed: g.lines_removed,
-                    pr_info: None,
-                })
-            });
+    fn render_git_status(&self, project: &ProjectData, status: Option<git::GitStatus>, t: ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let is_worktree = project.worktree_info.is_some();
         let entity_handle = cx.entity().clone();
 
@@ -779,6 +768,17 @@ impl ProjectColumn {
         };
         let folder_color = t.get_folder_color(effective_color);
 
+        // Fetch git status once for both header badge and git status area
+        let git_status = self.git_watcher.as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .or_else(|| {
+                project.remote_git_status.as_ref().map(|g| git::GitStatus {
+                    branch: g.branch.clone(),
+                    lines_added: g.lines_added,
+                    lines_removed: g.lines_removed,
+                    pr_info: None,
+                })
+            });
         v_flex()
             // Colored accent bar
             .child(
@@ -832,21 +832,10 @@ impl ProjectColumn {
                     })
                     // Branch badge — for worktrees, also acts as PR button with color-coded icon
                     .when(project.worktree_info.is_some(), |d| {
-                        // Get git status with branch + PR info
-                        let git_status = self.git_watcher.as_ref()
-                            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
-                            .or_else(|| {
-                                project.remote_git_status.as_ref().map(|g| git::GitStatus {
-                                    branch: g.branch.clone(),
-                                    lines_added: g.lines_added,
-                                    lines_removed: g.lines_removed,
-                                    pr_info: None,
-                                })
-                            });
                         let branch = git_status.as_ref()
                             .and_then(|s| s.branch.clone())
                             .unwrap_or_else(|| project.name.clone());
-                        let pr_info = git_status.and_then(|s| s.pr_info);
+                        let pr_info = git_status.as_ref().and_then(|s| s.pr_info.clone());
 
                         let (icon_path, icon_color, tooltip_text) = if let Some(ref pr) = pr_info {
                             let color = match &pr.state {
@@ -901,6 +890,9 @@ impl ProjectColumn {
                                         .text_size(px(10.0))
                                         .text_color(rgb(t.text_secondary))
                                         .line_height(px(12.0))
+                                        .max_w(px(120.0))
+                                        .text_ellipsis()
+                                        .overflow_hidden()
                                         .child(branch)
                                 )
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
@@ -922,7 +914,7 @@ impl ProjectColumn {
                                     .child(project.path.clone()),
                             )
                     )
-                    .child(self.render_git_status(project, t, cx)),
+                    .child(self.render_git_status(project, git_status, t, cx)),
             )
             .child(
                 // Right side: minimized taskbar + controls

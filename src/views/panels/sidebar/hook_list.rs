@@ -215,10 +215,13 @@ impl Sidebar {
                     cwd.to_string(),
                 ));
 
-                // Replace in TerminalsRegistry: remove old, insert new
+                // Replace in TerminalsRegistry: remove old, insert new (single lock)
                 let terminals = self.terminals.clone();
-                terminals.lock().remove(terminal_id);
-                terminals.lock().insert(new_terminal_id.clone(), terminal);
+                {
+                    let mut guard = terminals.lock();
+                    guard.remove(terminal_id);
+                    guard.insert(new_terminal_id.clone(), terminal);
+                }
 
                 // Update workspace: swap terminal ID in hook_terminals and layout
                 self.workspace.update(cx, |ws, cx| {

@@ -128,6 +128,8 @@ pub struct Sidebar {
     /// Project IDs that have been auto-expanded due to hook terminals.
     /// Tracked so we only auto-expand once (user can collapse afterward).
     hook_auto_expanded: HashSet<String>,
+    /// Parent project IDs with in-flight worktree creation (debounce guard)
+    creating_worktree: HashSet<String>,
 }
 
 impl Sidebar {
@@ -193,6 +195,7 @@ impl Sidebar {
             service_manager: None,
             collapsed_groups: HashSet::new(),
             hook_auto_expanded: HashSet::new(),
+            creating_worktree: HashSet::new(),
         }
     }
 
@@ -221,18 +224,25 @@ impl Sidebar {
     /// All blocking git operations (branch name generation, worktree creation)
     /// run off the main thread to avoid UI jank.
     pub(super) fn spawn_quick_create_worktree(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        // Debounce: prevent concurrent creation for the same parent
+        if !self.creating_worktree.insert(project_id.to_string()) {
+            return;
+        }
+
         let workspace = self.workspace.clone();
         let parent_id = project_id.to_string();
+        let parent_id_for_cleanup = parent_id.clone();
 
         // Collect data from workspace and settings (non-blocking reads)
         let prep = self.workspace.read(cx).prepare_quick_create(project_id);
         let path_template = crate::settings::settings(cx).worktree.path_template.clone();
         let Some((parent_path, main_repo_path)) = prep else {
             log::error!("Quick worktree creation failed: parent project not found");
+            self.creating_worktree.remove(project_id);
             return;
         };
 
-        cx.spawn(async move |_sidebar, cx| {
+        cx.spawn(async move |sidebar_weak, cx| {
             // Background thread: all blocking git operations
             let result = smol::unblock(move || -> Result<(String, std::path::PathBuf, String, String), String> {
                 let project_path = std::path::PathBuf::from(&parent_path);
@@ -282,6 +292,12 @@ impl Sidebar {
                     log::error!("Quick worktree creation failed: {}", e);
                 }
             }
+
+            // Clear debounce guard
+            let _ = sidebar_weak.update(cx, |sidebar, cx| {
+                sidebar.creating_worktree.remove(&parent_id_for_cleanup);
+                cx.notify();
+            });
         }).detach();
     }
 
@@ -989,7 +1005,17 @@ impl Sidebar {
                     ws.toggle_folder_collapsed(&folder_id, cx);
                 });
             }
-            SidebarCursorItem::Project { project_id } |
+            SidebarCursorItem::Project { project_id } => {
+                // Mirror mouse behavior: toggle worktree collapse for parent projects,
+                // terminal details for projects without worktrees
+                let has_worktrees = !self.workspace.read(cx)
+                    .worktree_child_ids(&project_id).is_empty();
+                if has_worktrees {
+                    self.toggle_worktrees_collapsed(&project_id);
+                } else {
+                    self.toggle_expanded(&project_id);
+                }
+            }
             SidebarCursorItem::WorktreeProject { project_id } => {
                 self.toggle_expanded(&project_id);
             }
@@ -1250,7 +1276,7 @@ impl SidebarProjectInfo {
             is_closing: false,
             parent_folder_color: None,
             path: project.path.clone(),
-            is_git_repo: crate::git::get_git_status(std::path::Path::new(&project.path)).is_some(),
+            is_git_repo: crate::git::is_git_repo(std::path::Path::new(&project.path)),
             is_worktree: project.worktree_info.is_some(),
         }
     }

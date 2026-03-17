@@ -599,6 +599,20 @@ impl Workspace {
         let focus_individual = self.focus_manager.is_focus_individual();
         let folder_filter = self.active_folder_filter.as_ref();
 
+        // Pre-build worktree children lookup only when folder filter is active
+        // (it's the only code path that needs parent→children resolution)
+        let wt_children_by_parent: Option<HashMap<&str, Vec<&ProjectData>>> = folder_filter.map(|_| {
+            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
+            for p in &self.data.projects {
+                if let Some(ref wi) = p.worktree_info {
+                    map.entry(wi.parent_project_id.as_str())
+                        .or_default()
+                        .push(p);
+                }
+            }
+            map
+        });
+
         let mut result = Vec::new();
         // Track worktree children already added via their parent's folder
         let mut added_via_folder: HashSet<&str> = HashSet::new();
