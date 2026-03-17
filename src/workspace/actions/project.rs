@@ -411,7 +411,9 @@ impl Workspace {
             name: project_name,
             path: project_path.to_string(),
             show_in_overview: true,
-            layout: new_layout,
+            // When hooks are deferred the worktree directory doesn't exist yet.
+            // Use None so no terminals are spawned until creation finishes.
+            layout: if fire_hooks { new_layout } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {
@@ -458,12 +460,26 @@ impl Workspace {
         Ok(id)
     }
 
-    /// Fire on_worktree_create hooks for a project whose hooks were deferred.
+    /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
+    /// Called once the worktree directory exists on disk.
     pub fn fire_worktree_hooks(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let Some(project) = self.project(project_id) else { return };
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
         let path = project.path.clone();
+
+        // If layout is still None (deferred creation), clone it from the parent
+        if project.layout.is_none() {
+            let parent_layout = project.worktree_info.as_ref()
+                .and_then(|wt| self.project(&wt.parent_project_id))
+                .and_then(|p| p.layout.as_ref())
+                .map(|l| l.clone_structure());
+            let layout = parent_layout.or_else(|| Some(crate::workspace::state::LayoutNode::new_terminal()));
+            if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
+                p.layout = layout;
+            }
+        }
+
         // project.name is set to the branch name during register_worktree_project
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
