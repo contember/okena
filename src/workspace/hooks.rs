@@ -121,9 +121,17 @@ impl HookRunner {
         self.terminals.lock().insert(terminal_id.clone(), terminal);
 
         if keep_alive {
-            // Type the command into the shell's stdin
-            let cmd_with_newline = format!("{}\n", full_cmd);
-            transport.send_input(&terminal_id, cmd_with_newline.as_bytes());
+            // Export env vars silently, then run just the user's command.
+            // This avoids echoing the full `KEY='val' KEY2='val2' cmd` line
+            // which is noisy and hard to read.
+            let mut input = String::new();
+            for (k, v) in &safe_env {
+                let escaped_v = v.replace('\'', "'\\''");
+                input.push_str(&format!("export {}='{}'\n", k, escaped_v));
+            }
+            input.push_str(command);
+            input.push('\n');
+            transport.send_input(&terminal_id, input.as_bytes());
         }
 
         Ok((terminal_id, full_cmd))
