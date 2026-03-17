@@ -350,7 +350,9 @@ impl Workspace {
     }
 
     /// Register a worktree project in workspace state.
-    /// The git worktree must already exist on disk.
+    /// When `fire_hooks` is true the worktree must already exist on disk
+    /// (hooks may cd into the project path). Pass `false` to defer hooks
+    /// and call `fire_worktree_hooks` after the directory is ready.
     /// Returns the new project ID on success.
     pub fn register_worktree_project(
         &mut self,
@@ -359,6 +361,33 @@ impl Workspace {
         repo_path: &std::path::Path,
         worktree_path: &str,
         project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, cx)
+    }
+
+    /// Same as `register_worktree_project` but defers on_worktree_create hooks.
+    /// Call `fire_worktree_hooks` once the worktree directory exists on disk.
+    pub fn register_worktree_project_deferred_hooks(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, cx)
+    }
+
+    fn register_worktree_project_inner(
+        &mut self,
+        parent_project_id: &str,
+        branch: &str,
+        repo_path: &std::path::Path,
+        worktree_path: &str,
+        project_path: &str,
+        fire_hooks: bool,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         // Get parent project info
@@ -414,17 +443,37 @@ impl Workspace {
 
         self.notify_data(cx);
 
+        if fire_hooks {
+            let hook_results = hooks::fire_on_worktree_create(
+                &new_project_hooks,
+                &id,
+                &new_project_name,
+                project_path,
+                branch,
+                cx,
+            );
+            self.register_hook_results(hook_results, cx);
+        }
+
+        Ok(id)
+    }
+
+    /// Fire on_worktree_create hooks for a project whose hooks were deferred.
+    pub fn fire_worktree_hooks(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.project(project_id) else { return };
+        let hooks_config = project.hooks.clone();
+        let name = project.name.clone();
+        let path = project.path.clone();
+        // project.name is set to the branch name during register_worktree_project
         let hook_results = hooks::fire_on_worktree_create(
-            &new_project_hooks,
-            &id,
-            &new_project_name,
-            project_path,
-            branch,
+            &hooks_config,
+            project_id,
+            &name,
+            &path,
+            &name,
             cx,
         );
         self.register_hook_results(hook_results, cx);
-
-        Ok(id)
     }
 
     /// Add a worktree project discovered by the periodic sync watcher.

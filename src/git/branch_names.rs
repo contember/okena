@@ -135,8 +135,13 @@ fn sanitize_username(name: &str) -> String {
 /// Generate a unique branch name like `username/rohlik` that doesn't collide
 /// with existing branches or worktree branches.
 pub fn generate_branch_name(repo_path: &Path) -> String {
-    let username = detect_github_username(repo_path);
-    let taken = collect_taken_branches(repo_path);
+    // Run username detection and branch listing in parallel —
+    // they spawn independent subprocesses.
+    let (username, taken) = std::thread::scope(|s| {
+        let u = s.spawn(|| detect_github_username(repo_path));
+        let t = s.spawn(|| collect_taken_branches(repo_path));
+        (u.join().unwrap(), t.join().unwrap())
+    });
 
     // Shuffle goods deterministically using a simple hash of current time
     let mut indices: Vec<usize> = (0..GOODS.len()).collect();

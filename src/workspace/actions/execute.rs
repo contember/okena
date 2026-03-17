@@ -428,6 +428,11 @@ pub fn spawn_uninitialized_terminals(
     terminals: &TerminalsRegistry,
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
+    // Don't spawn terminals for projects whose worktree is still being created
+    if ws.creating_projects.contains(project_id) {
+        return ActionResult::Ok(None);
+    }
+
     let project = match ws.project(project_id) {
         Some(p) => p,
         None => return ActionResult::Err(format!("project not found: {}", project_id)),

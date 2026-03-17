@@ -236,6 +236,8 @@ impl Sidebar {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
+        let is_creating = project.is_creating;
+        let is_busy = is_closing || is_creating;
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let parent_id = project.parent_project_id.clone().unwrap_or_default();
@@ -262,10 +264,10 @@ impl Sidebar {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .when(!is_closing, |d| d.cursor_pointer())
-            .when(is_closing, |d| d.opacity(0.5))
-            .when(!is_closing, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-            .when(is_focused_project && !is_closing, |d| d.bg(rgb(t.bg_hover)))
+            .when(!is_busy, |d| d.cursor_pointer())
+            .when(is_busy, |d| d.opacity(0.5))
+            .when(!is_busy, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .when(is_focused_project && !is_busy, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for worktree reordering
             .when(!parent_id.is_empty(), |d| {
@@ -374,7 +376,7 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0 && !is_closing, |d| {
+            .when(idle_count > 0 && !is_busy, |d| {
                 d.child(
                     div()
                         .flex_shrink_0()
@@ -384,16 +386,16 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .when(is_closing, |d| {
+            .when(is_busy, |d| {
                 d.child(
                     div()
                         .ml_auto()
                         .text_size(px(10.0))
                         .text_color(rgb(t.text_secondary))
-                        .child("Closing\u{2026}")
+                        .child(if is_creating { "Creating\u{2026}" } else { "Closing\u{2026}" })
                 )
             })
-            .when(!is_closing, |d| {
+            .when(!is_busy, |d| {
                 d.child(sidebar_terminal_badge(has_layout, terminal_count, &t))
                 // Eye button — visible on hover, or always when worktree is hidden
                 .child({

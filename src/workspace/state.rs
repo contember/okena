@@ -298,6 +298,9 @@ pub struct Workspace {
     /// The sync watcher skips these to avoid re-adding a worktree
     /// whose directory hasn't been fully deleted yet.
     pub removing_worktree_paths: HashSet<String>,
+    /// Project IDs whose worktree is still being created on disk (git fetch + worktree add).
+    /// Sidebar shows a "Creating…" indicator and terminals are not spawned.
+    pub creating_projects: HashSet<String>,
 }
 
 impl Workspace {
@@ -312,6 +315,7 @@ impl Workspace {
             pending_worktree_closes: HashMap::new(),
             closing_projects: HashSet::new(),
             removing_worktree_paths: HashSet::new(),
+            creating_projects: HashSet::new(),
         }
     }
 

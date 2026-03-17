@@ -92,6 +92,37 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
     }
 }
 
+/// Create a new worktree with an optional pre-fetched start point.
+/// If `start_branch` is Some, creates `-b <branch> <target> origin/<start_branch>`
+/// without re-fetching (caller is expected to have fetched already).
+pub fn create_worktree_with_start_point(
+    repo_path: &Path,
+    branch: &str,
+    target_path: &Path,
+    start_branch: Option<&str>,
+) -> Result<(), String> {
+    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let target_str = target_path.to_str().ok_or("Invalid target path")?;
+
+    let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
+
+    let start_point;
+    if let Some(sb) = start_branch {
+        start_point = format!("origin/{}", sb);
+        args.push(&start_point);
+    }
+
+    let output = safe_output(command("git").args(&args))
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
 /// Remove a worktree
 /// Returns Ok(()) on success, Err(error_message) on failure
 pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> {

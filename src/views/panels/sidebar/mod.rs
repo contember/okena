@@ -243,8 +243,9 @@ impl Sidebar {
         };
 
         cx.spawn(async move |sidebar_weak, cx| {
-            // Background thread: all blocking git operations
-            let result = smol::unblock(move || -> Result<(String, std::path::PathBuf, String, String), String> {
+            // Phase 1 (fast): resolve git root, generate branch name, compute
+            // paths — no network calls needed.
+            let prep_result = smol::unblock(move || -> Result<(String, std::path::PathBuf, String, String, Option<String>), String> {
                 let project_path = std::path::PathBuf::from(&parent_path);
 
                 // Determine git root
@@ -260,36 +261,102 @@ impl Sidebar {
                     .unwrap_or(std::path::Path::new(""))
                     .to_path_buf();
 
-                // Generate branch name (spawns git subprocesses)
+                // Generate branch name (username cached, branch listing is local)
                 let branch = crate::git::branch_names::generate_branch_name(&git_root);
+
+                // Fast local lookup for default branch (no network)
+                let default_branch = crate::git::repository::get_default_branch(&git_root);
 
                 // Compute target paths
                 let (worktree_path, project_path) = crate::git::repository::compute_target_paths(
                     &git_root, &subdir, &path_template, &branch,
                 );
 
-                // Create the git worktree on disk
-                let target = std::path::PathBuf::from(&worktree_path);
-                crate::git::create_worktree(&git_root, &branch, &target, true)?;
-
-                Ok((branch, git_root, worktree_path, project_path))
+                Ok((branch, git_root, worktree_path, project_path, default_branch))
             }).await;
 
-            match result {
-                Ok((branch, git_root, worktree_path, project_path)) => {
+            let (branch, git_root, worktree_path, project_path, default_branch) = match prep_result {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("Quick worktree creation failed: {}", e);
+                    let _ = sidebar_weak.update(cx, |sidebar, cx| {
+                        sidebar.creating_worktree.remove(&parent_id_for_cleanup);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            // Register project in sidebar immediately so it appears instantly.
+            // Hooks are deferred until the worktree directory exists on disk.
+            let project_id = cx.update(|cx| {
+                workspace.update(cx, |ws, cx| {
+                    let id = ws.register_worktree_project_deferred_hooks(
+                        &parent_id, &branch, &git_root,
+                        &worktree_path, &project_path, cx,
+                    );
+                    if let Ok(ref id) = id {
+                        ws.creating_projects.insert(id.clone());
+                    }
+                    id
+                })
+            });
+
+            let Ok(project_id) = project_id else {
+                log::error!("Quick worktree creation failed: could not register project");
+                let _ = sidebar_weak.update(cx, |sidebar, cx| {
+                    sidebar.creating_worktree.remove(&parent_id_for_cleanup);
+                    cx.notify();
+                });
+                return;
+            };
+
+            // Phase 2 (slow): fetch + git worktree add in background.
+            // The project is already visible in the sidebar.
+            let branch_clone = branch.clone();
+            let worktree_path_clone = worktree_path.clone();
+            let git_root_clone = git_root.clone();
+            let create_result = smol::unblock(move || -> Result<(), String> {
+                let target = std::path::PathBuf::from(&worktree_path_clone);
+
+                // Fetch and create worktree — fetch runs first if we have a default branch
+                if let Some(ref db) = default_branch {
+                    if let Some(repo_str) = git_root_clone.to_str() {
+                        let _ = crate::process::safe_output(
+                            crate::process::command("git")
+                                .args(["-C", repo_str, "fetch", "origin", db.as_str()]),
+                        );
+                    }
+                }
+
+                crate::git::repository::create_worktree_with_start_point(
+                    &git_root_clone,
+                    &branch_clone,
+                    &target,
+                    default_branch.as_deref(),
+                )
+            }).await;
+
+            match create_result {
+                Ok(()) => {
+                    // Worktree directory exists — clear creating state and fire hooks
                     let _ = cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
-                            if let Err(e) = ws.register_worktree_project(
-                                &parent_id, &branch, &git_root,
-                                &worktree_path, &project_path, cx,
-                            ) {
-                                log::error!("Quick worktree creation failed: {}", e);
-                            }
+                            ws.creating_projects.remove(&project_id);
+                            ws.fire_worktree_hooks(&project_id, cx);
+                            ws.notify_data(cx);
                         });
                     });
                 }
                 Err(e) => {
-                    log::error!("Quick worktree creation failed: {}", e);
+                    log::error!("Quick worktree git operation failed: {}", e);
+                    // Remove the optimistically-added project since git worktree add failed
+                    let _ = cx.update(|cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.creating_projects.remove(&project_id);
+                            ws.delete_project(&project_id, cx);
+                        });
+                    });
                 }
             }
 
@@ -1225,6 +1292,8 @@ pub(super) struct SidebarProjectInfo {
     pub hook_terminals: Vec<SidebarHookInfo>,
     /// True if this worktree is being closed (hook running or git remove in progress)
     pub is_closing: bool,
+    /// True if this worktree is being created (git fetch + worktree add in progress)
+    pub is_creating: bool,
     /// Parent project's folder color (for worktree children to inherit)
     pub parent_folder_color: Option<FolderColor>,
     /// Project path (for quick worktree creation)
@@ -1274,6 +1343,7 @@ impl SidebarProjectInfo {
                 }
             }).collect(),
             is_closing: false,
+            is_creating: false,
             parent_folder_color: None,
             path: project.path.clone(),
             is_git_repo: crate::git::is_git_repo(std::path::Path::new(&project.path)),
@@ -1291,6 +1361,7 @@ fn build_main_worktree_entry(
     children: &mut Vec<SidebarProjectInfo>,
     project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
     closing_projects: &HashSet<String>,
+    creating_projects: &HashSet<String>,
 ) {
     let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
         .and_then(|s| s.branch);
@@ -1298,6 +1369,7 @@ fn build_main_worktree_entry(
     main_wt.name = branch.unwrap_or_else(|| project.name.clone());
     main_wt.parent_folder_color = Some(project.folder_color);
     main_wt.is_closing = closing_projects.contains(&project.id);
+    main_wt.is_creating = creating_projects.contains(&project.id);
     if let Some(services) = project_services.remove(&project.id) {
         main_wt.services = services;
     }
@@ -1439,6 +1511,7 @@ impl Render for Sidebar {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
                         info.is_closing = workspace.closing_projects.contains(&p.id);
+                        info.is_creating = workspace.creating_projects.contains(&p.id);
                         info
                     })
                     .collect();
@@ -1447,7 +1520,7 @@ impl Render for Sidebar {
                     if let Some(mut children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
                         if let Some(&project) = all_projects.get(fp.id.as_str()) {
-                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects);
+                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects);
                         }
                         // Parent header eye reflects group state
                         fp.show_in_overview = children.iter().any(|c| c.show_in_overview);
@@ -1481,10 +1554,11 @@ impl Render for Sidebar {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
                 project_info.is_closing = workspace.closing_projects.contains(&project.id);
+                project_info.is_creating = workspace.creating_projects.contains(&project.id);
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {
-                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects);
+                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects);
                     // Parent header eye reflects group state: visible if any child is visible
                     project_info.show_in_overview = wt_children.iter().any(|c| c.show_in_overview);
                 } else {
