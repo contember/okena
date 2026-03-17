@@ -73,6 +73,8 @@ pub struct FocusManager {
     context: FocusContext,
     /// Which project is "zoomed" in the sidebar (only that project's column is visible)
     focused_project_id: Option<String>,
+    /// When true, focusing a parent project shows only that project (not its worktree children)
+    focus_project_individual: bool,
     /// Maximum stack depth to prevent memory issues
     max_stack_depth: usize,
 }
@@ -90,6 +92,7 @@ impl FocusManager {
             focus_stack: Vec::new(),
             context: FocusContext::Terminal,
             focused_project_id: None,
+            focus_project_individual: false,
             max_stack_depth: 10,
         }
     }
@@ -131,6 +134,18 @@ impl FocusManager {
     /// Set the focused/zoomed project ID
     pub fn set_focused_project_id(&mut self, id: Option<String>) {
         self.focused_project_id = id;
+        self.focus_project_individual = false;
+    }
+
+    /// Set the focused project ID with individual mode (show only this project, not worktree children)
+    pub fn set_focused_project_id_individual(&mut self, id: Option<String>) {
+        self.focused_project_id = id;
+        self.focus_project_individual = true;
+    }
+
+    /// Whether focus is in individual mode (don't expand worktree children)
+    pub fn is_focus_individual(&self) -> bool {
+        self.focus_project_individual
     }
 
     // --- Fullscreen state queries ---

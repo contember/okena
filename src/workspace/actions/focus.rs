@@ -31,6 +31,25 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Set focused project in individual mode (show only this project, not its worktree children).
+    /// Used when clicking a "main worktree" entry in the sidebar.
+    pub fn set_focused_project_individual(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        self.focus_manager.clear_fullscreen_without_restore();
+        self.focus_manager.set_focused_project_id_individual(project_id.clone());
+
+        if let Some(ref pid) = project_id {
+            if let Some(project) = self.project(pid) {
+                if let Some(ref layout) = project.layout {
+                    if let Some(first_path) = Self::find_first_terminal_path(layout) {
+                        self.focus_manager.focus_terminal(pid.clone(), first_path);
+                    }
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
     /// Find the path to the first terminal in a layout tree
     fn find_first_terminal_path(node: &crate::workspace::state::LayoutNode) -> Option<Vec<usize>> {
         use crate::workspace::state::LayoutNode;
