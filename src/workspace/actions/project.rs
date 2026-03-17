@@ -22,6 +22,14 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
+    /// Toggle visibility for a single worktree (no propagation to children)
+    pub fn toggle_worktree_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            project.show_in_overview = !project.show_in_overview;
+            true
+        });
+    }
+
     /// Toggle project overview visibility (also toggles all worktree children)
     pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let new_visible = self.project(project_id).map(|p| !p.show_in_overview);
