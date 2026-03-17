@@ -174,23 +174,33 @@ impl TerminalContent {
         });
     }
 
-    /// Convert pixel position to cell coordinates.
-    fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32)> {
+    /// Padding between the outer element bounds and the terminal grid.
+    const TERMINAL_PADDING: f32 = 4.0;
+
+    /// Convert pixel position to cell coordinates and which side of the cell the cursor is on.
+    fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
         let bounds = self.element_bounds?;
         let terminal = self.terminal.as_ref()?;
         let (cell_width, cell_height) = terminal.cell_dimensions();
 
-        let x = (f32::from(pos.x) - f32::from(bounds.origin.x)).max(0.0);
-        let y = (f32::from(pos.y) - f32::from(bounds.origin.y)).max(0.0);
+        let x = (f32::from(pos.x) - f32::from(bounds.origin.x) - Self::TERMINAL_PADDING).max(0.0);
+        let y = (f32::from(pos.y) - f32::from(bounds.origin.y) - Self::TERMINAL_PADDING).max(0.0);
 
-        let col = (x / cell_width).floor() as usize;
+        let col_exact = x / cell_width;
+        let col = col_exact.floor() as usize;
         let row = (y / cell_height).floor() as i32;
 
         let size = terminal.resize_state.lock();
         let col = col.min(size.size.cols.saturating_sub(1) as usize);
         let row = row.min(size.size.rows.saturating_sub(1) as i32);
 
-        Some((col, row))
+        let side = if col_exact.fract() < 0.5 {
+            alacritty_terminal::index::Side::Left
+        } else {
+            alacritty_terminal::index::Side::Right
+        };
+
+        Some((col, row, side))
     }
 
     /// Convert pixel to cell without bounds check.
@@ -214,7 +224,7 @@ impl TerminalContent {
         window.focus(&self.focus_handle, cx);
 
         if let Some(ref terminal) = self.terminal {
-            if let Some((col, row)) = self.pixel_to_cell(event.position) {
+            if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
                 // Check for Cmd+Click (macOS) / Ctrl+Click (Linux/Windows) on URL or file path
                 if event.modifiers.platform || event.modifiers.control {
                     if let Some(url_match) = self.url_detector.find_at(col, row) {
@@ -266,7 +276,7 @@ impl TerminalContent {
                         self.is_selecting = false;
                     }
                     _ => {
-                        terminal.start_selection(col, row);
+                        terminal.start_selection(col, row, side);
                         self.is_selecting = true;
                     }
                 }
@@ -278,7 +288,7 @@ impl TerminalContent {
     /// Handle mouse move.
     fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         // Update URL hover state
-        if let Some((col, row)) = self.pixel_to_cell(event.position) {
+        if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
             if self.url_detector.update_hover(col, row) {
                 cx.notify();
             }
@@ -305,8 +315,8 @@ impl TerminalContent {
             }
 
             if let Some(ref terminal) = self.terminal {
-                if let Some((col, row)) = self.pixel_to_cell(event.position) {
-                    terminal.update_selection(col, row);
+                if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
+                    terminal.update_selection(col, row, side);
                     cx.notify();
                 }
             }
@@ -437,7 +447,7 @@ impl Render for TerminalContent {
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
                     // Detect URL at click position for context menu link actions
-                    let link_url = this.pixel_to_cell(event.position).and_then(|(col, row)| {
+                    let link_url = this.pixel_to_cell(event.position).and_then(|(col, row, _side)| {
                         this.url_detector.find_at(col, row)
                             .filter(|m| m.kind == LinkKind::Url)
                             .map(|m| m.url)

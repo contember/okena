@@ -388,8 +388,8 @@ impl Terminal {
         let end_col = cols.saturating_sub(1);
 
         // Use the existing selection infrastructure
-        self.start_selection(start_col, start_row);
-        self.update_selection(end_col, end_row);
+        self.start_selection(start_col, start_row, Side::Left);
+        self.update_selection(end_col, end_row, Side::Right);
         self.end_selection();
     }
 
@@ -532,24 +532,24 @@ impl Terminal {
     }
 
     /// Start selection at a point
-    pub fn start_selection(&self, col: usize, row: i32) {
-        self.start_selection_with_type(col, row, SelectionType::Simple);
+    pub fn start_selection(&self, col: usize, row: i32, side: Side) {
+        self.start_selection_with_type(col, row, SelectionType::Simple, side);
     }
 
     /// Start word (semantic) selection at a point
     pub fn start_word_selection(&self, col: usize, row: i32) {
-        self.start_selection_with_type(col, row, SelectionType::Semantic);
+        self.start_selection_with_type(col, row, SelectionType::Semantic, Side::Left);
     }
 
     /// Start line selection at a point
     pub fn start_line_selection(&self, col: usize, row: i32) {
-        self.start_selection_with_type(col, row, SelectionType::Lines);
+        self.start_selection_with_type(col, row, SelectionType::Lines, Side::Left);
     }
 
     /// Start selection with a specific type
     /// Note: row is the visual row on screen (0 to screen_lines-1)
     /// We convert it to buffer coordinates by accounting for display_offset
-    fn start_selection_with_type(&self, col: usize, row: i32, selection_type: SelectionType) {
+    fn start_selection_with_type(&self, col: usize, row: i32, selection_type: SelectionType, side: Side) {
         let mut term = self.term.lock();
 
         // Convert visual row to buffer row
@@ -564,14 +564,14 @@ impl Terminal {
 
         // Set selection in the terminal using buffer coordinates
         let point = Point::new(Line(buffer_row), Column(col));
-        let selection = Selection::new(selection_type, point, Side::Left);
+        let selection = Selection::new(selection_type, point, side);
         term.selection = Some(selection);
     }
 
     /// Update selection to a new point
     /// Note: row is the visual row on screen (0 to screen_lines-1)
     /// We convert it to buffer coordinates by accounting for display_offset
-    pub fn update_selection(&self, col: usize, row: i32) {
+    pub fn update_selection(&self, col: usize, row: i32, side: Side) {
         let mut state = self.selection_state.lock();
         if state.is_selecting {
             // Update terminal selection
@@ -585,7 +585,7 @@ impl Terminal {
 
             if let Some(ref mut selection) = term.selection {
                 let point = Point::new(Line(buffer_row), Column(col));
-                selection.update(point, Side::Right);
+                selection.update(point, side);
             }
         }
     }
