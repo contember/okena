@@ -631,11 +631,13 @@ impl Okena {
         let global_hooks = crate::settings::settings(cx).hooks;
         let monitor = crate::workspace::hooks::try_monitor(cx);
         let runner = crate::workspace::hooks::try_runner(cx);
-        self.terminals.lock().remove(tid);
-
-        // Clean up any other persisted hook terminals from the deleted project
-        for hook_tid in &remaining_hook_tids {
-            self.terminals.lock().remove(hook_tid);
+        // Clean up primary and any other persisted hook terminals in a single lock
+        {
+            let mut guard = self.terminals.lock();
+            guard.remove(tid);
+            for hook_tid in &remaining_hook_tids {
+                guard.remove(hook_tid);
+            }
         }
 
         // Fire lifecycle hooks

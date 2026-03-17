@@ -204,6 +204,16 @@ impl Sidebar {
         self.terminal_click_detector.check(terminal_id.to_string())
     }
 
+    /// Whether a project row should show its children (layout or worktrees).
+    /// Worktree parents use negative-sense (collapsed set), others use positive-sense (expanded set).
+    pub(super) fn is_project_expanded(&self, project_id: &str, has_worktrees: bool) -> bool {
+        if has_worktrees {
+            !self.collapsed_worktrees.contains(project_id)
+        } else {
+            self.expanded_projects.contains(project_id)
+        }
+    }
+
     fn toggle_expanded(&mut self, project_id: &str) {
         if self.expanded_projects.contains(project_id) {
             self.expanded_projects.remove(project_id);

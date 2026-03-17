@@ -261,11 +261,7 @@ impl Sidebar {
     ) -> impl IntoElement {
         let t = theme(cx);
         let has_worktrees = project.worktree_count > 0;
-        let is_expanded = if has_worktrees {
-            !self.collapsed_worktrees.contains(&project.id)
-        } else {
-            self.expanded_projects.contains(&project.id)
-        };
+        let is_expanded = self.is_project_expanded(&project.id, has_worktrees);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let folder_id = folder_id.to_string();

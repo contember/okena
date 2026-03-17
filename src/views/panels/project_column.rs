@@ -636,13 +636,7 @@ impl ProjectColumn {
                     .when(!is_worktree, |d| {
                         let pr_info = status.pr_info.clone();
                         let (icon_path, icon_color) = if let Some(ref pr) = pr_info {
-                            let color = match &pr.state {
-                                git::PrState::Open => t.term_green,
-                                git::PrState::Draft => t.text_muted,
-                                git::PrState::Merged => t.term_magenta,
-                                git::PrState::Closed => t.term_red,
-                            };
-                            ("icons/git-pull-request.svg", color)
+                            ("icons/git-pull-request.svg", pr.state.color(&t))
                         } else {
                             ("icons/git-branch.svg", t.text_muted)
                         };
@@ -838,19 +832,7 @@ impl ProjectColumn {
                         let pr_info = git_status.as_ref().and_then(|s| s.pr_info.clone());
 
                         let (icon_path, icon_color, tooltip_text) = if let Some(ref pr) = pr_info {
-                            let color = match &pr.state {
-                                git::PrState::Open => t.term_green,
-                                git::PrState::Draft => t.text_muted,
-                                git::PrState::Merged => t.term_magenta,
-                                git::PrState::Closed => t.term_red,
-                            };
-                            let label = match &pr.state {
-                                git::PrState::Open => "Open",
-                                git::PrState::Draft => "Draft",
-                                git::PrState::Merged => "Merged",
-                                git::PrState::Closed => "Closed",
-                            };
-                            ("icons/git-pull-request.svg", color, format!("Pull Request ({})", label))
+                            ("icons/git-pull-request.svg", pr.state.color(&t), format!("Pull Request ({})", pr.state.label()))
                         } else {
                             ("icons/git-branch.svg", t.text_muted, branch.clone())
                         };

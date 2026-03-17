@@ -39,6 +39,28 @@ pub enum PrState {
     Draft,
 }
 
+impl PrState {
+    /// Theme color for this PR state
+    pub fn color(&self, t: &crate::theme::ThemeColors) -> u32 {
+        match self {
+            PrState::Open => t.term_green,
+            PrState::Draft => t.text_muted,
+            PrState::Merged => t.term_magenta,
+            PrState::Closed => t.term_red,
+        }
+    }
+
+    /// Display label for this PR state
+    pub fn label(&self) -> &'static str {
+        match self {
+            PrState::Open => "Open",
+            PrState::Draft => "Draft",
+            PrState::Merged => "Merged",
+            PrState::Closed => "Closed",
+        }
+    }
+}
+
 /// Pull request info
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrInfo {
