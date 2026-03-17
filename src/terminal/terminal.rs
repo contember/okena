@@ -864,6 +864,16 @@ impl Terminal {
             let last_col = Column(cols - 1);
             let display_offset = grid.display_offset() as i32;
 
+            // Helper: read a visual row from the grid as a String.
+            let read_row = |vrow: i32| -> String {
+                let buf = vrow - display_offset;
+                let mut s = String::with_capacity(cols);
+                for c in 0..cols {
+                    s.push(grid[Point::new(Line(buf), Column(c))].c);
+                }
+                s
+            };
+
             // Iterate over visual rows (0..screen_lines).
             // When scrolled, visual row 0 maps to buffer line (0 - display_offset).
             let mut visual_row = 0i32;
@@ -871,22 +881,10 @@ impl Terminal {
                 let mut combined_text = String::new();
                 // (visual_row, offset_in_combined, leading_spaces_stripped)
                 let mut row_offsets: Vec<(i32, usize, usize)> = Vec::new();
-                // Leading spaces of the first row in this group — used to
-                // distinguish TUI padding from real indentation on
-                // continuation lines.
-                let mut first_row_leading: usize = 0;
 
                 // Collect wrapped lines into one logical line
                 loop {
-                    // Buffer line accounts for scroll offset
-                    let buffer_line = visual_row - display_offset;
-
-                    let mut row_text = String::with_capacity(cols);
-                    for col in 0..cols {
-                        let cell_point = Point::new(Line(buffer_line), Column(col));
-                        let cell = &grid[cell_point];
-                        row_text.push(cell.c);
-                    }
+                    let row_text = read_row(visual_row);
 
                     // Trim trailing spaces — URLs/paths never end with spaces,
                     // and this allows the regex to match across padded line breaks.
@@ -894,7 +892,6 @@ impl Terminal {
 
                     // For continuation rows, also strip leading spaces (TUI padding)
                     let (text_to_add, leading_stripped) = if combined_text.is_empty() {
-                        first_row_leading = rtrimmed.len() - rtrimmed.trim_start_matches(' ').len();
                         (rtrimmed, 0usize)
                     } else {
                         let ltrimmed = rtrimmed.trim_start_matches(' ');
@@ -904,82 +901,15 @@ impl Terminal {
                     row_offsets.push((visual_row, combined_text.len(), leading_stripped));
                     combined_text.push_str(text_to_add);
 
+                    let buffer_line = visual_row - display_offset;
                     let last_cell = &grid[Point::new(Line(buffer_line), last_col)];
                     let has_wrapline_flag = last_cell.flags.contains(Flags::WRAPLINE);
 
-                    // Visual wrap detection for TUI-managed line breaks (no
-                    // WRAPLINE flag).  Merge the next row as a URL continuation
-                    // only when:
-                    //  0. current row fills to (or near) the terminal edge,
-                    //  1. current row ends with a URL-compatible char,
-                    //  2. next row's content starts with a URL-compatible char,
-                    //  3. next row doesn't begin a new URL scheme,
-                    //  4. next row isn't indented further than the first row,
-                    //  5. next row's content contains no spaces (URLs can't
-                    //     have spaces — if there are spaces it's regular text),
-                    //  6. next row's content doesn't end with ':' (label pattern).
-                    let next_visual = visual_row + 1;
-                    let visual_wrap = if !has_wrapline_flag && next_visual < screen_lines {
-                        // Visual wrapping only makes sense when the current
-                        // row fills to (or near) the terminal's right edge.
-                        // If there is significant trailing whitespace the
-                        // content is not wrapping.
-                        let content_len = rtrimmed.chars().count();
-                        if content_len + 3 < cols {
-                            false
-                        } else if !rtrimmed.chars().last().map_or(false, |c| url_char(c)) {
-                            false
-                        } else {
-                            let next_buffer = next_visual - display_offset;
-                            let mut next_row_text = String::with_capacity(cols);
-                            for col_idx in 0..cols {
-                                let cell = &grid[Point::new(Line(next_buffer), Column(col_idx))];
-                                next_row_text.push(cell.c);
-                            }
-                            let next_rtrimmed = next_row_text.trim_end();
-                            let next_content = next_rtrimmed.trim_start();
-                            let next_leading_spaces = next_rtrimmed.len() - next_content.len();
-
-                            if next_content.is_empty()
-                                || !url_char(next_content.chars().next().unwrap())
-                            {
-                                false
-                            } else if next_content.starts_with("http://")
-                                || next_content.starts_with("https://")
-                                || next_content.starts_with("ftp://")
-                                || next_content.starts_with("file://")
-                                || next_content.starts_with("ssh://")
-                                || next_content.starts_with("git://")
-                            {
-                                // New URL scheme — independent URL, not a
-                                // continuation.
-                                false
-                            } else if next_leading_spaces > first_row_leading {
-                                // Next line is indented further than the first
-                                // line of this group — the extra spaces are real
-                                // content (e.g. sub-item indentation), not TUI
-                                // padding for a wrapped URL.
-                                false
-                            } else if next_content.contains(' ') {
-                                // URLs cannot contain spaces.  If the trimmed
-                                // content has an internal space it's regular
-                                // text, not a URL continuation.
-                                false
-                            } else if next_content.ends_with(':') {
-                                // Label-like suffix (e.g. "remote:", "error:")
-                                // — not a URL continuation.
-                                false
-                            } else {
-                                true
-                            }
-                        }
-                    } else {
-                        false
-                    };
-
                     visual_row += 1;
 
-                    if !(has_wrapline_flag || visual_wrap) || visual_row >= screen_lines {
+                    // Only merge via terminal WRAPLINE flag.  TUI-managed
+                    // wrapping (no WRAPLINE) is handled in Phase 2 below.
+                    if !has_wrapline_flag || visual_row >= screen_lines {
                         break;
                     }
                 }
@@ -1042,6 +972,230 @@ impl Terminal {
                         }
                     }
                 }
+            }
+
+            // ── Phase 2: Extend URL matches at TUI-wrapped row boundaries ──
+            //
+            // Phase 1 only merges rows with the terminal WRAPLINE flag.  TUI
+            // applications manage their own wrapping (no WRAPLINE), so a long
+            // URL may be split across visual rows with only the first fragment
+            // matched by the regex.
+            //
+            // Approach inspired by Kitty: for each URL that reaches the end of
+            // visible content, strip leading whitespace from the next row and
+            // consume URL-compatible chars.  No attempt to reverse-engineer TUI
+            // decoration via common-prefix detection (too fragile).
+            //
+            // Guards against false positives:
+            //  - URL must not start at col 0 (terminal would set WRAPLINE)
+            //  - No alphabetic text before/after the URL (prose context)
+            //  - Continuation must have alphanumeric chars (not just punctuation)
+            //  - "Weak" continuations (no `/`) rejected if content has spaces
+            //  - Continuation containing `://` means a new URL, not extension
+
+            let phase1_len = matches.len();
+            let mut idx = 0;
+            while idx < phase1_len {
+                let group = matches[idx].wrap_group;
+
+                // Advance to the last segment of this wrap_group.
+                let mut last_idx = idx;
+                while last_idx + 1 < phase1_len
+                    && matches[last_idx + 1].wrap_group == group
+                {
+                    last_idx += 1;
+                }
+                let next_idx = last_idx + 1;
+
+                // Only extend URL matches (not file paths).
+                if !matches[last_idx].is_url {
+                    idx = next_idx;
+                    continue;
+                }
+
+                // URL must start after col 0 — if the URL occupies the full
+                // line without WRAPLINE, the lines are independent (the
+                // terminal would have set WRAPLINE for a genuine wrap).
+                let url_start_col = matches[idx].col;
+                if url_start_col == 0 {
+                    idx = next_idx;
+                    continue;
+                }
+
+                // Skip rows with WRAPLINE (already handled by Phase 1).
+                let m_line = matches[last_idx].line;
+                let m_col = matches[last_idx].col;
+                let m_len = matches[last_idx].len;
+                let match_buf_line = m_line - display_offset;
+                let match_last_cell =
+                    &grid[Point::new(Line(match_buf_line), last_col)];
+                if match_last_cell.flags.contains(Flags::WRAPLINE) {
+                    idx = next_idx;
+                    continue;
+                }
+
+                let match_row_text = read_row(m_line);
+                let match_rtrimmed = match_row_text.trim_end();
+
+                // URL must reach near the end of visible content.
+                // TUIs may use a narrower layout than the terminal width.
+                let trimmed_char_len = match_rtrimmed.chars().count();
+                if m_col + m_len + 3 < trimmed_char_len {
+                    idx = next_idx;
+                    continue;
+                }
+
+                // No alphabetic text after the URL (prose context).
+                let url_end_pos = m_col + m_len;
+                let suffix_byte = match_rtrimmed
+                    .char_indices()
+                    .nth(url_end_pos)
+                    .map_or(match_rtrimmed.len(), |(b, _)| b);
+                if match_rtrimmed[suffix_byte..]
+                    .chars()
+                    .any(|c| c.is_alphabetic())
+                {
+                    idx = next_idx;
+                    continue;
+                }
+
+                // ── Extension loop ──
+                let mut extended_url = matches[last_idx].text.clone();
+                let mut current_row = m_line;
+
+                loop {
+                    let next_row = current_row + 1;
+                    if next_row >= screen_lines {
+                        break;
+                    }
+
+                    let next_row_text = read_row(next_row);
+                    let next_rtrimmed = next_row_text.trim_end();
+
+                    // Strip leading whitespace (TUI indentation).
+                    let content = next_rtrimmed.trim_start_matches(' ');
+                    let indent = next_rtrimmed.len() - content.len();
+
+                    if content.is_empty() {
+                        break;
+                    }
+
+                    // Don't extend into a new URL scheme.
+                    if content.starts_with("http://")
+                        || content.starts_with("https://")
+                        || content.starts_with("ftp://")
+                        || content.starts_with("file://")
+                        || content.starts_with("ssh://")
+                        || content.starts_with("git://")
+                    {
+                        break;
+                    }
+
+                    // Take URL-compatible chars as extension.
+                    let ext_char_len = content
+                        .chars()
+                        .take_while(|c| url_char(*c))
+                        .count();
+                    if ext_char_len == 0 {
+                        break;
+                    }
+                    let ext_byte_len = content
+                        .char_indices()
+                        .nth(ext_char_len)
+                        .map_or(content.len(), |(b, _)| b);
+                    let ext_raw = &content[..ext_byte_len];
+
+                    // Trim the FULL combined URL, not just the fragment,
+                    // so balanced parens spanning the line break are
+                    // handled correctly (e.g. `Rust_(pr` + `ogramming_language)`).
+                    let candidate = format!("{}{}", extended_url, ext_raw);
+                    let trimmed_full = trim_url_trailing(&candidate);
+                    if trimmed_full.len() <= extended_url.len() {
+                        break;
+                    }
+                    let ext_trimmed = &trimmed_full[extended_url.len()..];
+
+                    // Must contain at least one alphanumeric character.
+                    if !ext_trimmed.chars().any(|c| c.is_alphanumeric()) {
+                        break;
+                    }
+
+                    // Pure alphabetic words (e.g. "remote", "next",
+                    // "Press") are not URL continuations — URL path
+                    // fragments always contain non-alpha chars (digits,
+                    // `/`, `-`, `_`, `.`, etc.).
+                    if ext_trimmed.chars().all(|c| c.is_alphabetic()) {
+                        break;
+                    }
+
+                    // Remaining content has a URL scheme → new item.
+                    let remaining = &content[ext_byte_len..];
+                    if remaining.contains("://") {
+                        break;
+                    }
+
+                    // "Weak" extension (no path separator `/`): only
+                    // accept when the full content has no spaces.
+                    // URLs never contain spaces; spaces mean prose.
+                    // Exception: tokens with digits (UUIDs, hashes, IDs)
+                    // are almost certainly URL content, not words.
+                    if !ext_trimmed.contains('/')
+                        && !ext_trimmed.chars().any(|c| c.is_ascii_digit())
+                        && content.contains(' ')
+                    {
+                        break;
+                    }
+
+                    // Commit extension.
+                    let ext_trimmed_len = ext_trimmed.len();
+                    let ext_trimmed_chars = ext_trimmed.chars().count();
+                    extended_url.push_str(ext_trimmed);
+
+                    matches.push(DetectedLink {
+                        line: next_row,
+                        col: indent,
+                        len: ext_trimmed_chars,
+                        text: String::new(), // updated below
+                        file_line: None,
+                        file_col: None,
+                        is_url: true,
+                        wrap_group: group,
+                    });
+
+                    // If trim_url_trailing removed characters, the URL
+                    // ended here (e.g. trailing `,`, `.`).
+                    if ext_trimmed_len < ext_raw.len() {
+                        break;
+                    }
+
+                    // Continue only if extension fills to near end of
+                    // visible content on this row.
+                    let next_trimmed_len =
+                        next_rtrimmed.chars().count();
+                    if indent + ext_char_len + 3 < next_trimmed_len {
+                        break;
+                    }
+                    if !remaining.is_empty()
+                        && remaining
+                            .chars()
+                            .any(|c| c.is_alphanumeric())
+                    {
+                        break;
+                    }
+
+                    current_row = next_row;
+                }
+
+                // Update text for all segments (original + extensions).
+                if extended_url != matches[last_idx].text {
+                    for m in matches.iter_mut() {
+                        if m.wrap_group == group {
+                            m.text.clone_from(&extended_url);
+                        }
+                    }
+                }
+
+                idx = next_idx;
             }
         });
 
@@ -1476,20 +1630,21 @@ mod tests {
 
     #[test]
     fn detect_url_wrapped_with_padding() {
-        // TUI writes a URL that fills nearly the whole row, then continues
-        // on next line.  No WRAPLINE flag — the TUI manages wrapping itself.
-        // Row 1: "https://claude.ai/code/sess_ABC" (31 chars) + padding
-        // Row 2: "DEF123" + padding
-        // cols=34 so row 1 is nearly full (31+3 >= 34).
+        // TUI writes a URL with a decoration prefix, URL fills nearly the
+        // whole row, then continues on next line with matching indentation.
+        // No WRAPLINE flag — the TUI manages wrapping itself.
+        // Row 1: "- https://claude.ai/code/sess_ABC" (33 chars)
+        // Row 2: "  DEF123" + padding
+        // cols=36 so row 1 is nearly full (33+3 >= 36).
         let links = detect_urls_in(
-            "https://claude.ai/code/sess_ABC\r\nDEF123\r\n",
-            34,
+            "- https://claude.ai/code/sess_ABC\r\n  DEF123\r\n",
+            36,
         );
         assert_eq!(links.len(), 2, "URL spans two rows: {:?}", links);
         assert_eq!(links[0].text, "https://claude.ai/code/sess_ABCDEF123");
-        assert_eq!(links[0].col, 0);
+        assert_eq!(links[0].col, 2);
         assert_eq!(links[1].text, "https://claude.ai/code/sess_ABCDEF123");
-        assert_eq!(links[1].col, 0);
+        assert_eq!(links[1].col, 2);
         assert_eq!(links[1].line, 1);
     }
 
@@ -1688,5 +1843,143 @@ mod tests {
         );
         assert_eq!(links.len(), 1, "Label-like 'remote:' must not be merged: {:?}", links);
         assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/new/fixes");
+    }
+
+    #[test]
+    fn detect_url_wrapped_with_trailing_text() {
+        // URL wraps across two lines, continuation line has non-URL text after
+        // the URL part (e.g. " — S3 bucket").  The first token of the
+        // continuation contains '/' so it should still be recognised as a URL
+        // continuation.
+        let links = detect_urls_in(
+            "    - #61 https://github.com/contember/npi-infrastru\r\n    cture/pull/61 \u{2014} S3 bucket\r\n",
+            55,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == "https://github.com/contember/npi-infrastructure/pull/61")
+            .collect();
+        assert!(
+            !url_links.is_empty(),
+            "Should detect the full wrapped URL: {:?}",
+            links
+        );
+    }
+
+    #[test]
+    fn detect_url_wrapped_tui_narrow_layout() {
+        // TUI uses a narrower layout than the terminal width.
+        // URL doesn't reach the terminal edge but does reach the end
+        // of the TUI's visible content.  Phase 2 should still extend.
+        // Terminal is 55 cols, but TUI content only uses ~42 cols.
+        let links = detect_urls_in(
+            "\u{2514}  https://github.com/NPI-Cloud/npi-inf\r\n   rastructure/pull/64\r\n",
+            55,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == "https://github.com/NPI-Cloud/npi-infrastructure/pull/64")
+            .collect();
+        assert!(
+            url_links.len() >= 2,
+            "URL should span two rows even when TUI layout is narrower than terminal: {:?}",
+            links
+        );
+    }
+
+    #[test]
+    fn detect_url_not_extended_by_list_marker() {
+        // URL on its own line followed by a list item starting with "- ".
+        // The "-" is a url_char but it's a list marker, not a URL
+        // continuation.  Must not extend.
+        let links = detect_urls_in(
+            "  https://github.com/contember/dotaz/pull/2\r\n  - Format check passes\r\n",
+            55,
+        );
+        assert_eq!(links.len(), 1, "Should not extend into list marker: {:?}", links);
+        assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/2");
+    }
+
+    #[test]
+    fn detect_url_extension_stops_after_trailing_trim() {
+        // URL continuation ends with ")" which gets trimmed.  The "2." on
+        // the following line must NOT be absorbed as another extension.
+        // Simulates prose: "...npi-inf +\nrastructure/pull/65)\n2. https://..."
+        let links = detect_urls_in(
+            "  https://github.com/NPI-Cloud/npi-inf\r\n  rastructure/pull/65)\r\n  2. next item\r\n",
+            42,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text.starts_with("https://github.com/NPI-Cloud/npi-inf"))
+            .collect();
+        // Should have 2 segments (line 0 + line 1), NOT 3
+        assert_eq!(
+            url_links.len(), 2,
+            "Should not extend past trimmed ')' into '2.': {:?}",
+            links
+        );
+        assert_eq!(
+            url_links[0].text,
+            "https://github.com/NPI-Cloud/npi-infrastructure/pull/65"
+        );
+    }
+
+    #[test]
+    fn detect_url_not_extended_into_numbered_list_item() {
+        // Numbered list where each item has a URL.  The `2` from "2. https://..."
+        // must NOT be absorbed as a continuation of the first URL.
+        let links = detect_urls_in(
+            "1. https://github.com/contember/dotaz/pull/2\r\n2. https://github.com/NPI-Cloud/npi-infrastr\r\n   ucture/pull/65\r\n",
+            46,
+        );
+        // First URL should be exactly pull/2, not pull/22
+        let first: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == "https://github.com/contember/dotaz/pull/2")
+            .collect();
+        assert!(
+            !first.is_empty(),
+            "First URL should be pull/2, not absorb '2' from next line: {:?}",
+            links
+        );
+        // Second URL should also be detected
+        let second: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text.contains("npi-infrastructure/pull/65"))
+            .collect();
+        assert!(
+            !second.is_empty(),
+            "Second URL should be detected: {:?}",
+            links
+        );
+    }
+
+    #[test]
+    fn detect_url_not_extended_by_prose_word() {
+        // URL on a dash-list line, next line is also a dash-list item
+        // with prose text.  "next" is a url_char word but must NOT be
+        // absorbed as URL continuation.
+        let links = detect_urls_in(
+            "- https://github.com/contember/dotaz/pull/2\r\n- next item without URL\r\n",
+            46,
+        );
+        assert_eq!(links.len(), 1, "Should not extend into 'next': {:?}", links);
+        assert_eq!(links[0].text, "https://github.com/contember/dotaz/pull/2");
+    }
+
+    #[test]
+    fn detect_url_uuid_continuation_with_trailing_prose() {
+        // URL wraps mid-UUID, continuation line has prose after the UUID
+        // fragment.  The UUID part (digits + hex letters + dashes) must
+        // still be recognised as URL continuation despite spaces in the
+        // line — digits distinguish it from a prose word.
+        let links = detect_urls_in(
+            "  http://localhost:19400/s/1f41d02d-6105-45fb-b3\r\n  b1-4b56ae4d869f \u{2014} take your time.\r\n",
+            50,
+        );
+        let url_links: Vec<&DetectedLink> = links.iter()
+            .filter(|l| l.text == "http://localhost:19400/s/1f41d02d-6105-45fb-b3b1-4b56ae4d869f")
+            .collect();
+        assert!(
+            url_links.len() >= 2,
+            "UUID continuation should be detected across wrapped lines: {:?}",
+            links
+        );
     }
 }
