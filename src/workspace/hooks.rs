@@ -102,9 +102,20 @@ impl HookRunner {
         let cwd = if project_path.is_empty() { "." } else { project_path };
 
         let terminal_id = if keep_alive {
-            // Start a regular interactive shell so the terminal stays alive
-            // after the hook command finishes.
-            self.backend.create_terminal(cwd, None)
+            // Build a shell command that:
+            // 1. Exports env vars (available to the hook and the interactive shell)
+            // 2. Runs the hook command
+            // 3. Execs into the user's default shell so the terminal stays alive
+            // This avoids noisy export echoing and zsh session restore issues.
+            let mut script = String::new();
+            for (k, v) in &safe_env {
+                let escaped_v = v.replace('\'', "'\\''");
+                script.push_str(&format!("export {}='{}'; ", k, escaped_v));
+            }
+            script.push_str(command);
+            script.push_str("; exec \"${SHELL:-sh}\"");
+            let shell = ShellType::for_command(script);
+            self.backend.create_terminal(cwd, Some(&shell))
         } else {
             // Use sh -c so the PTY exits when the command completes.
             let shell = ShellType::for_command(full_cmd.clone());
@@ -119,20 +130,6 @@ impl HookRunner {
             cwd.to_string(),
         ));
         self.terminals.lock().insert(terminal_id.clone(), terminal);
-
-        if keep_alive {
-            // Export env vars silently, then run just the user's command.
-            // This avoids echoing the full `KEY='val' KEY2='val2' cmd` line
-            // which is noisy and hard to read.
-            let mut input = String::new();
-            for (k, v) in &safe_env {
-                let escaped_v = v.replace('\'', "'\\''");
-                input.push_str(&format!("export {}='{}'\n", k, escaped_v));
-            }
-            input.push_str(command);
-            input.push('\n');
-            transport.send_input(&terminal_id, input.as_bytes());
-        }
 
         Ok((terminal_id, full_cmd))
     }
