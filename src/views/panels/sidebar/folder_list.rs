@@ -56,6 +56,7 @@ impl Sidebar {
         let is_collapsed = folder.collapsed;
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
+        let is_active_filter = self.workspace.read(cx).active_folder_filter() == Some(&folder.id);
 
         // Folder header row
         div()
@@ -68,7 +69,7 @@ impl Sidebar {
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_focused, |d| d.bg(rgb(t.bg_hover)))
+            .when(is_focused || is_active_filter, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for folder reordering
             .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {
@@ -119,15 +120,8 @@ impl Sidebar {
                 let folder_id = folder_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    // Toggle folder scope: if already scoped to this folder, clear; otherwise set
-                    let current = this.workspace.read(cx).active_folder_filter().cloned();
-                    let next = if current.as_deref() == Some(&folder_id) {
-                        None
-                    } else {
-                        Some(folder_id.clone())
-                    };
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_folder_filter(next, cx);
+                        ws.toggle_folder_focus(&folder_id, cx);
                     });
                 }
             }))
@@ -184,14 +178,8 @@ impl Sidebar {
                                 this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
-                                let current = this.workspace.read(cx).active_folder_filter().cloned();
-                                let next = if current.as_deref() == Some(&folder_id) {
-                                    None
-                                } else {
-                                    Some(folder_id.clone())
-                                };
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.set_folder_filter(next, cx);
+                                    ws.toggle_folder_focus(&folder_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -449,6 +437,28 @@ impl Sidebar {
                 )
             })
             .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
+            // Quick create button — only visible on hover
+            .when(show_quick_create, |d| {
+                d.child(
+                    sidebar_quick_create_button(
+                        ElementId::Name(format!("fp-quick-wt-{}", quick_create_id).into()),
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .group_hover("folder-project-item", |s| s.opacity(1.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener({
+                        let project_id = quick_create_id.clone();
+                        move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.spawn_quick_create_worktree(&project_id, cx);
+                        }
+                    }))
+                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
+            })
             // Eye button — visible on hover, or always when project is hidden
             .child({
                 let show_in_overview = project.show_in_overview;
@@ -471,28 +481,6 @@ impl Sidebar {
                     }
                 }))
                 .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-            })
-            // Quick create button — after eye, only visible on hover
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(
-                        ElementId::Name(format!("fp-quick-wt-{}", quick_create_id).into()),
-                        &t,
-                    )
-                    .opacity(0.0)
-                    .group_hover("folder-project-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.spawn_quick_create_worktree(&project_id, cx);
-                        }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
             })
     }
 }

@@ -184,6 +184,28 @@ impl Sidebar {
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
             })
+            // Quick create button — only visible on hover
+            .when(show_quick_create, |d| {
+                d.child(
+                    sidebar_quick_create_button(
+                        ElementId::Name(format!("quick-wt-{}", quick_create_id).into()),
+                        &t,
+                    )
+                    .opacity(0.0)
+                    .group_hover("project-item", |s| s.opacity(1.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener({
+                        let project_id = quick_create_id.clone();
+                        move |this, _, _window, cx| {
+                            cx.stop_propagation();
+                            this.spawn_quick_create_worktree(&project_id, cx);
+                        }
+                    }))
+                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
+            })
             // Eye button — visible on hover, or always when project is hidden
             .child({
                 let show_in_overview = project.show_in_overview;
@@ -206,28 +228,6 @@ impl Sidebar {
                     }
                 }))
                 .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-            })
-            // Quick create button — after badges, only visible on hover
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(
-                        ElementId::Name(format!("quick-wt-{}", quick_create_id).into()),
-                        &t,
-                    )
-                    .opacity(0.0)
-                    .group_hover("project-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.spawn_quick_create_worktree(&project_id, cx);
-                        }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
             })
     }
 
