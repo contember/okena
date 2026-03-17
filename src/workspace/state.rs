@@ -2833,8 +2833,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
+        let mut p1 = make_project("p1", true);
+        p1.worktree_ids = vec!["w1".to_string()];
+
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), w1, make_project("p2", true)],
+            vec![p1, w1, make_project("p2", true)],
             vec!["f1", "w1", "p2"],
         );
         data.folders = vec![FolderData {
@@ -2868,8 +2871,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
+        let mut p1 = make_project("p1", true);
+        p1.worktree_ids = vec!["w1".to_string()];
+
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", true), w1, make_project("p3", true)],
+            vec![p1, make_project("p2", true), w1, make_project("p3", true)],
             // w1 sits between the two folders in project_order
             vec!["f1", "w1", "f2", "p3"],
         );
@@ -2914,8 +2920,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
+        let mut p2 = make_project("p2", false);
+        p2.worktree_ids = vec!["w1".to_string()];
+
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", false), w1],
+            vec![make_project("p1", true), p2, w1],
             // w1 appears before BOTH folders
             vec!["w1", "f1", "f2"],
         );
@@ -2960,8 +2969,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
+        let mut p1 = make_project("p1", false);
+        p1.worktree_ids = vec!["w1".to_string()];
+
         let mut data = make_workspace_data(
-            vec![make_project("p1", false), make_project("p2", true), w1],
+            vec![p1, make_project("p2", true), w1],
             // w1 before f2 in project_order
             vec!["f1", "w1", "f2"],
         );
@@ -3099,12 +3111,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let ws = Workspace::new(data);
@@ -3125,6 +3139,7 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let other = make_project("other", true);
         let mut data = make_workspace_data(vec![parent, wt1, other], vec!["f1", "other"]);
@@ -3154,12 +3169,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
@@ -3181,12 +3198,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);
@@ -3206,12 +3225,14 @@ mod workspace_tests {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: String::new(),
         });
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: String::new(),
         });
         let data = make_workspace_data(vec![parent, wt1, wt2], vec!["parent"]);
         let mut ws = Workspace::new(data);

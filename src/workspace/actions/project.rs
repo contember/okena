@@ -865,6 +865,7 @@ mod gpui_tests {
             parent_project_id: parent_id.to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
+            branch_name: String::new(),
         });
         p
     }
