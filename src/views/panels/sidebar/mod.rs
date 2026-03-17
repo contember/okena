@@ -1315,7 +1315,7 @@ pub(super) struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
-    fn from_project(project: &ProjectData) -> Self {
+    fn from_project(project: &ProjectData, is_git_repo: bool) -> Self {
         let layout = project.layout.as_ref();
         Self {
             id: project.id.clone(),
@@ -1356,7 +1356,7 @@ impl SidebarProjectInfo {
             is_creating: false,
             parent_folder_color: None,
             path: project.path.clone(),
-            is_git_repo: crate::git::is_git_repo(std::path::Path::new(&project.path)),
+            is_git_repo,
             is_worktree: project.worktree_info.is_some(),
         }
     }
@@ -1372,10 +1372,12 @@ fn build_main_worktree_entry(
     project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
     closing_projects: &HashSet<String>,
     creating_projects: &HashSet<String>,
+    git_repo_map: &HashMap<std::path::PathBuf, bool>,
 ) {
     let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
         .and_then(|s| s.branch);
-    let mut main_wt = SidebarProjectInfo::from_project(project);
+    let is_git = *git_repo_map.get(std::path::Path::new(&project.path)).unwrap_or(&false);
+    let mut main_wt = SidebarProjectInfo::from_project(project, is_git);
     main_wt.name = branch.unwrap_or_else(|| project.name.clone());
     main_wt.parent_folder_color = Some(project.folder_color);
     main_wt.is_closing = closing_projects.contains(&project.id);
@@ -1441,6 +1443,12 @@ impl Render for Sidebar {
             .map(|p| (p.id.as_str(), p))
             .collect();
 
+        // Batch is_git_repo check — single cache lock instead of per-project
+        let project_paths: Vec<&std::path::Path> = workspace.data().projects.iter()
+            .map(|p| std::path::Path::new(&p.path))
+            .collect();
+        let git_repo_map = crate::git::batch_is_git_repo(&project_paths);
+
         // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
         let all_project_ids: HashSet<&str> = workspace.data().projects.iter().map(|p| p.id.as_str()).collect();
@@ -1449,8 +1457,10 @@ impl Render for Sidebar {
                 let children: Vec<SidebarProjectInfo> = parent.worktree_ids.iter()
                     .filter_map(|wt_id| all_projects.get(wt_id.as_str()))
                     .map(|p| {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let is_git = *git_repo_map.get(std::path::Path::new(&p.path)).unwrap_or(&false);
+                        let mut info = SidebarProjectInfo::from_project(p, is_git);
                         info.is_closing = workspace.closing_projects.contains(&p.id);
+                        info.is_creating = workspace.creating_projects.contains(&p.id);
                         // Inherit parent project's color for visual association
                         info.folder_color = parent.folder_color;
                         info
@@ -1516,7 +1526,8 @@ impl Render for Sidebar {
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
                     .map(|p| {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let is_git = *git_repo_map.get(std::path::Path::new(&p.path)).unwrap_or(&false);
+                        let mut info = SidebarProjectInfo::from_project(p, is_git);
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
@@ -1530,7 +1541,7 @@ impl Render for Sidebar {
                     if let Some(mut children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
                         if let Some(&project) = all_projects.get(fp.id.as_str()) {
-                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects);
+                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects, &git_repo_map);
                         }
                         // Parent header eye reflects group state
                         fp.show_in_overview = children.iter().any(|c| c.show_in_overview);
@@ -1559,7 +1570,8 @@ impl Render for Sidebar {
                     }
                 }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
-                let mut project_info = SidebarProjectInfo::from_project(project);
+                let is_git = *git_repo_map.get(std::path::Path::new(&project.path)).unwrap_or(&false);
+                let mut project_info = SidebarProjectInfo::from_project(project, is_git);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
@@ -1568,7 +1580,7 @@ impl Render for Sidebar {
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {
-                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects);
+                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects, &git_repo_map);
                     // Parent header eye reflects group state: visible if any child is visible
                     project_info.show_in_overview = wt_children.iter().any(|c| c.show_in_overview);
                 } else {

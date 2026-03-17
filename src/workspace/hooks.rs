@@ -69,15 +69,23 @@ impl HookRunner {
             .collect();
 
         let full_cmd = if cfg!(windows) {
-            // Escape values for cmd.exe: wrap in double quotes, escape embedded
-            // double quotes and percent signs to prevent command injection.
-            // Note: other cmd.exe special chars (^, &, |, <, >) are NOT escaped
-            // because hook env var values come from controlled sources (project
-            // name, path, branch) and are unlikely to contain them.
+            // Escape all cmd.exe special characters in env var values.
+            // ^ must be escaped first since it's the cmd.exe escape character.
             let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| {
-                    let escaped = v.replace('%', "%%").replace('"', "\\\"");
+                    // Escape all cmd.exe special characters.
+                    // ^ must be first since it's the escape character itself.
+                    let escaped = v
+                        .replace('^', "^^")
+                        .replace('%', "%%")
+                        .replace('"', "\\\"")
+                        .replace('&', "^&")
+                        .replace('|', "^|")
+                        .replace('<', "^<")
+                        .replace('>', "^>")
+                        .replace('(', "^(")
+                        .replace(')', "^)");
                     format!("set \"{}={}\"", k, escaped)
                 })
                 .collect::<Vec<_>>()

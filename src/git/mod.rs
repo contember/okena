@@ -3,7 +3,7 @@ pub mod diff;
 pub(crate) mod repository;
 pub mod watcher;
 
-pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
+pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, batch_is_git_repo, get_file_contents_for_diff};
 pub use repository::{
     create_worktree,
     remove_worktree,

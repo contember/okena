@@ -78,6 +78,9 @@ pub struct WorktreeMetadata {
     /// Path to the git worktree checkout directory (may differ from project path in monorepos)
     #[serde(default)]
     pub worktree_path: String,
+    /// Branch name at worktree creation time (stable even if project is renamed)
+    #[serde(default)]
+    pub branch_name: String,
 }
 
 /// Status of a hook terminal in the service panel.
@@ -2735,12 +2738,14 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: "branch-w2".to_string(),
         });
 
         let data = make_workspace_data(
@@ -2779,12 +2784,14 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
+            branch_name: "branch-w2".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2823,6 +2830,7 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2857,6 +2865,7 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2902,6 +2911,7 @@ mod workspace_tests {
             parent_project_id: "p2".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2947,6 +2957,7 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -2989,6 +3000,7 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let mut data = make_workspace_data(
@@ -3033,6 +3045,7 @@ mod workspace_tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
+            branch_name: "branch-w1".to_string(),
         });
 
         let data = make_workspace_data(

@@ -3,7 +3,11 @@
 //! Provides structures and functions for parsing unified diff output
 //! and executing git diff commands.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use crate::process::{command, safe_output};
 use serde::{Serialize, Deserialize};
@@ -440,25 +444,22 @@ fn create_untracked_file_diff(repo_path: &Path, file_path: &str) -> Option<FileD
     })
 }
 
+// Shared cache for is_git_repo / batch_is_git_repo
+static GIT_REPO_CACHE: Mutex<Option<HashMap<PathBuf, (bool, Instant)>>> = Mutex::new(None);
+const GIT_REPO_TTL: Duration = Duration::from_secs(30);
+const GIT_REPO_MAX_ENTRIES: usize = 256;
+
 /// Check if a path is inside a git repository.
 /// Results are cached for 30 seconds to avoid spawning subprocesses on every render.
 pub fn is_git_repo(path: &Path) -> bool {
-    use parking_lot::Mutex;
-    use std::collections::HashMap;
-    use std::time::{Duration, Instant};
-
-    static CACHE: Mutex<Option<HashMap<PathBuf, (bool, Instant)>>> = Mutex::new(None);
-    const TTL: Duration = Duration::from_secs(30);
-    const MAX_ENTRIES: usize = 256;
-
     let path_buf = path.to_path_buf();
 
     // Check cache first
     {
-        let guard = CACHE.lock();
+        let guard = GIT_REPO_CACHE.lock();
         if let Some(ref cache) = *guard {
             if let Some(&(result, ts)) = cache.get(&path_buf) {
-                if ts.elapsed() < TTL {
+                if ts.elapsed() < GIT_REPO_TTL {
                     return result;
                 }
             }
@@ -478,20 +479,75 @@ pub fn is_git_repo(path: &Path) -> bool {
 
     // Store in cache and evict stale entries
     {
-        let mut guard = CACHE.lock();
+        let mut guard = GIT_REPO_CACHE.lock();
         let cache = guard.get_or_insert_with(HashMap::new);
-        let now = Instant::now();
-        cache.insert(path_buf, (result, now));
-        // Evict entries older than TTL (30s) when above capacity, or 5 minutes otherwise
-        let evict_threshold = if cache.len() > MAX_ENTRIES {
-            TTL
-        } else {
-            Duration::from_secs(300)
-        };
-        cache.retain(|_, (_, ts)| now.duration_since(*ts) < evict_threshold);
+        cache.insert(path_buf, (result, Instant::now()));
+        // Always evict entries older than 5 minutes
+        let max_age = Duration::from_secs(300);
+        cache.retain(|_, (_, ts)| ts.elapsed() < max_age);
+        // Aggressively evict stale entries when above capacity
+        if cache.len() > GIT_REPO_MAX_ENTRIES {
+            cache.retain(|_, (_, ts)| ts.elapsed() < GIT_REPO_TTL);
+        }
     }
 
     result
+}
+
+/// Check multiple paths at once with a single cache lock for reads.
+/// More efficient than calling `is_git_repo` in a loop for many paths.
+pub fn batch_is_git_repo(paths: &[&Path]) -> HashMap<PathBuf, bool> {
+    let mut results = HashMap::with_capacity(paths.len());
+    let mut misses = Vec::new();
+
+    // Single lock to read all cached values
+    {
+        let guard = GIT_REPO_CACHE.lock();
+        if let Some(ref cache) = *guard {
+            for &path in paths {
+                let pb = path.to_path_buf();
+                if let Some(&(result, ts)) = cache.get(&pb) {
+                    if ts.elapsed() < GIT_REPO_TTL {
+                        results.insert(pb, result);
+                        continue;
+                    }
+                }
+                misses.push(pb);
+            }
+        } else {
+            misses.extend(paths.iter().map(|p| p.to_path_buf()));
+        }
+    }
+
+    // Resolve cache misses without holding the lock
+    for pb in &misses {
+        let result = pb.to_str()
+            .map(|s| safe_output(command("git").args(["-C", s, "rev-parse", "--is-inside-work-tree"]))
+                .map(|o| o.status.success())
+                .unwrap_or(false))
+            .unwrap_or(false);
+        results.insert(pb.clone(), result);
+    }
+
+    // Single lock to write all misses back
+    if !misses.is_empty() {
+        let mut guard = GIT_REPO_CACHE.lock();
+        let cache = guard.get_or_insert_with(HashMap::new);
+        let now = Instant::now();
+        for pb in &misses {
+            if let Some(&result) = results.get(pb) {
+                cache.insert(pb.clone(), (result, now));
+            }
+        }
+        // Eviction
+        let max_age = Duration::from_secs(300);
+        cache.retain(|_, (_, ts)| ts.elapsed() < max_age);
+        if cache.len() > GIT_REPO_MAX_ENTRIES {
+            cache.retain(|_, (_, ts)| ts.elapsed() < GIT_REPO_TTL);
+        }
+    }
+
+    results
 }
 
 /// Get the full content of a file from git at a specific revision.

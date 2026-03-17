@@ -258,5 +258,4 @@ mod tests {
             assert!(!good.name.is_empty());
         }
     }
-
 }

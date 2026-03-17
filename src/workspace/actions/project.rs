@@ -420,6 +420,7 @@ impl Workspace {
                 parent_project_id: parent_project_id.to_string(),
                 main_repo_path: repo_path.to_string_lossy().to_string(),
                 worktree_path: worktree_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             folder_color: parent_color,
@@ -467,6 +468,12 @@ impl Workspace {
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
         let path = project.path.clone();
+        // Read branch from metadata (stable), falling back to name for old data
+        let branch = project.worktree_info.as_ref()
+            .map(|wt| &wt.branch_name)
+            .filter(|b| !b.is_empty())
+            .cloned()
+            .unwrap_or_else(|| name.clone());
 
         // If layout is still None (deferred creation), clone it from the parent
         if project.layout.is_none() {
@@ -480,13 +487,12 @@ impl Workspace {
             }
         }
 
-        // project.name is set to the branch name during register_worktree_project
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
             project_id,
             &name,
             &path,
-            &name,
+            &branch,
             cx,
         );
         self.register_hook_results(hook_results, cx);
@@ -525,6 +531,7 @@ impl Workspace {
                 parent_project_id: parent_id.to_string(),
                 main_repo_path: main_repo_path.to_string(),
                 worktree_path: wt_path.to_string(),
+                branch_name: branch.to_string(),
             }),
             worktree_ids: Vec::new(),
             default_shell: None,

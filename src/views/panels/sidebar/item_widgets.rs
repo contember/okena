@@ -7,6 +7,7 @@ use crate::theme::ThemeColors;
 use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
 use gpui::prelude::*;
+use gpui_component::tooltip::Tooltip;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
 ///
@@ -269,4 +270,20 @@ pub fn sidebar_visibility_toggle(
         )
 }
 
-
+/// Visibility toggle button with hover-reveal behavior.
+///
+/// Shows on hover via `group_name`, or always when `show_in_overview` is false.
+/// Caller chains `.on_click()` to handle the toggle action.
+pub fn sidebar_visibility_button(
+    id: impl Into<ElementId>,
+    show_in_overview: bool,
+    group_name: &'static str,
+    tooltip_text: &'static str,
+    t: &ThemeColors,
+) -> Stateful<Div> {
+    sidebar_visibility_toggle(id, show_in_overview, t)
+        .opacity(0.0)
+        .when(!show_in_overview, |d| d.opacity(1.0))
+        .group_hover(group_name, |s| s.opacity(1.0))
+        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+}

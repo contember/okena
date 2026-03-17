@@ -489,6 +489,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
                     parent_project_id: parent_id.clone(),
                     main_repo_path: parent_path.clone(),
                     worktree_path: wt_path_clone,
+                    branch_name: branch.clone(),
                 }),
                 worktree_ids: Vec::new(),
                 default_shell: None,
@@ -939,6 +940,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -963,6 +965,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -992,6 +995,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
+            branch_name: "some-branch".to_string(),
         });
 
         let mut data = make_workspace(
@@ -1096,6 +1100,7 @@ mod tests {
             parent_project_id: "p1".to_string(),
             main_repo_path: repo_path.to_string_lossy().to_string(),
             worktree_path: wt_path.to_string_lossy().to_string(),
+            branch_name: "test-branch".to_string(),
         });
 
         let mut data = make_workspace(

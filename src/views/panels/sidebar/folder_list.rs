@@ -455,18 +455,14 @@ impl Sidebar {
                     .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
                 )
             })
-            // Eye button — visible on hover, or always when project is hidden
-            .child({
-                let show_in_overview = project.show_in_overview;
-                let visibility_tooltip = if show_in_overview { "Hide Project" } else { "Show Project" };
-                sidebar_visibility_toggle(
+            .child(
+                sidebar_visibility_button(
                     ElementId::Name(format!("fp-visibility-{}", project.id).into()),
-                    show_in_overview,
+                    project.show_in_overview,
+                    "folder-project-item",
+                    if project.show_in_overview { "Hide Project" } else { "Show Project" },
                     &t,
                 )
-                .opacity(0.0)
-                .when(!show_in_overview, |d| d.opacity(1.0))
-                .group_hover("folder-project-item", |s| s.opacity(1.0))
                 .on_click(cx.listener({
                     let project_id = project_id.clone();
                     move |this, _, _window, cx| {
@@ -476,7 +472,6 @@ impl Sidebar {
                         cx.stop_propagation();
                     }
                 }))
-                .tooltip(move |_window, cx| Tooltip::new(visibility_tooltip).build(_window, cx))
-            })
+            )
     }
 }
