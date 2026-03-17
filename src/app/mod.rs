@@ -660,20 +660,32 @@ impl Okena {
             );
         }
 
-        // Git worktree remove in the background (fire-and-forget)
+        // Git worktree remove in the background
         let pending_clone = pending.clone();
-        cx.spawn(async move |_this, _cx| {
+        let workspace = self.workspace.clone();
+        if let Some(ref path) = project_path_for_git {
+            workspace.update(cx, |ws, _| {
+                ws.removing_worktree_paths.insert(path.clone());
+            });
+        }
+        cx.spawn(async move |_this, cx| {
             if let Some(path) = project_path_for_git {
                 let main_repo = pending_clone.main_repo_path.clone();
+                let path_clone = path.clone();
                 let result = smol::unblock(move || {
                     crate::git::remove_worktree_fast(
-                        &std::path::PathBuf::from(&path),
+                        &std::path::PathBuf::from(&path_clone),
                         &std::path::PathBuf::from(&main_repo),
                     )
                 }).await;
                 if let Err(e) = result {
                     log::error!("Background worktree remove failed: {}", e);
                 }
+                let _ = cx.update(|cx| {
+                    workspace.update(cx, |ws, _| {
+                        ws.removing_worktree_paths.remove(&path);
+                    });
+                });
             }
         }).detach();
     }

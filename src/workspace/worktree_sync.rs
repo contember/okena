@@ -1,4 +1,4 @@
-use crate::git::list_git_worktrees;
+use crate::git::{list_git_worktrees, list_template_worktrees};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
@@ -26,8 +26,8 @@ impl WorktreeSyncWatcher {
             loop {
                 smol::Timer::after(Duration::from_secs(30)).await;
 
-                // Collect project info from workspace
-                let (parent_projects, current_worktrees, existing_paths) = cx.update(|cx| {
+                // Collect project info from workspace and settings
+                let (parent_projects, current_worktrees, existing_paths, removing_paths, path_template) = cx.update(|cx| {
                     let ws = workspace.read(cx);
                     let parents: Vec<(String, String)> = ws.data().projects.iter()
                         .filter(|p| p.worktree_info.is_none() && !p.is_remote)
@@ -40,22 +40,33 @@ impl WorktreeSyncWatcher {
                     let paths: std::collections::HashSet<String> = ws.data().projects.iter()
                         .map(|p| p.path.clone())
                         .collect();
-                    (parents, worktrees, paths)
+                    let removing = ws.removing_worktree_paths.clone();
+                    let template = crate::settings::settings(cx).worktree.path_template.clone();
+                    (parents, worktrees, paths, removing, template)
                 });
 
                 // Run git worktree discovery on blocking thread
                 let discovered = smol::unblock({
                     let parent_projects = parent_projects.clone();
                     let existing_paths = existing_paths.clone();
+                    let removing_paths = removing_paths.clone();
+                    let path_template = path_template.clone();
                     move || {
-                        // Build canonical existing paths for dedup with git output
+                        // Build canonical sets for dedup with git output
                         let canonical_existing: std::collections::HashSet<String> = existing_paths.iter()
+                            .map(|p| Path::new(p).canonicalize()
+                                .map(|c| c.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| p.clone()))
+                            .collect();
+                        let canonical_removing: std::collections::HashSet<String> = removing_paths.iter()
                             .map(|p| Path::new(p).canonicalize()
                                 .map(|c| c.to_string_lossy().to_string())
                                 .unwrap_or_else(|_| p.clone()))
                             .collect();
 
                         let mut new_worktrees = Vec::new();
+                        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
                         for (parent_id, parent_path) in &parent_projects {
                             if !Path::new(parent_path).exists() {
                                 continue;
@@ -64,15 +75,28 @@ impl WorktreeSyncWatcher {
                                 .canonicalize()
                                 .map(|c| c.to_string_lossy().to_string())
                                 .unwrap_or_else(|_| parent_path.clone());
-                            let worktrees = list_git_worktrees(Path::new(parent_path));
-                            for (wt_path, branch) in worktrees {
+
+                            // Discover from git worktree list + template directory scan
+                            let git_root = crate::git::get_repo_root(Path::new(parent_path))
+                                .unwrap_or_else(|| parent_path.into());
+                            let mut candidates = list_git_worktrees(Path::new(parent_path));
+                            candidates.extend(list_template_worktrees(&git_root, &path_template));
+
+                            for (wt_path, branch) in candidates {
                                 if wt_path == *parent_path || wt_path == canonical_parent {
                                     continue;
                                 }
                                 if existing_paths.contains(&wt_path) || canonical_existing.contains(&wt_path) {
                                     continue;
                                 }
+                                if removing_paths.contains(&wt_path) || canonical_removing.contains(&wt_path) {
+                                    continue;
+                                }
                                 if !Path::new(&wt_path).exists() {
+                                    continue;
+                                }
+                                // Dedup across git list and template scan
+                                if !seen_paths.insert(wt_path.clone()) {
                                     continue;
                                 }
                                 new_worktrees.push((parent_id.clone(), parent_path.clone(), wt_path, branch));

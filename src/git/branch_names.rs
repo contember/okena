@@ -96,19 +96,9 @@ fn detect_github_username(repo_path: &Path) -> String {
 }
 
 fn detect_github_username_inner(repo_path: &Path) -> String {
-    // Tier 1: parse git remote URL (fast, no network call)
-    if let Some(path_str) = repo_path.to_str() {
-        if let Ok(output) = safe_output(command("git").args(["-C", path_str, "remote", "get-url", "origin"])) {
-            if output.status.success() {
-                let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if let Some(username) = parse_github_username_from_remote(&url) {
-                    return sanitize_username(&username);
-                }
-            }
-        }
-    }
-
-    // Tier 2: gh api user (requires network, may be slow)
+    // Tier 1: gh api user — returns the authenticated user's login,
+    // which is correct even when the remote is owned by an org.
+    // Result is cached so the network call only happens once.
     if let Ok(output) = safe_output(command("gh").args(["api", "user", "--jq", ".login"])) {
         if output.status.success() {
             let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -118,7 +108,7 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
         }
     }
 
-    // Tier 3: git config user.name
+    // Tier 2: git config user.name
     if let Some(path_str) = repo_path.to_str() {
         if let Ok(output) = safe_output(command("git").args(["-C", path_str, "config", "user.name"])) {
             if output.status.success() {
@@ -132,27 +122,6 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
 
     // Tier 4: fallback
     "dev".to_string()
-}
-
-fn parse_github_username_from_remote(url: &str) -> Option<String> {
-    // SSH: git@github.com:user/repo.git
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
-        let user = rest.split('/').next()?;
-        if !user.is_empty() {
-            return Some(user.to_string());
-        }
-    }
-    // HTTPS: https://github.com/user/repo.git or http://github.com/user/repo.git
-    for prefix in &["https://github.com/", "http://github.com/"] {
-        if let Some(rest) = url.strip_prefix(prefix) {
-            if let Some(user) = rest.split('/').next() {
-                if !user.is_empty() {
-                    return Some(user.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 fn sanitize_username(name: &str) -> String {
@@ -241,30 +210,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_github_username_ssh() {
-        assert_eq!(
-            parse_github_username_from_remote("git@github.com:user/repo.git"),
-            Some("user".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_github_username_https() {
-        assert_eq!(
-            parse_github_username_from_remote("https://github.com/user/repo.git"),
-            Some("user".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_github_username_no_github() {
-        assert_eq!(
-            parse_github_username_from_remote("git@gitlab.com:user/repo.git"),
-            None
-        );
-    }
-
-    #[test]
     fn test_adjective_gender_agreement() {
         let m_good = BakedGood { name: "rohlik", gender: Gender::Masculine };
         let f_good = BakedGood { name: "houska", gender: Gender::Feminine };
@@ -296,11 +241,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_github_username_https_no_extension() {
-        assert_eq!(
-            parse_github_username_from_remote("https://github.com/myorg/myrepo"),
-            Some("myorg".to_string())
-        );
-    }
 }

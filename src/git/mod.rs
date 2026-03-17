@@ -9,6 +9,7 @@ pub use repository::{
     remove_worktree,
     remove_worktree_fast,
     list_git_worktrees,
+    list_template_worktrees,
     get_available_branches_for_worktree,
     get_repo_root,
     has_uncommitted_changes,

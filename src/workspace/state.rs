@@ -81,7 +81,7 @@ pub struct WorktreeMetadata {
 }
 
 /// Status of a hook terminal in the service panel.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HookTerminalStatus {
     Running,
     Succeeded,
@@ -89,7 +89,7 @@ pub enum HookTerminalStatus {
 }
 
 /// Entry for a hook terminal displayed in the service panel.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookTerminalEntry {
     pub label: String,
     pub status: HookTerminalStatus,
@@ -159,8 +159,8 @@ pub struct ProjectData {
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<crate::terminal::shell_config::ShellType>,
-    /// Hook terminals currently displayed in the service panel (transient, not persisted)
-    #[serde(skip)]
+    /// Hook terminals displayed in the service panel (persisted across restarts)
+    #[serde(default)]
     pub hook_terminals: HashMap<String, HookTerminalEntry>,
 }
 
@@ -294,6 +294,10 @@ pub struct Workspace {
     /// Project IDs currently being closed (hook running or git worktree remove in progress).
     /// Used by the sidebar to show a visual "closing" indicator.
     pub closing_projects: HashSet<String>,
+    /// Worktree paths currently being removed in the background.
+    /// The sync watcher skips these to avoid re-adding a worktree
+    /// whose directory hasn't been fully deleted yet.
+    pub removing_worktree_paths: HashSet<String>,
 }
 
 impl Workspace {
@@ -307,6 +311,7 @@ impl Workspace {
             pending_remote_focus: HashSet::new(),
             pending_worktree_closes: HashMap::new(),
             closing_projects: HashSet::new(),
+            removing_worktree_paths: HashSet::new(),
         }
     }
 
@@ -447,9 +452,7 @@ impl Workspace {
             // Set the terminal name to the hook label
             project.terminal_names.insert(terminal_id.to_string(), label);
 
-            // Use cx.notify() instead of notify_data() — hook terminals are transient
-            // and should not trigger a workspace save to disk.
-            cx.notify();
+            self.notify_data(cx);
         }
     }
 
@@ -507,9 +510,7 @@ impl Workspace {
                     }
                 }
                 project.terminal_names.remove(terminal_id);
-                // Use cx.notify() instead of notify_data() — hook terminals are transient
-                // and should not trigger a workspace save to disk.
-                cx.notify();
+                self.notify_data(cx);
                 return;
             }
         }
@@ -560,7 +561,7 @@ impl Workspace {
             project.terminal_names.insert(new_id.to_string(), name);
         }
 
-        cx.notify();
+        self.notify_data(cx);
     }
 
     /// Register a pending worktree close that will execute when the hook terminal exits.
@@ -1014,15 +1015,25 @@ impl LayoutNode {
     /// Clear all terminal IDs in this layout tree (used on app restart)
     /// Also resets minimized and detached state since terminals need to be created first
     pub fn clear_terminal_ids(&mut self) {
+        self.clear_terminal_ids_except(&HashSet::new());
+    }
+
+    /// Clear terminal IDs except those in the `keep` set (e.g. hook terminals).
+    /// Kept terminals preserve their ID, minimized, and detached state.
+    pub fn clear_terminal_ids_except(&mut self, keep: &HashSet<&str>) {
         match self {
             LayoutNode::Terminal { terminal_id, minimized, detached, .. } => {
-                *terminal_id = None;
-                *minimized = false;
-                *detached = false;
+                let should_keep = terminal_id.as_deref()
+                    .map_or(false, |id| keep.contains(id));
+                if !should_keep {
+                    *terminal_id = None;
+                    *minimized = false;
+                    *detached = false;
+                }
             }
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
                 for child in children {
-                    child.clear_terminal_ids();
+                    child.clear_terminal_ids_except(keep);
                 }
             }
         }

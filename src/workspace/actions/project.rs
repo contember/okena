@@ -452,7 +452,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: wt_path.to_string(),
-            show_in_overview: true,
+            show_in_overview: false,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
