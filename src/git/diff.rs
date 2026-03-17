@@ -482,7 +482,7 @@ pub fn is_git_repo(path: &Path) -> bool {
         let cache = guard.get_or_insert_with(HashMap::new);
         let now = Instant::now();
         cache.insert(path_buf, (result, now));
-        // Evict entries older than 5 minutes, or all stale entries if at capacity
+        // Evict entries older than TTL (30s) when above capacity, or 5 minutes otherwise
         let evict_threshold = if cache.len() > MAX_ENTRIES {
             TTL
         } else {

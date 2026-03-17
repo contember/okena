@@ -120,7 +120,7 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
         }
     }
 
-    // Tier 4: fallback
+    // Tier 3: fallback
     "dev".to_string()
 }
 
@@ -134,6 +134,9 @@ fn sanitize_username(name: &str) -> String {
 
 /// Generate a unique branch name like `username/rohlik` that doesn't collide
 /// with existing branches or worktree branches.
+///
+/// **Blocking I/O**: spawns git/gh subprocesses. Must be called off the main
+/// thread (e.g., via `smol::unblock`).
 pub fn generate_branch_name(repo_path: &Path) -> String {
     // Run username detection and branch listing in parallel —
     // they spawn independent subprocesses.
@@ -187,8 +190,15 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
 }
 
 fn collect_taken_branches(repo_path: &Path) -> HashSet<String> {
-    let mut taken: HashSet<String> = super::repository::list_branches(repo_path).into_iter().collect();
-    taken.extend(super::repository::get_worktree_branches(repo_path));
+    // list_branches and get_worktree_branches are independent git commands —
+    // run them in parallel to halve the latency.
+    let (branches, wt_branches) = std::thread::scope(|s| {
+        let b = s.spawn(|| super::repository::list_branches(repo_path));
+        let w = s.spawn(|| super::repository::get_worktree_branches(repo_path));
+        (b.join().unwrap(), w.join().unwrap())
+    });
+    let mut taken: HashSet<String> = branches.into_iter().collect();
+    taken.extend(wt_branches);
     taken
 }
 
@@ -199,6 +209,9 @@ fn shuffle(indices: &mut [usize]) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(42);
+    // Mix in the process ID so that two calls in the same nanosecond (e.g. in
+    // parallel tests) are unlikely to produce the same permutation.
+    let seed = seed.wrapping_add(std::process::id() as u64);
     let mut rng = seed;
     for i in (1..indices.len()).rev() {
         // Simple xorshift64

@@ -71,6 +71,9 @@ impl HookRunner {
         let full_cmd = if cfg!(windows) {
             // Escape values for cmd.exe: wrap in double quotes, escape embedded
             // double quotes and percent signs to prevent command injection.
+            // Note: other cmd.exe special chars (^, &, |, <, >) are NOT escaped
+            // because hook env var values come from controlled sources (project
+            // name, path, branch) and are unlikely to contain them.
             let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| {
@@ -85,8 +88,10 @@ impl HookRunner {
                 format!("{} && {}", env_prefix, command)
             }
         } else {
-            // POSIX single-quote escaping: wrap values in '...' and escape embedded
-            // single quotes as '\''. Safe because hook terminals always use `sh -c`.
+            // POSIX single-quote escaping: wrap values in '...' and replace each
+            // embedded ' with the sequence '\'' (end current single-quoted string,
+            // insert an escaped literal quote, re-open single-quoted string).
+            // This is the standard POSIX single-quote escape pattern.
             let env_prefix = safe_env
                 .iter()
                 .map(|(k, v)| format!("{}='{}'", k, v.replace('\'', "'\\''")))
