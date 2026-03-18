@@ -299,15 +299,10 @@ impl Sidebar {
             }))
             .on_click(cx.listener({
                 let project_id = project_id.clone();
-                let is_main_worktree = parent_id.is_empty();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        if is_main_worktree {
-                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                        } else {
-                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                        }
+                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
             }))
@@ -364,18 +359,13 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         let project_name = project_name.clone();
-                        let is_main_worktree = parent_id.is_empty();
                         move |this, _event: &ClickEvent, window, cx| {
                             if this.check_project_double_click(&project_id) {
                                 this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    if is_main_worktree {
-                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                    } else {
-                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                    }
+                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -501,14 +491,13 @@ impl Sidebar {
             .when(is_inactive_tab && !is_minimized, |d| d.opacity(0.5))
             .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
             .when(is_cursor && !is_in_tab_group, |d| d.border_l_2().border_color(rgb(t.border_active)))
-            // Click to focus this terminal and its project
+            // Click to focus this terminal
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 let terminal_id = terminal_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                         ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                     });
                 }
@@ -574,7 +563,6 @@ impl Sidebar {
                                 } else {
                                     this.cursor_index = None;
                                     this.workspace.update(cx, |ws, cx| {
-                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                                         ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                                     });
                                 }

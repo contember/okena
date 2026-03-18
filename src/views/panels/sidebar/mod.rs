@@ -1635,8 +1635,7 @@ impl Render for Sidebar {
             match item {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id)
-                        || (project.worktree_count > 0 && worktree_children.iter().any(|c| focused_project_id.as_ref() == Some(&c.id)));
+                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
                     if project.is_orphan {
                         flat_elements.push(
                             self.render_worktree_item(&project, 8.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1714,8 +1713,7 @@ impl Render for Sidebar {
                     if !folder.collapsed {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id)
-                                || (fp.worktree_count > 0 && worktree_children.get(&fp.id).map_or(false, |children| children.iter().any(|c| focused_project_id.as_ref() == Some(&c.id))));
+                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
                             if fp.is_orphan {
                                 flat_elements.push(
                                     self.render_worktree_item(fp, 20.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
