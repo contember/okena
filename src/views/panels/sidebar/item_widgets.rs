@@ -256,11 +256,7 @@ pub fn sidebar_visibility_toggle(
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             svg()
-                .path(if show_in_overview {
-                    "icons/eye.svg"
-                } else {
-                    "icons/eye-off.svg"
-                })
+                .path("icons/eye.svg")
                 .size(px(12.0))
                 .text_color(if show_in_overview {
                     rgb(t.term_blue)

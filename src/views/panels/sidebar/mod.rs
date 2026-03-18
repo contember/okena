@@ -1530,8 +1530,6 @@ impl Render for Sidebar {
                                 child.services = services;
                             }
                         }
-                        // Parent header eye reflects group state
-                        fp.show_in_overview = children.iter().any(|c| c.show_in_overview);
                         folder_wt_children.insert(fp.id.clone(), children);
                     } else {
                         if let Some(services) = project_services.remove(&fp.id) {
@@ -1573,8 +1571,6 @@ impl Render for Sidebar {
                             child.services = services;
                         }
                     }
-                    // Parent header eye reflects group state: visible if any child is visible
-                    project_info.show_in_overview = wt_children.iter().any(|c| c.show_in_overview);
                 }
                 if let Some(services) = project_services.remove(&project.id) {
                     project_info.services = services;

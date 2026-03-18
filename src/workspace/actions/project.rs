@@ -39,24 +39,6 @@ impl Workspace {
             project.show_in_overview = new_visible;
             true
         });
-
-        // Propagate to worktree children
-        for child_id in self.worktree_child_ids(project_id) {
-            self.with_project(&child_id, cx, |project| {
-                project.show_in_overview = new_visible;
-                true
-            });
-        }
-    }
-
-    /// Toggle visibility of a single project without cascading to worktree children.
-    /// Used for worktree items (including the main worktree entry) so toggling one
-    /// worktree doesn't affect siblings or the parent project header.
-    pub fn toggle_single_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        self.with_project(project_id, cx, |project| {
-            project.show_in_overview = !project.show_in_overview;
-            true
-        });
     }
 
     /// Add a new project
