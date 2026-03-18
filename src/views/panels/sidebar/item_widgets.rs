@@ -20,7 +20,7 @@ pub fn sidebar_expand_arrow(
     div()
         .id(id)
         .flex_shrink_0()
-        .w(px(16.0))
+        .w(px(12.0))
         .h(px(16.0))
         .flex()
         .items_center()
@@ -48,7 +48,7 @@ pub fn sidebar_color_indicator(
     div()
         .id(id)
         .flex_shrink_0()
-        .w(px(16.0))
+        .w(px(14.0))
         .h(px(16.0))
         .flex()
         .items_center()
@@ -283,7 +283,7 @@ pub fn sidebar_visibility_button(
 ) -> Stateful<Div> {
     sidebar_visibility_toggle(id, show_in_overview, t)
         .opacity(0.0)
-        .when(!show_in_overview, |d| d.opacity(1.0))
+        .when(show_in_overview, |d| d.opacity(1.0))
         .group_hover(group_name, |s| s.opacity(1.0))
         .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
 }

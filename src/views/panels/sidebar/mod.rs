@@ -128,6 +128,8 @@ pub struct Sidebar {
     /// Project IDs that have been auto-expanded due to hook terminals.
     /// Tracked so we only auto-expand once (user can collapse afterward).
     hook_auto_expanded: HashSet<String>,
+    /// Projects with worktrees that were auto-expanded (one-time).
+    worktree_auto_expanded: HashSet<String>,
     /// Parent project IDs with in-flight worktree creation (debounce guard)
     creating_worktree: HashSet<String>,
 }
@@ -155,6 +157,7 @@ impl Sidebar {
             let ws = workspace.read(cx);
             let mut changed = false;
             for project in &ws.data().projects {
+                // Auto-expand projects with hook terminals
                 if !project.hook_terminals.is_empty() && this.hook_auto_expanded.insert(project.id.clone()) {
                     this.expanded_projects.insert(project.id.clone());
                     changed = true;
@@ -195,6 +198,7 @@ impl Sidebar {
             service_manager: None,
             collapsed_groups: HashSet::new(),
             hook_auto_expanded: HashSet::new(),
+            worktree_auto_expanded: HashSet::new(),
             creating_worktree: HashSet::new(),
         }
     }
@@ -992,7 +996,7 @@ impl Sidebar {
             SidebarCursorItem::Project { project_id } |
             SidebarCursorItem::WorktreeProject { project_id } => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.focus_project_terminal(&project_id, cx);
+                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
                 });
                 // Restore focus to terminal
                 self.cursor_index = None;
@@ -1048,7 +1052,7 @@ impl Sidebar {
             SidebarCursorItem::RemoteProject { project_id, .. } => {
                 // Remote projects are now materialized in workspace, use unified focus
                 self.workspace.update(cx, |ws, cx| {
-                    ws.focus_project_terminal(&project_id, cx);
+                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
                 });
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -1362,40 +1366,14 @@ impl SidebarProjectInfo {
     }
 }
 
-/// Build a "main worktree" entry from a parent project and prepend it to children.
-/// Also propagates the parent's folder color to all worktree children and clears
-/// terminal/service/hook data from the parent header (it moves to the main_wt entry).
-fn build_main_worktree_entry(
+/// Propagate the parent's folder color to all worktree children.
+fn propagate_folder_color(
     project: &ProjectData,
-    project_info: &mut SidebarProjectInfo,
-    children: &mut Vec<SidebarProjectInfo>,
-    project_services: &mut HashMap<String, Vec<SidebarServiceInfo>>,
-    closing_projects: &HashSet<String>,
-    creating_projects: &HashSet<String>,
-    git_repo_map: &HashMap<std::path::PathBuf, bool>,
+    children: &mut [SidebarProjectInfo],
 ) {
-    let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
-        .and_then(|s| s.branch);
-    let is_git = *git_repo_map.get(std::path::Path::new(&project.path)).unwrap_or(&false);
-    let mut main_wt = SidebarProjectInfo::from_project(project, is_git);
-    main_wt.name = branch.unwrap_or_else(|| project.name.clone());
-    main_wt.parent_folder_color = Some(project.folder_color);
-    main_wt.is_closing = closing_projects.contains(&project.id);
-    main_wt.is_creating = creating_projects.contains(&project.id);
-    if let Some(services) = project_services.remove(&project.id) {
-        main_wt.services = services;
-    }
     for child in children.iter_mut() {
         child.parent_folder_color = Some(project.folder_color);
     }
-    children.insert(0, main_wt);
-    // Clear terminal/service data from project header (shown under main worktree)
-    project_info.terminal_ids.clear();
-    project_info.terminal_names.clear();
-    project_info.inactive_tab_terminals.clear();
-    project_info.tab_group_terminals.clear();
-    project_info.has_layout = false;
-    project_info.hook_terminals.clear();
 }
 
 /// An item in the sidebar's top-level ordering: either a project or a folder
@@ -1463,6 +1441,7 @@ impl Render for Sidebar {
                         info.is_creating = workspace.creating_projects.contains(&p.id);
                         // Inherit parent project's color for visual association
                         info.folder_color = parent.folder_color;
+                        // Services will be assigned after project_services is built
                         info
                     })
                     .collect();
@@ -1541,7 +1520,15 @@ impl Render for Sidebar {
                     if let Some(mut children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
                         if let Some(&project) = all_projects.get(fp.id.as_str()) {
-                            build_main_worktree_entry(project, fp, &mut children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects, &git_repo_map);
+                            propagate_folder_color(project, &mut children);
+                        }
+                        if let Some(services) = project_services.remove(&fp.id) {
+                            fp.services = services;
+                        }
+                        for child in &mut children {
+                            if let Some(services) = project_services.remove(&child.id) {
+                                child.services = services;
+                            }
                         }
                         // Parent header eye reflects group state
                         fp.show_in_overview = children.iter().any(|c| c.show_in_overview);
@@ -1580,13 +1567,17 @@ impl Render for Sidebar {
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {
-                    build_main_worktree_entry(project, &mut project_info, &mut wt_children, &mut project_services, &workspace.closing_projects, &workspace.creating_projects, &git_repo_map);
+                    propagate_folder_color(project, &mut wt_children);
+                    for child in &mut wt_children {
+                        if let Some(services) = project_services.remove(&child.id) {
+                            child.services = services;
+                        }
+                    }
                     // Parent header eye reflects group state: visible if any child is visible
                     project_info.show_in_overview = wt_children.iter().any(|c| c.show_in_overview);
-                } else {
-                    if let Some(services) = project_services.remove(&project.id) {
-                        project_info.services = services;
-                    }
+                }
+                if let Some(services) = project_services.remove(&project.id) {
+                    project_info.services = services;
                 }
                 items.push(SidebarItem::Project {
                     project: project_info,
@@ -1613,26 +1604,6 @@ impl Render for Sidebar {
             let ws = self.workspace.read(cx);
             ws.focus_manager.focused_project_id().cloned()
                 .or_else(|| ws.focus_manager.focused_terminal_state().map(|ft| ft.project_id))
-        };
-
-        // Compute ancestor IDs for subtle highlight on parent project and folder headers
-        let (focused_parent_project_id, focused_folder_id): (Option<String>, Option<String>) = {
-            if let Some(ref fid) = focused_project_id {
-                let ws = self.workspace.read(cx);
-                // If focused project is a worktree child, find its parent
-                let parent_id = ws.project(fid)
-                    .and_then(|p| p.worktree_info.as_ref())
-                    .map(|wt| wt.parent_project_id.clone());
-                // The "effective" project for folder lookup is the parent if it's a worktree child
-                let effective_id = parent_id.as_deref().unwrap_or(fid.as_str());
-                // Find which folder contains this project
-                let folder_id = ws.data().folders.iter()
-                    .find(|f| f.project_ids.iter().any(|pid| pid == effective_id))
-                    .map(|f| f.id.clone());
-                (parent_id, folder_id)
-            } else {
-                (None, None)
-            }
         };
 
         // Build flat elements with cursor tracking
@@ -1668,9 +1639,8 @@ impl Render for Sidebar {
             match item {
                 SidebarItem::Project { project, index, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let is_focused_project = (focused_project_id.as_ref() == Some(&project.id)
-                        && project.worktree_count == 0)
-                        || focused_parent_project_id.as_ref() == Some(&project.id);
+                    let is_focused_project = focused_project_id.as_ref() == Some(&project.id)
+                        && project.worktree_count == 0;
                     if project.is_orphan {
                         flat_elements.push(
                             self.render_worktree_item(&project, 8.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1682,30 +1652,54 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Expanded terminals and services (grouped) — only for projects without worktrees
-                    if project.worktree_count == 0 && self.expanded_projects.contains(&project.id) {
-                        self.render_expanded_children(&project, 20.0, 32.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
-                    }
+                    // Projects with worktrees are expanded by default
+                    let show_children = self.expanded_projects.contains(&project.id);
 
-                    // Worktree children (includes main worktree as first entry when present)
+                    // Worktree children (shown first)
+                    if !worktree_children.is_empty() {
+                        let wt_collapsed = self.collapsed_worktrees.contains(&project.id);
+                        let is_cursor = cursor_index == Some(flat_idx);
+                        let project_id_clone = project.id.clone();
+                        flat_elements.push(
+                            item_widgets::sidebar_group_header(
+                                ElementId::Name(format!("wt-group-{}", project.id).into()),
+                                "Worktrees",
+                                worktree_children.len(),
+                                wt_collapsed,
+                                is_cursor,
+                                20.0,
+                                &t,
+                            )
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.toggle_worktrees_collapsed(&project_id_clone);
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                        );
+                        flat_idx += 1;
+                    }
                     if !self.collapsed_worktrees.contains(&project.id) {
                         for (wt_idx, child) in worktree_children.iter().enumerate() {
                             let is_cursor = cursor_index == Some(flat_idx);
                             let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                             flat_elements.push(
-                                self.render_worktree_item(child, 20.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                                self.render_worktree_item(child, 34.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
                             );
                             flat_idx += 1;
 
                             if self.expanded_projects.contains(&child.id) {
-                                self.render_expanded_children(child, 32.0, 44.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                self.render_expanded_children(child, 50.0, 64.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }
                         }
+                    }
+
+                    // Expanded terminals and services (grouped, after worktrees)
+                    if show_children {
+                        self.render_expanded_children(&project, 20.0, 34.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                     }
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children } => {
                     let is_cursor = cursor_index == Some(flat_idx);
-                    let is_focused_folder = focused_folder_id.as_ref() == Some(&folder.id);
                     let idle_terminal_count = if folder.collapsed {
                         let terminals = self.terminals.lock();
                         projects.iter()
@@ -1716,7 +1710,7 @@ impl Render for Sidebar {
                         0
                     };
                     flat_elements.push(
-                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, is_focused_folder, window, cx).into_any_element()
+                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
@@ -1724,9 +1718,8 @@ impl Render for Sidebar {
                     if !folder.collapsed {
                         for fp in &projects {
                             let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = (focused_project_id.as_ref() == Some(&fp.id)
-                                && fp.worktree_count == 0)
-                                || focused_parent_project_id.as_ref() == Some(&fp.id);
+                            let is_focused_project = focused_project_id.as_ref() == Some(&fp.id)
+                                && fp.worktree_count == 0;
                             if fp.is_orphan {
                                 flat_elements.push(
                                     self.render_worktree_item(fp, 20.0, 0, is_cursor, is_focused_project, window, cx).into_any_element()
@@ -1738,27 +1731,52 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Expanded terminals and services for folder project (grouped) — only without worktrees
-                            if fp.worktree_count == 0 && self.expanded_projects.contains(&fp.id) {
-                                self.render_expanded_children(fp, 32.0, 44.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
-                            }
+                            let show_children = self.expanded_projects.contains(&fp.id);
 
-                            // Worktree children for folder project
-                            if !self.collapsed_worktrees.contains(&fp.id) {
-                                if let Some(wt_children) = worktree_children.get(&fp.id) {
+                            // Worktree children for folder project (shown first)
+                            if let Some(wt_children) = worktree_children.get(&fp.id) {
+                                // Worktrees group header
+                                {
+                                    let wt_collapsed = self.collapsed_worktrees.contains(&fp.id);
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    let fp_id_clone = fp.id.clone();
+                                    flat_elements.push(
+                                        item_widgets::sidebar_group_header(
+                                            ElementId::Name(format!("wt-group-{}", fp.id).into()),
+                                            "Worktrees",
+                                            wt_children.len(),
+                                            wt_collapsed,
+                                            is_cursor,
+                                            36.0,
+                                            &t,
+                                        )
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            this.toggle_worktrees_collapsed(&fp_id_clone);
+                                            cx.notify();
+                                        }))
+                                        .into_any_element()
+                                    );
+                                    flat_idx += 1;
+                                }
+                                if !self.collapsed_worktrees.contains(&fp.id) {
                                     for (wt_idx, child) in wt_children.iter().enumerate() {
                                         let is_cursor = cursor_index == Some(flat_idx);
                                         let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
                                         flat_elements.push(
-                                            self.render_worktree_item(child, 32.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                                            self.render_worktree_item(child, 50.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
                                         );
                                         flat_idx += 1;
 
                                         if self.expanded_projects.contains(&child.id) {
-                                            self.render_expanded_children(child, 44.0, 56.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                            self.render_expanded_children(child, 66.0, 80.0, "wt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                                         }
                                     }
                                 }
+                            }
+
+                            // Expanded terminals and services for folder project (after worktrees)
+                            if show_children {
+                                self.render_expanded_children(fp, 36.0, 50.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
                             }
                         }
                     }

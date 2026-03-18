@@ -16,13 +16,12 @@ impl Sidebar {
     pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let has_worktrees = project.worktree_count > 0;
-        let is_expanded = self.is_project_expanded(&project.id, has_worktrees);
+        let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
 
         // Show quick create button for git repos that aren't themselves worktrees
@@ -41,7 +40,7 @@ impl Sidebar {
             .id(ElementId::Name(format!("project-row-{}", project.id).into()))
             .group("project-item")
             .h(px(24.0))
-            .pl(px(8.0))
+            .pl(px(4.0))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -89,12 +88,12 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.focus_project_terminal(&project_id, cx);
+                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
             }))
             .child({
-                let has_expandable_content = has_layout || has_worktrees;
+                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-{}", project.id).into()),
@@ -104,18 +103,14 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            if has_worktrees {
-                                this.toggle_worktrees_collapsed(&project_id);
-                            } else {
-                                this.toggle_expanded(&project_id);
-                            }
+                            this.toggle_expanded(&project_id);
                             cx.notify();
                             cx.stop_propagation();
                         }
                     }))
                     .into_any_element()
                 } else {
-                    div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
+                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
                 }
             })
             .child({
@@ -124,12 +119,24 @@ impl Sidebar {
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
                     ElementId::Name(format!("folder-icon-{}", project.id).into()),
-                    div()
-                        .flex_shrink_0()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(folder_color)),
+                    if project.is_worktree {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(folder_color))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(folder_color))
+                            .into_any_element()
+                    },
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
@@ -157,7 +164,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.focus_project_terminal(&project_id, cx);
+                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -176,7 +183,6 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
             })
@@ -297,7 +303,11 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.focus_project_terminal(&project_id, cx);
+                        if is_main_worktree {
+                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                        } else {
+                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                        }
                     });
                 }
             }))
@@ -316,26 +326,29 @@ impl Sidebar {
                     }
                 })),
             )
-            .child(
-                // Git branch icon
+            .child({
+                // Worktree color indicator — empty circle centered in same-width container as project dot
+                let color = if project.is_orphan {
+                    rgb(t.warning)
+                } else {
+                    rgb(t.get_folder_color(project.folder_color))
+                };
                 div()
                     .flex_shrink_0()
-                    .w(px(16.0))
+                    .w(px(14.0))
                     .h(px(16.0))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(
-                        svg()
-                            .path("icons/git-branch.svg")
-                            .size(px(14.0))
-                            .text_color(if project.is_orphan {
-                                rgb(t.warning)
-                            } else {
-                                rgb(t.get_folder_color(project.folder_color))
-                            })
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(color)
                     )
-            )
+            })
             .child(
                 // Worktree name (or input if renaming)
                 if is_renaming {
@@ -358,7 +371,11 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.focus_project_terminal(&project_id, cx);
+                                    if is_main_worktree {
+                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                                    } else {
+                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                                    }
                                 });
                             }
                             cx.stop_propagation();
@@ -387,8 +404,7 @@ impl Sidebar {
                 )
             })
             .when(!is_busy, |d| {
-                d.child(sidebar_terminal_badge(has_layout, terminal_count, &t))
-                .child(
+                d.child(
                     sidebar_visibility_button(
                         ElementId::Name(format!("visibility-wt-{}", project_id).into()),
                         project.show_in_overview,
@@ -485,13 +501,14 @@ impl Sidebar {
             .when(is_inactive_tab && !is_minimized, |d| d.opacity(0.5))
             .when(is_focused, |d| d.bg(rgb(t.bg_selection)))
             .when(is_cursor && !is_in_tab_group, |d| d.border_l_2().border_color(rgb(t.border_active)))
-            // Click to focus this terminal
+            // Click to focus this terminal and its project
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 let terminal_id = terminal_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                         ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                     });
                 }
@@ -557,6 +574,7 @@ impl Sidebar {
                                 } else {
                                     this.cursor_index = None;
                                     this.workspace.update(cx, |ws, cx| {
+                                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                                         ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
                                     });
                                 }

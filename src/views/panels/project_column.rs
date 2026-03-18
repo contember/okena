@@ -821,12 +821,24 @@ impl ProjectColumn {
                     .gap(px(6.0))
                     .overflow_hidden()
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(folder_color))
+                        if project.worktree_info.is_some() {
+                            div()
+                                .flex_shrink_0()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgb(folder_color))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex_shrink_0()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(folder_color))
+                                .into_any_element()
+                        }
                     )
                     .child({
                         // For worktree projects, show parent project's name
