@@ -641,6 +641,7 @@ impl ProjectColumn {
                             ("icons/git-branch.svg", t.text_muted)
                         };
                         let pr_number = pr_info.as_ref().map(|p| p.number);
+                        let ci_checks = pr_info.as_ref().and_then(|p| p.ci_checks.clone());
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
                         d.child(
@@ -679,6 +680,20 @@ impl ProjectColumn {
                                         div()
                                             .text_color(rgb(t.text_muted))
                                             .child(format!("#{num}"))
+                                    )
+                                })
+                                .when_some(ci_checks, |d, checks| {
+                                    let tooltip = checks.tooltip_text();
+                                    d.child(
+                                        div()
+                                            .id("ci-status")
+                                            .child(
+                                                svg()
+                                                    .path(checks.status.icon())
+                                                    .size(px(8.0))
+                                                    .text_color(rgb(checks.status.color(&t)))
+                                            )
+                                            .tooltip(move |_window, cx| Tooltip::new(tooltip.clone()).build(_window, cx))
                                     )
                                 })
                         )
@@ -846,6 +861,7 @@ impl ProjectColumn {
                         };
 
                         let pr_number = pr_info.as_ref().map(|p| p.number);
+                        let ci_checks = pr_info.as_ref().and_then(|p| p.ci_checks.clone());
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
 
@@ -893,6 +909,20 @@ impl ProjectColumn {
                                             .text_color(rgb(t.text_muted))
                                             .line_height(px(12.0))
                                             .child(format!("#{num}"))
+                                    )
+                                })
+                                .when_some(ci_checks, |d, checks| {
+                                    let ci_tooltip = checks.tooltip_text();
+                                    d.child(
+                                        div()
+                                            .id("ci-status-wt")
+                                            .child(
+                                                svg()
+                                                    .path(checks.status.icon())
+                                                    .size(px(8.0))
+                                                    .text_color(rgb(checks.status.color(&t)))
+                                            )
+                                            .tooltip(move |_window, cx| Tooltip::new(ci_tooltip.clone()).build(_window, cx))
                                     )
                                 })
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))

@@ -536,15 +536,23 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
     }
 }
 
-/// Count commits that haven't been pushed to the upstream branch.
-/// Returns 0 on any error (no upstream, not a git repo, etc.).
+/// Count commits that haven't been pushed to the branch's own remote.
+/// Compares against `origin/<branch>` rather than `@{u}` because worktree
+/// branches created from `origin/main` auto-track main, which would
+/// incorrectly report all feature commits as unpushed.
+/// Returns 0 if the branch has never been pushed (no `origin/<branch>` ref).
 pub fn count_unpushed_commits(path: &Path) -> usize {
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return 0,
     };
+    let branch = match get_current_branch(path) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let remote_ref = format!("origin/{}..HEAD", branch);
     let output = command("git")
-        .args(["-C", path_str, "rev-list", "@{u}..HEAD", "--count"])
+        .args(["-C", path_str, "rev-list", &remote_ref, "--count"])
         .output()
         .ok();
     match output {
@@ -621,11 +629,68 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
                     }
                 }
             };
-            return Some(super::PrInfo { url, state, number });
+            return Some(super::PrInfo { url, state, number, ci_checks: None });
         }
     }
 
     None
+}
+
+/// Parse CI check buckets from a JSON array string (extracted for testability).
+pub(crate) fn parse_ci_checks(json_str: &str) -> Option<super::CiCheckSummary> {
+    let checks: Vec<serde_json::Value> = serde_json::from_str(json_str).ok()?;
+
+    if checks.is_empty() {
+        return None;
+    }
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut pending = 0usize;
+
+    for check in &checks {
+        match check.get("bucket").and_then(|v| v.as_str()) {
+            Some("pass") => passed += 1,
+            Some("fail") | Some("cancel") => failed += 1,
+            Some("pending") => pending += 1,
+            _ => {} // "skipping" and unknown — don't count toward total
+        }
+    }
+
+    let total = passed + failed + pending;
+    if total == 0 {
+        return None;
+    }
+
+    let status = if failed > 0 {
+        super::CiStatus::Failure
+    } else if pending > 0 {
+        super::CiStatus::Pending
+    } else {
+        super::CiStatus::Success
+    };
+
+    Some(super::CiCheckSummary { status, passed, failed, pending, total })
+}
+
+/// Get CI check status for the current branch's PR.
+/// Uses `gh pr checks --json bucket` which returns a flat JSON array.
+pub fn get_ci_checks(path: &Path) -> Option<super::CiCheckSummary> {
+    let path_str = path.to_str()?;
+
+    let output = safe_output(
+        command("gh")
+            .args(["pr", "checks", "--json", "bucket"])
+            .current_dir(path_str),
+    )
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_ci_checks(stdout.trim())
 }
 
 /// List worktrees found in the template container directory.
@@ -881,5 +946,71 @@ mod tests {
         let expected = PathBuf::from("/projects").join("repo-wt").join("feature-my-branch");
         assert_paths_eq(&wt, &expected);
         assert_paths_eq(&proj, &expected);
+    }
+
+    // ─── CI check parsing tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_ci_all_pass() {
+        let json = r#"[{"bucket":"pass"},{"bucket":"pass"},{"bucket":"pass"}]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.status, super::super::CiStatus::Success);
+        assert_eq!(result.passed, 3);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.pending, 0);
+        assert_eq!(result.total, 3);
+    }
+
+    #[test]
+    fn parse_ci_with_failure() {
+        let json = r#"[{"bucket":"pass"},{"bucket":"fail"},{"bucket":"pass"}]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.status, super::super::CiStatus::Failure);
+        assert_eq!(result.passed, 2);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.total, 3);
+    }
+
+    #[test]
+    fn parse_ci_with_pending() {
+        let json = r#"[{"bucket":"pass"},{"bucket":"pending"},{"bucket":"pending"}]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.status, super::super::CiStatus::Pending);
+        assert_eq!(result.passed, 1);
+        assert_eq!(result.pending, 2);
+        assert_eq!(result.total, 3);
+    }
+
+    #[test]
+    fn parse_ci_skipping_excluded_from_total() {
+        let json = r#"[{"bucket":"pass"},{"bucket":"skipping"},{"bucket":"pass"}]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.status, super::super::CiStatus::Success);
+        assert_eq!(result.passed, 2);
+        assert_eq!(result.total, 2);
+    }
+
+    #[test]
+    fn parse_ci_cancel_counts_as_failure() {
+        let json = r#"[{"bucket":"pass"},{"bucket":"cancel"}]"#;
+        let result = super::parse_ci_checks(json).unwrap();
+        assert_eq!(result.status, super::super::CiStatus::Failure);
+        assert_eq!(result.failed, 1);
+    }
+
+    #[test]
+    fn parse_ci_empty_array() {
+        assert!(super::parse_ci_checks("[]").is_none());
+    }
+
+    #[test]
+    fn parse_ci_invalid_json() {
+        assert!(super::parse_ci_checks("not json").is_none());
+    }
+
+    #[test]
+    fn parse_ci_only_skipping() {
+        let json = r#"[{"bucket":"skipping"},{"bucket":"skipping"}]"#;
+        assert!(super::parse_ci_checks(json).is_none());
     }
 }
