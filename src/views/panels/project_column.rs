@@ -898,13 +898,26 @@ impl ProjectColumn {
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
                         )
                     })
-                    .child(
+                    .child({
+                        let path_for_copy = project.path.clone();
                         // Left-truncate: flex + justify_end clips from the left
                         div()
+                            .id("project-path")
                             .max_w(px(300.0))
                             .overflow_hidden()
                             .flex()
                             .justify_end()
+                            .cursor_pointer()
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(path_for_copy.clone()));
+                                crate::views::panels::toast::ToastManager::success("Path copied to clipboard".to_string(), cx);
+                            })
+                            .tooltip(move |_window, cx| Tooltip::new("Copy path").build(_window, cx))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -913,7 +926,7 @@ impl ProjectColumn {
                                     .line_height(px(12.0))
                                     .child(project.path.clone()),
                             )
-                    )
+                    })
                     .child(self.render_git_status(project, git_status, t, cx)),
             )
             .child(
