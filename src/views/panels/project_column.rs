@@ -640,6 +640,7 @@ impl ProjectColumn {
                         } else {
                             ("icons/git-branch.svg", t.text_muted)
                         };
+                        let pr_number = pr_info.as_ref().map(|p| p.number);
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
                         d.child(
@@ -673,6 +674,13 @@ impl ProjectColumn {
                                         .overflow_hidden()
                                         .child(status.branch.clone().unwrap_or_default())
                                 )
+                                .when_some(pr_number, |d, num| {
+                                    d.child(
+                                        div()
+                                            .text_color(rgb(t.text_muted))
+                                            .child(format!("#{num}"))
+                                    )
+                                })
                         )
                     })
                     // Diff stats (clickable, only if there are changes)
@@ -837,6 +845,7 @@ impl ProjectColumn {
                             ("icons/git-branch.svg", t.text_muted, branch.clone())
                         };
 
+                        let pr_number = pr_info.as_ref().map(|p| p.number);
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
 
@@ -877,6 +886,15 @@ impl ProjectColumn {
                                         .overflow_hidden()
                                         .child(branch)
                                 )
+                                .when_some(pr_number, |d, num| {
+                                    d.child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(t.text_muted))
+                                            .line_height(px(12.0))
+                                            .child(format!("#{num}"))
+                                    )
+                                })
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
                         )
                     })

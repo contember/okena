@@ -66,6 +66,7 @@ impl PrState {
 pub struct PrInfo {
     pub url: String,
     pub state: PrState,
+    pub number: u32,
 }
 
 /// Git status information for display in project header

@@ -595,7 +595,7 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
 
     let output = safe_output(
         command("gh")
-            .args(["pr", "view", "--json", "url,state,isDraft", "--jq", "[.url, .state, .isDraft] | @tsv"])
+            .args(["pr", "view", "--json", "url,state,isDraft,number", "--jq", "[.url, .state, .isDraft, .number] | @tsv"])
             .current_dir(path_str),
     )
     .ok()?;
@@ -604,9 +604,10 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let line = stdout.trim();
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 && parts[0].starts_with("http") {
+        if parts.len() >= 4 && parts[0].starts_with("http") {
             let url = parts[0].to_string();
             let is_draft = parts[2] == "true";
+            let number = parts[3].parse::<u32>().unwrap_or(0);
             let state = if is_draft {
                 super::PrState::Draft
             } else {
@@ -620,7 +621,7 @@ pub fn get_pr_info(path: &Path) -> Option<super::PrInfo> {
                     }
                 }
             };
-            return Some(super::PrInfo { url, state });
+            return Some(super::PrInfo { url, state, number });
         }
     }
 
