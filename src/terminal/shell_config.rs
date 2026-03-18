@@ -140,9 +140,10 @@ impl ShellType {
             }
             ShellType::Custom { path, args } => {
                 if args.is_empty() {
-                    path.clone()
+                    shell_quote(path)
                 } else {
-                    format!("{} {}", path, args.join(" "))
+                    let quoted_args: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+                    format!("{} {}", shell_quote(path), quoted_args.join(" "))
                 }
             }
         }
@@ -194,6 +195,21 @@ impl ShellType {
             }
         }
     }
+}
+
+/// Shell-quote a string for embedding in a shell command.
+/// Returns the string as-is if it contains no special characters,
+/// otherwise wraps in single quotes with proper escaping.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // If it only contains safe characters, no quoting needed
+    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'.' || b == b'-' || b == b'_' || b == b'=' || b == b':') {
+        return s.to_string();
+    }
+    // Single-quote and escape embedded single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Information about an available shell

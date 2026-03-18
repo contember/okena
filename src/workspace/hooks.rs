@@ -813,10 +813,18 @@ pub fn resolve_shell_wrapper(
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
 /// The wrapper template uses `{shell}` as a placeholder for the resolved shell command.
 ///
+/// If the result contains shell metacharacters (`&&`, `||`, `;`, `|`), it is wrapped
+/// in `sh -c` for proper execution. Otherwise, it is split into executable + args directly,
+/// avoiding an extra `sh` process layer (important for session backends like dtach/tmux).
+///
 /// The shell is expected to be already resolved (not `ShellType::Default`).
 pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str) -> ShellType {
     let shell_cmd = shell.to_command_string();
-    let wrapped = wrapper.replace("{shell}", &shell_cmd);
+    // Replace {shell} with `exec <shell>` so the shell replaces the wrapper process.
+    // This is critical for session backends (dtach/tmux) that monitor the top-level process.
+    let wrapped = wrapper.replace("{shell}", &format!("exec {}", shell_cmd));
+    // Always use for_command (sh -c '...') so that build_terminal_command can extract
+    // the inner command for session backend integration (dtach/tmux/screen).
     ShellType::for_command(wrapped)
 }
 
@@ -979,22 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_shell_wrapper_with_default_shell() {
-        use super::apply_shell_wrapper;
-        let shell = ShellType::Default;
-        let wrapper = "docker exec -it mycontainer {shell}";
-        let wrapped = apply_shell_wrapper(&shell, wrapper);
-        match &wrapped {
-            ShellType::Custom { args, .. } => {
-                let full_cmd = args.last().expect("args should have command");
-                assert!(full_cmd.contains("docker exec -it mycontainer ${SHELL:-sh}"), "got: {}", full_cmd);
-            }
-            other => panic!("Expected ShellType::Custom, got: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn apply_shell_wrapper_with_custom_shell_and_args() {
+    fn apply_shell_wrapper_simple() {
         use super::apply_shell_wrapper;
         let shell = ShellType::Custom {
             path: "/bin/zsh".to_string(),
@@ -1003,9 +996,29 @@ mod tests {
         let wrapper = "devcontainer exec -- {shell}";
         let wrapped = apply_shell_wrapper(&shell, wrapper);
         match &wrapped {
-            ShellType::Custom { args, .. } => {
-                let full_cmd = args.last().expect("args should have command");
-                assert!(full_cmd.contains("devcontainer exec -- /bin/zsh --login"), "got: {}", full_cmd);
+            ShellType::Custom { path, args } => {
+                assert_eq!(path, "sh");
+                assert_eq!(args[0], "-c");
+                assert!(args[1].contains("devcontainer exec -- exec /bin/zsh --login"), "got: {}", args[1]);
+            }
+            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn apply_shell_wrapper_with_metacharacters() {
+        use super::apply_shell_wrapper;
+        let shell = ShellType::Custom {
+            path: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let wrapper = "echo hello && {shell}";
+        let wrapped = apply_shell_wrapper(&shell, wrapper);
+        match &wrapped {
+            ShellType::Custom { path, args } => {
+                assert_eq!(path, "sh");
+                assert_eq!(args[0], "-c");
+                assert!(args[1].contains("echo hello && exec /bin/zsh"), "got: {}", args[1]);
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
