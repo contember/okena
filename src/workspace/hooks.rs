@@ -251,7 +251,7 @@ fn run_hook_actions(
     (terminal_actions, hook_results)
 }
 
-/// Resolve a hook command: per-project override takes priority over global default.
+/// Resolve a hook command: project → parent project (if worktree) → global.
 fn resolve_hook(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
@@ -259,6 +259,20 @@ fn resolve_hook(
 ) -> Option<String> {
     get_field(project_hooks)
         .clone()
+        .or_else(|| get_field(global_hooks).clone())
+}
+
+/// Resolve a hook command with parent project fallback for worktrees:
+/// project → parent project → global.
+fn resolve_hook_with_parent(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    global_hooks: &HooksConfig,
+    get_field: fn(&HooksConfig) -> &Option<String>,
+) -> Option<String> {
+    get_field(project_hooks)
+        .clone()
+        .or_else(|| parent_hooks.and_then(|h| get_field(h).clone()))
         .or_else(|| get_field(global_hooks).clone())
 }
 
@@ -744,6 +758,7 @@ pub fn fire_worktree_removed(
 /// Fire the `terminal.on_create` hook after a terminal PTY is spawned.
 pub fn fire_terminal_on_create(
     project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
     project_id: &str,
     project_name: &str,
     project_path: &str,
@@ -751,7 +766,7 @@ pub fn fire_terminal_on_create(
     cx: &App,
 ) -> Vec<HookTerminalResult> {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.terminal.on_create) {
+    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_create) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
         log::info!("Running terminal.on_create hook for terminal '{}'", terminal_id);
@@ -768,6 +783,7 @@ pub fn fire_terminal_on_create(
 /// Runs headlessly (no PTY runner) since the terminal just exited.
 pub fn fire_terminal_on_close(
     project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
     project_id: &str,
     project_name: &str,
     project_path: &str,
@@ -776,7 +792,7 @@ pub fn fire_terminal_on_close(
     cx: &App,
 ) {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.terminal.on_close) {
+    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_close) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
         if let Some(code) = exit_code {
@@ -792,9 +808,10 @@ pub fn fire_terminal_on_close(
 /// Returns the wrapper command template if configured (project or global level).
 pub fn resolve_shell_wrapper(
     project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
     global_hooks: &HooksConfig,
 ) -> Option<String> {
-    resolve_hook(project_hooks, global_hooks, |h| &h.terminal.shell_wrapper)
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.shell_wrapper)
 }
 
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
@@ -915,6 +932,37 @@ mod tests {
     fn build_hook_label_falls_back_to_project_name() {
         let env = HashMap::new();
         assert_eq!(build_hook_label("on_project_open", &env, "my-project"), "on_project_open (my-project)");
+    }
+
+    #[test]
+    fn resolve_hook_with_parent_three_tier() {
+        use crate::workspace::settings::TerminalHooks;
+
+        let project = HooksConfig::default();
+        let parent = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("parent-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let global = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("global-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+
+        // Project empty → falls through to parent
+        let resolved = resolve_hook_with_parent(&project, Some(&parent), &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("parent-cmd".into()));
+
+        // Project empty, no parent → falls through to global
+        let resolved = resolve_hook_with_parent(&project, None, &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("global-cmd".into()));
+
+        // Project set → wins over parent and global
+        let project_with_hook = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("project-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let resolved = resolve_hook_with_parent(&project_with_hook, Some(&parent), &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("project-cmd".into()));
     }
 
     #[test]

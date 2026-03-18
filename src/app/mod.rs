@@ -538,8 +538,15 @@ impl Okena {
                                 .filter(|(tid, _)| !service_tids.contains(tid) && !hook_tids.contains(tid))
                                 .filter_map(|(tid, exit_code)| {
                                     ws.find_project_for_terminal(tid).and_then(|p| {
-                                        if global_on_close || p.hooks.terminal.on_close.is_some() {
-                                            Some((p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), *exit_code))
+                                        let parent_on_close = p.worktree_info.as_ref()
+                                            .and_then(|wt| ws.project(&wt.parent_project_id))
+                                            .and_then(|pp| pp.hooks.terminal.on_close.as_ref())
+                                            .is_some();
+                                        if global_on_close || p.hooks.terminal.on_close.is_some() || parent_on_close {
+                                            let parent_hooks = p.worktree_info.as_ref()
+                                                .and_then(|wt| ws.project(&wt.parent_project_id))
+                                                .map(|pp| pp.hooks.clone());
+                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), *exit_code))
                                         } else {
                                             None
                                         }
@@ -547,9 +554,9 @@ impl Okena {
                                 })
                                 .collect()
                         };
-                        for (project_hooks, project_id, project_name, project_path, terminal_id, exit_code) in terminal_close_infos {
+                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, exit_code) in terminal_close_infos {
                             crate::workspace::hooks::fire_terminal_on_close(
-                                &project_hooks, &project_id, &project_name,
+                                &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
                                 &project_path, &terminal_id, exit_code, cx,
                             );
                         }

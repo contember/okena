@@ -442,6 +442,9 @@ pub fn spawn_uninitialized_terminals(
     let project_path = project.path.clone();
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
+    let parent_hooks = project.worktree_info.as_ref()
+        .and_then(|wt| ws.project(&wt.parent_project_id))
+        .map(|p| p.hooks.clone());
     let project_default_shell = project.default_shell.clone();
     let mut uninitialized = Vec::new();
     if let Some(layout) = &project.layout {
@@ -453,7 +456,7 @@ pub fn spawn_uninitialized_terminals(
     let global_hooks = app_settings.hooks;
 
     // Resolve shell_wrapper once for all terminals in this project
-    let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, &global_hooks);
+    let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
 
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {
@@ -480,7 +483,7 @@ pub fn spawn_uninitialized_terminals(
 
                 // Fire terminal.on_create hook (before moving terminal_id)
                 let hook_results = hooks::fire_terminal_on_create(
-                    &project_hooks, project_id, &project_name, &project_path, &terminal_id, cx,
+                    &project_hooks, parent_hooks.as_ref(), project_id, &project_name, &project_path, &terminal_id, cx,
                 );
                 ws.register_hook_results(hook_results, cx);
 
