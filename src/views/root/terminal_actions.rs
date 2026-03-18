@@ -2,6 +2,7 @@ use crate::settings::settings;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::panels::toast::ToastManager;
 use crate::workspace::actions::execute::spawn_uninitialized_terminals;
+use crate::workspace::hooks;
 use gpui::*;
 use std::sync::Arc;
 
@@ -65,10 +66,34 @@ impl RootView {
         });
 
         // Determine the actual shell to use (resolve Default → project default → global default)
-        let actual_shell = shell_type.resolve_default(
+        let mut actual_shell = shell_type.resolve_default(
             self.workspace.read(cx).project(project_id).and_then(|p| p.default_shell.as_ref()),
             &settings(cx).default_shell,
         );
+
+        // Get project info for hooks
+        let (project_name, project_hooks, parent_hooks) = {
+            let ws = self.workspace.read(cx);
+            let project = ws.project(project_id);
+            let name = project.map(|p| p.name.clone()).unwrap_or_default();
+            let hooks_cfg = project.map(|p| p.hooks.clone()).unwrap_or_default();
+            let parent = project
+                .and_then(|p| p.worktree_info.as_ref())
+                .and_then(|wt| ws.project(&wt.parent_project_id))
+                .map(|p| p.hooks.clone());
+            (name, hooks_cfg, parent)
+        };
+
+        // Apply shell_wrapper if configured
+        let global_hooks = settings(cx).hooks;
+        if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
+            actual_shell = hooks::apply_shell_wrapper(&actual_shell, &wrapper);
+        }
+
+        // Apply on_create: wrap shell to run command first, then exec into shell
+        if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx) {
+            actual_shell = hooks::apply_on_create(&actual_shell, &cmd);
+        }
 
         // Create new terminal with the new shell
         match self.backend.create_terminal(&project_path, Some(&actual_shell)) {

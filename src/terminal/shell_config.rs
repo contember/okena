@@ -120,6 +120,35 @@ impl ShellType {
         }
     }
 
+    /// Convert to the full command string (executable + args).
+    /// Used by shell_wrapper to produce the correct command to wrap.
+    pub fn to_command_string(&self) -> String {
+        match self {
+            ShellType::Default => "${SHELL:-sh}".to_string(),
+            #[cfg(windows)]
+            ShellType::Cmd => "cmd.exe".to_string(),
+            #[cfg(windows)]
+            ShellType::PowerShell { core } => {
+                if *core { "pwsh.exe -NoLogo" } else { "powershell.exe -NoLogo" }.to_string()
+            }
+            #[cfg(windows)]
+            ShellType::Wsl { distro } => {
+                match distro {
+                    Some(d) => format!("wsl.exe -d {}", d),
+                    None => "wsl.exe".to_string(),
+                }
+            }
+            ShellType::Custom { path, args } => {
+                if args.is_empty() {
+                    shell_quote(path)
+                } else {
+                    let quoted_args: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+                    format!("{} {}", shell_quote(path), quoted_args.join(" "))
+                }
+            }
+        }
+    }
+
     /// Build a CommandBuilder for this shell type
     pub fn build_command(&self, cwd: &str) -> CommandBuilder {
         match self {
@@ -166,6 +195,21 @@ impl ShellType {
             }
         }
     }
+}
+
+/// Shell-quote a string for embedding in a shell command.
+/// Returns the string as-is if it contains no special characters,
+/// otherwise wraps in single quotes with proper escaping.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // If it only contains safe characters, no quoting needed
+    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'.' || b == b'-' || b == b'_' || b == b'=' || b == b':') {
+        return s.to_string();
+    }
+    // Single-quote and escape embedded single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Information about an available shell
@@ -432,6 +476,15 @@ mod tests {
         // Not a WSL UNC path
         assert!(parse_wsl_unc_path("C:\\Users\\test").is_none());
         assert!(parse_wsl_unc_path("/regular/path").is_none());
+    }
+
+    #[test]
+    fn to_command_string_custom_no_args() {
+        let shell = ShellType::Custom {
+            path: "/usr/bin/fish".to_string(),
+            args: vec![],
+        };
+        assert_eq!(shell.to_command_string(), "/usr/bin/fish");
     }
 
     #[test]

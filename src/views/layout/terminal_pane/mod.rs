@@ -32,6 +32,7 @@ use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::panels::toast::ToastManager;
 use crate::views::root::TerminalsRegistry;
+use crate::workspace::hooks;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -399,16 +400,36 @@ impl TerminalPane {
             return;
         }
 
-        let shell = self.shell_type.clone().resolve_default(
+        let mut shell = self.shell_type.clone().resolve_default(
             self.workspace.read(cx).project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
             &settings(cx).default_shell,
         );
 
-        // Read fresh path from workspace state (handles tilde-expanded paths)
-        let project_path = self.workspace.read(cx)
-            .project(&self.project_id)
-            .map(|p| p.path.clone())
-            .unwrap_or_else(|| self.project_path.clone());
+        // Read fresh path and project info from workspace state
+        let (project_path, project_name, project_hooks, parent_hooks) = {
+            let ws = self.workspace.read(cx);
+            let project = ws.project(&self.project_id);
+            let path = project.map(|p| p.path.clone())
+                .unwrap_or_else(|| self.project_path.clone());
+            let name = project.map(|p| p.name.clone()).unwrap_or_default();
+            let hooks_cfg = project.map(|p| p.hooks.clone()).unwrap_or_default();
+            let parent = project
+                .and_then(|p| p.worktree_info.as_ref())
+                .and_then(|wt| ws.project(&wt.parent_project_id))
+                .map(|p| p.hooks.clone());
+            (path, name, hooks_cfg, parent)
+        };
+
+        // Apply shell_wrapper if configured
+        let global_hooks = settings(cx).hooks;
+        if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
+            shell = hooks::apply_shell_wrapper(&shell, &wrapper);
+        }
+
+        // Apply on_create: wrap shell to run command first, then exec into shell
+        if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx) {
+            shell = hooks::apply_on_create(&shell, &cmd);
+        }
 
         match self
             .backend

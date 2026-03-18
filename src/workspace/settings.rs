@@ -51,29 +51,122 @@ impl DiffViewMode {
     }
 }
 
-/// Configuration for project lifecycle hooks
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct HooksConfig {
+/// Project lifecycle hooks
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectHooks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_project_open: Option<String>,
+    pub on_open: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_project_close: Option<String>,
+    pub on_close: Option<String>,
+}
+
+/// Terminal lifecycle hooks
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TerminalHooks {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_worktree_create: Option<String>,
+    pub on_create: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_worktree_close: Option<String>,
+    pub on_close: Option<String>,
+    /// Shell wrapper template. `{shell}` is replaced with the resolved shell command.
+    /// Example: `devcontainer exec --workspace-folder $OKENA_PROJECT_PATH -- {shell}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_wrapper: Option<String>,
+}
+
+/// Worktree lifecycle hooks
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorktreeHooks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_create: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_close: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_merge: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_merge: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before_worktree_remove: Option<String>,
+    pub before_remove: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_removed: Option<String>,
+    pub after_remove: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_rebase_conflict: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_dirty_worktree_close: Option<String>,
+    pub on_dirty_close: Option<String>,
+}
+
+/// Grouped hook configuration (project, terminal, worktree).
+/// Backward-compatible: deserializes both the old flat format and the new grouped format.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct HooksConfig {
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub project: ProjectHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub terminal: TerminalHooks,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub worktree: WorktreeHooks,
+}
+
+fn is_default<T: Default + PartialEq>(val: &T) -> bool {
+    *val == T::default()
+}
+
+/// Old flat hook field names, used for backward-compatible deserialization.
+const FLAT_HOOK_KEYS: &[&str] = &[
+    "on_project_open", "on_project_close",
+    "on_worktree_create", "on_worktree_close",
+    "pre_merge", "post_merge",
+    "before_worktree_remove", "worktree_removed",
+    "on_rebase_conflict", "on_dirty_worktree_close",
+];
+
+impl<'de> Deserialize<'de> for HooksConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = match value.as_object() {
+            Some(o) => o,
+            None => return Ok(HooksConfig::default()),
+        };
+
+        // Detect format: new grouped format has "project", "terminal", or "worktree" top-level keys
+        let is_new_format = obj.contains_key("project") || obj.contains_key("terminal") || obj.contains_key("worktree");
+        let has_flat_keys = !is_new_format && FLAT_HOOK_KEYS.iter().any(|k| obj.contains_key(*k));
+
+        if has_flat_keys {
+            // Old flat format → map to grouped
+            let s = |key: &str| -> Option<String> {
+                obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+            };
+            Ok(HooksConfig {
+                project: ProjectHooks {
+                    on_open: s("on_project_open"),
+                    on_close: s("on_project_close"),
+                },
+                terminal: TerminalHooks::default(),
+                worktree: WorktreeHooks {
+                    on_create: s("on_worktree_create"),
+                    on_close: s("on_worktree_close"),
+                    pre_merge: s("pre_merge"),
+                    post_merge: s("post_merge"),
+                    before_remove: s("before_worktree_remove"),
+                    after_remove: s("worktree_removed"),
+                    on_rebase_conflict: s("on_rebase_conflict"),
+                    on_dirty_close: s("on_dirty_worktree_close"),
+                },
+            })
+        } else {
+            // New grouped format (or empty)
+            let deser = |key: &str| -> serde_json::Value {
+                obj.get(key).cloned().unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+            };
+            let project: ProjectHooks = serde_json::from_value(deser("project"))
+                .unwrap_or_default();
+            let terminal: TerminalHooks = serde_json::from_value(deser("terminal"))
+                .unwrap_or_default();
+            let worktree: WorktreeHooks = serde_json::from_value(deser("worktree"))
+                .unwrap_or_default();
+            Ok(HooksConfig { project, terminal, worktree })
+        }
+    }
 }
 
 /// Configuration for worktree creation and close defaults
@@ -157,7 +250,7 @@ impl Default for SidebarSettings {
 }
 
 /// Current settings schema version - increment when making breaking changes
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -531,12 +624,13 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         settings.version = 1;
     }
 
-    // Future migrations would go here:
-    // if settings.version == 1 {
-    //     log::info!("Migrating settings from v1 to v2");
-    //     // Perform v1 -> v2 migration
-    //     settings.version = 2;
-    // }
+    // v1 -> v2: flat HooksConfig → grouped (project/terminal/worktree).
+    // The custom Deserialize impl on HooksConfig handles the actual conversion;
+    // this just bumps the version so the grouped format is written on next save.
+    if settings.version == 1 {
+        log::info!("Migrating settings from v1 to v2 (grouped hooks)");
+        settings.version = 2;
+    }
 
     // Ensure version is current
     if settings.version < SETTINGS_VERSION {
@@ -673,48 +767,82 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::HooksConfig;
+    use super::*;
 
     #[test]
-    fn hooks_config_serde_round_trip_with_all_fields() {
+    fn hooks_config_grouped_round_trip() {
         let config = HooksConfig {
-            on_project_open: Some("echo open".into()),
-            on_project_close: Some("echo close".into()),
-            on_worktree_create: Some("npm install".into()),
-            on_worktree_close: Some("cleanup".into()),
-            pre_merge: Some("lint".into()),
-            post_merge: Some("notify".into()),
-            before_worktree_remove: Some("backup".into()),
-            worktree_removed: Some("log".into()),
-            on_rebase_conflict: Some("terminal: claude -p \"fix\"".into()),
-            on_dirty_worktree_close: Some("echo dirty".into()),
+            project: ProjectHooks {
+                on_open: Some("echo open".into()),
+                on_close: Some("echo close".into()),
+            },
+            terminal: TerminalHooks {
+                on_create: Some("echo create".into()),
+                on_close: Some("echo exit".into()),
+                shell_wrapper: Some("devcontainer exec -- {shell}".into()),
+            },
+            worktree: WorktreeHooks {
+                on_create: Some("npm install".into()),
+                on_close: Some("cleanup".into()),
+                pre_merge: Some("lint".into()),
+                post_merge: Some("notify".into()),
+                before_remove: Some("backup".into()),
+                after_remove: Some("log".into()),
+                on_rebase_conflict: Some("terminal: claude -p \"fix\"".into()),
+                on_dirty_close: Some("echo dirty".into()),
+            },
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: HooksConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.pre_merge, Some("lint".into()));
-        assert_eq!(deserialized.post_merge, Some("notify".into()));
-        assert_eq!(deserialized.before_worktree_remove, Some("backup".into()));
-        assert_eq!(deserialized.worktree_removed, Some("log".into()));
+        assert_eq!(deserialized.project.on_open, Some("echo open".into()));
+        assert_eq!(deserialized.terminal.shell_wrapper, Some("devcontainer exec -- {shell}".into()));
+        assert_eq!(deserialized.worktree.pre_merge, Some("lint".into()));
+        assert_eq!(deserialized.worktree.after_remove, Some("log".into()));
     }
 
     #[test]
-    fn hooks_config_backward_compat_missing_new_fields() {
-        // Simulate old config JSON without the new hook fields
+    fn hooks_config_old_flat_format_migrates() {
+        let json = r#"{
+            "on_project_open": "echo open",
+            "on_project_close": "echo close",
+            "pre_merge": "lint",
+            "worktree_removed": "log",
+            "before_worktree_remove": "backup"
+        }"#;
+        let config: HooksConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.project.on_open, Some("echo open".into()));
+        assert_eq!(config.project.on_close, Some("echo close".into()));
+        assert_eq!(config.worktree.pre_merge, Some("lint".into()));
+        assert_eq!(config.worktree.after_remove, Some("log".into()));
+        assert_eq!(config.worktree.before_remove, Some("backup".into()));
+        // Terminal hooks not present in old format
+        assert!(config.terminal.on_create.is_none());
+        assert!(config.terminal.shell_wrapper.is_none());
+    }
+
+    #[test]
+    fn hooks_config_old_flat_partial() {
         let json = r#"{"on_project_open": "echo open"}"#;
         let config: HooksConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.on_project_open, Some("echo open".into()));
-        assert!(config.pre_merge.is_none());
-        assert!(config.post_merge.is_none());
-        assert!(config.before_worktree_remove.is_none());
-        assert!(config.worktree_removed.is_none());
+        assert_eq!(config.project.on_open, Some("echo open".into()));
+        assert!(config.worktree.pre_merge.is_none());
+        assert!(config.worktree.after_remove.is_none());
     }
 
     #[test]
     fn hooks_config_empty_json_deserializes_to_defaults() {
         let json = "{}";
         let config: HooksConfig = serde_json::from_str(json).unwrap();
-        assert!(config.on_project_open.is_none());
-        assert!(config.pre_merge.is_none());
-        assert!(config.worktree_removed.is_none());
+        assert!(config.project.on_open.is_none());
+        assert!(config.terminal.on_create.is_none());
+        assert!(config.worktree.pre_merge.is_none());
+    }
+
+    #[test]
+    fn hooks_config_grouped_serializes_cleanly() {
+        // Empty config should serialize to just {}
+        let config = HooksConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, "{}");
     }
 }

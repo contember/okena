@@ -251,7 +251,7 @@ fn run_hook_actions(
     (terminal_actions, hook_results)
 }
 
-/// Resolve a hook command: per-project override takes priority over global default.
+/// Resolve a hook command: project → parent project (if worktree) → global.
 fn resolve_hook(
     project_hooks: &HooksConfig,
     global_hooks: &HooksConfig,
@@ -259,6 +259,20 @@ fn resolve_hook(
 ) -> Option<String> {
     get_field(project_hooks)
         .clone()
+        .or_else(|| get_field(global_hooks).clone())
+}
+
+/// Resolve a hook command with parent project fallback for worktrees:
+/// project → parent project → global.
+fn resolve_hook_with_parent(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    global_hooks: &HooksConfig,
+    get_field: fn(&HooksConfig) -> &Option<String>,
+) -> Option<String> {
+    get_field(project_hooks)
+        .clone()
+        .or_else(|| parent_hooks.and_then(|h| get_field(h).clone()))
         .or_else(|| get_field(global_hooks).clone())
 }
 
@@ -485,7 +499,7 @@ pub fn fire_on_project_open(
     cx: &App,
 ) -> Vec<HookTerminalResult> {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_project_open) {
+    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.project.on_open) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_open hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -507,7 +521,7 @@ pub fn fire_on_project_close(
     cx: &App,
 ) {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_project_close) {
+    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.project.on_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -525,7 +539,7 @@ pub fn fire_on_worktree_create(
     cx: &App,
 ) -> Vec<HookTerminalResult> {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_worktree_create) {
+    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.worktree.on_create) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
@@ -548,7 +562,7 @@ pub fn fire_on_worktree_close(
     cx: &App,
 ) {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.on_worktree_close) {
+    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.worktree.on_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_worktree_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -591,7 +605,7 @@ pub fn fire_pre_merge(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.pre_merge) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.pre_merge) {
         let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
         log::info!("Running pre_merge hook for project '{}'", project_name);
         return run_hook_sync(&cmd, env, monitor, "pre_merge", project_name, runner, project_id);
@@ -612,7 +626,7 @@ pub fn fire_post_merge(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.post_merge) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.post_merge) {
         let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
         log::info!("Running post_merge hook for project '{}'", project_name);
         if let Some(result) = run_hook(cmd, env, monitor, "post_merge", project_name, runner, project_id, true) {
@@ -634,7 +648,7 @@ pub fn fire_before_worktree_remove(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.before_worktree_remove) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
@@ -658,7 +672,7 @@ pub fn fire_before_worktree_remove_async(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.before_worktree_remove) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
@@ -686,7 +700,7 @@ pub fn fire_on_rebase_conflict(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.on_rebase_conflict) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_rebase_conflict) {
         let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
         env.insert("OKENA_REBASE_ERROR".into(), rebase_error.into());
         log::info!("Running on_rebase_conflict hook for project '{}'", project_name);
@@ -708,7 +722,7 @@ pub fn fire_on_dirty_worktree_close(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.on_dirty_worktree_close) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
@@ -729,7 +743,7 @@ pub fn fire_worktree_removed(
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
-    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree_removed) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.after_remove) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
@@ -741,9 +755,83 @@ pub fn fire_worktree_removed(
     Vec::new()
 }
 
+/// Resolve the `terminal.on_create` hook command.
+/// Returns the command string if configured at any level (project/parent/global).
+pub fn resolve_terminal_on_create(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    cx: &App,
+) -> Option<String> {
+    let global_hooks = settings(cx).hooks;
+    resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_create)
+}
+
+/// Apply the `terminal.on_create` command by wrapping the shell to run
+/// the command first, then `exec` into the original shell.
+/// Produces: `sh -c '<on_create_cmd>; exec <shell_cmd>'`
+pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str) -> ShellType {
+    let shell_cmd = shell.to_command_string();
+    let script = format!("{}; exec {}", on_create_cmd, shell_cmd);
+    ShellType::for_command(script)
+}
+
+/// Fire the `terminal.on_close` hook after a terminal PTY exits.
+/// Runs headlessly (no PTY runner) since the terminal just exited.
+pub fn fire_terminal_on_close(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    terminal_id: &str,
+    exit_code: Option<u32>,
+    cx: &App,
+) {
+    let global_hooks = settings(cx).hooks;
+    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_close) {
+        let mut env = project_env(project_id, project_name, project_path);
+        env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
+        if let Some(code) = exit_code {
+            env.insert("OKENA_EXIT_CODE".into(), code.to_string());
+        }
+        log::info!("Running terminal.on_close hook for terminal '{}'", terminal_id);
+        let monitor = try_monitor(cx);
+        run_hook(cmd, env, monitor.as_ref(), "terminal.on_close", project_name, None, project_id, true);
+    }
+}
+
+/// Resolve the shell_wrapper for terminal creation.
+/// Returns the wrapper command template if configured (project or global level).
+pub fn resolve_shell_wrapper(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    global_hooks: &HooksConfig,
+) -> Option<String> {
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.shell_wrapper)
+}
+
+/// Apply shell_wrapper to a ShellType, producing a new ShellType.
+/// The wrapper template uses `{shell}` as a placeholder for the resolved shell command.
+///
+/// If the result contains shell metacharacters (`&&`, `||`, `;`, `|`), it is wrapped
+/// in `sh -c` for proper execution. Otherwise, it is split into executable + args directly,
+/// avoiding an extra `sh` process layer (important for session backends like dtach/tmux).
+///
+/// The shell is expected to be already resolved (not `ShellType::Default`).
+pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str) -> ShellType {
+    let shell_cmd = shell.to_command_string();
+    // Replace {shell} with `exec <shell>` so the shell replaces the wrapper process.
+    // This is critical for session backends (dtach/tmux) that monitor the top-level process.
+    let wrapped = wrapper.replace("{shell}", &format!("exec {}", shell_cmd));
+    // Always use for_command (sh -c '...') so that build_terminal_command can extract
+    // the inner command for session backend integration (dtach/tmux/screen).
+    ShellType::for_command(wrapped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::settings::WorktreeHooks;
 
     #[test]
     fn run_hook_sync_returns_ok_for_true() {
@@ -760,14 +848,14 @@ mod tests {
     #[test]
     fn resolve_hook_prefers_project_over_global() {
         let project = HooksConfig {
-            pre_merge: Some("project-cmd".into()),
+            worktree: WorktreeHooks { pre_merge: Some("project-cmd".into()), ..Default::default() },
             ..Default::default()
         };
         let global = HooksConfig {
-            pre_merge: Some("global-cmd".into()),
+            worktree: WorktreeHooks { pre_merge: Some("global-cmd".into()), ..Default::default() },
             ..Default::default()
         };
-        let resolved = resolve_hook(&project, &global, |h| &h.pre_merge);
+        let resolved = resolve_hook(&project, &global, |h| &h.worktree.pre_merge);
         assert_eq!(resolved, Some("project-cmd".into()));
     }
 
@@ -775,10 +863,10 @@ mod tests {
     fn resolve_hook_falls_back_to_global() {
         let project = HooksConfig::default();
         let global = HooksConfig {
-            pre_merge: Some("global-cmd".into()),
+            worktree: WorktreeHooks { pre_merge: Some("global-cmd".into()), ..Default::default() },
             ..Default::default()
         };
-        let resolved = resolve_hook(&project, &global, |h| &h.pre_merge);
+        let resolved = resolve_hook(&project, &global, |h| &h.worktree.pre_merge);
         assert_eq!(resolved, Some("global-cmd".into()));
     }
 
@@ -786,7 +874,7 @@ mod tests {
     fn resolve_hook_returns_none_when_both_empty() {
         let project = HooksConfig::default();
         let global = HooksConfig::default();
-        let resolved = resolve_hook(&project, &global, |h| &h.before_worktree_remove);
+        let resolved = resolve_hook(&project, &global, |h| &h.worktree.before_remove);
         assert_eq!(resolved, None);
     }
 
@@ -851,6 +939,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_hook_with_parent_three_tier() {
+        use crate::workspace::settings::TerminalHooks;
+
+        let project = HooksConfig::default();
+        let parent = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("parent-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let global = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("global-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+
+        // Project empty → falls through to parent
+        let resolved = resolve_hook_with_parent(&project, Some(&parent), &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("parent-cmd".into()));
+
+        // Project empty, no parent → falls through to global
+        let resolved = resolve_hook_with_parent(&project, None, &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("global-cmd".into()));
+
+        // Project set → wins over parent and global
+        let project_with_hook = HooksConfig {
+            terminal: TerminalHooks { on_create: Some("project-cmd".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let resolved = resolve_hook_with_parent(&project_with_hook, Some(&parent), &global, |h| &h.terminal.on_create);
+        assert_eq!(resolved, Some("project-cmd".into()));
+    }
+
+    #[test]
     fn valid_env_keys() {
         assert!(is_valid_env_key("OKENA_PROJECT_PATH"));
         assert!(is_valid_env_key("_FOO"));
@@ -865,5 +984,52 @@ mod tests {
         assert!(!is_valid_env_key("FOO BAR"));
         assert!(!is_valid_env_key("FOO;BAR"));
         assert!(!is_valid_env_key("FOO=BAR"));
+    }
+
+    #[test]
+    fn apply_shell_wrapper_simple() {
+        use super::apply_shell_wrapper;
+        let shell = ShellType::Custom {
+            path: "/bin/zsh".to_string(),
+            args: vec!["--login".to_string()],
+        };
+        let wrapper = "devcontainer exec -- {shell}";
+        let wrapped = apply_shell_wrapper(&shell, wrapper);
+        match &wrapped {
+            ShellType::Custom { path, args } => {
+                assert_eq!(path, "sh");
+                assert_eq!(args[0], "-c");
+                assert!(args[1].contains("devcontainer exec -- exec /bin/zsh --login"), "got: {}", args[1]);
+            }
+            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn apply_shell_wrapper_with_metacharacters() {
+        use super::apply_shell_wrapper;
+        let shell = ShellType::Custom {
+            path: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let wrapper = "echo hello && {shell}";
+        let wrapped = apply_shell_wrapper(&shell, wrapper);
+        match &wrapped {
+            ShellType::Custom { path, args } => {
+                assert_eq!(path, "sh");
+                assert_eq!(args[0], "-c");
+                assert!(args[1].contains("echo hello && exec /bin/zsh"), "got: {}", args[1]);
+            }
+            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shell_to_command_string_custom_no_args() {
+        let shell = ShellType::Custom {
+            path: "/usr/bin/fish".to_string(),
+            args: vec![],
+        };
+        assert_eq!(shell.to_command_string(), "/usr/bin/fish");
     }
 }
