@@ -640,6 +640,8 @@ impl ProjectColumn {
                         } else {
                             ("icons/git-branch.svg", t.text_muted)
                         };
+                        let pr_number = pr_info.as_ref().map(|p| p.number);
+                        let ci_checks = pr_info.as_ref().and_then(|p| p.ci_checks.clone());
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
                         d.child(
@@ -673,6 +675,27 @@ impl ProjectColumn {
                                         .overflow_hidden()
                                         .child(status.branch.clone().unwrap_or_default())
                                 )
+                                .when_some(pr_number, |d, num| {
+                                    d.child(
+                                        div()
+                                            .text_color(rgb(t.text_muted))
+                                            .child(format!("#{num}"))
+                                    )
+                                })
+                                .when_some(ci_checks, |d, checks| {
+                                    let tooltip = checks.tooltip_text();
+                                    d.child(
+                                        div()
+                                            .id("ci-status")
+                                            .child(
+                                                svg()
+                                                    .path(checks.status.icon())
+                                                    .size(px(8.0))
+                                                    .text_color(rgb(checks.status.color(&t)))
+                                            )
+                                            .tooltip(move |_window, cx| Tooltip::new(tooltip.clone()).build(_window, cx))
+                                    )
+                                })
                         )
                     })
                     // Diff stats (clickable, only if there are changes)
@@ -837,6 +860,8 @@ impl ProjectColumn {
                             ("icons/git-branch.svg", t.text_muted, branch.clone())
                         };
 
+                        let pr_number = pr_info.as_ref().map(|p| p.number);
+                        let ci_checks = pr_info.as_ref().and_then(|p| p.ci_checks.clone());
                         let has_pr = pr_info.is_some();
                         let pr_url = pr_info.map(|p| p.url);
 
@@ -877,16 +902,52 @@ impl ProjectColumn {
                                         .overflow_hidden()
                                         .child(branch)
                                 )
+                                .when_some(pr_number, |d, num| {
+                                    d.child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(t.text_muted))
+                                            .line_height(px(12.0))
+                                            .child(format!("#{num}"))
+                                    )
+                                })
+                                .when_some(ci_checks, |d, checks| {
+                                    let ci_tooltip = checks.tooltip_text();
+                                    d.child(
+                                        div()
+                                            .id("ci-status-wt")
+                                            .child(
+                                                svg()
+                                                    .path(checks.status.icon())
+                                                    .size(px(8.0))
+                                                    .text_color(rgb(checks.status.color(&t)))
+                                            )
+                                            .tooltip(move |_window, cx| Tooltip::new(ci_tooltip.clone()).build(_window, cx))
+                                    )
+                                })
                                 .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
                         )
                     })
-                    .child(
+                    .child({
+                        let path_for_copy = project.path.clone();
                         // Left-truncate: flex + justify_end clips from the left
                         div()
+                            .id("project-path")
                             .max_w(px(300.0))
                             .overflow_hidden()
                             .flex()
                             .justify_end()
+                            .cursor_pointer()
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(path_for_copy.clone()));
+                                crate::views::panels::toast::ToastManager::success("Path copied to clipboard".to_string(), cx);
+                            })
+                            .tooltip(move |_window, cx| Tooltip::new("Copy path").build(_window, cx))
                             .child(
                                 div()
                                     .flex_shrink_0()
@@ -895,7 +956,7 @@ impl ProjectColumn {
                                     .line_height(px(12.0))
                                     .child(project.path.clone()),
                             )
-                    )
+                    })
                     .child(self.render_git_status(project, git_status, t, cx)),
             )
             .child(

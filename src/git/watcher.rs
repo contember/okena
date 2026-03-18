@@ -14,6 +14,10 @@ use super::GitStatus;
 const GIT_POLL_INTERVAL: u64 = 5;
 /// How many git poll cycles between PR URL checks (~60s)
 const PR_POLL_EVERY_N_CYCLES: u64 = 12;
+/// How many git poll cycles between CI check polls when checks are pending (~15s)
+const CI_PENDING_POLL_EVERY_N_CYCLES: u64 = 3;
+/// How many git poll cycles between CI check polls when checks are settled (~60s)
+const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
 
 /// Centralized git status poller.
 ///
@@ -27,6 +31,10 @@ pub struct GitStatusWatcher {
     statuses: HashMap<String, Option<GitStatus>>,
     /// Cached PR info keyed by project ID
     pr_infos: HashMap<String, Option<super::PrInfo>>,
+    /// Cached CI check status keyed by project ID
+    ci_checks: HashMap<String, Option<super::CiCheckSummary>>,
+    /// Whether any project has pending CI checks (drives adaptive polling)
+    any_pending_ci: bool,
     /// Watch channel sender for remote WS push
     remote_tx: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
 }
@@ -41,6 +49,8 @@ impl GitStatusWatcher {
             workspace,
             statuses: HashMap::new(),
             pr_infos: HashMap::new(),
+            ci_checks: HashMap::new(),
+            any_pending_ci: false,
             remote_tx,
         };
         watcher.spawn_refresh(cx);
@@ -70,6 +80,12 @@ impl GitStatusWatcher {
                 });
 
                 let check_prs = cycle % PR_POLL_EVERY_N_CYCLES == 0;
+                let ci_poll_interval = if this.update(cx, |this, _| this.any_pending_ci).unwrap_or(false) {
+                    CI_PENDING_POLL_EVERY_N_CYCLES
+                } else {
+                    CI_SETTLED_POLL_EVERY_N_CYCLES
+                };
+                let check_ci = cycle % ci_poll_interval == 0;
 
                 // Phase 1: Fetch git status for all projects in parallel
                 let status_futures: Vec<_> = projects.iter().map(|(id, path)| {
@@ -103,6 +119,33 @@ impl GitStatusWatcher {
                     HashMap::new()
                 };
 
+                // Phase 3: Fetch CI check status — adaptive interval based on pending state.
+                // Only for projects that have a known PR.
+                let new_ci_checks: HashMap<String, Option<super::CiCheckSummary>> = if check_ci {
+                    let pr_infos_snapshot: HashMap<String, Option<super::PrInfo>> = if check_prs {
+                        // Use freshly fetched PR info
+                        new_pr_infos.clone()
+                    } else {
+                        // Use cached PR info
+                        this.update(cx, |this, _| this.pr_infos.clone()).unwrap_or_default()
+                    };
+                    let ci_futures: Vec<_> = projects.iter()
+                        .filter(|(id, _)| pr_infos_snapshot.get(id).map(|p| p.is_some()).unwrap_or(false))
+                        .map(|(id, path)| {
+                            let id = id.clone();
+                            let path = path.clone();
+                            async move {
+                                let checks = smol::unblock(move || {
+                                    git::repository::get_ci_checks(Path::new(&path))
+                                }).await;
+                                (id, checks)
+                            }
+                        }).collect();
+                    futures::future::join_all(ci_futures).await.into_iter().collect()
+                } else {
+                    HashMap::new()
+                };
+
                 // Compare and update
                 let should_continue = this.update(cx, |this, cx| {
                     // Merge PR info: update cache on PR poll cycles, keep old values otherwise
@@ -110,10 +153,22 @@ impl GitStatusWatcher {
                         this.pr_infos = new_pr_infos;
                     }
 
-                    // Inject cached PR info into statuses
+                    // Merge CI checks: update cache on CI poll cycles
+                    if check_ci {
+                        for (id, checks) in new_ci_checks {
+                            this.ci_checks.insert(id, checks);
+                        }
+                        this.any_pending_ci = this.ci_checks.values()
+                            .any(|c| c.as_ref().map(|s| s.status.is_pending()).unwrap_or(false));
+                    }
+
+                    // Inject cached PR info + CI checks into statuses
                     for (id, status) in new_statuses.iter_mut() {
                         if let Some(Some(status)) = status.as_mut().map(Some) {
-                            status.pr_info = this.pr_infos.get(id).cloned().flatten();
+                            if let Some(mut pr) = this.pr_infos.get(id).cloned().flatten() {
+                                pr.ci_checks = this.ci_checks.get(id).cloned().flatten();
+                                status.pr_info = Some(pr);
+                            }
                         }
                     }
 

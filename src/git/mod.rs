@@ -61,11 +61,64 @@ impl PrState {
     }
 }
 
+/// Overall CI check rollup status
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CiStatus {
+    Success,
+    Failure,
+    Pending,
+}
+
+impl CiStatus {
+    pub fn color(&self, t: &crate::theme::ThemeColors) -> u32 {
+        match self {
+            CiStatus::Success => t.term_green,
+            CiStatus::Failure => t.term_red,
+            CiStatus::Pending => t.term_yellow,
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            CiStatus::Success => "icons/check.svg",
+            CiStatus::Failure => "icons/close.svg",
+            CiStatus::Pending => "icons/refresh.svg",
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, CiStatus::Pending)
+    }
+}
+
+/// Summary of CI check results
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CiCheckSummary {
+    pub status: CiStatus,
+    pub passed: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub total: usize,
+}
+
+impl CiCheckSummary {
+    pub fn tooltip_text(&self) -> String {
+        match self.status {
+            CiStatus::Success => format!("{}/{} checks passed", self.passed, self.total),
+            CiStatus::Failure => format!("{} failed, {} passed of {} checks", self.failed, self.passed, self.total),
+            CiStatus::Pending => format!("{} pending, {} passed of {} checks", self.pending, self.passed, self.total),
+        }
+    }
+}
+
 /// Pull request info
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrInfo {
     pub url: String,
     pub state: PrState,
+    pub number: u32,
+    #[serde(default)]
+    pub ci_checks: Option<CiCheckSummary>,
 }
 
 /// Git status information for display in project header
@@ -203,4 +256,27 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     // Sort by path
     summaries.sort_by(|a, b| a.path.cmp(&b.path));
     summaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ci_tooltip_all_passed() {
+        let summary = CiCheckSummary { status: CiStatus::Success, passed: 4, failed: 0, pending: 0, total: 4 };
+        assert_eq!(summary.tooltip_text(), "4/4 checks passed");
+    }
+
+    #[test]
+    fn ci_tooltip_failure() {
+        let summary = CiCheckSummary { status: CiStatus::Failure, passed: 3, failed: 1, pending: 0, total: 4 };
+        assert_eq!(summary.tooltip_text(), "1 failed, 3 passed of 4 checks");
+    }
+
+    #[test]
+    fn ci_tooltip_pending() {
+        let summary = CiCheckSummary { status: CiStatus::Pending, passed: 1, failed: 0, pending: 2, total: 3 };
+        assert_eq!(summary.tooltip_text(), "2 pending, 1 passed of 3 checks");
+    }
 }
