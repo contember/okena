@@ -532,6 +532,14 @@ impl Workspace {
         None
     }
 
+    /// Find the project that owns a terminal by scanning project layouts.
+    /// Returns a reference to the `ProjectData` if found.
+    pub fn find_project_for_terminal(&self, terminal_id: &str) -> Option<&ProjectData> {
+        self.data.projects.iter().find(|p| {
+            p.layout.as_ref().map_or(false, |l| l.find_terminal_path(terminal_id).is_some())
+        })
+    }
+
     /// Get all hook terminal IDs for a project (for cleanup before deletion).
     pub fn hook_terminal_ids_for_project(&self, project_id: &str) -> Vec<String> {
         self.project(project_id)

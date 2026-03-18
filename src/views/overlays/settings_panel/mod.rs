@@ -64,6 +64,10 @@ pub struct SettingsPanel {
     pub(super) hook_worktree_removed: Entity<SimpleInputState>,
     pub(super) hook_on_rebase_conflict: Entity<SimpleInputState>,
     pub(super) hook_on_dirty_worktree_close: Entity<SimpleInputState>,
+    // Global terminal hook inputs
+    pub(super) hook_terminal_on_create: Entity<SimpleInputState>,
+    pub(super) hook_terminal_on_close: Entity<SimpleInputState>,
+    pub(super) hook_terminal_shell_wrapper: Entity<SimpleInputState>,
     // Per-project hook inputs
     pub(super) project_hook_project_open: Entity<SimpleInputState>,
     pub(super) project_hook_project_close: Entity<SimpleInputState>,
@@ -75,6 +79,10 @@ pub struct SettingsPanel {
     pub(super) project_hook_worktree_removed: Entity<SimpleInputState>,
     pub(super) project_hook_on_rebase_conflict: Entity<SimpleInputState>,
     pub(super) project_hook_on_dirty_worktree_close: Entity<SimpleInputState>,
+    // Per-project terminal hook inputs
+    pub(super) project_hook_terminal_on_create: Entity<SimpleInputState>,
+    pub(super) project_hook_terminal_on_close: Entity<SimpleInputState>,
+    pub(super) project_hook_terminal_shell_wrapper: Entity<SimpleInputState>,
     // Worktree dir suffix input
     pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
     // File opener input
@@ -112,25 +120,25 @@ impl SettingsPanel {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. echo \"opened $OKENA_PROJECT_NAME\"");
-            match s.hooks.on_project_open { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.project.on_open { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_project_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. echo \"closed $OKENA_PROJECT_NAME\"");
-            match s.hooks.on_project_close { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.project.on_close { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_worktree_create = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. npm install");
-            match s.hooks.on_worktree_create { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.on_create { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_worktree_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. cleanup script");
-            match s.hooks.on_worktree_close { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.on_close { Some(ref v) => state.default_value(v.clone()), None => state }
         });
 
         // Create new global hook inputs
@@ -138,79 +146,111 @@ impl SettingsPanel {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. run linter before merge");
-            match s.hooks.pre_merge { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.pre_merge { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_post_merge = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. notify team after merge");
-            match s.hooks.post_merge { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.post_merge { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_before_worktree_remove = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. backup work before removal");
-            match s.hooks.before_worktree_remove { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.before_remove { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_worktree_removed = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. cleanup after removal");
-            match s.hooks.worktree_removed { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.after_remove { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_on_rebase_conflict = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. notify on rebase conflict");
-            match s.hooks.on_rebase_conflict { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.on_rebase_conflict { Some(ref v) => state.default_value(v.clone()), None => state }
         });
         let hook_on_dirty_worktree_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
                 .placeholder("e.g. backup uncommitted changes");
-            match s.hooks.on_dirty_worktree_close { Some(ref v) => state.default_value(v.clone()), None => state }
+            match s.hooks.worktree.on_dirty_close { Some(ref v) => state.default_value(v.clone()), None => state }
+        });
+
+        // Create global terminal hook inputs
+        let hook_terminal_on_create = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder("e.g. echo \"terminal created\"");
+            match s.hooks.terminal.on_create { Some(ref v) => state.default_value(v.clone()), None => state }
+        });
+        let hook_terminal_on_close = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder("e.g. echo \"terminal closed\"");
+            match s.hooks.terminal.on_close { Some(ref v) => state.default_value(v.clone()), None => state }
+        });
+        let hook_terminal_shell_wrapper = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder("e.g. devcontainer exec -- {shell}");
+            match s.hooks.terminal.shell_wrapper { Some(ref v) => state.default_value(v.clone()), None => state }
         });
 
         // Subscribe to global hook input changes
         cx.subscribe(&hook_project_open, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_project_open(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_project_on_open(val, cx));
         }).detach();
         cx.subscribe(&hook_project_close, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_project_close(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_project_on_close(val, cx));
         }).detach();
         cx.subscribe(&hook_worktree_create, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_worktree_create(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_on_create(val, cx));
         }).detach();
         cx.subscribe(&hook_worktree_close, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_worktree_close(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_on_close(val, cx));
         }).detach();
         cx.subscribe(&hook_pre_merge, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_pre_merge(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_pre_merge(val, cx));
         }).detach();
         cx.subscribe(&hook_post_merge, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_post_merge(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_post_merge(val, cx));
         }).detach();
         cx.subscribe(&hook_before_worktree_remove, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_before_worktree_remove(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_before_remove(val, cx));
         }).detach();
         cx.subscribe(&hook_worktree_removed, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_removed(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_after_remove(val, cx));
         }).detach();
         cx.subscribe(&hook_on_rebase_conflict, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_rebase_conflict(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_on_rebase_conflict(val, cx));
         }).detach();
         cx.subscribe(&hook_on_dirty_worktree_close, |_this, entity, _: &InputChangedEvent, cx| {
             let val = opt_string(entity.read(cx).value());
-            settings_entity(cx).update(cx, |state, cx| state.set_hook_on_dirty_worktree_close(val, cx));
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_worktree_on_dirty_close(val, cx));
+        }).detach();
+        cx.subscribe(&hook_terminal_on_create, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = opt_string(entity.read(cx).value());
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_terminal_on_create(val, cx));
+        }).detach();
+        cx.subscribe(&hook_terminal_on_close, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = opt_string(entity.read(cx).value());
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_terminal_on_close(val, cx));
+        }).detach();
+        cx.subscribe(&hook_terminal_shell_wrapper, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = opt_string(entity.read(cx).value());
+            settings_entity(cx).update(cx, |state, cx| state.set_hook_terminal_shell_wrapper(val, cx));
         }).detach();
 
         // Create per-project hook inputs (initialized for selected project)
@@ -222,62 +262,80 @@ impl SettingsPanel {
         let project_hook_project_open = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_project_open.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_project_open.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.project.on_open.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.project.on_open.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_project_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_project_close.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_project_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.project.on_close.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.project.on_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_worktree_create = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_worktree_create.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_worktree_create.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.on_create.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.on_create.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_worktree_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_worktree_close.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_worktree_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.on_close.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.on_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_pre_merge = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.pre_merge.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.pre_merge.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.pre_merge.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.pre_merge.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_post_merge = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.post_merge.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.post_merge.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.post_merge.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.post_merge.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_before_worktree_remove = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.before_worktree_remove.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.before_worktree_remove.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.before_remove.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.before_remove.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_worktree_removed = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.worktree_removed.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.worktree_removed.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.after_remove.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.after_remove.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_on_rebase_conflict = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_rebase_conflict.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_rebase_conflict.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.on_rebase_conflict.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.on_rebase_conflict.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
         let project_hook_on_dirty_worktree_close = cx.new(|cx| {
             let state = SimpleInputState::new(cx)
                 .multiline()
-                .placeholder(global_hooks.on_dirty_worktree_close.as_deref().unwrap_or("No global hook set"));
-            match project_hooks.as_ref().and_then(|h| h.on_dirty_worktree_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+                .placeholder(global_hooks.worktree.on_dirty_close.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.worktree.on_dirty_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+        });
+        let project_hook_terminal_on_create = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder(global_hooks.terminal.on_create.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.terminal.on_create.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+        });
+        let project_hook_terminal_on_close = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder(global_hooks.terminal.on_close.as_deref().unwrap_or("No global hook set"));
+            match project_hooks.as_ref().and_then(|h| h.terminal.on_close.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
+        });
+        let project_hook_terminal_shell_wrapper = cx.new(|cx| {
+            let state = SimpleInputState::new(cx)
+                .multiline()
+                .placeholder(global_hooks.terminal.shell_wrapper.as_deref().unwrap_or("e.g. devcontainer exec -- {shell}"));
+            match project_hooks.as_ref().and_then(|h| h.terminal.shell_wrapper.as_ref()) { Some(v) => state.default_value(v.clone()), None => state }
         });
 
         // Subscribe to per-project hook input changes
@@ -289,7 +347,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_project_open = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.project.on_open = val; true });
                     });
                 }
             }
@@ -301,7 +359,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_project_close = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.project.on_close = val; true });
                     });
                 }
             }
@@ -313,7 +371,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_worktree_create = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.on_create = val; true });
                     });
                 }
             }
@@ -325,7 +383,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_worktree_close = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.on_close = val; true });
                     });
                 }
             }
@@ -337,7 +395,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.pre_merge = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.pre_merge = val; true });
                     });
                 }
             }
@@ -349,7 +407,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.post_merge = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.post_merge = val; true });
                     });
                 }
             }
@@ -361,7 +419,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.before_worktree_remove = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.before_remove = val; true });
                     });
                 }
             }
@@ -373,7 +431,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.worktree_removed = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.after_remove = val; true });
                     });
                 }
             }
@@ -385,7 +443,7 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_rebase_conflict = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.on_rebase_conflict = val; true });
                     });
                 }
             }
@@ -397,7 +455,43 @@ impl SettingsPanel {
                     let val = opt_string(entity.read(cx).value());
                     let pid = pid.clone();
                     ws.update(cx, |ws, cx| {
-                        ws.with_project(&pid, cx, |p| { p.hooks.on_dirty_worktree_close = val; true });
+                        ws.with_project(&pid, cx, |p| { p.hooks.worktree.on_dirty_close = val; true });
+                    });
+                }
+            }
+        }).detach();
+        cx.subscribe(&project_hook_terminal_on_create, {
+            let ws = ws.clone();
+            move |this, entity, _: &InputChangedEvent, cx| {
+                if let Some(ref pid) = this.selected_project_id {
+                    let val = opt_string(entity.read(cx).value());
+                    let pid = pid.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.with_project(&pid, cx, |p| { p.hooks.terminal.on_create = val; true });
+                    });
+                }
+            }
+        }).detach();
+        cx.subscribe(&project_hook_terminal_on_close, {
+            let ws = ws.clone();
+            move |this, entity, _: &InputChangedEvent, cx| {
+                if let Some(ref pid) = this.selected_project_id {
+                    let val = opt_string(entity.read(cx).value());
+                    let pid = pid.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.with_project(&pid, cx, |p| { p.hooks.terminal.on_close = val; true });
+                    });
+                }
+            }
+        }).detach();
+        cx.subscribe(&project_hook_terminal_shell_wrapper, {
+            let ws = ws.clone();
+            move |this, entity, _: &InputChangedEvent, cx| {
+                if let Some(ref pid) = this.selected_project_id {
+                    let val = opt_string(entity.read(cx).value());
+                    let pid = pid.clone();
+                    ws.update(cx, |ws, cx| {
+                        ws.with_project(&pid, cx, |p| { p.hooks.terminal.shell_wrapper = val; true });
                     });
                 }
             }
@@ -470,6 +564,9 @@ impl SettingsPanel {
             hook_worktree_removed,
             hook_on_rebase_conflict,
             hook_on_dirty_worktree_close,
+            hook_terminal_on_create,
+            hook_terminal_on_close,
+            hook_terminal_shell_wrapper,
             project_hook_project_open,
             project_hook_project_close,
             project_hook_worktree_create,
@@ -480,6 +577,9 @@ impl SettingsPanel {
             project_hook_worktree_removed,
             project_hook_on_rebase_conflict,
             project_hook_on_dirty_worktree_close,
+            project_hook_terminal_on_create,
+            project_hook_terminal_on_close,
+            project_hook_terminal_shell_wrapper,
             worktree_dir_suffix_input,
             file_opener_input,
             listen_address_input,
@@ -543,53 +643,68 @@ impl SettingsPanel {
 
         // Update placeholders and values
         self.project_hook_project_open.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_project_open.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_project_open.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.project.on_open.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.project.on_open.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_project_close.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_project_close.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_project_close.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.project.on_close.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.project.on_close.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_worktree_create.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_worktree_create.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_worktree_create.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.on_create.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.on_create.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_worktree_close.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_worktree_close.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_worktree_close.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.on_close.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.on_close.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_pre_merge.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.pre_merge.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.pre_merge.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.pre_merge.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.pre_merge.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_post_merge.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.post_merge.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.post_merge.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.post_merge.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.post_merge.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_before_worktree_remove.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.before_worktree_remove.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.before_worktree_remove.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.before_remove.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.before_remove.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_worktree_removed.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.worktree_removed.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.worktree_removed.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.after_remove.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.after_remove.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_on_rebase_conflict.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_rebase_conflict.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_rebase_conflict.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.on_rebase_conflict.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.on_rebase_conflict.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
         self.project_hook_on_dirty_worktree_close.update(cx, |state, cx| {
-            state.set_placeholder(global_hooks.on_dirty_worktree_close.as_deref().unwrap_or("No global hook set"));
-            let val = project_hooks.as_ref().and_then(|h| h.on_dirty_worktree_close.clone()).unwrap_or_default();
+            state.set_placeholder(global_hooks.worktree.on_dirty_close.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.worktree.on_dirty_close.clone()).unwrap_or_default();
+            state.set_value(val, cx);
+        });
+        self.project_hook_terminal_on_create.update(cx, |state, cx| {
+            state.set_placeholder(global_hooks.terminal.on_create.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.terminal.on_create.clone()).unwrap_or_default();
+            state.set_value(val, cx);
+        });
+        self.project_hook_terminal_on_close.update(cx, |state, cx| {
+            state.set_placeholder(global_hooks.terminal.on_close.as_deref().unwrap_or("No global hook set"));
+            let val = project_hooks.as_ref().and_then(|h| h.terminal.on_close.clone()).unwrap_or_default();
+            state.set_value(val, cx);
+        });
+        self.project_hook_terminal_shell_wrapper.update(cx, |state, cx| {
+            state.set_placeholder(global_hooks.terminal.shell_wrapper.as_deref().unwrap_or("e.g. devcontainer exec -- {shell}"));
+            let val = project_hooks.as_ref().and_then(|h| h.terminal.shell_wrapper.clone()).unwrap_or_default();
             state.set_value(val, cx);
         });
     }

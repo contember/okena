@@ -414,7 +414,7 @@ impl CloseWorktreeDialog {
             // and register a pending close — the actual removal happens when the hook exits.
             // If no hook or no runner, proceed with immediate removal.
             let has_before_remove_hook =
-                project_hooks.before_worktree_remove.is_some() || global_hooks.before_worktree_remove.is_some();
+                project_hooks.worktree.before_remove.is_some() || global_hooks.worktree.before_remove.is_some();
 
             if has_before_remove_hook && runner.is_some() {
                 // Fire hook as visible PTY terminal and defer removal

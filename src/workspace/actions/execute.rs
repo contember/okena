@@ -14,6 +14,7 @@ use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::layout::pane_drag::DropZone;
 use crate::views::root::TerminalsRegistry;
+use crate::workspace::hooks;
 use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 use std::sync::Arc;
@@ -439,21 +440,34 @@ pub fn spawn_uninitialized_terminals(
     };
 
     let project_path = project.path.clone();
+    let project_name = project.name.clone();
+    let project_hooks = project.hooks.clone();
     let project_default_shell = project.default_shell.clone();
     let mut uninitialized = Vec::new();
     if let Some(layout) = &project.layout {
         collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
 
-    let global_default = settings(cx).default_shell.clone();
+    let app_settings = settings(cx);
+    let global_default = app_settings.default_shell.clone();
+    let global_hooks = app_settings.hooks;
+
+    // Resolve shell_wrapper once for all terminals in this project
+    let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, &global_hooks);
 
     for (path, shell_type) in uninitialized {
-        let shell = match shell_type {
+        let mut shell = match shell_type {
             ShellType::Default => project_default_shell
                 .clone()
                 .unwrap_or_else(|| global_default.clone()),
             other => other,
         };
+
+        // Apply shell_wrapper if configured
+        if let Some(ref wrapper) = shell_wrapper {
+            shell = hooks::apply_shell_wrapper(&shell, wrapper);
+        }
+
         match backend.create_terminal(&project_path, Some(&shell)) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
@@ -463,6 +477,13 @@ pub fn spawn_uninitialized_terminals(
                     backend.transport(),
                     project_path.clone(),
                 ));
+
+                // Fire terminal.on_create hook (before moving terminal_id)
+                let hook_results = hooks::fire_terminal_on_create(
+                    &project_hooks, project_id, &project_name, &project_path, &terminal_id, cx,
+                );
+                ws.register_hook_results(hook_results, cx);
+
                 terminals.lock().insert(terminal_id, terminal);
             }
             Err(e) => {

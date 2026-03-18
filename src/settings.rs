@@ -159,63 +159,61 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Set hook: on_project_open
-    pub fn set_hook_on_project_open(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_project_open = value;
+    // Project hooks
+    pub fn set_hook_project_on_open(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.project.on_open = value;
+        self.save_and_notify(cx);
+    }
+    pub fn set_hook_project_on_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.project.on_close = value;
         self.save_and_notify(cx);
     }
 
-    /// Set hook: on_project_close
-    pub fn set_hook_on_project_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_project_close = value;
+    // Terminal hooks
+    pub fn set_hook_terminal_on_create(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.terminal.on_create = value;
+        self.save_and_notify(cx);
+    }
+    pub fn set_hook_terminal_on_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.terminal.on_close = value;
+        self.save_and_notify(cx);
+    }
+    pub fn set_hook_terminal_shell_wrapper(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.terminal.shell_wrapper = value;
         self.save_and_notify(cx);
     }
 
-    /// Set hook: on_worktree_create
-    pub fn set_hook_on_worktree_create(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_worktree_create = value;
+    // Worktree hooks
+    pub fn set_hook_worktree_on_create(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.on_create = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: on_worktree_close
-    pub fn set_hook_on_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_worktree_close = value;
+    pub fn set_hook_worktree_on_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.on_close = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: pre_merge
-    pub fn set_hook_pre_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.pre_merge = value;
+    pub fn set_hook_worktree_pre_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.pre_merge = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: post_merge
-    pub fn set_hook_post_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.post_merge = value;
+    pub fn set_hook_worktree_post_merge(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.post_merge = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: before_worktree_remove
-    pub fn set_hook_before_worktree_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.before_worktree_remove = value;
+    pub fn set_hook_worktree_before_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.before_remove = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: worktree_removed
-    pub fn set_hook_worktree_removed(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.worktree_removed = value;
+    pub fn set_hook_worktree_after_remove(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.after_remove = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: on_rebase_conflict
-    pub fn set_hook_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_rebase_conflict = value;
+    pub fn set_hook_worktree_on_rebase_conflict(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.on_rebase_conflict = value;
         self.save_and_notify(cx);
     }
-
-    /// Set hook: on_dirty_worktree_close
-    pub fn set_hook_on_dirty_worktree_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
-        self.settings.hooks.on_dirty_worktree_close = value;
+    pub fn set_hook_worktree_on_dirty_close(&mut self, value: Option<String>, cx: &mut Context<Self>) {
+        self.settings.hooks.worktree.on_dirty_close = value;
         self.save_and_notify(cx);
     }
 

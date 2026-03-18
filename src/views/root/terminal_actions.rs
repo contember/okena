@@ -2,6 +2,7 @@ use crate::settings::settings;
 use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::views::panels::toast::ToastManager;
 use crate::workspace::actions::execute::spawn_uninitialized_terminals;
+use crate::workspace::hooks;
 use gpui::*;
 use std::sync::Arc;
 
@@ -65,19 +66,40 @@ impl RootView {
         });
 
         // Determine the actual shell to use (resolve Default → project default → global default)
-        let actual_shell = shell_type.resolve_default(
+        let mut actual_shell = shell_type.resolve_default(
             self.workspace.read(cx).project(project_id).and_then(|p| p.default_shell.as_ref()),
             &settings(cx).default_shell,
         );
+
+        // Get project info for hooks
+        let (project_name, project_hooks) = {
+            let ws = self.workspace.read(cx);
+            let project = ws.project(project_id);
+            let name = project.map(|p| p.name.clone()).unwrap_or_default();
+            let hooks_cfg = project.map(|p| p.hooks.clone()).unwrap_or_default();
+            (name, hooks_cfg)
+        };
+
+        // Apply shell_wrapper if configured
+        let global_hooks = settings(cx).hooks;
+        if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, &global_hooks) {
+            actual_shell = hooks::apply_shell_wrapper(&actual_shell, &wrapper);
+        }
 
         // Create new terminal with the new shell
         match self.backend.create_terminal(&project_path, Some(&actual_shell)) {
             Ok(new_terminal_id) => {
                 log::info!("switch_terminal_shell: Switched to {:?}, new terminal_id: {}", actual_shell, new_terminal_id);
 
-                // Update terminal_id in workspace state
+                // Update terminal_id in workspace state and fire on_create hook
                 self.workspace.update(cx, |ws, cx| {
                     ws.set_terminal_id(project_id, &layout_path, new_terminal_id.clone(), cx);
+
+                    // Fire terminal.on_create hook
+                    let hook_results = hooks::fire_terminal_on_create(
+                        &project_hooks, project_id, &project_name, &project_path, &new_terminal_id, cx,
+                    );
+                    ws.register_hook_results(hook_results, cx);
                 });
 
                 // Create terminal wrapper and register it

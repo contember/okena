@@ -9,7 +9,7 @@ impl SettingsPanel {
         let t = theme(cx);
         let is_project = self.selected_project_id.is_some();
 
-        let (h1, h2, h3, h4, h5, h6, h7, h8, h9, h10) = if is_project {
+        let (h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, t1, t2, t3) = if is_project {
             (
                 self.project_hook_project_open.clone(),
                 self.project_hook_project_close.clone(),
@@ -21,6 +21,9 @@ impl SettingsPanel {
                 self.project_hook_worktree_removed.clone(),
                 self.project_hook_on_rebase_conflict.clone(),
                 self.project_hook_on_dirty_worktree_close.clone(),
+                self.project_hook_terminal_on_create.clone(),
+                self.project_hook_terminal_on_close.clone(),
+                self.project_hook_terminal_shell_wrapper.clone(),
             )
         } else {
             (
@@ -34,6 +37,9 @@ impl SettingsPanel {
                 self.hook_worktree_removed.clone(),
                 self.hook_on_rebase_conflict.clone(),
                 self.hook_on_dirty_worktree_close.clone(),
+                self.hook_terminal_on_create.clone(),
+                self.hook_terminal_on_close.clone(),
+                self.hook_terminal_shell_wrapper.clone(),
             )
         };
 
@@ -81,6 +87,25 @@ impl SettingsPanel {
                         "hook-worktree-close", "On Worktree Close",
                         "Command to run after a git worktree is removed",
                         &h4, "", &t, false,
+                    )),
+            )
+            .child(section_header("Terminal Hooks", &t))
+            .child(
+                section_container(&t)
+                    .child(hook_input_row(
+                        "hook-terminal-on-create", "On Terminal Create",
+                        "Command to run when a new terminal is created",
+                        &t1, "", &t, true,
+                    ))
+                    .child(hook_input_row(
+                        "hook-terminal-on-close", "On Terminal Close",
+                        "Command to run when a terminal is closed",
+                        &t2, "", &t, true,
+                    ))
+                    .child(hook_input_row(
+                        "hook-terminal-shell-wrapper", "Shell Wrapper",
+                        "Wrap the shell command (use {shell} as placeholder)",
+                        &t3, "", &t, false,
                     )),
             )
             .child(section_header("Merge & Removal Hooks", &t))
