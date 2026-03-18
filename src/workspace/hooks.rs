@@ -755,28 +755,24 @@ pub fn fire_worktree_removed(
     Vec::new()
 }
 
-/// Fire the `terminal.on_create` hook after a terminal PTY is spawned.
-pub fn fire_terminal_on_create(
+/// Resolve the `terminal.on_create` hook command.
+/// Returns the command string if configured at any level (project/parent/global).
+pub fn resolve_terminal_on_create(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
-    project_id: &str,
-    project_name: &str,
-    project_path: &str,
-    terminal_id: &str,
     cx: &App,
-) -> Vec<HookTerminalResult> {
+) -> Option<String> {
     let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_create) {
-        let mut env = project_env(project_id, project_name, project_path);
-        env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
-        log::info!("Running terminal.on_create hook for terminal '{}'", terminal_id);
-        let monitor = try_monitor(cx);
-        let runner = try_runner(cx);
-        if let Some(result) = run_hook(cmd, env, monitor.as_ref(), "terminal.on_create", project_name, runner.as_ref(), project_id, true) {
-            return vec![result];
-        }
-    }
-    Vec::new()
+    resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_create)
+}
+
+/// Apply the `terminal.on_create` command by wrapping the shell to run
+/// the command first, then `exec` into the original shell.
+/// Produces: `sh -c '<on_create_cmd>; exec <shell_cmd>'`
+pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str) -> ShellType {
+    let shell_cmd = shell.to_command_string();
+    let script = format!("{}; exec {}", on_create_cmd, shell_cmd);
+    ShellType::for_command(script)
 }
 
 /// Fire the `terminal.on_close` hook after a terminal PTY exits.

@@ -426,6 +426,11 @@ impl TerminalPane {
             shell = hooks::apply_shell_wrapper(&shell, &wrapper);
         }
 
+        // Apply on_create: wrap shell to run command first, then exec into shell
+        if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx) {
+            shell = hooks::apply_on_create(&shell, &cmd);
+        }
+
         match self
             .backend
             .create_terminal(&project_path, Some(&shell))
@@ -434,12 +439,6 @@ impl TerminalPane {
                 self.terminal_id = Some(terminal_id.clone());
                 self.workspace.update(cx, |ws, cx| {
                     ws.set_terminal_id(&self.project_id, &self.layout_path, terminal_id.clone(), cx);
-
-                    // Fire terminal.on_create hook
-                    let hook_results = hooks::fire_terminal_on_create(
-                        &project_hooks, parent_hooks.as_ref(), &self.project_id, &project_name, &project_path, &terminal_id, cx,
-                    );
-                    ws.register_hook_results(hook_results, cx);
                 });
 
                 let size = TerminalSize::default();

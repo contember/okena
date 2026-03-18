@@ -90,20 +90,19 @@ impl RootView {
             actual_shell = hooks::apply_shell_wrapper(&actual_shell, &wrapper);
         }
 
+        // Apply on_create: wrap shell to run command first, then exec into shell
+        if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx) {
+            actual_shell = hooks::apply_on_create(&actual_shell, &cmd);
+        }
+
         // Create new terminal with the new shell
         match self.backend.create_terminal(&project_path, Some(&actual_shell)) {
             Ok(new_terminal_id) => {
                 log::info!("switch_terminal_shell: Switched to {:?}, new terminal_id: {}", actual_shell, new_terminal_id);
 
-                // Update terminal_id in workspace state and fire on_create hook
+                // Update terminal_id in workspace state
                 self.workspace.update(cx, |ws, cx| {
                     ws.set_terminal_id(project_id, &layout_path, new_terminal_id.clone(), cx);
-
-                    // Fire terminal.on_create hook
-                    let hook_results = hooks::fire_terminal_on_create(
-                        &project_hooks, parent_hooks.as_ref(), project_id, &project_name, &project_path, &new_terminal_id, cx,
-                    );
-                    ws.register_hook_results(hook_results, cx);
                 });
 
                 // Create terminal wrapper and register it

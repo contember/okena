@@ -455,8 +455,9 @@ pub fn spawn_uninitialized_terminals(
     let global_default = app_settings.default_shell.clone();
     let global_hooks = app_settings.hooks;
 
-    // Resolve shell_wrapper once for all terminals in this project
+    // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
+    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx);
 
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {
@@ -471,6 +472,11 @@ pub fn spawn_uninitialized_terminals(
             shell = hooks::apply_shell_wrapper(&shell, wrapper);
         }
 
+        // Apply on_create: wrap shell to run command first, then exec into shell
+        if let Some(ref cmd) = on_create_cmd {
+            shell = hooks::apply_on_create(&shell, cmd);
+        }
+
         match backend.create_terminal(&project_path, Some(&shell)) {
             Ok(terminal_id) => {
                 ws.set_terminal_id(project_id, &path, terminal_id.clone(), cx);
@@ -480,12 +486,6 @@ pub fn spawn_uninitialized_terminals(
                     backend.transport(),
                     project_path.clone(),
                 ));
-
-                // Fire terminal.on_create hook (before moving terminal_id)
-                let hook_results = hooks::fire_terminal_on_create(
-                    &project_hooks, parent_hooks.as_ref(), project_id, &project_name, &project_path, &terminal_id, cx,
-                );
-                ws.register_hook_results(hook_results, cx);
 
                 terminals.lock().insert(terminal_id, terminal);
             }
