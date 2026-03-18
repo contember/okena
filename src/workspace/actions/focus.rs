@@ -56,12 +56,16 @@ impl Workspace {
         let selecting = self.active_folder_filter().map(|s| s.as_str()) != Some(folder_id);
         if selecting {
             self.set_folder_filter(Some(folder_id.to_string()), cx);
+            // Clear project focus so all visible folder projects show
+            self.focus_manager.set_focused_project_id(None);
+            // Focus the first project's terminal
             if let Some(first_pid) = self.folder(folder_id).and_then(|f| f.project_ids.first()).cloned() {
-                self.focus_project_terminal(&first_pid, cx);
+                self.focus_first_terminal_in(&first_pid);
             }
         } else {
             self.set_folder_filter(None, cx);
         }
+        cx.notify();
     }
 
     /// Resolve a focusable project and focus its first terminal.

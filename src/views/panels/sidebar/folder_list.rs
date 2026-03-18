@@ -55,7 +55,9 @@ impl Sidebar {
         let is_collapsed = folder.collapsed;
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
-        let is_active_filter = self.workspace.read(cx).active_folder_filter() == Some(&folder.id);
+        let ws = self.workspace.read(cx);
+        let is_active_filter = ws.active_folder_filter() == Some(&folder.id)
+            && ws.focused_project_id().is_none();
 
         // Folder header row
         div()
