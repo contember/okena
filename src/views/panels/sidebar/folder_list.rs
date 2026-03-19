@@ -189,16 +189,7 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_terminal_count > 0, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.border_idle))
-                )
-            })
+            .when(idle_terminal_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 // Delete folder button (on hover)
                 {
@@ -259,10 +250,6 @@ impl Sidebar {
 
         let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
-
-        // Show quick create button for git repos that aren't themselves worktrees
-        let show_quick_create = project.is_git_repo && !project.is_worktree;
-        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -419,71 +406,7 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.border_idle))
-                )
-            })
-            // Quick create button — only visible on hover
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(
-                        ElementId::Name(format!("fp-quick-wt-{}", quick_create_id).into()),
-                        &t,
-                    )
-                    .opacity(0.0)
-                    .group_hover("folder-project-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.spawn_quick_create_worktree(&project_id, cx);
-                        }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
-            })
-            // Manage worktrees button
-            .when(project.is_git_repo && !project.is_worktree, |d| {
-                let project_id = project.id.clone();
-                d.child(
-                    div()
-                        .id(ElementId::Name(format!("fp-wt-list-{}", project_id).into()))
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .opacity(0.0)
-                        .group_hover("folder-project-item", |s| s.opacity(1.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_mouse_down(MouseButton::Left, cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, event: &MouseDownEvent, _window, cx| {
-                                this.show_worktree_list(project_id.clone(), f32::from(event.position.y), cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .child(
-                            svg()
-                                .path("icons/git-branch.svg")
-                                .size(px(12.0))
-                                .text_color(rgb(t.text_secondary))
-                        )
-                        .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Manage Worktrees").build(_window, cx))
-                )
-            })
+            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 sidebar_visibility_button(
                     ElementId::Name(format!("fp-visibility-{}", project.id).into()),

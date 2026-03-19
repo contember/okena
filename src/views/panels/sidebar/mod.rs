@@ -137,6 +137,8 @@ pub struct Sidebar {
     worktree_list_project_id: Option<String>,
     /// Y position (window coords) where the worktree list was triggered
     worktree_list_click_y: f32,
+    /// Cached git worktrees for the worktree list popover (computed eagerly on show)
+    worktree_list_entries: Vec<(String, String)>,
 }
 
 impl Sidebar {
@@ -207,6 +209,7 @@ impl Sidebar {
             creating_worktree: HashSet::new(),
             worktree_list_project_id: None,
             worktree_list_click_y: 0.0,
+            worktree_list_entries: Vec::new(),
         }
     }
 
@@ -597,6 +600,12 @@ impl Sidebar {
     }
 
     pub(super) fn show_worktree_list(&mut self, project_id: String, click_y: f32, cx: &mut Context<Self>) {
+        let project_path = self.workspace.read(cx).project(&project_id)
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
+        self.worktree_list_entries = crate::git::repository::list_git_worktrees(
+            std::path::Path::new(&project_path),
+        );
         self.worktree_list_project_id = Some(project_id);
         self.worktree_list_click_y = click_y;
         cx.notify();
@@ -604,6 +613,7 @@ impl Sidebar {
 
     fn hide_worktree_list(&mut self, cx: &mut Context<Self>) {
         self.worktree_list_project_id = None;
+        self.worktree_list_entries.clear();
         cx.notify();
     }
 
@@ -1350,8 +1360,6 @@ pub(super) struct SidebarProjectInfo {
     pub is_closing: bool,
     /// True if this worktree is being created (git fetch + worktree add in progress)
     pub is_creating: bool,
-    /// Parent project's folder color (for worktree children to inherit)
-    pub parent_folder_color: Option<FolderColor>,
     /// Project path (for quick worktree creation)
     pub path: String,
     /// Whether this project is inside a git repo (for showing quick create button)
@@ -1400,21 +1408,10 @@ impl SidebarProjectInfo {
             }).collect(),
             is_closing: false,
             is_creating: false,
-            parent_folder_color: None,
             path: project.path.clone(),
             is_git_repo,
             is_worktree: project.worktree_info.is_some(),
         }
-    }
-}
-
-/// Propagate the parent's folder color to all worktree children.
-fn propagate_folder_color(
-    project: &ProjectData,
-    children: &mut [SidebarProjectInfo],
-) {
-    for child in children.iter_mut() {
-        child.parent_folder_color = Some(project.folder_color);
     }
 }
 
@@ -1446,6 +1443,13 @@ impl Render for Sidebar {
                 }
                 SidebarRequest::RenameFolder { folder_id, folder_name } => {
                     self.start_folder_rename(folder_id, folder_name, window, cx);
+                }
+                SidebarRequest::QuickCreateWorktree { project_id } => {
+                    self.spawn_quick_create_worktree(&project_id, cx);
+                }
+                SidebarRequest::ShowWorktreeList { project_id } => {
+                    // Use a default Y position since we don't have click coords from context menu
+                    self.show_worktree_list(project_id, 200.0, cx);
                 }
             }
         }
@@ -1561,9 +1565,6 @@ impl Render for Sidebar {
                 for fp in &mut folder_projects {
                     if let Some(mut children) = worktree_children_map.remove(&fp.id) {
                         fp.worktree_count = children.len();
-                        if let Some(&project) = all_projects.get(fp.id.as_str()) {
-                            propagate_folder_color(project, &mut children);
-                        }
                         for child in &mut children {
                             if let Some(services) = project_services.remove(&child.id) {
                                 child.services = services;
@@ -1603,7 +1604,6 @@ impl Render for Sidebar {
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {
-                    propagate_folder_color(project, &mut wt_children);
                     for child in &mut wt_children {
                         if let Some(services) = project_services.remove(&child.id) {
                             child.services = services;
@@ -1681,7 +1681,7 @@ impl Render for Sidebar {
                         // Group header highlights when focused non-individual (showing all)
                         let is_focused_group = focused_project_id.as_ref() == Some(&project.id) && !focus_individual;
                         flat_elements.push(
-                            self.render_project_group_header(&project, index, is_cursor, is_focused_group, window, cx).into_any_element()
+                            self.render_project_group_header(&project, 4.0, "gh", "group-header-item", project_list::GroupHeaderDragConfig::TopLevel { index }, is_cursor, is_focused_group, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
@@ -1691,7 +1691,7 @@ impl Render for Sidebar {
                             let is_cursor = cursor_index == Some(flat_idx);
                             let is_focused_project = focused_project_id.as_ref() == Some(&project.id) && focus_individual;
                             flat_elements.push(
-                                self.render_project_group_child(&project, is_cursor, is_focused_project, window, cx).into_any_element()
+                                self.render_project_group_child(&project, 20.0, "gc", "group-child-item", is_cursor, is_focused_project, window, cx).into_any_element()
                             );
                             flat_idx += 1;
 
@@ -1761,7 +1761,7 @@ impl Render for Sidebar {
                                 let is_cursor = cursor_index == Some(flat_idx);
                                 let is_focused_group = focused_project_id.as_ref() == Some(&fp.id) && !focus_individual;
                                 flat_elements.push(
-                                    self.render_project_group_header_in_folder(fp, &folder.id, is_cursor, is_focused_group, window, cx).into_any_element()
+                                    self.render_project_group_header(fp, 20.0, "fgh", "fgh-item", project_list::GroupHeaderDragConfig::InFolder { folder_id: folder.id.clone() }, is_cursor, is_focused_group, window, cx).into_any_element()
                                 );
                                 flat_idx += 1;
 
@@ -1771,7 +1771,7 @@ impl Render for Sidebar {
                                     let is_cursor = cursor_index == Some(flat_idx);
                                     let is_focused_project = focused_project_id.as_ref() == Some(&fp.id) && focus_individual;
                                     flat_elements.push(
-                                        self.render_project_group_child_in_folder(fp, is_cursor, is_focused_project, window, cx).into_any_element()
+                                        self.render_project_group_child(fp, 36.0, "fgc", "fgc-item", is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
                                     flat_idx += 1;
 

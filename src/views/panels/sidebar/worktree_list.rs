@@ -9,19 +9,18 @@ use super::Sidebar;
 impl Sidebar {
     /// Render the worktree list popover for a project.
     /// Shows all git worktrees with checkboxes to toggle sidebar visibility.
+    /// Uses cached entries from `self.worktree_list_entries` (computed in `show_worktree_list`).
     pub(super) fn render_worktree_list(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let ws = self.workspace.read(cx);
 
-        // Get parent project path (git root)
+        // Get parent project path (for normalization comparison)
         let project_path = ws.project(project_id)
             .map(|p| p.path.clone())
             .unwrap_or_default();
 
-        // List all git worktrees
-        let git_worktrees = crate::git::repository::list_git_worktrees(
-            std::path::Path::new(&project_path),
-        );
+        // Use cached git worktrees
+        let git_worktrees = &self.worktree_list_entries;
 
         // Build set of worktree paths already tracked in workspace
         let tracked_wt_paths: std::collections::HashSet<String> = ws.data().projects.iter()
@@ -31,7 +30,7 @@ impl Sidebar {
             .collect();
 
         // Filter: skip the main repo itself (first entry usually matches project_path)
-        let worktrees: Vec<(String, String, bool)> = git_worktrees.into_iter()
+        let worktrees: Vec<(String, String, bool)> = git_worktrees.iter()
             .filter(|(wt_path, _)| {
                 // Skip the main worktree (same path as parent project)
                 let norm_wt = crate::git::repository::normalize_path(std::path::Path::new(wt_path));
@@ -39,8 +38,8 @@ impl Sidebar {
                 norm_wt != norm_proj
             })
             .map(|(wt_path, branch)| {
-                let is_tracked = tracked_wt_paths.contains(&wt_path);
-                (wt_path, branch, is_tracked)
+                let is_tracked = tracked_wt_paths.contains(wt_path);
+                (wt_path.clone(), branch.clone(), is_tracked)
             })
             .collect();
 

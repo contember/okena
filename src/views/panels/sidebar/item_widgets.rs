@@ -187,6 +187,18 @@ pub fn sidebar_group_header(
         )
 }
 
+/// Idle dot badge (6x6 circle in border_idle color).
+///
+/// Used to indicate terminals waiting for input when a project/folder is collapsed.
+pub fn sidebar_idle_dot(t: &ThemeColors) -> Div {
+    div()
+        .flex_shrink_0()
+        .w(px(6.0))
+        .h(px(6.0))
+        .rounded(px(3.0))
+        .bg(rgb(t.border_idle))
+}
+
 /// Worktree count badge (git-branch icon + number).
 /// Shown on parent projects that have active worktrees.
 pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement {
@@ -206,32 +218,6 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
                 .text_size(px(10.0))
                 .text_color(rgb(t.text_muted))
                 .child(format!("{}", count)),
-        )
-}
-
-/// Quick worktree creation button (+).
-///
-/// Caller chains `.on_click()` to trigger quick worktree creation.
-pub fn sidebar_quick_create_button(
-    id: impl Into<ElementId>,
-    t: &ThemeColors,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .cursor_pointer()
-        .w(px(18.0))
-        .h(px(18.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.0))
-        .hover(|s| s.bg(rgb(t.bg_hover)))
-        .child(
-            svg()
-                .path("icons/plus.svg")
-                .size(px(12.0))
-                .text_color(rgb(t.text_secondary)),
         )
 }
 
@@ -258,11 +244,7 @@ pub fn sidebar_visibility_toggle(
             svg()
                 .path("icons/eye.svg")
                 .size(px(12.0))
-                .text_color(if show_in_overview {
-                    rgb(t.term_blue)
-                } else {
-                    rgb(t.text_muted)
-                }),
+                .text_color(rgb(t.text_muted)),
         )
 }
 

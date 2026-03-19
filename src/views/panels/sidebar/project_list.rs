@@ -12,6 +12,15 @@ use super::item_widgets::*;
 use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag, WorktreeDrag, WorktreeDragView};
 use std::collections::HashMap;
 
+/// Drag/drop configuration for group header rendering.
+/// Determines how project drag and folder drag are handled.
+pub(super) enum GroupHeaderDragConfig {
+    /// Top-level group header: reorder projects/folders by index.
+    TopLevel { index: usize },
+    /// Group header inside a folder: move projects into folder at position.
+    InFolder { folder_id: String },
+}
+
 impl Sidebar {
     pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -24,9 +33,6 @@ impl Sidebar {
 
         let has_layout = project.has_layout;
 
-        // Show quick create button for git repos that aren't themselves worktrees
-        let show_quick_create = project.is_git_repo && !project.is_worktree;
-        let quick_create_id = project.id.clone();
 
         // Count idle terminals when project is collapsed (not expanded)
         let idle_count = if !is_expanded {
@@ -173,73 +179,9 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.border_idle))
-                )
-            })
+            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
-            })
-            // Quick create button — only visible on hover
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(
-                        ElementId::Name(format!("quick-wt-{}", quick_create_id).into()),
-                        &t,
-                    )
-                    .opacity(0.0)
-                    .group_hover("project-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.spawn_quick_create_worktree(&project_id, cx);
-                        }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
-            })
-            // Manage worktrees button — discover and toggle external worktrees
-            .when(project.is_git_repo && !project.is_worktree, |d| {
-                let project_id = project.id.clone();
-                d.child(
-                    div()
-                        .id(ElementId::Name(format!("wt-list-{}", project_id).into()))
-                        .flex_shrink_0()
-                        .cursor_pointer()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .opacity(0.0)
-                        .group_hover("project-item", |s| s.opacity(1.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_mouse_down(MouseButton::Left, cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, event: &MouseDownEvent, _window, cx| {
-                                this.show_worktree_list(project_id.clone(), f32::from(event.position.y), cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .child(
-                            svg()
-                                .path("icons/git-branch.svg")
-                                .size(px(12.0))
-                                .text_color(rgb(t.text_secondary))
-                        )
-                        .tooltip(|_window, cx| Tooltip::new("Manage Worktrees").build(_window, cx))
-                )
             })
             .child(
                 sidebar_visibility_button(
@@ -409,16 +351,7 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0 && !is_busy, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(t.border_idle))
-                )
-            })
+            .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
             .when(is_busy, |d| {
                 d.child(
                     div()
@@ -711,22 +644,31 @@ impl Sidebar {
 
     /// Render project as a group header when it has worktrees.
     /// Click = show parent + all worktrees (non-individual focus).
-    pub(super) fn render_project_group_header(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_project_group_header(
+        &self,
+        project: &SidebarProjectInfo,
+        left_padding: f32,
+        id_prefix: &str,
+        group_name: &'static str,
+        drag_config: GroupHeaderDragConfig,
+        is_cursor: bool,
+        is_focused_project: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.is_project_expanded(&project.id, true);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let is_renaming = is_renaming(&self.project_rename, &project.id);
-        let show_quick_create = project.is_git_repo && !project.is_worktree;
-        let quick_create_id = project.id.clone();
 
         let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
 
-        div()
-            .id(ElementId::Name(format!("group-header-{}", project.id).into()))
-            .group("group-header-item")
+        let base = div()
+            .id(ElementId::Name(format!("{}-{}", id_prefix, project.id).into()))
+            .group(group_name)
             .h(px(24.0))
-            .pl(px(4.0))
+            .pl(px(left_padding))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -740,21 +682,45 @@ impl Sidebar {
             })
             .drag_over::<ProjectDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
-            })
-            .on_drop(cx.listener({
-                let project_id = project_id.clone();
-                move |this, drag: &ProjectDrag, _window, cx| {
-                    if drag.project_id != project_id {
-                        this.workspace.update(cx, |ws, cx| { ws.move_project(&drag.project_id, index, cx); });
-                    }
-                }
-            }))
-            .drag_over::<FolderDrag>(move |style, _, _, _| {
-                style.border_t_2().border_color(rgb(t.border_active))
-            })
-            .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
-                this.workspace.update(cx, |ws, cx| { ws.move_item_in_order(&drag.folder_id, index, cx); });
-            }))
+            });
+
+        let base = match drag_config {
+            GroupHeaderDragConfig::TopLevel { index } => {
+                base
+                    .on_drop(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, drag: &ProjectDrag, _window, cx| {
+                            if drag.project_id != project_id {
+                                this.workspace.update(cx, |ws, cx| { ws.move_project(&drag.project_id, index, cx); });
+                            }
+                        }
+                    }))
+                    .drag_over::<FolderDrag>(move |style, _, _, _| {
+                        style.border_t_2().border_color(rgb(t.border_active))
+                    })
+                    .on_drop(cx.listener(move |this, drag: &FolderDrag, _window, cx| {
+                        this.workspace.update(cx, |ws, cx| { ws.move_item_in_order(&drag.folder_id, index, cx); });
+                    }))
+            }
+            GroupHeaderDragConfig::InFolder { folder_id } => {
+                base
+                    .on_drop(cx.listener({
+                        let folder_id = folder_id.clone();
+                        let project_id = project_id.clone();
+                        move |this, drag: &ProjectDrag, _window, cx| {
+                            if drag.project_id != project_id {
+                                let pos = this.workspace.read(cx).folder(&folder_id)
+                                    .and_then(|f| f.project_ids.iter().position(|id| id == &project_id));
+                                if let Some(pos) = pos {
+                                    this.workspace.update(cx, |ws, cx| { ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx); });
+                                }
+                            }
+                        }
+                    }))
+            }
+        };
+
+        base
             .on_mouse_down(MouseButton::Right, cx.listener({
                 let project_id = project_id.clone();
                 move |this, event: &MouseDownEvent, _window, cx| {
@@ -773,7 +739,7 @@ impl Sidebar {
             }))
             .child(
                 sidebar_expand_arrow(
-                    ElementId::Name(format!("expand-gh-{}", project.id).into()),
+                    ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()),
                     is_expanded,
                     &t,
                 )
@@ -790,7 +756,7 @@ impl Sidebar {
                 let folder_color = t.get_folder_color(project.folder_color);
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
-                    ElementId::Name(format!("gh-icon-{}", project.id).into()),
+                    ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
                     div().flex_shrink_0().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color)).into_any_element(),
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
@@ -800,12 +766,15 @@ impl Sidebar {
             })
             .child(
                 if is_renaming {
-                    sidebar_rename_input("gh-rename-input", &self.project_rename, &t)
+                    sidebar_rename_input(
+                        ElementId::Name(format!("{}-rename-input", id_prefix).into()),
+                        &self.project_rename, &t,
+                    )
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
-                        ElementId::Name(format!("gh-name-{}", project.id).into()),
+                        ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()),
                         project_name.clone(), &t,
                     )
                     .font_weight(FontWeight::MEDIUM)
@@ -827,56 +796,22 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
-            .when(idle_count > 0, |d| d.child(div().flex_shrink_0().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(rgb(t.border_idle))))
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(ElementId::Name(format!("gh-quick-wt-{}", quick_create_id).into()), &t)
-                    .opacity(0.0)
-                    .group_hover("group-header-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| { cx.stop_propagation(); this.spawn_quick_create_worktree(&project_id, cx); }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
-            })
-            // Manage worktrees button — opens popover with git worktree list
-            .child({
-                let project_id = project.id.clone();
-                div()
-                    .id(ElementId::Name(format!("gh-wt-list-{}", project.id).into()))
-                    .flex_shrink_0()
-                    .cursor_pointer()
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.0))
-                    .opacity(0.0)
-                    .group_hover("group-header-item", |s| s.opacity(1.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, event: &MouseDownEvent, _window, cx| {
-                            this.show_worktree_list(project_id.clone(), f32::from(event.position.y), cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(
-                        svg()
-                            .path("icons/git-branch.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Manage Worktrees").build(_window, cx))
-            })
+            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
     }
 
     /// Render main project as a child row under a group header.
     /// Click = show just this project (individual focus).
-    pub(super) fn render_project_group_child(&self, project: &SidebarProjectInfo, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_project_group_child(
+        &self,
+        project: &SidebarProjectInfo,
+        left_padding: f32,
+        id_prefix: &str,
+        group_name: &'static str,
+        is_cursor: bool,
+        is_focused_project: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = theme(cx);
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
@@ -884,10 +819,10 @@ impl Sidebar {
         let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
 
         div()
-            .id(ElementId::Name(format!("group-child-{}", project.id).into()))
-            .group("group-child-item")
+            .id(ElementId::Name(format!("{}-{}", id_prefix, project.id).into()))
+            .group(group_name)
             .h(px(24.0))
-            .pl(px(20.0))
+            .pl(px(left_padding))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -915,7 +850,7 @@ impl Sidebar {
             .child({
                 let has_expandable = has_layout || !project.services.is_empty();
                 if has_expandable {
-                    sidebar_expand_arrow(ElementId::Name(format!("expand-gc-{}", project.id).into()), is_expanded, &t)
+                    sidebar_expand_arrow(ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()), is_expanded, &t)
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| { this.toggle_expanded(&project_id); cx.notify(); cx.stop_propagation(); }
@@ -927,10 +862,19 @@ impl Sidebar {
             })
             .child({
                 let folder_color = t.get_folder_color(project.folder_color);
-                div().flex_shrink_0().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color))
+                div()
+                    .flex_shrink_0()
+                    .w(px(14.0))
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color))
+                    )
             })
             .child(
-                sidebar_name_label(ElementId::Name(format!("gc-name-{}", project.id).into()), project.name.clone(), &t)
+                sidebar_name_label(ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()), project.name.clone(), &t)
                 .on_click(cx.listener({
                     let project_id = project_id.clone();
                     move |this, _event: &ClickEvent, _window, cx| {
@@ -943,11 +887,11 @@ impl Sidebar {
                 }))
                 .into_any_element(),
             )
-            .when(idle_count > 0, |d| d.child(div().flex_shrink_0().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(rgb(t.border_idle))))
+            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 sidebar_visibility_button(
-                    ElementId::Name(format!("gc-vis-{}", project.id).into()),
-                    project.show_in_overview, project.terminal_ids.len(), "group-child-item",
+                    ElementId::Name(format!("{}-vis-{}", id_prefix, project.id).into()),
+                    project.show_in_overview, project.terminal_ids.len(), group_name,
                     if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
                 )
                 .on_click(cx.listener({
@@ -960,228 +904,5 @@ impl Sidebar {
             )
     }
 
-    /// Group header in folder context (indented).
-    pub(super) fn render_project_group_header_in_folder(&self, project: &SidebarProjectInfo, folder_id: &str, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let is_expanded = self.is_project_expanded(&project.id, true);
-        let project_id = project.id.clone();
-        let project_name = project.name.clone();
-        let folder_id = folder_id.to_string();
-        let is_renaming = is_renaming(&self.project_rename, &project.id);
-        let show_quick_create = project.is_git_repo && !project.is_worktree;
-        let quick_create_id = project.id.clone();
-        let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
 
-        div()
-            .id(ElementId::Name(format!("fgh-{}", project.id).into()))
-            .group("fgh-item")
-            .h(px(24.0))
-            .pl(px(20.0))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
-            .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
-            .on_drag(super::ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
-                cx.new(|_| super::ProjectDragView { name: drag.project_name.clone() })
-            })
-            .drag_over::<super::ProjectDrag>(move |style, _, _, _| {
-                style.border_t_2().border_color(rgb(t.border_active))
-            })
-            .on_drop(cx.listener({
-                let folder_id = folder_id.clone();
-                let project_id = project_id.clone();
-                move |this, drag: &super::ProjectDrag, _window, cx| {
-                    if drag.project_id != project_id {
-                        let pos = this.workspace.read(cx).folder(&folder_id)
-                            .and_then(|f| f.project_ids.iter().position(|id| id == &project_id));
-                        if let Some(pos) = pos {
-                            this.workspace.update(cx, |ws, cx| { ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx); });
-                        }
-                    }
-                }
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener({
-                let project_id = project_id.clone();
-                move |this, event: &MouseDownEvent, _window, cx| {
-                    this.request_context_menu(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .on_click(cx.listener({
-                let project_id = project_id.clone();
-                move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| { ws.set_focused_project(Some(project_id.clone()), cx); });
-                }
-            }))
-            .child(
-                sidebar_expand_arrow(ElementId::Name(format!("expand-fgh-{}", project.id).into()), is_expanded, &t)
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| { this.toggle_worktrees_collapsed(&project_id); cx.notify(); cx.stop_propagation(); }
-                }))
-            )
-            .child({
-                let folder_color = t.get_folder_color(project.folder_color);
-                let project_id = project.id.clone();
-                sidebar_color_indicator(
-                    ElementId::Name(format!("fgh-icon-{}", project.id).into()),
-                    div().flex_shrink_0().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color)).into_any_element(),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
-                    cx.stop_propagation();
-                }))
-            })
-            .child(
-                if is_renaming {
-                    sidebar_rename_input("fgh-rename-input", &self.project_rename, &t)
-                        .map(|el| el.into_any_element())
-                        .unwrap_or_else(|| div().flex_1().into_any_element())
-                } else {
-                    sidebar_name_label(ElementId::Name(format!("fgh-name-{}", project.id).into()), project_name.clone(), &t)
-                    .font_weight(FontWeight::MEDIUM)
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        let project_name = project_name.clone();
-                        move |this, _event: &ClickEvent, window, cx| {
-                            if this.check_project_double_click(&project_id) {
-                                this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
-                            } else {
-                                this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| { ws.set_focused_project(Some(project_id.clone()), cx); });
-                            }
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .into_any_element()
-                },
-            )
-            .when(idle_count > 0, |d| d.child(div().flex_shrink_0().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(rgb(t.border_idle))))
-            .when(show_quick_create, |d| {
-                d.child(
-                    sidebar_quick_create_button(ElementId::Name(format!("fgh-quick-wt-{}", quick_create_id).into()), &t)
-                    .opacity(0.0)
-                    .group_hover("fgh-item", |s| s.opacity(1.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
-                    .on_click(cx.listener({
-                        let project_id = quick_create_id.clone();
-                        move |this, _, _window, cx| { cx.stop_propagation(); this.spawn_quick_create_worktree(&project_id, cx); }
-                    }))
-                    .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
-                )
-            })
-            .child({
-                let project_id = project.id.clone();
-                div()
-                    .id(ElementId::Name(format!("fgh-wt-list-{}", project.id).into()))
-                    .flex_shrink_0()
-                    .cursor_pointer()
-                    .w(px(18.0))
-                    .h(px(18.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(3.0))
-                    .opacity(0.0)
-                    .group_hover("fgh-item", |s| s.opacity(1.0))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, event: &MouseDownEvent, _window, cx| {
-                            this.show_worktree_list(project_id.clone(), f32::from(event.position.y), cx);
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .child(
-                        svg().path("icons/git-branch.svg").size(px(12.0)).text_color(rgb(t.text_secondary))
-                    )
-                    .tooltip(|_window, cx| Tooltip::new("Manage Worktrees").build(_window, cx))
-            })
-    }
-
-    /// Main project child in folder group header context (further indented).
-    pub(super) fn render_project_group_child_in_folder(&self, project: &SidebarProjectInfo, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
-        let project_id = project.id.clone();
-        let has_layout = project.has_layout;
-        let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
-
-        div()
-            .id(ElementId::Name(format!("fgc-{}", project.id).into()))
-            .group("fgc-item")
-            .h(px(24.0))
-            .pl(px(36.0))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
-            .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
-            .on_click(cx.listener({
-                let project_id = project_id.clone();
-                move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| { ws.set_focused_project_individual(Some(project_id.clone()), cx); });
-                }
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener({
-                let project_id = project_id.clone();
-                move |this, event: &MouseDownEvent, _window, cx| {
-                    this.request_context_menu(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child({
-                let has_expandable = has_layout || !project.services.is_empty();
-                if has_expandable {
-                    sidebar_expand_arrow(ElementId::Name(format!("expand-fgc-{}", project.id).into()), is_expanded, &t)
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| { this.toggle_expanded(&project_id); cx.notify(); cx.stop_propagation(); }
-                    }))
-                    .into_any_element()
-                } else {
-                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
-                }
-            })
-            .child({
-                let folder_color = t.get_folder_color(project.folder_color);
-                div().flex_shrink_0().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color))
-            })
-            .child(
-                sidebar_name_label(ElementId::Name(format!("fgc-name-{}", project.id).into()), project.name.clone(), &t)
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _event: &ClickEvent, _window, cx| {
-                        this.cursor_index = None;
-                        this.workspace.update(cx, |ws, cx| { ws.set_focused_project_individual(Some(project_id.clone()), cx); });
-                        cx.stop_propagation();
-                    }
-                }))
-                .into_any_element(),
-            )
-            .when(idle_count > 0, |d| d.child(div().flex_shrink_0().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(rgb(t.border_idle))))
-            .child(
-                sidebar_visibility_button(
-                    ElementId::Name(format!("fgc-vis-{}", project.id).into()),
-                    project.show_in_overview, project.terminal_ids.len(), "fgc-item",
-                    if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.workspace.update(cx, |ws, cx| { ws.toggle_project_overview_visibility(&project_id, cx); });
-                        cx.stop_propagation();
-                    }
-                }))
-            )
-    }
 }
