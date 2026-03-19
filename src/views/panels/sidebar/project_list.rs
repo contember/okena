@@ -15,7 +15,7 @@ use std::collections::HashMap;
 impl Sidebar {
     pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let has_worktrees = project.worktree_count > 0;
+        let has_nested_worktrees = project.nested_worktree_count > 0;
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
@@ -93,7 +93,7 @@ impl Sidebar {
                 }
             }))
             .child({
-                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
+                let has_expandable_content = has_layout || has_nested_worktrees || !project.services.is_empty();
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-{}", project.id).into()),
@@ -228,9 +228,11 @@ impl Sidebar {
             )
     }
 
-    /// Renders a worktree project nested under its parent
+    /// Renders a worktree project row. Promoted worktrees use the same indent as their parent
+    /// (solid dot, conditional expand arrow). Nested worktrees are indented with a hollow circle.
     pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let is_promoted = project.is_promoted_worktree;
         let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
         let is_creating = project.is_creating;
@@ -241,7 +243,6 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
 
         // Count idle terminals when project is collapsed (not expanded)
@@ -251,12 +252,11 @@ impl Sidebar {
             0
         };
 
-        // Worktree project row - indented under parent
         div()
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
             .group("worktree-item")
             .h(px(24.0))
-            .pl(px(indent))  // Indented under parent project
+            .pl(px(indent))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -306,28 +306,43 @@ impl Sidebar {
                     });
                 }
             }))
-            .child(
-                sidebar_expand_arrow(
-                    ElementId::Name(format!("expand-wt-{}", project.id).into()),
-                    is_expanded,
-                    &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.toggle_expanded(&project_id);
-                        cx.notify();
-                        cx.stop_propagation();
-                    }
-                })),
-            )
+            // Vertical connector line for promoted worktrees — links them to their parent.
+            .when(is_promoted, |d| d.relative().child(
+                div()
+                    .absolute()
+                    .left(px(indent - 16.0 + 6.0))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(1.0))
+                    .bg(rgb(t.text_secondary))
+                    .opacity(0.3)
+            ))
             .child({
-                // Worktree color indicator — empty circle centered in same-width container as project dot
-                let color = if project.is_orphan {
-                    rgb(t.warning)
+                // Promoted: only show arrow when there's expandable content; nested: always show
+                let has_expandable_content = has_layout || !project.services.is_empty();
+                if !is_promoted || has_expandable_content {
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("expand-wt-{}", project.id).into()),
+                        is_expanded,
+                        &t,
+                    )
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.toggle_expanded(&project_id);
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .into_any_element()
                 } else {
-                    rgb(t.get_folder_color(project.folder_color))
-                };
+                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
+                }
+            })
+            .child({
+                // Hollow circle indicator for all worktrees
+                let folder_color = t.get_folder_color(project.folder_color);
+                let color = if project.is_orphan { rgb(t.warning) } else { rgb(folder_color) };
                 div()
                     .flex_shrink_0()
                     .w(px(14.0))
@@ -345,7 +360,6 @@ impl Sidebar {
                     )
             })
             .child(
-                // Worktree name (or input if renaming)
                 if is_renaming {
                     sidebar_rename_input("worktree-rename-input", &self.project_rename, &t)
                         .map(|el| el.into_any_element())

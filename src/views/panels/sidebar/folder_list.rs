@@ -249,7 +249,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let has_worktrees = project.worktree_count > 0;
+        let has_nested_worktrees = project.nested_worktree_count > 0;
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
@@ -339,7 +339,7 @@ impl Sidebar {
                 }
             }))
             .child({
-                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
+                let has_expandable_content = has_layout || has_nested_worktrees || !project.services.is_empty();
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-fp-{}", project.id).into()),
