@@ -848,25 +848,16 @@ impl Sidebar {
     ) {
         cursor_items.push(SidebarCursorItem::Project { project_id: project.id.clone() });
 
-        // Promoted worktrees — emitted as Project cursor items right after parent
-        if let Some(promoted) = promoted_children_map.get(&project.id) {
-            for child in promoted {
-                cursor_items.push(SidebarCursorItem::Project { project_id: child.id.clone() });
-                if self.expanded_projects.contains(&child.id) {
-                    self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
-                }
-            }
-        }
-
         let has_nested = nested_children_map.get(&project.id).map_or(false, |c| !c.is_empty());
 
-        // Parent's own expanded children (terminals/services)
+        // Parent's own expanded children (terminals/services) — before worktrees
         if self.expanded_projects.contains(&project.id) {
+            self.push_group_cursor_items(&project.id, &project.layout, service_names, hook_terminal_ids, cursor_items);
+
             // Nested worktrees group header — only when parent is expanded and has nested worktrees
             if has_nested {
                 cursor_items.push(SidebarCursorItem::WorktreeProject { project_id: project.id.clone() });
             }
-            self.push_group_cursor_items(&project.id, &project.layout, service_names, hook_terminal_ids, cursor_items);
         }
 
         // Nested worktree children — only when parent is expanded
@@ -879,6 +870,16 @@ impl Sidebar {
                     if self.expanded_projects.contains(&child.id) {
                         self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
                     }
+                }
+            }
+        }
+
+        // Promoted worktrees — pushed down by expanded children
+        if let Some(promoted) = promoted_children_map.get(&project.id) {
+            for child in promoted {
+                cursor_items.push(SidebarCursorItem::Project { project_id: child.id.clone() });
+                if self.expanded_projects.contains(&child.id) {
+                    self.push_group_cursor_items(&child.id, &child.layout, service_names, hook_terminal_ids, cursor_items);
                 }
             }
         }
@@ -1730,21 +1731,12 @@ impl Render for Sidebar {
                     }
                     flat_idx += 1;
 
-                    // Promoted worktrees — rendered as indented project rows right after parent
-                    for (wt_idx, child) in promoted_worktrees.iter().enumerate() {
-                        let is_cursor = cursor_index == Some(flat_idx);
-                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
-                        flat_elements.push(
-                            self.render_worktree_item(child, 20.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
-                        );
-                        flat_idx += 1;
-
-                        if self.expanded_projects.contains(&child.id) {
-                            self.render_expanded_children(child, 36.0, 50.0, "pwt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
-                        }
-                    }
-
                     let show_children = self.expanded_projects.contains(&project.id);
+
+                    // Expanded terminals and services (grouped, before worktrees)
+                    if show_children {
+                        self.render_expanded_children(&project, 20.0, 34.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                    }
 
                     // Nested worktree children — only shown when parent is expanded
                     if show_children && !worktree_children.is_empty() {
@@ -1785,9 +1777,18 @@ impl Render for Sidebar {
                         }
                     }
 
-                    // Expanded terminals and services (grouped, after worktrees)
-                    if show_children {
-                        self.render_expanded_children(&project, 20.0, 34.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                    // Promoted worktrees — rendered as indented project rows, pushed down by expanded children
+                    for (wt_idx, child) in promoted_worktrees.iter().enumerate() {
+                        let is_cursor = cursor_index == Some(flat_idx);
+                        let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                        flat_elements.push(
+                            self.render_worktree_item(child, 20.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                        );
+                        flat_idx += 1;
+
+                        if self.expanded_projects.contains(&child.id) {
+                            self.render_expanded_children(child, 36.0, 50.0, "pwt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                        }
                     }
                 }
                 SidebarItem::Folder { folder, index, projects, worktree_children, promoted_worktrees } => {
@@ -1822,23 +1823,12 @@ impl Render for Sidebar {
                             }
                             flat_idx += 1;
 
-                            // Promoted worktrees — indented under their parent within the folder
-                            if let Some(promoted) = promoted_worktrees.get(&fp.id) {
-                                for (wt_idx, child) in promoted.iter().enumerate() {
-                                    let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
-                                    flat_elements.push(
-                                        self.render_worktree_item(child, 36.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
-                                    );
-                                    flat_idx += 1;
-
-                                    if self.expanded_projects.contains(&child.id) {
-                                        self.render_expanded_children(child, 50.0, 64.0, "pwt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
-                                    }
-                                }
-                            }
-
                             let show_children = self.expanded_projects.contains(&fp.id);
+
+                            // Expanded terminals and services for folder project (before worktrees)
+                            if show_children {
+                                self.render_expanded_children(fp, 36.0, 50.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            }
 
                             // Nested worktree children — only shown when parent is expanded
                             if show_children {
@@ -1881,9 +1871,20 @@ impl Render for Sidebar {
                                 }
                             }
 
-                            // Expanded terminals and services for folder project (after worktrees)
-                            if show_children {
-                                self.render_expanded_children(fp, 36.0, 50.0, "", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                            // Promoted worktrees — indented under their parent within the folder, pushed down by expanded children
+                            if let Some(promoted) = promoted_worktrees.get(&fp.id) {
+                                for (wt_idx, child) in promoted.iter().enumerate() {
+                                    let is_cursor = cursor_index == Some(flat_idx);
+                                    let is_focused_project = focused_project_id.as_ref() == Some(&child.id);
+                                    flat_elements.push(
+                                        self.render_worktree_item(child, 36.0, wt_idx, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    );
+                                    flat_idx += 1;
+
+                                    if self.expanded_projects.contains(&child.id) {
+                                        self.render_expanded_children(child, 50.0, 64.0, "pwt-", cursor_index, &mut flat_idx, &mut flat_elements, cx);
+                                    }
+                                }
                             }
                         }
                     }
