@@ -66,9 +66,8 @@ impl WorktreeDialog {
         // Determine git repo root: if parent is already a worktree, use its
         // stored main_repo_path; otherwise detect via `git rev-parse --show-toplevel`.
         let project_pathbuf = PathBuf::from(&project_path);
-        let parent_main_repo = workspace.read(cx).project(&project_id)
-            .and_then(|p| p.worktree_info.as_ref())
-            .map(|wt| PathBuf::from(&wt.main_repo_path));
+        let parent_main_repo = workspace.read(cx).worktree_parent_path(&project_id)
+            .map(PathBuf::from);
         let git_root = parent_main_repo
             .or_else(|| git::get_repo_root(&project_pathbuf))
             .unwrap_or_else(|| project_pathbuf.clone());

@@ -144,14 +144,11 @@ impl Render for ContextMenu {
             .filter(|p| p.worktree_info.as_ref().map_or(false, |wt| wt.parent_project_id == self.request.project_id))
             .count();
 
-        // Count worktrees that don't match the current path template (migratable)
-        let wt_path_template = crate::settings::settings(cx).worktree.path_template.clone();
+        // Count worktrees for this parent (potentially migratable to new path template)
         let migratable_worktree_count = ws.data().projects.iter()
             .filter(|p| {
                 p.worktree_info.as_ref().map_or(false, |wt| {
                     wt.parent_project_id == self.request.project_id
-                        && !wt.worktree_path.is_empty()
-                        && !wt.matches_template(&wt_path_template)
                 })
             })
             .count();

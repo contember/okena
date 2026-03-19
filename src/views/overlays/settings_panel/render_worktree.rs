@@ -11,11 +11,10 @@ impl SettingsPanel {
         let s = settings_entity(cx).read(cx).settings.clone();
         let wt = &s.worktree;
 
-        // Count worktrees that don't match the current template (migratable)
-        let template = s.worktree.path_template.clone();
+        // Count worktrees that could potentially be migrated to a new path template.
+        // The actual migration function checks at runtime if the path already matches.
         let migratable_count = self.workspace.read(cx).data().projects.iter()
-            .filter(|p| p.worktree_info.as_ref()
-                .map_or(false, |wt| !wt.worktree_path.is_empty() && !wt.matches_template(&template)))
+            .filter(|p| p.worktree_info.is_some())
             .count();
 
         div()

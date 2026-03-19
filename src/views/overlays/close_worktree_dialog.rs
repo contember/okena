@@ -65,9 +65,7 @@ impl CloseWorktreeDialog {
 
         let project_name = project.map(|p| p.name.clone()).unwrap_or_default();
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
-        let main_repo_path = project
-            .and_then(|p| p.worktree_info.as_ref())
-            .map(|wt| wt.main_repo_path.clone());
+        let main_repo_path = ws.worktree_parent_path(&project_id);
 
         let path = PathBuf::from(&project_path);
         let is_dirty = git::has_uncommitted_changes(&path);

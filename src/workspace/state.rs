@@ -68,31 +68,25 @@ impl WorkspaceData {
     }
 }
 
-/// Metadata for worktree projects
+/// Metadata for worktree projects.
+///
+/// Only `parent_project_id` is actively used. The other fields are kept for
+/// backward-compatible deserialization of old workspace.json files but are no
+/// longer written on save. All derived data (main repo path, branch, worktree
+/// path) is resolved dynamically from the parent project and git at runtime.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorktreeMetadata {
     /// ID of the main repo project
     pub parent_project_id: String,
-    /// Path to main repository (git root)
+    /// Deprecated: resolved dynamically from parent project path.
+    #[serde(default, skip_serializing)]
     pub main_repo_path: String,
-    /// Path to the git worktree checkout directory (may differ from project path in monorepos)
-    #[serde(default)]
+    /// Deprecated: same as project.path.
+    #[serde(default, skip_serializing)]
     pub worktree_path: String,
-    /// Branch name at worktree creation time (stable even if project is renamed)
-    #[serde(default)]
+    /// Deprecated: read from git at runtime.
+    #[serde(default, skip_serializing)]
     pub branch_name: String,
-}
-
-impl WorktreeMetadata {
-    /// Check if this worktree's path matches the configured path template.
-    pub fn matches_template(&self, template: &str) -> bool {
-        crate::git::repository::worktree_matches_template(
-            &self.main_repo_path,
-            &self.branch_name,
-            &self.worktree_path,
-            template,
-        )
-    }
 }
 
 /// Status of a hook terminal in the service panel.
@@ -807,6 +801,14 @@ impl Workspace {
     /// Get a project by ID
     pub fn project(&self, id: &str) -> Option<&ProjectData> {
         self.data.projects.iter().find(|p| p.id == id)
+    }
+
+    /// Get the parent project's path for a worktree project (i.e. the main repo path).
+    pub fn worktree_parent_path(&self, project_id: &str) -> Option<String> {
+        self.project(project_id)
+            .and_then(|p| p.worktree_info.as_ref())
+            .and_then(|wt| self.project(&wt.parent_project_id))
+            .map(|parent| parent.path.clone())
     }
 
     /// Get a mutable project by ID

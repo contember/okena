@@ -829,23 +829,6 @@ pub(crate) fn compute_target_paths(
     (worktree_path, project_path)
 }
 
-/// Check whether a worktree's actual path matches the configured path template.
-/// Used to determine if a worktree should be "promoted" to a top-level sidebar item.
-pub(crate) fn worktree_matches_template(
-    main_repo_path: &str,
-    branch_name: &str,
-    worktree_path: &str,
-    template: &str,
-) -> bool {
-    if worktree_path.is_empty() || branch_name.is_empty() {
-        return false;
-    }
-    let git_root = Path::new(main_repo_path);
-    let (expected_path, _) = compute_target_paths(git_root, Path::new(""), template, branch_name);
-    let normalized_actual = normalize_path(Path::new(worktree_path));
-    let normalized_expected = normalize_path(Path::new(&expected_path));
-    normalized_actual == normalized_expected
-}
 
 /// Get commit graph with topology (railways) for a repository.
 ///
@@ -1140,68 +1123,6 @@ mod tests {
     fn parse_ci_only_skipping() {
         let json = r#"[{"bucket":"skipping"},{"bucket":"skipping"}]"#;
         assert!(super::parse_ci_checks(json).is_none());
-    }
-
-    // ─── worktree_matches_template tests ──────────────────────────────
-
-    #[test]
-    fn worktree_template_match_default() {
-        assert!(worktree_matches_template(
-            "/projects/myrepo",
-            "feature-123",
-            "/projects/myrepo-wt/feature-123",
-            "../{repo}-wt/{branch}",
-        ));
-    }
-
-    #[test]
-    fn worktree_template_match_branch_with_slashes() {
-        assert!(worktree_matches_template(
-            "/projects/repo",
-            "feature/my-branch",
-            "/projects/repo-wt/feature-my-branch",
-            "../{repo}-wt/{branch}",
-        ));
-    }
-
-    #[test]
-    fn worktree_template_no_match_custom_path() {
-        assert!(!worktree_matches_template(
-            "/projects/myrepo",
-            "feature-123",
-            "/some/custom/path",
-            "../{repo}-wt/{branch}",
-        ));
-    }
-
-    #[test]
-    fn worktree_template_no_match_empty_path() {
-        assert!(!worktree_matches_template(
-            "/projects/myrepo",
-            "feature-123",
-            "",
-            "../{repo}-wt/{branch}",
-        ));
-    }
-
-    #[test]
-    fn worktree_template_no_match_empty_branch() {
-        assert!(!worktree_matches_template(
-            "/projects/myrepo",
-            "",
-            "/projects/myrepo-wt/feature-123",
-            "../{repo}-wt/{branch}",
-        ));
-    }
-
-    #[test]
-    fn worktree_template_match_absolute_template() {
-        assert!(worktree_matches_template(
-            "/projects/myrepo",
-            "main",
-            "/tmp/worktrees/myrepo/main",
-            "/tmp/worktrees/{repo}/{branch}",
-        ));
     }
 
     // ─── commit graph parsing tests ────────────────────────────────────

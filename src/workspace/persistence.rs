@@ -487,9 +487,9 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
                 hidden_terminals: HashMap::new(),
                 worktree_info: Some(WorktreeMetadata {
                     parent_project_id: parent_id.clone(),
-                    main_repo_path: parent_path.clone(),
-                    worktree_path: wt_path_clone,
-                    branch_name: branch.clone(),
+                    main_repo_path: String::new(),
+                    worktree_path: String::new(),
+                    branch_name: String::new(),
                 }),
                 worktree_ids: Vec::new(),
                 default_shell: None,
@@ -1060,7 +1060,6 @@ mod tests {
         assert!(wt.name.contains("feature-branch"));
         let wt_info = wt.worktree_info.as_ref().unwrap();
         assert_eq!(wt_info.parent_project_id, "p1");
-        assert_eq!(wt_info.main_repo_path, repo_path.to_string_lossy().to_string());
 
         // Should be placed after parent in order
         let parent_pos = data.project_order.iter().position(|id| id == "p1").unwrap();

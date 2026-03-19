@@ -400,9 +400,9 @@ impl Workspace {
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
-                main_repo_path: repo_path.to_string_lossy().to_string(),
-                worktree_path: worktree_path.to_string(),
-                branch_name: branch.to_string(),
+                main_repo_path: String::new(),
+                worktree_path: String::new(),
+                branch_name: String::new(),
             }),
             worktree_ids: Vec::new(),
             folder_color: parent_color,
@@ -450,11 +450,8 @@ impl Workspace {
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
         let path = project.path.clone();
-        // Read branch from metadata (stable), falling back to name for old data
-        let branch = project.worktree_info.as_ref()
-            .map(|wt| &wt.branch_name)
-            .filter(|b| !b.is_empty())
-            .cloned()
+        // Read branch from git at runtime, falling back to project name
+        let branch = crate::git::repository::get_current_branch(std::path::Path::new(&path))
             .unwrap_or_else(|| name.clone());
 
         // If layout is still None (deferred creation), clone it from the parent
@@ -511,9 +508,9 @@ impl Workspace {
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::workspace::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
-                main_repo_path: main_repo_path.to_string(),
-                worktree_path: wt_path.to_string(),
-                branch_name: branch.to_string(),
+                main_repo_path: String::new(),
+                worktree_path: String::new(),
+                branch_name: String::new(),
             }),
             worktree_ids: Vec::new(),
             default_shell: None,
@@ -564,9 +561,10 @@ impl Workspace {
         parent_project_id: &str,
     ) -> Option<(String, Option<String>)> {
         let parent = self.project(parent_project_id)?;
+        let main_repo = self.worktree_parent_path(parent_project_id);
         Some((
             parent.path.clone(),
-            parent.worktree_info.as_ref().map(|wt| wt.main_repo_path.clone()),
+            main_repo,
         ))
     }
 
@@ -583,26 +581,30 @@ impl Workspace {
         let mut moved_count = 0;
         for wt_id in &worktree_ids {
             let Some(project) = self.project(wt_id) else { continue };
-            let Some(ref wt_info) = project.worktree_info else { continue };
+            if project.worktree_info.is_none() { continue; }
 
-            // Check if this worktree already matches the template
-            if wt_info.matches_template(&template) {
+            let project_path = project.path.clone();
+            let wt_dir = std::path::Path::new(&project_path);
+
+            // Read branch name from git at runtime
+            let Some(branch) = crate::git::repository::get_current_branch(wt_dir) else {
+                log::warn!("Cannot determine branch for worktree {}, skipping migration", wt_id);
                 continue;
-            }
+            };
 
-            // Compute the new path from the template
-            let git_root = std::path::Path::new(&wt_info.main_repo_path);
+            // Compute the new path from the template (use parent's path as git root)
+            let git_root = std::path::Path::new(&main_repo_path);
             let (new_worktree_path, _) = crate::git::repository::compute_target_paths(
                 git_root,
                 std::path::Path::new(""),
                 &template,
-                &wt_info.branch_name,
+                &branch,
             );
 
-            let current_path = std::path::PathBuf::from(&wt_info.worktree_path);
+            let current_path = std::path::PathBuf::from(&project_path);
             let new_path = std::path::PathBuf::from(&new_worktree_path);
 
-            // Skip if paths are the same (shouldn't happen, but safety check)
+            // Skip if paths are the same
             if current_path == new_path { continue; }
 
             // Skip if current path doesn't exist on disk
@@ -614,20 +616,12 @@ impl Workspace {
                 continue;
             }
 
-            // Update the project's paths in workspace state
+            // Update the project's path in workspace state
             let wt_id = wt_id.clone();
-            let new_wt_path = new_worktree_path.clone();
-            // Compute new project path (account for monorepo subdir)
-            let subdir = std::path::Path::new(&project.path)
-                .strip_prefix(&wt_info.worktree_path)
-                .unwrap_or(std::path::Path::new(""));
-            let new_project_path = crate::git::repository::project_path_in_worktree(&new_worktree_path, subdir);
+            let new_project_path = new_worktree_path.clone();
 
             self.with_project(&wt_id, cx, |project| {
                 project.path = new_project_path;
-                if let Some(ref mut wt) = project.worktree_info {
-                    wt.worktree_path = new_wt_path;
-                }
                 true
             });
             moved_count += 1;
@@ -675,9 +669,7 @@ impl Workspace {
         let project_path = project.path.clone();
         // Use the stored worktree path (repo-level checkout), falling back to project path
         // for backwards compatibility with worktrees created before monorepo support
-        let worktree_path = project.worktree_info.as_ref()
-            .and_then(|wt| (!wt.worktree_path.is_empty()).then(|| std::path::PathBuf::from(&wt.worktree_path)))
-            .unwrap_or_else(|| std::path::PathBuf::from(&project_path));
+        let worktree_path = std::path::PathBuf::from(&project_path);
 
         // Remove the git worktree
         crate::git::remove_worktree(&worktree_path, force)?;
