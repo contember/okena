@@ -311,9 +311,19 @@ pub fn get_diff_with_options(
     // Staged: staged changes (index vs HEAD)
     // --no-color: prevent ANSI codes when user has color.ui=always
     // --no-ext-diff: prevent external diff tools from intercepting output
+    let range_str;
     let mut args = match mode {
         DiffMode::WorkingTree => vec!["-C", path_str, "diff", "--no-color", "--no-ext-diff"],
         DiffMode::Staged => vec!["-C", path_str, "diff", "--cached", "--no-color", "--no-ext-diff"],
+        DiffMode::Commit(ref hash) => {
+            range_str = format!("{}^..{}", hash, hash);
+            vec!["-C", path_str, "diff", &range_str, "--no-color", "--no-ext-diff"]
+        }
+        DiffMode::BranchCompare { ref base, ref head } => {
+            // Three-dot diff: changes on head since it diverged from base
+            range_str = format!("{}...{}", base, head);
+            vec!["-C", path_str, "diff", &range_str, "--no-color", "--no-ext-diff"]
+        }
     };
 
     // Add -w flag to ignore whitespace changes
@@ -342,7 +352,7 @@ pub fn get_diff_with_options(
     log::debug!("[get_diff_with_options] parse_unified_diff: {:?}, files: {}", t1.elapsed(), result.files.len());
 
     // For unstaged mode, also include untracked files
-    if mode == DiffMode::WorkingTree {
+    if matches!(mode, DiffMode::WorkingTree) {
         let t2 = std::time::Instant::now();
         let untracked = get_untracked_files(path);
         log::debug!("[get_diff_with_options] get_untracked_files: {:?}, count: {}", t2.elapsed(), untracked.len());
@@ -607,6 +617,18 @@ pub fn get_file_contents_for_diff(
             let old = get_file_from_git(repo_path, "HEAD", file_path);
             let new = get_file_from_git(repo_path, "", file_path)
                 .or_else(|| get_file_from_working_tree(repo_path, file_path));
+            (old, new)
+        }
+        DiffMode::Commit(ref hash) => {
+            // Commit: comparing parent^ vs commit
+            let parent = format!("{}^", hash);
+            let old = get_file_from_git(repo_path, &parent, file_path);
+            let new = get_file_from_git(repo_path, hash, file_path);
+            (old, new)
+        }
+        DiffMode::BranchCompare { ref base, ref head } => {
+            let old = get_file_from_git(repo_path, base, file_path);
+            let new = get_file_from_git(repo_path, head, file_path);
             (old, new)
         }
     };

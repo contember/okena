@@ -148,6 +148,31 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
     }
 }
 
+/// Move a git worktree to a new location on disk.
+/// Uses `git worktree move` which updates git's internal bookkeeping.
+pub fn move_worktree(current_path: &Path, new_path: &Path) -> Result<(), String> {
+    let current_str = current_path.to_str().ok_or("Invalid current worktree path")?;
+    let new_str = new_path.to_str().ok_or("Invalid new worktree path")?;
+
+    // Create parent directory for new path if it doesn't exist
+    if let Some(parent) = new_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create target directory: {}", e))?;
+    }
+
+    let output = safe_output(
+        command("git").args(["-C", current_str, "worktree", "move", current_str, new_str]),
+    )
+    .map_err(|e| format!("Failed to execute git: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
 /// Fast worktree removal: delete the directory and prune stale worktree metadata.
 /// Much faster than `git worktree remove` which does expensive status checks.
 /// Only safe when the caller has already handled dirty state (stash/discard).
@@ -177,7 +202,7 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Resu
 }
 
 /// List all branches in a repository
-pub(crate) fn list_branches(path: &Path) -> Vec<String> {
+pub fn list_branches(path: &Path) -> Vec<String> {
     let path_str = match path.to_str() {
         Some(s) => s,
         None => return vec![],
@@ -804,6 +829,108 @@ pub(crate) fn compute_target_paths(
     (worktree_path, project_path)
 }
 
+/// Check whether a worktree's actual path matches the configured path template.
+/// Used to determine if a worktree should be "promoted" to a top-level sidebar item.
+pub(crate) fn worktree_matches_template(
+    main_repo_path: &str,
+    branch_name: &str,
+    worktree_path: &str,
+    template: &str,
+) -> bool {
+    if worktree_path.is_empty() || branch_name.is_empty() {
+        return false;
+    }
+    let git_root = Path::new(main_repo_path);
+    let (expected_path, _) = compute_target_paths(git_root, Path::new(""), template, branch_name);
+    let normalized_actual = normalize_path(Path::new(worktree_path));
+    let normalized_expected = normalize_path(Path::new(&expected_path));
+    normalized_actual == normalized_expected
+}
+
+/// Get commit graph with topology (railways) for a repository.
+///
+/// Uses `git log --graph` to get lane positions, producing both commit rows
+/// and connector rows (branch/merge lines between commits).
+/// If `branch` is Some, shows the log for that branch instead of HEAD.
+pub fn get_commit_graph(path: &Path, limit: usize, branch: Option<&str>) -> Vec<super::GraphRow> {
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let mut args = vec![
+        "-C".to_string(), path_str.to_string(), "log".to_string(), "--graph".to_string(),
+        format!("--format=%x00%h%x01%s%x01%an%x01%at%x01%P"),
+        format!("-n{}", limit),
+        "--no-color".to_string(),
+    ];
+    if let Some(b) = branch {
+        args.push(b.to_string());
+    }
+
+    let output = safe_output(
+        command("git").args(args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+    )
+    .ok();
+
+    match output {
+        Some(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            parse_commit_graph_output(&stdout)
+        }
+        _ => vec![],
+    }
+}
+
+/// Parse `git log --graph --format="%x00%h%x01%s%x01%an%x01%at%x01%P"` output.
+///
+/// Lines containing `\x00` are commit lines — everything before is the graph prefix.
+/// Lines without `\x00` are graph connector lines (branch/merge topology).
+pub(crate) fn parse_commit_graph_output(stdout: &str) -> Vec<super::GraphRow> {
+    let mut rows = Vec::new();
+
+    for line in stdout.lines() {
+        if let Some(null_pos) = line.find('\x00') {
+            // Commit line: graph prefix + commit data
+            let graph = line[..null_pos].to_string();
+            let data = &line[null_pos + 1..];
+
+            let parts: Vec<&str> = data.splitn(4, '\x01').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+
+            let hash = parts[0].to_string();
+            let message = parts[1].to_string();
+            let author = parts[2].to_string();
+            let timestamp = parts[3].parse::<i64>().unwrap_or(0);
+            // Remaining part after timestamp may contain \x01 + parents
+            let is_merge = if let Some(rest) = data.splitn(5, '\x01').nth(4) {
+                rest.contains(' ')
+            } else {
+                false
+            };
+
+            rows.push(super::GraphRow::Commit(super::CommitLogEntry {
+                hash,
+                message,
+                author,
+                timestamp,
+                is_merge,
+                graph,
+            }));
+        } else {
+            // Connector line: just graph characters
+            let trimmed = line.trim_end();
+            if !trimmed.is_empty() {
+                rows.push(super::GraphRow::Connector(trimmed.to_string()));
+            }
+        }
+    }
+
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1139,125 @@ mod tests {
     fn parse_ci_only_skipping() {
         let json = r#"[{"bucket":"skipping"},{"bucket":"skipping"}]"#;
         assert!(super::parse_ci_checks(json).is_none());
+    }
+
+    // ─── worktree_matches_template tests ──────────────────────────────
+
+    #[test]
+    fn worktree_template_match_default() {
+        assert!(worktree_matches_template(
+            "/projects/myrepo",
+            "feature-123",
+            "/projects/myrepo-wt/feature-123",
+            "../{repo}-wt/{branch}",
+        ));
+    }
+
+    #[test]
+    fn worktree_template_match_branch_with_slashes() {
+        assert!(worktree_matches_template(
+            "/projects/repo",
+            "feature/my-branch",
+            "/projects/repo-wt/feature-my-branch",
+            "../{repo}-wt/{branch}",
+        ));
+    }
+
+    #[test]
+    fn worktree_template_no_match_custom_path() {
+        assert!(!worktree_matches_template(
+            "/projects/myrepo",
+            "feature-123",
+            "/some/custom/path",
+            "../{repo}-wt/{branch}",
+        ));
+    }
+
+    #[test]
+    fn worktree_template_no_match_empty_path() {
+        assert!(!worktree_matches_template(
+            "/projects/myrepo",
+            "feature-123",
+            "",
+            "../{repo}-wt/{branch}",
+        ));
+    }
+
+    #[test]
+    fn worktree_template_no_match_empty_branch() {
+        assert!(!worktree_matches_template(
+            "/projects/myrepo",
+            "",
+            "/projects/myrepo-wt/feature-123",
+            "../{repo}-wt/{branch}",
+        ));
+    }
+
+    #[test]
+    fn worktree_template_match_absolute_template() {
+        assert!(worktree_matches_template(
+            "/projects/myrepo",
+            "main",
+            "/tmp/worktrees/myrepo/main",
+            "/tmp/worktrees/{repo}/{branch}",
+        ));
+    }
+
+    // ─── commit graph parsing tests ────────────────────────────────────
+
+    #[test]
+    fn parse_graph_linear_commits() {
+        let output = "* \x00abc1234\x01Fix bug\x01alice\x011700000000\x01aabbccdd\n\
+                       * \x00def5678\x01Add test\x01bob\x011699999000\x01abc1234\n";
+        let rows = super::parse_commit_graph_output(output);
+        assert_eq!(rows.len(), 2);
+        match &rows[0] {
+            super::super::GraphRow::Commit(e) => {
+                assert_eq!(e.hash, "abc1234");
+                assert_eq!(e.graph, "* ");
+                assert!(!e.is_merge);
+            }
+            _ => panic!("expected commit row"),
+        }
+    }
+
+    #[test]
+    fn parse_graph_with_connectors() {
+        let output = "*   \x00aaa1111\x01Merge PR\x01carol\x011700000000\x01bbb2222 ccc3333\n\
+                       |\\  \n\
+                       | * \x00ccc3333\x01Feature\x01dave\x011699999000\x01ddd4444\n\
+                       |/  \n\
+                       * \x00ddd4444\x01Base\x01eve\x011699998000\x01eee5555\n";
+        let rows = super::parse_commit_graph_output(output);
+        assert_eq!(rows.len(), 5);
+        // Row 0: merge commit
+        assert!(matches!(&rows[0], super::super::GraphRow::Commit(e) if e.is_merge));
+        // Row 1: connector "|\  "
+        assert!(matches!(&rows[1], super::super::GraphRow::Connector(g) if g.contains('\\')));
+        // Row 2: branch commit
+        assert!(matches!(&rows[2], super::super::GraphRow::Commit(e) if e.hash == "ccc3333"));
+        // Row 3: connector "|/  "
+        assert!(matches!(&rows[3], super::super::GraphRow::Connector(g) if g.contains('/')));
+        // Row 4: base commit
+        assert!(matches!(&rows[4], super::super::GraphRow::Commit(_)));
+    }
+
+    #[test]
+    fn parse_graph_empty() {
+        assert!(super::parse_commit_graph_output("").is_empty());
+        assert!(super::parse_commit_graph_output("\n").is_empty());
+    }
+
+    #[test]
+    fn parse_graph_preserves_graph_prefix() {
+        let output = "| | * \x00fff6666\x01Deep branch\x01frank\x011700000000\x01ggg7777\n";
+        let rows = super::parse_commit_graph_output(output);
+        assert_eq!(rows.len(), 1);
+        match &rows[0] {
+            super::super::GraphRow::Commit(e) => {
+                assert_eq!(e.graph, "| | * ");
+            }
+            _ => panic!("expected commit row"),
+        }
     }
 }
