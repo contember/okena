@@ -251,6 +251,9 @@ pub enum OverlayManagerEvent {
     /// Context menu: Close all worktrees of a parent project
     CloseAllWorktrees { project_id: String },
 
+    /// Context menu: Migrate worktrees to match current path template
+    MigrateWorktrees { project_id: String },
+
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
 
@@ -739,6 +742,12 @@ impl OverlayManager {
                 ContextMenuEvent::CloseAllWorktrees { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::CloseAllWorktrees {
+                        project_id: project_id.clone(),
+                    });
+                }
+                ContextMenuEvent::MigrateWorktrees { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::MigrateWorktrees {
                         project_id: project_id.clone(),
                     });
                 }

@@ -123,6 +123,24 @@ impl RootView {
                     log::warn!("Some worktrees could not be closed: {:?}", errors);
                 }
             }
+            OverlayManagerEvent::MigrateWorktrees { project_id } => {
+                let result = self.workspace.update(cx, |ws, cx| {
+                    ws.migrate_worktrees_to_template(project_id, cx)
+                });
+                match result {
+                    Ok(count) if count > 0 => {
+                        crate::views::panels::toast::ToastManager::info(
+                            format!("Migrated {} worktree(s) to new path template", count), cx,
+                        );
+                    }
+                    Err(e) => {
+                        crate::views::panels::toast::ToastManager::error(
+                            format!("Failed to migrate worktrees: {}", e), cx,
+                        );
+                    }
+                    _ => {}
+                }
+            }
             OverlayManagerEvent::FocusParent { project_id } => {
                 let parent_id = self.workspace.read(cx)
                     .project(project_id)
