@@ -85,7 +85,7 @@ impl DetachedTerminalView {
         let terminal_for_refresh = terminal.clone();
         cx.spawn(async move |this: WeakEntity<DetachedTerminalView>, cx| {
             loop {
-                smol::Timer::after(std::time::Duration::from_millis(16)).await; // ~60fps check rate
+                smol::Timer::after(std::time::Duration::from_millis(8)).await; // ~120fps check rate
 
                 // Only notify if terminal has new content
                 if terminal_for_refresh.take_dirty() {
