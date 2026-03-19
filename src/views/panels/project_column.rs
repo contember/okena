@@ -76,6 +76,49 @@ pub struct ProjectColumn {
     service_panel_height: f32,
     /// Bounds of the git diff stats badge (for popover positioning)
     diff_stats_bounds: Bounds<Pixels>,
+    /// Whether the commit log popover is visible
+    commit_log_visible: bool,
+    /// Cached commit graph rows for the popover
+    commit_log_entries: Vec<git::GraphRow>,
+    /// Whether commit log is currently loading
+    commit_log_loading: bool,
+    /// Bounds of the commit log trigger button (for popover positioning)
+    commit_log_bounds: Bounds<Pixels>,
+    /// How many commits have been loaded so far (for pagination)
+    commit_log_count: usize,
+    /// Project path for loading more commits
+    commit_log_project_path: String,
+    /// Whether there are potentially more commits to load
+    commit_log_has_more: bool,
+    /// Scroll handle for the commit log scroll area
+    commit_log_scroll: ScrollHandle,
+    /// Currently viewed branch in commit log (None = HEAD)
+    commit_log_branch: Option<String>,
+    /// Available branches for the branch picker
+    commit_log_branches: Vec<String>,
+    /// Whether the branch picker is open
+    commit_log_branch_picker: bool,
+    /// Text filter for branch picker
+    commit_log_branch_filter: String,
+    /// Whether compare mode UI is shown
+    commit_log_compare_mode: bool,
+    /// Selected base branch for comparison
+    commit_log_compare_base: Option<String>,
+    /// Selected head branch for comparison
+    commit_log_compare_head: Option<String>,
+    /// Which slot the branch picker is targeting
+    commit_log_picker_target: BranchPickerTarget,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum BranchPickerTarget {
+    /// Picking branch to view graph for
+    #[default]
+    Graph,
+    /// Picking base branch for compare
+    CompareBase,
+    /// Picking head branch for compare
+    CompareHead,
 }
 
 impl ProjectColumn {
@@ -117,6 +160,22 @@ impl ProjectColumn {
             service_terminal_pane: None,
             service_panel_height: initial_service_height,
             diff_stats_bounds: Bounds::default(),
+            commit_log_visible: false,
+            commit_log_entries: Vec::new(),
+            commit_log_loading: false,
+            commit_log_bounds: Bounds::default(),
+            commit_log_count: 0,
+            commit_log_project_path: String::new(),
+            commit_log_has_more: false,
+            commit_log_scroll: ScrollHandle::new(),
+            commit_log_branch: None,
+            commit_log_branches: Vec::new(),
+            commit_log_branch_picker: false,
+            commit_log_branch_filter: String::new(),
+            commit_log_compare_mode: false,
+            commit_log_compare_base: None,
+            commit_log_compare_head: None,
+            commit_log_picker_target: BranchPickerTarget::default(),
         }
     }
 
@@ -399,6 +458,587 @@ impl ProjectColumn {
         .detach();
     }
 
+    const COMMIT_PAGE_SIZE: usize = 50;
+
+    fn toggle_commit_log(&mut self, project_path: String, cx: &mut Context<Self>) {
+        if self.commit_log_visible {
+            self.commit_log_visible = false;
+            cx.notify();
+            return;
+        }
+        // Hide diff popover when opening commit log
+        self.diff_popover_visible = false;
+
+        self.commit_log_visible = true;
+        self.commit_log_loading = true;
+        self.commit_log_entries.clear();
+        self.commit_log_count = 0;
+        self.commit_log_project_path = project_path.clone();
+        self.commit_log_has_more = false;
+        self.commit_log_branch = None;
+        self.commit_log_branch_picker = false;
+        self.commit_log_branch_filter.clear();
+        self.commit_log_compare_mode = false;
+        self.commit_log_compare_base = None;
+        self.commit_log_compare_head = None;
+        self.commit_log_picker_target = BranchPickerTarget::Graph;
+        cx.notify();
+
+        let page = Self::COMMIT_PAGE_SIZE;
+        let path_for_branches = project_path.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let (entries, branches) = smol::unblock(move || {
+                let entries = git::get_commit_graph(std::path::Path::new(&project_path), page, None);
+                let branches = git::list_branches(std::path::Path::new(&path_for_branches));
+                (entries, branches)
+            })
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.commit_log_loading = false;
+                let commit_count = entries.iter().filter(|r| matches!(r, git::GraphRow::Commit(_))).count();
+                this.commit_log_has_more = commit_count >= page;
+                this.commit_log_count = commit_count;
+                this.commit_log_entries = entries;
+                this.commit_log_branches = branches;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn switch_commit_log_branch(&mut self, branch: Option<String>, cx: &mut Context<Self>) {
+        self.commit_log_branch = branch.clone();
+        self.commit_log_branch_picker = false;
+        self.commit_log_branch_filter.clear();
+        self.commit_log_loading = true;
+        self.commit_log_entries.clear();
+        self.commit_log_count = 0;
+        self.commit_log_has_more = false;
+        cx.notify();
+
+        let project_path = self.commit_log_project_path.clone();
+        let page = Self::COMMIT_PAGE_SIZE;
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let entries = smol::unblock(move || {
+                git::get_commit_graph(
+                    std::path::Path::new(&project_path),
+                    page,
+                    branch.as_deref(),
+                )
+            })
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.commit_log_loading = false;
+                let commit_count = entries.iter().filter(|r| matches!(r, git::GraphRow::Commit(_))).count();
+                this.commit_log_has_more = commit_count >= page;
+                this.commit_log_count = commit_count;
+                this.commit_log_entries = entries;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_more_commits(&mut self, cx: &mut Context<Self>) {
+        if self.commit_log_loading || !self.commit_log_has_more {
+            return;
+        }
+
+        self.commit_log_loading = true;
+        cx.notify();
+
+        let project_path = self.commit_log_project_path.clone();
+        let branch = self.commit_log_branch.clone();
+        let already_loaded = self.commit_log_count;
+        let page = Self::COMMIT_PAGE_SIZE;
+        let new_total = already_loaded + page;
+
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // Reload full graph with larger limit — git log --graph requires
+            // the full history to compute lane positions correctly
+            let entries = smol::unblock(move || {
+                git::get_commit_graph(std::path::Path::new(&project_path), new_total, branch.as_deref())
+            })
+            .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.commit_log_loading = false;
+                let commit_count = entries.iter().filter(|r| matches!(r, git::GraphRow::Commit(_))).count();
+                this.commit_log_has_more = commit_count >= new_total;
+                this.commit_log_count = commit_count;
+                this.commit_log_entries = entries;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn hide_commit_log(&mut self, cx: &mut Context<Self>) {
+        if self.commit_log_visible {
+            self.commit_log_visible = false;
+            cx.notify();
+        }
+    }
+
+    fn render_commit_log_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.commit_log_visible {
+            return div().size_0().into_any_element();
+        }
+
+        let bounds = self.commit_log_bounds;
+        let position = point(
+            bounds.origin.x - px(8.0),
+            bounds.origin.y + bounds.size.height + px(6.0),
+        );
+
+        // Resolve branch name for the header
+        let branch_name = self.git_watcher.as_ref()
+            .and_then(|w| w.read(cx).get(&self.project_id).cloned())
+            .and_then(|s| s.branch);
+
+        let content = if self.commit_log_loading && self.commit_log_entries.is_empty() {
+            div()
+                .px(px(14.0))
+                .py(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(t.text_muted))
+                        .child("Loading\u{2026}"),
+                )
+                .into_any_element()
+        } else if self.commit_log_entries.is_empty() {
+            div()
+                .px(px(14.0))
+                .py(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(t.text_muted))
+                        .child("No commits"),
+                )
+                .into_any_element()
+        } else {
+            // Calculate max graph width for consistent column sizing
+            let max_graph_len = self.commit_log_entries.iter().map(|row| match row {
+                git::GraphRow::Commit(e) => e.graph.len(),
+                git::GraphRow::Connector(g) => g.len(),
+            }).max().unwrap_or(0);
+
+            let project_id = self.project_id.clone();
+            let request_broker = self.request_broker.clone();
+            let is_loading_more = self.commit_log_loading;
+            let t_copy = *t;
+
+            // Extract commit list for navigation in the diff viewer
+            let all_commits: Vec<git::CommitLogEntry> = self.commit_log_entries.iter()
+                .filter_map(|r| match r { git::GraphRow::Commit(e) => Some(e.clone()), _ => None })
+                .collect();
+            let all_commits = std::sync::Arc::new(all_commits);
+
+            div()
+                .children(
+                    self.commit_log_entries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| render_graph_row(row, i, max_graph_len, &project_id, &request_broker, &all_commits, cx, t)),
+                )
+                .when(is_loading_more, |d| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .h(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(t_copy.text_muted))
+                                    .child("Loading\u{2026}"),
+                            ),
+                    )
+                })
+                .into_any_element()
+        };
+
+        div()
+            .size_full()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("commit-log-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.hide_commit_log(cx);
+                    }))
+                    .on_scroll_wheel(|_, _, cx| {
+                        cx.stop_propagation();
+                    }),
+            )
+            .child(
+                deferred(
+                    anchored()
+                        .position(position)
+                        .snap_to_window()
+                        .child(
+                            v_flex()
+                                .id("commit-log-popover")
+                                .occlude()
+                                .w(px(520.0))
+                                .max_h(px(420.0))
+                                .bg(rgb(t.bg_primary))
+                                .border_1()
+                                .border_color(rgb(t.border))
+                                .rounded(px(8.0))
+                                .shadow_lg()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .on_scroll_wheel(|_, _, cx| {
+                                    cx.stop_propagation();
+                                })
+                                // Header
+                                .child(
+                                    h_flex()
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .gap(px(6.0))
+                                        .items_center()
+                                        .border_b_1()
+                                        .border_color(rgb(t.border))
+                                        .child(
+                                            svg()
+                                                .path("icons/git-commit.svg")
+                                                .size(px(11.0))
+                                                .text_color(rgb(t.text_muted)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(t.text_secondary))
+                                                .child("GRAPH"),
+                                        )
+                                        // Right side: Compare toggle + branch selector
+                                        .child({
+                                            let display_branch = self.commit_log_branch.clone()
+                                                .or(branch_name);
+                                            let is_compare = self.commit_log_compare_mode;
+                                            h_flex()
+                                                .flex_1()
+                                                .justify_end()
+                                                .gap(px(4.0))
+                                                .items_center()
+                                                // Compare toggle
+                                                .child(
+                                                    div()
+                                                        .id("commit-log-compare-toggle")
+                                                        .cursor_pointer()
+                                                        .px(px(6.0))
+                                                        .py(px(2.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgb(if is_compare { t.bg_selection } else { t.bg_hover }))
+                                                        .hover(|s| s.bg(rgb(t.bg_selection)))
+                                                        .text_size(px(10.0))
+                                                        .text_color(rgb(if is_compare { t.term_cyan } else { t.text_muted }))
+                                                        .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                                            this.commit_log_compare_mode = !this.commit_log_compare_mode;
+                                                            if this.commit_log_compare_mode {
+                                                                // Pre-fill base with current branch
+                                                                let current = this.git_watcher.as_ref()
+                                                                    .and_then(|w| w.read(cx).get(&this.project_id).cloned())
+                                                                    .and_then(|s| s.branch);
+                                                                this.commit_log_compare_base = current;
+                                                                this.commit_log_compare_head = this.commit_log_branch.clone();
+                                                            }
+                                                            this.commit_log_branch_picker = false;
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Compare"),
+                                                )
+                                                // Branch selector pill (only when not in compare mode)
+                                                .when(!is_compare, |d| {
+                                                    d.when_some(display_branch, |d, name| {
+                                                        d.child(
+                                                            h_flex()
+                                                                .id("commit-log-branch-btn")
+                                                                .gap(px(4.0))
+                                                                .items_center()
+                                                                .px(px(6.0))
+                                                                .py(px(2.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgb(t.bg_hover))
+                                                                .cursor_pointer()
+                                                                .hover(|s| s.bg(rgb(t.bg_selection)))
+                                                                .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                                                                .on_click(cx.listener(|this, _, _window, cx| {
+                                                                    this.commit_log_picker_target = BranchPickerTarget::Graph;
+                                                                    this.commit_log_branch_picker = !this.commit_log_branch_picker;
+                                                                    this.commit_log_branch_filter.clear();
+                                                                    cx.notify();
+                                                                }))
+                                                                .child(svg().path("icons/git-branch.svg").size(px(10.0)).text_color(rgb(t.term_green)))
+                                                                .child(
+                                                                    div().text_size(px(10.0)).text_color(rgb(t.text_secondary))
+                                                                        .max_w(px(140.0)).text_ellipsis().overflow_hidden().child(name),
+                                                                ),
+                                                        )
+                                                    })
+                                                })
+                                        }),
+                                )
+                                // Compare bar — two branch selectors + view diff button
+                                .when(self.commit_log_compare_mode, |d| {
+                                    let base = self.commit_log_compare_base.clone();
+                                    let head = self.commit_log_compare_head.clone();
+                                    let pid = self.project_id.clone();
+                                    let broker = self.request_broker.clone();
+                                    let both_selected = base.is_some() && head.is_some();
+                                    d.child(
+                                        h_flex()
+                                            .px(px(10.0))
+                                            .py(px(6.0))
+                                            .gap(px(6.0))
+                                            .items_center()
+                                            .border_b_1()
+                                            .border_color(rgb(t.border))
+                                            // Base branch pill
+                                            .child(
+                                                div()
+                                                    .id("compare-base-btn")
+                                                    .cursor_pointer()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded(px(4.0))
+                                                    .bg(rgb(t.bg_hover))
+                                                    .hover(|s| s.bg(rgb(t.bg_selection)))
+                                                    .text_size(px(10.0))
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.commit_log_picker_target = BranchPickerTarget::CompareBase;
+                                                        this.commit_log_branch_picker = !this.commit_log_branch_picker;
+                                                        this.commit_log_branch_filter.clear();
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        h_flex().gap(px(3.0)).items_center()
+                                                            .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_green)))
+                                                            .child(
+                                                                div().text_color(rgb(t.text_secondary))
+                                                                    .max_w(px(120.0)).text_ellipsis().overflow_hidden()
+                                                                    .child(base.clone().unwrap_or_else(|| "base...".to_string())),
+                                                            ),
+                                                    ),
+                                            )
+                                            // Arrow
+                                            .child(div().text_size(px(10.0)).text_color(rgb(t.text_muted)).child("\u{2192}"))
+                                            // Head branch pill
+                                            .child(
+                                                div()
+                                                    .id("compare-head-btn")
+                                                    .cursor_pointer()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded(px(4.0))
+                                                    .bg(rgb(t.bg_hover))
+                                                    .hover(|s| s.bg(rgb(t.bg_selection)))
+                                                    .text_size(px(10.0))
+                                                    .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.commit_log_picker_target = BranchPickerTarget::CompareHead;
+                                                        this.commit_log_branch_picker = !this.commit_log_branch_picker;
+                                                        this.commit_log_branch_filter.clear();
+                                                        cx.notify();
+                                                    }))
+                                                    .child(
+                                                        h_flex().gap(px(3.0)).items_center()
+                                                            .child(svg().path("icons/git-branch.svg").size(px(9.0)).text_color(rgb(t.term_cyan)))
+                                                            .child(
+                                                                div().text_color(rgb(t.text_secondary))
+                                                                    .max_w(px(120.0)).text_ellipsis().overflow_hidden()
+                                                                    .child(head.clone().unwrap_or_else(|| "head...".to_string())),
+                                                            ),
+                                                    ),
+                                            )
+                                            // View Diff button
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .flex()
+                                                    .justify_end()
+                                                    .child(
+                                                        div()
+                                                            .id("compare-view-diff")
+                                                            .cursor_pointer()
+                                                            .px(px(8.0))
+                                                            .py(px(3.0))
+                                                            .rounded(px(4.0))
+                                                            .when(both_selected, |d| {
+                                                                d.bg(rgb(t.term_cyan))
+                                                                    .text_color(rgb(t.bg_primary))
+                                                                    .hover(|s| s.opacity(0.9))
+                                                            })
+                                                            .when(!both_selected, |d| {
+                                                                d.bg(rgb(t.bg_hover))
+                                                                    .text_color(rgb(t.text_muted))
+                                                            })
+                                                            .text_size(px(10.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                                                            .when(both_selected, |d| {
+                                                                d.on_click(cx.listener(move |this, _, _window, cx| {
+                                                                    let base = this.commit_log_compare_base.clone().unwrap();
+                                                                    let head = this.commit_log_compare_head.clone().unwrap();
+                                                                    this.hide_commit_log(cx);
+                                                                    broker.update(cx, |broker, cx| {
+                                                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                                                            project_id: pid.clone(),
+                                                                            file: None,
+                                                                            mode: Some(okena_core::types::DiffMode::BranchCompare {
+                                                                                base,
+                                                                                head,
+                                                                            }),
+                                                                            commit_message: None,
+                                                                            commits: None,
+                                                                            commit_index: None,
+                                                                        }, cx);
+                                                                    });
+                                                                }))
+                                                            })
+                                                            .child("View Diff"),
+                                                    ),
+                                            ),
+                                    )
+                                })
+                                // Branch picker (inline, between header and commit list)
+                                .when(self.commit_log_branch_picker, |d| {
+                                    let filter = self.commit_log_branch_filter.to_lowercase();
+                                    let filtered: Vec<&String> = self.commit_log_branches.iter()
+                                        .filter(|b| filter.is_empty() || b.to_lowercase().contains(&filter))
+                                        .collect();
+                                    d.child(
+                                        v_flex()
+                                            .border_b_1()
+                                            .border_color(rgb(t.border))
+                                            .max_h(px(200.0))
+                                            // Filter input
+                                            .child(
+                                                div()
+                                                    .px(px(10.0))
+                                                    .py(px(6.0))
+                                                    .child(
+                                                        div()
+                                                            .px(px(8.0))
+                                                            .py(px(4.0))
+                                                            .rounded(px(4.0))
+                                                            .bg(rgb(t.bg_secondary))
+                                                            .text_size(px(11.0))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .child(
+                                                                if filter.is_empty() {
+                                                                    format!("{} branches", self.commit_log_branches.len())
+                                                                } else {
+                                                                    format!("\"{}\" \u{2014} {} matches", self.commit_log_branch_filter, filtered.len())
+                                                                }
+                                                            ),
+                                                    ),
+                                            )
+                                            // Branch list
+                                            .child(
+                                                div()
+                                                    .id("branch-picker-scroll")
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .overflow_y_scroll()
+                                                    .children(
+                                                        filtered.iter().enumerate().map(|(i, branch)| {
+                                                            let b = (*branch).clone();
+                                                            let target = self.commit_log_picker_target;
+                                                            let is_selected = match target {
+                                                                BranchPickerTarget::Graph => self.commit_log_branch.as_ref() == Some(*branch),
+                                                                BranchPickerTarget::CompareBase => self.commit_log_compare_base.as_ref() == Some(*branch),
+                                                                BranchPickerTarget::CompareHead => self.commit_log_compare_head.as_ref() == Some(*branch),
+                                                            };
+                                                            div()
+                                                                .id(ElementId::Name(format!("branch-{}-{}", i, branch).into()))
+                                                                .px(px(10.0))
+                                                                .py(px(3.0))
+                                                                .cursor_pointer()
+                                                                .text_size(px(11.0))
+                                                                .text_color(rgb(if is_selected { t.text_primary } else { t.text_secondary }))
+                                                                .when(is_selected, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                                                    match target {
+                                                                        BranchPickerTarget::Graph => {
+                                                                            this.switch_commit_log_branch(Some(b.clone()), cx);
+                                                                        }
+                                                                        BranchPickerTarget::CompareBase => {
+                                                                            this.commit_log_compare_base = Some(b.clone());
+                                                                            this.commit_log_branch_picker = false;
+                                                                            cx.notify();
+                                                                        }
+                                                                        BranchPickerTarget::CompareHead => {
+                                                                            this.commit_log_compare_head = Some(b.clone());
+                                                                            this.commit_log_branch_picker = false;
+                                                                            cx.notify();
+                                                                        }
+                                                                    }
+                                                                }))
+                                                                .child((*branch).clone())
+                                                                .into_any_element()
+                                                        }),
+                                                    ),
+                                            ),
+                                    )
+                                })
+                                // Scrollable commit list
+                                .child(
+                                    div()
+                                        .id("commit-log-scroll")
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scroll()
+                                        .track_scroll(&self.commit_log_scroll)
+                                        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                                            // Scrolling down: check if near bottom to auto-load
+                                            let delta_y = f32::from(event.delta.pixel_delta(px(1.0)).y);
+                                            if delta_y >= 0.0 {
+                                                return; // scrolling up
+                                            }
+                                            if !this.commit_log_has_more || this.commit_log_loading {
+                                                return;
+                                            }
+                                            // Estimate total content height vs visible area
+                                            let row_count = this.commit_log_entries.len();
+                                            let est_content_h = row_count as f32 * 20.0; // rough avg row height
+                                            let scroll_y = -f32::from(this.commit_log_scroll.offset().y);
+                                            let viewport_h = 380.0; // approximate visible height
+                                            if scroll_y + viewport_h > est_content_h - 200.0 {
+                                                this.load_more_commits(cx);
+                                            }
+                                        }))
+                                        .py(px(4.0))
+                                        .child(content),
+                                ),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_diff_popover(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::views::components::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
 
@@ -434,6 +1074,10 @@ impl ProjectColumn {
                                         broker.push_overlay_request(OverlayRequest::DiffViewer {
                                             project_id: pid,
                                             file: Some(file_path.clone()),
+                                            mode: None,
+                                            commit_message: None,
+                                            commits: None,
+                                            commit_index: None,
                                         }, cx);
                                     });
                                 }))
@@ -698,6 +1342,48 @@ impl ProjectColumn {
                                 })
                         )
                     })
+                    // Commit log button
+                    .child({
+                        let project_path_for_log = project.path.clone();
+                        let entity_for_bounds = entity_handle.clone();
+                        div()
+                            .id(ElementId::Name(format!("commit-log-btn-{}", project_id).into()))
+                            .relative()
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(18.0))
+                            .h(px(16.0))
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_commit_log(project_path_for_log.clone(), cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path("icons/git-commit.svg")
+                                    .size(px(10.0))
+                                    .text_color(rgb(t.text_muted)),
+                            )
+                            .child(
+                                canvas(
+                                    move |bounds, _window, app| {
+                                        let _ = entity_for_bounds.update(app, |this: &mut ProjectColumn, _cx| {
+                                            this.commit_log_bounds = bounds;
+                                        });
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
+                            .tooltip(move |_window, cx| Tooltip::new("Commit Log").build(_window, cx))
+                    })
                     // Diff stats (clickable, only if there are changes)
                     .when(has_changes, |d: Div| {
                         d.child(
@@ -730,6 +1416,10 @@ impl ProjectColumn {
                                         broker.push_overlay_request(OverlayRequest::DiffViewer {
                                             project_id: pid,
                                             file: None,
+                                            mode: None,
+                                            commit_message: None,
+                                            commits: None,
+                                            commit_index: None,
                                         }, cx);
                                     });
                                 }))
@@ -2086,6 +2776,7 @@ impl Render for ProjectColumn {
                     .child(content)
                     .child(self.render_service_panel(cx))
                     .child(self.render_diff_popover(&t, cx))
+                    .child(self.render_commit_log_popover(&t, cx))
                     .into_any_element()
             }
 
@@ -2099,4 +2790,281 @@ impl Render for ProjectColumn {
                 .into_any_element(),
         }
     }
+}
+
+/// Lane color palette for graph railways.
+const LANE_COLORS: &[fn(&ThemeColors) -> u32] = &[
+    |t| t.term_cyan,
+    |t| t.term_green,
+    |t| t.term_yellow,
+    |t| t.term_magenta,
+    |t| t.term_blue,
+    |t| t.term_red,
+];
+
+fn lane_color(lane_idx: usize, t: &ThemeColors) -> u32 {
+    LANE_COLORS[lane_idx % LANE_COLORS.len()](t)
+}
+
+/// Width of each graph character column in pixels.
+const GRAPH_CELL_W: f32 = 10.0;
+/// Thickness of railway lines.
+const RAIL_W: f32 = 2.0;
+/// Diameter of commit dots.
+const DOT_SIZE: f32 = 8.0;
+
+/// Commit row height.
+const COMMIT_ROW_H: f32 = 24.0;
+/// Connector row height.
+const CONNECTOR_ROW_H: f32 = 10.0;
+
+fn render_graph_row(
+    row: &git::GraphRow,
+    index: usize,
+    max_graph_len: usize,
+    project_id: &str,
+    request_broker: &Entity<RequestBroker>,
+    all_commits: &std::sync::Arc<Vec<git::CommitLogEntry>>,
+    cx: &mut Context<ProjectColumn>,
+    t: &ThemeColors,
+) -> AnyElement {
+    let graph_width = max_graph_len as f32 * GRAPH_CELL_W;
+
+    match row {
+        git::GraphRow::Commit(entry) => {
+            let commit_hash = entry.hash.clone();
+            let commit_msg = entry.message.clone();
+            let pid = project_id.to_string();
+            let broker = request_broker.clone();
+            let commits_for_click = all_commits.clone();
+            let commit_idx = all_commits.iter().position(|c| c.hash == entry.hash).unwrap_or(0);
+            h_flex()
+                .id(ElementId::Name(format!("graph-row-{}", index).into()))
+                .pl(px(4.0))
+                .pr(px(12.0))
+                .h(px(COMMIT_ROW_H))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(t.bg_hover)))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.hide_commit_log(cx);
+                    let commits_vec = (*commits_for_click).clone();
+                    broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                            project_id: pid.clone(),
+                            file: None,
+                            mode: Some(okena_core::types::DiffMode::Commit(commit_hash.clone())),
+                            commit_message: Some(commit_msg.clone()),
+                            commits: Some(commits_vec),
+                            commit_index: Some(commit_idx),
+                        }, cx);
+                    });
+                }))
+                .child(
+                    render_graph_column(&entry.graph, max_graph_len, COMMIT_ROW_H, t)
+                        .w(px(graph_width))
+                        .h(px(COMMIT_ROW_H)),
+                )
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(COMMIT_ROW_H))
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.text_primary))
+                                .text_ellipsis()
+                                .overflow_hidden()
+                                .flex_shrink()
+                                .min_w_0()
+                                .child(entry.message.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.text_muted))
+                                .flex_shrink_0()
+                                .child(entry.author.clone()),
+                        ),
+                )
+                .into_any_element()
+        }
+        git::GraphRow::Connector(graph) => {
+            div()
+                .pl(px(4.0))
+                .h(px(CONNECTOR_ROW_H))
+                .child(
+                    render_graph_column(graph, max_graph_len, CONNECTOR_ROW_H, t)
+                        .w(px(graph_width))
+                        .h(px(CONNECTOR_ROW_H)),
+                )
+                .into_any_element()
+        }
+    }
+}
+
+/// Render graph prefix as a single relatively-positioned container with
+/// absolutely-positioned railway elements. This ensures lines connect
+/// across lane centers regardless of character cell boundaries.
+fn render_graph_column(graph: &str, max_len: usize, row_h: f32, t: &ThemeColors) -> Div {
+    let padded: String = if graph.len() < max_len {
+        format!("{:<width$}", graph, width = max_len)
+    } else {
+        graph.to_string()
+    };
+
+    // X coordinate of the rail's left edge for a given column position
+    let rail_x = |pos: usize| -> f32 {
+        pos as f32 * GRAPH_CELL_W + (GRAPH_CELL_W - RAIL_W) / 2.0
+    };
+
+    let mid_y = (row_h - RAIL_W) / 2.0;
+
+    let mut elements: Vec<AnyElement> = Vec::new();
+
+    for (pos, ch) in padded.chars().enumerate() {
+        let lane_idx = pos / 2;
+        let color = lane_color(lane_idx, t);
+
+        match ch {
+            '|' => {
+                // Vertical rail — full height at lane center
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(rail_x(pos)))
+                        .top(px(0.0))
+                        .w(px(RAIL_W))
+                        .h(px(row_h))
+                        .bg(rgb(color))
+                        .into_any_element(),
+                );
+            }
+            '*' => {
+                // Vertical rail through entire row
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(rail_x(pos)))
+                        .top(px(0.0))
+                        .w(px(RAIL_W))
+                        .h(px(row_h))
+                        .bg(rgb(color))
+                        .into_any_element(),
+                );
+                // Dot on top, centered
+                let dot_x = pos as f32 * GRAPH_CELL_W + (GRAPH_CELL_W - DOT_SIZE) / 2.0;
+                let dot_y = (row_h - DOT_SIZE) / 2.0;
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(dot_x))
+                        .top(px(dot_y))
+                        .w(px(DOT_SIZE))
+                        .h(px(DOT_SIZE))
+                        .rounded(px(DOT_SIZE / 2.0))
+                        .bg(rgb(color))
+                        .into_any_element(),
+                );
+            }
+            '\\' => {
+                // Fork: S-curve from left lane (top) to right lane (bottom)
+                let diag_color = lane_color((pos + 1) / 2, t);
+                let lx = rail_x(pos.saturating_sub(1));
+                let rx = rail_x(pos + 1);
+
+                // Top vertical: left lane center → middle
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(lx))
+                        .top(px(0.0))
+                        .w(px(RAIL_W))
+                        .h(px(mid_y + RAIL_W))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+                // Horizontal bridge: left lane center → right lane center
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(lx))
+                        .top(px(mid_y))
+                        .w(px(rx + RAIL_W - lx))
+                        .h(px(RAIL_W))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+                // Bottom vertical: right lane center → bottom
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(rx))
+                        .top(px(mid_y))
+                        .w(px(RAIL_W))
+                        .h(px(row_h - mid_y))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+            }
+            '/' => {
+                // Merge: S-curve from right lane (top) to left lane (bottom)
+                let diag_color = lane_color((pos + 1) / 2, t);
+                let lx = rail_x(pos.saturating_sub(1));
+                let rx = rail_x(pos + 1);
+
+                // Top vertical: right lane center → middle
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(rx))
+                        .top(px(0.0))
+                        .w(px(RAIL_W))
+                        .h(px(mid_y + RAIL_W))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+                // Horizontal bridge
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(lx))
+                        .top(px(mid_y))
+                        .w(px(rx + RAIL_W - lx))
+                        .h(px(RAIL_W))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+                // Bottom vertical: left lane center → bottom
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(lx))
+                        .top(px(mid_y))
+                        .w(px(RAIL_W))
+                        .h(px(row_h - mid_y))
+                        .bg(rgb(diag_color))
+                        .into_any_element(),
+                );
+            }
+            '_' => {
+                // Horizontal connector
+                elements.push(
+                    div()
+                        .absolute()
+                        .left(px(pos as f32 * GRAPH_CELL_W))
+                        .top(px(mid_y))
+                        .w(px(GRAPH_CELL_W))
+                        .h(px(RAIL_W))
+                        .bg(rgb(color))
+                        .into_any_element(),
+                );
+            }
+            _ => {} // space — nothing
+        }
+    }
+
+    div().relative().flex_shrink_0().children(elements)
 }
