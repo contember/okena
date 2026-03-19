@@ -2,9 +2,9 @@
 //! from gpui_component's window_border while still enabling window resize).
 
 use gpui::{
-    AnyView, Bounds, Context, CursorStyle, Decorations, HitboxBehavior, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, ResizeEdge, Size, Stateful,
-    Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
+    AnyView, Bounds, Context, CursorStyle, Decorations, DispatchPhase, Hitbox, HitboxBehavior,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
+    Render, ResizeEdge, Size, Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
 };
 
 /// Edge detection zone size (pixels) for CSD resize handles.
@@ -31,52 +31,68 @@ impl Render for SimpleRoot {
         div()
             .id("simple-root")
             .size_full()
-            .when(matches!(decorations, Decorations::Client { .. }), |div: Stateful<gpui::Div>| {
+            .when(matches!(decorations, Decorations::Client { .. }), |div: gpui::Stateful<gpui::Div>| {
                 div.child(
                     canvas(
                         |_bounds, window, _cx| {
-                            window.insert_hitbox(
-                                Bounds::new(
-                                    point(px(0.0), px(0.0)),
-                                    window.window_bounds().get_bounds().size,
+                            let size = window.window_bounds().get_bounds().size;
+                            let e = RESIZE_EDGE_SIZE;
+                            // Create 4 edge-only hitboxes (top, bottom, left, right strips)
+                            [
+                                window.insert_hitbox(
+                                    Bounds::new(point(px(0.0), px(0.0)), Size { width: size.width, height: e }),
+                                    HitboxBehavior::Normal,
                                 ),
-                                HitboxBehavior::Normal,
-                            )
+                                window.insert_hitbox(
+                                    Bounds::new(point(px(0.0), size.height - e), Size { width: size.width, height: e }),
+                                    HitboxBehavior::Normal,
+                                ),
+                                window.insert_hitbox(
+                                    Bounds::new(point(px(0.0), e), Size { width: e, height: size.height - e * 2.0 }),
+                                    HitboxBehavior::Normal,
+                                ),
+                                window.insert_hitbox(
+                                    Bounds::new(point(size.width - e, e), Size { width: e, height: size.height - e * 2.0 }),
+                                    HitboxBehavior::Normal,
+                                ),
+                            ]
                         },
-                        move |_bounds, hitbox, window, _cx| {
+                        move |_bounds, hitboxes: [Hitbox; 4], window, _cx| {
                             let mouse = window.mouse_position();
                             let size = window.window_bounds().get_bounds().size;
                             if let Some(edge) = detect_resize_edge(mouse, size) {
-                                window.set_cursor_style(
-                                    match edge {
-                                        ResizeEdge::Top | ResizeEdge::Bottom => {
-                                            CursorStyle::ResizeUpDown
-                                        }
-                                        ResizeEdge::Left | ResizeEdge::Right => {
-                                            CursorStyle::ResizeLeftRight
-                                        }
-                                        ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
-                                            CursorStyle::ResizeUpLeftDownRight
-                                        }
-                                        ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
-                                            CursorStyle::ResizeUpRightDownLeft
-                                        }
-                                    },
-                                    &hitbox,
-                                );
+                                let cursor = match edge {
+                                    ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
+                                    ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
+                                    ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+                                    ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+                                };
+                                for hitbox in &hitboxes {
+                                    window.set_cursor_style(cursor, hitbox);
+                                }
                             }
+
+                            // Handle mouse down on edge hitboxes for resize
+                            let hitbox_ids: [_; 4] = std::array::from_fn(|i| hitboxes[i].id);
+                            window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
+                                    return;
+                                }
+                                // Only act if mouse is over one of the edge hitboxes
+                                if !hitbox_ids.iter().any(|id| id.is_hovered(window)) {
+                                    return;
+                                }
+                                let size = window.window_bounds().get_bounds().size;
+                                if let Some(edge) = detect_resize_edge(e.position, size) {
+                                    window.start_window_resize(edge);
+                                    cx.stop_propagation();
+                                }
+                            });
                         },
                     )
                     .size_full()
                     .absolute(),
                 )
-                .on_mouse_down(MouseButton::Left, move |_, window: &mut Window, _cx: &mut gpui::App| {
-                    let size = window.window_bounds().get_bounds().size;
-                    let pos = window.mouse_position();
-                    if let Some(edge) = detect_resize_edge(pos, size) {
-                        window.start_window_resize(edge);
-                    }
-                })
             })
             .child(self.view.clone())
     }

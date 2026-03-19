@@ -65,7 +65,11 @@ impl Okena {
                     size: size(px(800.0), px(600.0)),
                 })),
                 is_resizable: true,
-                window_decorations: Some(WindowDecorations::Server),
+                window_decorations: Some(if cfg!(target_os = "windows") {
+                    WindowDecorations::Client
+                } else {
+                    WindowDecorations::Server
+                }),
                 window_min_size: Some(Size {
                     width: px(300.0),
                     height: px(200.0),
