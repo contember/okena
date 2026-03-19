@@ -100,46 +100,19 @@ impl RootView {
                     project_id: project_id.clone(),
                 }, cx);
             }
-            OverlayManagerEvent::CloseAllWorktrees { project_id } => {
-                // Collect all worktree project IDs for this parent
-                let worktree_ids: Vec<String> = self.workspace.read(cx)
-                    .data().projects.iter()
-                    .filter(|p| p.worktree_info.as_ref()
-                        .map_or(false, |wt| wt.parent_project_id == *project_id))
-                    .map(|p| p.id.clone())
-                    .collect();
-
-                // Remove each one (non-force, skip dirty ones)
-                let mut errors = Vec::new();
-                for wt_id in &worktree_ids {
-                    let result = self.workspace.update(cx, |ws, cx| {
-                        ws.remove_worktree_project(wt_id, false, cx)
-                    });
-                    if let Err(e) = result {
-                        errors.push(e);
-                    }
-                }
-                if !errors.is_empty() {
-                    log::warn!("Some worktrees could not be closed: {:?}", errors);
-                }
-            }
-            OverlayManagerEvent::MigrateWorktrees { project_id } => {
-                let result = self.workspace.update(cx, |ws, cx| {
-                    ws.migrate_worktrees_to_template(project_id, cx)
+            OverlayManagerEvent::QuickCreateWorktree { project_id } => {
+                self.request_broker.update(cx, |broker, cx| {
+                    broker.push_sidebar_request(crate::workspace::requests::SidebarRequest::QuickCreateWorktree {
+                        project_id: project_id.clone(),
+                    }, cx);
                 });
-                match result {
-                    Ok(count) if count > 0 => {
-                        crate::views::panels::toast::ToastManager::info(
-                            format!("Migrated {} worktree(s) to new path template", count), cx,
-                        );
-                    }
-                    Err(e) => {
-                        crate::views::panels::toast::ToastManager::error(
-                            format!("Failed to migrate worktrees: {}", e), cx,
-                        );
-                    }
-                    _ => {}
-                }
+            }
+            OverlayManagerEvent::ManageWorktrees { project_id } => {
+                self.request_broker.update(cx, |broker, cx| {
+                    broker.push_sidebar_request(crate::workspace::requests::SidebarRequest::ShowWorktreeList {
+                        project_id: project_id.clone(),
+                    }, cx);
+                });
             }
             OverlayManagerEvent::FocusParent { project_id } => {
                 let parent_id = self.workspace.read(cx)

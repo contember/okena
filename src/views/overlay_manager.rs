@@ -248,11 +248,11 @@ pub enum OverlayManagerEvent {
     /// Context menu: Configure hooks for a project
     ConfigureHooks { project_id: String },
 
-    /// Context menu: Close all worktrees of a parent project
-    CloseAllWorktrees { project_id: String },
+    /// Context menu: Quick create worktree (one-click)
+    QuickCreateWorktree { project_id: String },
 
-    /// Context menu: Migrate worktrees to match current path template
-    MigrateWorktrees { project_id: String },
+    /// Context menu: Open manage worktrees popover in sidebar
+    ManageWorktrees { project_id: String },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -739,15 +739,15 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::CloseAllWorktrees { project_id } => {
+                ContextMenuEvent::QuickCreateWorktree { project_id } => {
                     this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::CloseAllWorktrees {
+                    cx.emit(OverlayManagerEvent::QuickCreateWorktree {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::MigrateWorktrees { project_id } => {
+                ContextMenuEvent::ManageWorktrees { project_id } => {
                     this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::MigrateWorktrees {
+                    cx.emit(OverlayManagerEvent::ManageWorktrees {
                         project_id: project_id.clone(),
                     });
                 }

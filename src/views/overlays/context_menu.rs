@@ -14,11 +14,11 @@ pub enum ContextMenuEvent {
     Close,
     AddTerminal { project_id: String },
     CreateWorktree { project_id: String, project_path: String },
+    QuickCreateWorktree { project_id: String },
+    ManageWorktrees { project_id: String },
     RenameProject { project_id: String, project_name: String },
     RenameDirectory { project_id: String, project_path: String },
     CloseWorktree { project_id: String },
-    CloseAllWorktrees { project_id: String },
-    MigrateWorktrees { project_id: String },
     DeleteProject { project_id: String },
     ConfigureHooks { project_id: String },
     ReloadServices { project_id: String },
@@ -95,14 +95,14 @@ impl ContextMenu {
         });
     }
 
-    fn close_all_worktrees(&self, cx: &mut Context<Self>) {
-        cx.emit(ContextMenuEvent::CloseAllWorktrees {
+    fn quick_create_worktree(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::QuickCreateWorktree {
             project_id: self.request.project_id.clone(),
         });
     }
 
-    fn migrate_worktrees(&self, cx: &mut Context<Self>) {
-        cx.emit(ContextMenuEvent::MigrateWorktrees {
+    fn manage_worktrees(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::ManageWorktrees {
             project_id: self.request.project_id.clone(),
         });
     }
@@ -142,15 +142,6 @@ impl Render for ContextMenu {
         let is_git_repo = git::is_git_repo(std::path::Path::new(&project_path));
         let worktree_count = ws.data().projects.iter()
             .filter(|p| p.worktree_info.as_ref().map_or(false, |wt| wt.parent_project_id == self.request.project_id))
-            .count();
-
-        // Count worktrees for this parent (potentially migratable to new path template)
-        let migratable_worktree_count = ws.data().projects.iter()
-            .filter(|p| {
-                p.worktree_info.as_ref().map_or(false, |wt| {
-                    wt.parent_project_id == self.request.project_id
-                })
-            })
             .count();
 
         let project_path_for_worktree = project_path.clone();
@@ -198,32 +189,22 @@ impl Render for ContextMenu {
                                 })),
                         )
                     })
-                    // Close All Worktrees option (only for git repos that are not worktrees and have child worktrees)
-                    .when(is_git_repo && !is_worktree && worktree_count > 0, |d| {
+                    // Quick Create Worktree (only for git repos that are not already worktrees)
+                    .when(is_git_repo && !is_worktree, |d| {
                         d.child(
-                            menu_item_with_color(
-                                "context-menu-close-all-worktrees",
-                                "icons/git-branch.svg",
-                                &format!("Close All Worktrees ({})", worktree_count),
-                                t.warning, t.warning, &t,
-                            )
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.close_all_worktrees(cx);
-                            }))
+                            menu_item("context-menu-quick-create-wt", "icons/plus.svg", "Quick Create Worktree", &t)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.quick_create_worktree(cx);
+                                })),
                         )
                     })
-                    // Migrate Worktrees option (only when worktrees don't match current template)
-                    .when(migratable_worktree_count > 0, |d| {
+                    // Manage Worktrees (only for git repos that are not already worktrees)
+                    .when(is_git_repo && !is_worktree, |d| {
                         d.child(
-                            menu_item(
-                                "context-menu-migrate-worktrees",
-                                "icons/git-branch.svg",
-                                &format!("Migrate Worktrees ({})", migratable_worktree_count),
-                                &t,
-                            )
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.migrate_worktrees(cx);
-                            }))
+                            menu_item("context-menu-manage-wt", "icons/git-branch.svg", "Manage Worktrees", &t)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.manage_worktrees(cx);
+                                })),
                         )
                     })
                     // Separator

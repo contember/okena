@@ -60,4 +60,6 @@ pub enum OverlayRequest {
 pub enum SidebarRequest {
     RenameProject { project_id: String, project_name: String },
     RenameFolder { folder_id: String, folder_name: String },
+    QuickCreateWorktree { project_id: String },
+    ShowWorktreeList { project_id: String },
 }
