@@ -535,6 +535,22 @@ impl Workspace {
         // Note: caller is responsible for calling notify_data
     }
 
+    /// Add a worktree project ID to its parent's worktree_ids list (deduped).
+    /// Also removes the worktree from project_order since it lives under its parent now.
+    pub fn add_to_worktree_ids(&mut self, parent_id: &str, worktree_id: &str) {
+        if let Some(parent) = self.data.projects.iter_mut().find(|p| p.id == parent_id) {
+            if !parent.worktree_ids.iter().any(|id| id == worktree_id) {
+                parent.worktree_ids.push(worktree_id.to_string());
+            }
+        }
+        // Worktrees in worktree_ids don't belong in project_order
+        self.data.project_order.retain(|id| id != worktree_id);
+        // Also remove from any folder's project_ids
+        for folder in &mut self.data.folders {
+            folder.project_ids.retain(|id| id != worktree_id);
+        }
+    }
+
     /// Remove a stale worktree project whose directory no longer exists.
     /// Does NOT fire hooks or call git worktree remove (the directory is already gone).
     pub fn remove_stale_worktree(&mut self, project_id: &str) {

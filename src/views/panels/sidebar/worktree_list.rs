@@ -114,26 +114,20 @@ impl Sidebar {
                                 });
                             }
                         } else {
-                            // Add: register as a discovered worktree
+                            // Add: register as a discovered worktree and link to parent
                             this.workspace.update(cx, |ws, cx| {
                                 ws.add_discovered_worktree(
                                     &wt_path_clone,
                                     &branch_clone,
                                     &project_id,
-                                    "",  // main_repo_path no longer stored
+                                    "",
                                 );
-                                // Also add to parent's worktree_ids
+                                // Find the newly added project ID and add to parent's worktree_ids
                                 let new_id = ws.data().projects.iter()
                                     .find(|p| p.path == wt_path_clone)
                                     .map(|p| p.id.clone());
                                 if let Some(new_id) = new_id {
-                                    if let Some(parent) = ws.data.projects.iter_mut()
-                                        .find(|p| p.id == project_id)
-                                    {
-                                        if !parent.worktree_ids.contains(&new_id) {
-                                            parent.worktree_ids.push(new_id);
-                                        }
-                                    }
+                                    ws.add_to_worktree_ids(&project_id, &new_id);
                                 }
                                 ws.notify_data(cx);
                             });
