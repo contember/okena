@@ -1636,9 +1636,9 @@ impl Render for Sidebar {
         let cursor_index = self.cursor_index;
 
         // Determine which project is focused — only highlight when explicitly focused via sidebar click
-        let focused_project_id: Option<String> = {
+        let (focused_project_id, focus_individual) = {
             let ws = self.workspace.read(cx);
-            ws.focus_manager.focused_project_id().cloned()
+            (ws.focus_manager.focused_project_id().cloned(), ws.focus_manager.is_focus_individual())
         };
 
         // Build flat elements with cursor tracking
@@ -1678,17 +1678,18 @@ impl Render for Sidebar {
                     if has_worktrees && !project.is_orphan {
                         // Group header mode: project becomes a group, main project is first child
                         let is_cursor = cursor_index == Some(flat_idx);
-                        let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
+                        // Group header highlights when focused non-individual (showing all)
+                        let is_focused_group = focused_project_id.as_ref() == Some(&project.id) && !focus_individual;
                         flat_elements.push(
-                            self.render_project_group_header(&project, index, is_cursor, is_focused_project, window, cx).into_any_element()
+                            self.render_project_group_header(&project, index, is_cursor, is_focused_group, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
                         let is_expanded = self.is_project_expanded(&project.id, true);
                         if is_expanded {
-                            // Main project as first child
+                            // Main project as first child — highlights when focused individual
                             let is_cursor = cursor_index == Some(flat_idx);
-                            let is_focused_project = focused_project_id.as_ref() == Some(&project.id);
+                            let is_focused_project = focused_project_id.as_ref() == Some(&project.id) && focus_individual;
                             flat_elements.push(
                                 self.render_project_group_child(&project, is_cursor, is_focused_project, window, cx).into_any_element()
                             );
@@ -1758,9 +1759,9 @@ impl Render for Sidebar {
                             if has_worktrees && !fp.is_orphan {
                                 // Group header mode within folder
                                 let is_cursor = cursor_index == Some(flat_idx);
-                                let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
+                                let is_focused_group = focused_project_id.as_ref() == Some(&fp.id) && !focus_individual;
                                 flat_elements.push(
-                                    self.render_project_group_header_in_folder(fp, &folder.id, is_cursor, is_focused_project, window, cx).into_any_element()
+                                    self.render_project_group_header_in_folder(fp, &folder.id, is_cursor, is_focused_group, window, cx).into_any_element()
                                 );
                                 flat_idx += 1;
 
@@ -1768,7 +1769,7 @@ impl Render for Sidebar {
                                 if is_expanded {
                                     // Main project as first child
                                     let is_cursor = cursor_index == Some(flat_idx);
-                                    let is_focused_project = focused_project_id.as_ref() == Some(&fp.id);
+                                    let is_focused_project = focused_project_id.as_ref() == Some(&fp.id) && focus_individual;
                                     flat_elements.push(
                                         self.render_project_group_child_in_folder(fp, is_cursor, is_focused_project, window, cx).into_any_element()
                                     );
