@@ -1,0 +1,16 @@
+[package]
+name = "okena-ext-codex"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-extensions = { path = "../okena-extensions" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+serde_json = "1.0"
+smol = "2.0"
+parking_lot = "0.12"
+dirs = "5.0"
+log = "0.4"

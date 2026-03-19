@@ -1,5 +1,4 @@
-use crate::settings::settings_entity;
-use crate::theme::theme;
+use okena_extensions::ThemeColors;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -20,13 +19,16 @@ const HOVER_DELAY_MS: u64 = 300;
 /// Codex OAuth client ID (public, embedded in the Codex CLI binary)
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
+fn theme(cx: &App) -> ThemeColors {
+    okena_extensions::theme(cx)
+}
+
 /// A rate limit window from the usage API
 #[derive(Clone)]
 struct RateLimitWindow {
     used_percent: u64,
     window_seconds: u64,
     reset_at: u64,
-    /// Percentage of the window that has elapsed (0.0–100.0)
     time_elapsed_pct: Option<f64>,
 }
 
@@ -79,8 +81,6 @@ struct CodexAuth {
 }
 
 /// Refresh the OAuth access token using the refresh token.
-/// Returns the new access token and persists new tokens back to auth.json
-/// (OpenAI uses rotating refresh tokens — the old one is invalidated on use).
 fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -102,7 +102,7 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
     let new_access = resp["access_token"].as_str()?;
     let new_refresh = resp["refresh_token"].as_str();
 
-    // Persist new tokens back to auth.json so the refresh token stays valid
+    // Persist new tokens back to auth.json
     if let Ok(content) = std::fs::read_to_string(&auth.auth_path) {
         if let Ok(mut file_json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(tokens) = file_json.get_mut("tokens").and_then(|t| t.as_object_mut()) {
@@ -131,7 +131,6 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
     let window_seconds = v["limit_window_seconds"].as_u64().unwrap_or(0);
     let reset_at = v["reset_at"].as_u64().unwrap_or(0);
 
-    // Compute what percentage of the window has elapsed
     let time_elapsed_pct = if window_seconds > 0 && reset_at > 0 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -251,18 +250,6 @@ impl CodexUsage {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
             loop {
-                // Skip fetch if codex_integration is disabled
-                let enabled = this
-                    .update(cx, |_, cx| {
-                        settings_entity(cx).read(cx).settings.codex_integration
-                    })
-                    .unwrap_or(false);
-
-                if !enabled {
-                    smol::Timer::after(USAGE_INTERVAL).await;
-                    continue;
-                }
-
                 let result = smol::unblock(fetch_usage).await;
 
                 if let Some(fetched) = result {
@@ -348,7 +335,7 @@ impl CodexUsage {
 
     fn render_popover(
         &self,
-        t: &crate::theme::ThemeColors,
+        t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let data = self.data.lock();
@@ -390,7 +377,6 @@ impl CodexUsage {
                         .child(
                             v_flex()
                                 .gap(px(8.0))
-                                // Title
                                 .child(
                                     h_flex()
                                         .justify_between()
@@ -408,19 +394,15 @@ impl CodexUsage {
                                                 .child(data.plan_type.clone()),
                                         ),
                                 )
-                                // Primary rate limit
                                 .when_some(data.primary_window.as_ref(), |el, w| {
                                     el.child(render_window_row(t, "Rate Limit", w))
                                 })
-                                // Secondary rate limit
                                 .when_some(data.secondary_window.as_ref(), |el, w| {
                                     el.child(render_window_row(t, "Secondary", w))
                                 })
-                                // Code review rate limit
                                 .when_some(data.review_primary.as_ref(), |el, w| {
                                     el.child(render_window_row(t, "Code Review", w))
                                 })
-                                // Time pace hint
                                 .when(
                                     data.primary_window.as_ref().and_then(|w| w.time_elapsed_pct).is_some()
                                         || data.secondary_window.as_ref().and_then(|w| w.time_elapsed_pct).is_some(),
@@ -433,7 +415,6 @@ impl CodexUsage {
                                         )
                                     },
                                 )
-                                // Credits
                                 .when_some(data.credits.as_ref(), |el, c| {
                                     if c.unlimited {
                                         el.child(
@@ -481,7 +462,7 @@ impl CodexUsage {
     }
 }
 
-fn utilization_color(t: &crate::theme::ThemeColors, pct: u64) -> u32 {
+fn utilization_color(t: &ThemeColors, pct: u64) -> u32 {
     if pct > 80 {
         t.metric_critical
     } else if pct > 60 {
@@ -526,7 +507,7 @@ fn format_reset_time(reset_at: u64) -> String {
 }
 
 fn render_window_row(
-    t: &crate::theme::ThemeColors,
+    t: &ThemeColors,
     label: &str,
     window: &RateLimitWindow,
 ) -> impl IntoElement {
@@ -567,10 +548,8 @@ fn render_window_row(
         .child(render_usage_with_time_bar(t, pct, window.time_elapsed_pct))
 }
 
-/// Render a combined progress bar: usage fill on top of a time-elapsed marker.
-/// The time marker is a thin vertical line showing where you "should" be.
 fn render_usage_with_time_bar(
-    t: &crate::theme::ThemeColors,
+    t: &ThemeColors,
     usage_pct: u64,
     time_pct: Option<f64>,
 ) -> impl IntoElement {
@@ -588,7 +567,6 @@ fn render_usage_with_time_bar(
         .rounded(px(2.0))
         .bg(rgb(t.bg_secondary))
         .relative()
-        // Usage fill
         .child(
             div()
                 .h_full()
@@ -596,7 +574,6 @@ fn render_usage_with_time_bar(
                 .bg(rgb(pace_color))
                 .w(relative(clamped_usage / 100.0)),
         )
-        // Time elapsed marker (thin vertical line)
         .when_some(time_pct, |el, tp| {
             let clamped_time = tp.clamp(0.0, 100.0) as f32;
             el.child(

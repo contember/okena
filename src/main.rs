@@ -417,6 +417,17 @@ fn main() {
         // Initialize toast notification system
         cx.set_global(ToastManager::new());
 
+        // Initialize extension registry
+        let mut ext_registry = okena_extensions::ExtensionRegistry::new();
+        ext_registry.register(okena_ext_claude::register());
+        ext_registry.register(okena_ext_codex::register());
+        cx.set_global(ext_registry);
+
+        // Register theme provider for extensions
+        cx.set_global(okena_extensions::GlobalThemeProvider(|cx| {
+            crate::theme::theme(cx)
+        }));
+
         // Initialize hook execution monitor
         cx.set_global(workspace::hook_monitor::HookMonitor::new());
 

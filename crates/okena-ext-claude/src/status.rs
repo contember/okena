@@ -1,6 +1,5 @@
-use crate::settings::settings_entity;
-use crate::theme::theme;
-use crate::views::components::ui_helpers::{format_api_timestamp, capitalize_first};
+use crate::ui_helpers::{format_api_timestamp, capitalize_first, open_url};
+use okena_extensions::ThemeColors;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -9,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Refresh interval for Codex status
+/// Refresh interval for Claude Code status
 const STATUS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Hover delay before showing the popover (ms)
@@ -23,7 +22,7 @@ struct IncidentUpdate {
     created_at: String,
 }
 
-/// An unresolved incident affecting the API component
+/// An unresolved incident affecting the Claude Code component
 #[derive(Clone)]
 struct Incident {
     name: String,
@@ -31,40 +30,32 @@ struct Incident {
     updates: Vec<IncidentUpdate>,
 }
 
-/// Fetched status data for OpenAI API (Codex)
+/// Fetched status data for Claude Code
 #[derive(Clone)]
 struct StatusData {
     status: String,
     incidents: Vec<Incident>,
 }
 
-/// Codex (OpenAI API) status indicator with hover popover and click-to-open.
-pub struct CodexStatus {
+fn theme(cx: &App) -> ThemeColors {
+    okena_extensions::theme(cx)
+}
+
+/// Claude Code status indicator with hover popover and click-to-open.
+pub struct ClaudeStatus {
     data: Arc<Mutex<Option<StatusData>>>,
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
 }
 
-impl CodexStatus {
+impl ClaudeStatus {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let data: Arc<Mutex<Option<StatusData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {
-                // Skip fetch if codex_integration is disabled
-                let enabled = this
-                    .update(cx, |_, cx| {
-                        settings_entity(cx).read(cx).settings.codex_integration
-                    })
-                    .unwrap_or(false);
-
-                if !enabled {
-                    smol::Timer::after(STATUS_INTERVAL).await;
-                    continue;
-                }
-
                 let result = smol::unblock(|| {
                     let client = reqwest::blocking::Client::builder()
                         .timeout(Duration::from_secs(10))
@@ -73,20 +64,19 @@ impl CodexStatus {
                         .ok()?;
 
                     let resp: serde_json::Value = client
-                        .get("https://status.openai.com/api/v2/summary.json")
+                        .get("https://status.claude.com/api/v2/summary.json")
                         .send()
                         .ok()?
                         .json()
                         .ok()?;
 
-                    // Find the Codex component and its ID
+                    // Find the Claude Code component and its ID
                     let components = resp["components"].as_array()?;
                     let mut component_status = None;
                     let mut component_id = None;
                     for component in components {
-                        if component["name"].as_str() == Some("Codex") {
-                            component_status =
-                                component["status"].as_str().map(|s| s.to_string());
+                        if component["name"].as_str() == Some("Claude Code") {
+                            component_status = component["status"].as_str().map(|s| s.to_string());
                             component_id = component["id"].as_str().map(|s| s.to_string());
                             break;
                         }
@@ -218,7 +208,7 @@ impl CodexStatus {
 
     fn render_popover(
         &self,
-        t: &crate::theme::ThemeColors,
+        t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let data = self.data.lock();
@@ -237,7 +227,7 @@ impl CodexStatus {
                 .snap_to_window()
                 .child(
                     div()
-                        .id("codex-status-popover")
+                        .id("claude-status-popover")
                         .occlude()
                         .min_w(px(320.0))
                         .max_w(px(480.0))
@@ -349,7 +339,7 @@ impl CodexStatus {
     }
 }
 
-impl Render for CodexStatus {
+impl Render for ClaudeStatus {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
@@ -374,14 +364,14 @@ impl Render for CodexStatus {
         div()
             .child(
                 h_flex()
-                    .id("codex-status-trigger")
+                    .id("claude-status-trigger")
                     .cursor_pointer()
                     .gap(px(4.0))
                     .px(px(4.0))
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .child(div().text_color(rgb(t.text_muted)).child("Codex"))
+                    .child(div().text_color(rgb(t.text_muted)).child("Claude Code"))
                     .child(div().text_color(rgb(color)).child(label))
                     .child(
                         canvas(
@@ -405,10 +395,9 @@ impl Render for CodexStatus {
                         }))
                     })
                     .on_click(|_, _, _cx| {
-                        crate::process::open_url("https://status.openai.com");
+                        open_url("https://status.claude.com");
                     }),
             )
             .child(self.render_popover(&t, cx))
     }
 }
-

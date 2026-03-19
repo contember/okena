@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mobile/native", "crates/okena-core"]
+members = [".", "mobile/native", "crates/okena-core", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex"]
 resolver = "2"
 
 [package]
@@ -11,6 +11,11 @@ license = "MIT"
 [dependencies]
 # Shared core types
 okena-core = { path = "crates/okena-core", features = ["client"] }
+
+# Extension system
+okena-extensions = { path = "crates/okena-extensions" }
+okena-ext-claude = { path = "crates/okena-ext-claude" }
+okena-ext-codex = { path = "crates/okena-ext-codex" }
 
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

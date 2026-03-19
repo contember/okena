@@ -5,6 +5,7 @@ use crate::theme::ThemeMode;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Terminal cursor shape.
@@ -250,7 +251,7 @@ impl Default for SidebarSettings {
 }
 
 /// Current settings schema version - increment when making breaking changes
-pub const SETTINGS_VERSION: u32 = 2;
+pub const SETTINGS_VERSION: u32 = 3;
 
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -349,13 +350,21 @@ pub struct AppSettings {
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
 
-    /// Show Claude Code status indicator in the status bar (default: false)
+    /// Set of enabled extension IDs (replaces per-extension bool flags).
     #[serde(default)]
-    pub claude_code_integration: bool,
+    pub enabled_extensions: HashSet<String>,
 
-    /// Show Codex status indicator in the status bar (default: false)
-    #[serde(default)]
-    pub codex_integration: bool,
+    /// Per-extension settings (keyed by extension ID).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extension_settings: HashMap<String, serde_json::Value>,
+
+    /// Legacy: Claude Code integration flag. Migrated to enabled_extensions.
+    #[serde(default, skip_serializing)]
+    claude_code_integration: bool,
+
+    /// Legacy: Codex integration flag. Migrated to enabled_extensions.
+    #[serde(default, skip_serializing)]
+    codex_integration: bool,
 
     /// Idle timeout in seconds for "waiting for input" detection (default: 5, 0 = disabled)
     #[serde(default = "default_idle_timeout_secs")]
@@ -398,6 +407,8 @@ impl Default for AppSettings {
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
             auto_update_enabled: default_auto_update_enabled(),
+            enabled_extensions: HashSet::new(),
+            extension_settings: HashMap::new(),
             claude_code_integration: false,
             codex_integration: false,
             idle_timeout_secs: default_idle_timeout_secs(),
@@ -632,6 +643,20 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         settings.version = 2;
     }
 
+    // v2 -> v3: migrate per-extension bool flags to enabled_extensions set.
+    if settings.version == 2 {
+        log::info!("Migrating settings from v2 to v3 (extension system)");
+        if settings.claude_code_integration {
+            settings.enabled_extensions.insert("claude-code".to_string());
+        }
+        if settings.codex_integration {
+            settings.enabled_extensions.insert("codex".to_string());
+        }
+        settings.claude_code_integration = false;
+        settings.codex_integration = false;
+        settings.version = 3;
+    }
+
     // Ensure version is current
     if settings.version < SETTINGS_VERSION {
         log::warn!(
@@ -844,5 +869,53 @@ mod tests {
         let config = HooksConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn migrate_v2_claude_code_integration_to_enabled_extensions() {
+        let json = r#"{"version": 2, "claude_code_integration": true}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert_eq!(migrated.version, SETTINGS_VERSION);
+        assert!(migrated.enabled_extensions.contains("claude-code"));
+        assert!(!migrated.enabled_extensions.contains("codex"));
+    }
+
+    #[test]
+    fn migrate_v2_codex_integration_to_enabled_extensions() {
+        let json = r#"{"version": 2, "codex_integration": true}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert!(migrated.enabled_extensions.contains("codex"));
+    }
+
+    #[test]
+    fn migrate_v2_both_integrations() {
+        let json = r#"{"version": 2, "claude_code_integration": true, "codex_integration": true}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert!(migrated.enabled_extensions.contains("claude-code"));
+        assert!(migrated.enabled_extensions.contains("codex"));
+    }
+
+    #[test]
+    fn migrate_v2_no_integrations_stays_empty() {
+        let json = r#"{"version": 2}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert!(migrated.enabled_extensions.is_empty());
+    }
+
+    #[test]
+    fn enabled_extensions_not_serialized_with_legacy_fields() {
+        let mut settings = AppSettings::default();
+        settings.enabled_extensions.insert("claude-code".to_string());
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        // Legacy bool fields should not appear in serialized output
+        assert!(!json.contains("claude_code_integration"));
+        assert!(!json.contains("codex_integration"));
+        // enabled_extensions should be present
+        assert!(json.contains("enabled_extensions"));
+        assert!(json.contains("claude-code"));
     }
 }

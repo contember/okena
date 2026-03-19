@@ -5,16 +5,12 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
+use okena_extensions::ExtensionRegistry;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
 use time::OffsetDateTime;
-
-use super::claude_status::ClaudeStatus;
-use super::claude_usage::ClaudeUsage;
-use super::codex_status::CodexStatus;
-use super::codex_usage::CodexUsage;
 
 /// Refresh interval for system stats
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -73,10 +69,8 @@ impl SystemInfoCache {
 pub struct StatusBar {
     workspace: Entity<Workspace>,
     cache: Arc<Mutex<SystemInfoCache>>,
-    claude_status: Entity<ClaudeStatus>,
-    claude_usage: Entity<ClaudeUsage>,
-    codex_status: Entity<CodexStatus>,
-    codex_usage: Entity<CodexUsage>,
+    /// Extension widgets: (extension_id, widgets)
+    extension_widgets: Vec<(String, Vec<AnyView>)>,
     sidebar_open: bool,
 }
 
@@ -107,15 +101,25 @@ impl StatusBar {
             }
         }).detach();
 
-        let claude_status = cx.new(|cx| ClaudeStatus::new(cx));
-        let claude_usage = cx.new(|cx| ClaudeUsage::new(cx));
-        let codex_status = cx.new(|cx| CodexStatus::new(cx));
-        let codex_usage = cx.new(|cx| CodexUsage::new(cx));
+        // Clone extension factories out of the global registry, then call them.
+        // The Arc clone releases the borrow on the global before we call factory(cx).
+        let factories: Vec<(String, okena_extensions::StatusBarWidgetFactory)> =
+            if let Some(registry) = cx.try_global::<ExtensionRegistry>() {
+                registry.extensions().iter().filter_map(|ext| {
+                    let factory = ext.status_bar_widgets.as_ref()?.clone();
+                    Some((ext.manifest.id.to_string(), factory))
+                }).collect()
+            } else {
+                Vec::new()
+            };
+        let extension_widgets: Vec<(String, Vec<AnyView>)> = factories.into_iter()
+            .map(|(id, factory)| (id, factory(cx)))
+            .collect();
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        Self { workspace, cache, claude_status, claude_usage, codex_status, codex_usage, sidebar_open: true }
+        Self { workspace, cache, extension_widgets, sidebar_open: true }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -169,6 +173,13 @@ impl Render for StatusBar {
             t.metric_normal
         };
 
+        // Collect enabled extension widgets
+        let enabled_extensions = &settings_entity(cx).read(cx).settings.enabled_extensions;
+        let enabled_ext_widgets: Vec<&Vec<AnyView>> = self.extension_widgets.iter()
+            .filter(|(id, _)| enabled_extensions.contains(id.as_str()))
+            .map(|(_, widgets)| widgets)
+            .collect();
+
         div()
             .id("status-bar")
             .h(px(22.0))
@@ -182,7 +193,7 @@ impl Render for StatusBar {
             .text_size(px(11.0))
             // Left side - sidebar toggle (macOS only) + system stats
             .child({
-                h_flex().gap(px(16.0))
+                let mut left = h_flex().gap(px(16.0))
                     // On macOS, sidebar toggle lives in the status bar footer
                     .when(cfg!(target_os = "macos"), |d| {
                         d.child(
@@ -234,17 +245,16 @@ impl Render for StatusBar {
                                     .text_color(rgb(mem_color))
                                     .child(memory_str)
                             )
-                    )
-                    // Claude Code status + usage
-                    .when(settings_entity(cx).read(cx).settings.claude_code_integration, |d| {
-                        d.child(self.claude_status.clone())
-                            .child(self.claude_usage.clone())
-                    })
-                    // Codex status + usage
-                    .when(settings_entity(cx).read(cx).settings.codex_integration, |d| {
-                        d.child(self.codex_status.clone())
-                            .child(self.codex_usage.clone())
-                    })
+                    );
+
+                // Extension widgets
+                for widgets in &enabled_ext_widgets {
+                    for widget in *widgets {
+                        left = left.child(widget.clone());
+                    }
+                }
+
+                left
             })
             // Right side - remote info + version + time
             .child({

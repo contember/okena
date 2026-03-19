@@ -4230,6 +4230,9 @@ dependencies = [
  "libc",
  "log",
  "okena-core",
+ "okena-ext-claude",
+ "okena-ext-codex",
+ "okena-extensions",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
@@ -4268,6 +4271,45 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",
+]
+
+[[package]]
+name = "okena-ext-claude"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-extensions",
+ "parking_lot",
+ "reqwest",
+ "serde_json",
+ "smol",
+]
+
+[[package]]
+name = "okena-ext-codex"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-extensions",
+ "parking_lot",
+ "reqwest",
+ "serde_json",
+ "smol",
+]
+
+[[package]]
+name = "okena-extensions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "okena-core",
+ "serde_json",
 ]
 
 [[package]]

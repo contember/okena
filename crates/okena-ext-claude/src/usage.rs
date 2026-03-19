@@ -1,5 +1,4 @@
-use crate::settings::settings_entity;
-use crate::theme::theme;
+use okena_extensions::ThemeColors;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -32,7 +31,7 @@ struct ExtraUsage {
     is_enabled: bool,
     monthly_limit: f64,
     used_credits: f64,
-    utilization: f64, // 0.0 if null from API
+    utilization: f64,
 }
 
 /// All fetched usage data
@@ -43,6 +42,10 @@ struct UsageData {
     seven_day_sonnet: Option<TierUsage>,
     seven_day_opus: Option<TierUsage>,
     extra_usage: Option<ExtraUsage>,
+}
+
+fn theme(cx: &App) -> ThemeColors {
+    okena_extensions::theme(cx)
 }
 
 /// Claude API usage indicator with hover popover.
@@ -128,7 +131,6 @@ fn parse_tier(
 }
 
 /// Compute what percentage of the billing period has elapsed.
-/// `resets_at` is an ISO 8601 timestamp, `period_secs` is the total period duration.
 fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
     let reset_epoch = parse_iso8601_to_epoch(resets_at)?;
     let now = std::time::SystemTime::now()
@@ -140,7 +142,7 @@ fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
     Some((elapsed / period_secs * 100.0).clamp(0.0, 100.0))
 }
 
-/// Parse a simplified ISO 8601 timestamp (e.g. "2026-03-11T15:30:00Z") to Unix epoch seconds.
+/// Parse a simplified ISO 8601 timestamp to Unix epoch seconds.
 fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
     let parts: Vec<&str> = ts.split('T').collect();
     if parts.len() != 2 {
@@ -180,8 +182,6 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 }
 
 /// Format ISO 8601 reset time to a human-readable short form.
-/// When `include_date` is true, shows relative labels: "today", "tomorrow",
-/// weekday name (for 2-6 days), or "Mar 5" for further dates.
 fn format_reset_time(ts: &str, include_date: bool) -> String {
     let parts: Vec<&str> = ts.split('T').collect();
     if parts.len() != 2 {
@@ -215,7 +215,7 @@ fn format_reset_time(ts: &str, include_date: bool) -> String {
                 } else if diff == 1 {
                     "tomorrow".to_string()
                 } else if (2..=6).contains(&diff) {
-                    let dow = ((reset_days % 7) + 7) % 7; // epoch day 0 = Thu
+                    let dow = ((reset_days % 7) + 7) % 7;
                     ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][dow as usize].to_string()
                 } else {
                     let month_name = match month {
@@ -243,16 +243,6 @@ impl ClaudeUsage {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
             loop {
-                // Skip fetch if claude_code_integration is disabled
-                let enabled = this.update(cx, |_, cx| {
-                    settings_entity(cx).read(cx).settings.claude_code_integration
-                }).unwrap_or(false);
-
-                if !enabled {
-                    smol::Timer::after(USAGE_INTERVAL).await;
-                    continue;
-                }
-
                 // Returns (Option<UsageData>, Option<Duration>) — data + optional retry delay
                 let (result, retry_after) = smol::unblock(|| {
                     let token = match read_access_token() {
@@ -323,11 +313,6 @@ impl ClaudeUsage {
                 })
                 .await;
 
-                match &result {
-                    Some(_) => log::info!("[claude-usage] data updated successfully"),
-                    None => log::info!("[claude-usage] no data returned"),
-                }
-
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
                     consecutive_failures = 0;
@@ -340,14 +325,12 @@ impl ClaudeUsage {
 
                 let delay = match retry_after {
                     Some(server_delay) => {
-                        // Exponential backoff: MIN_RETRY_DELAY * 2^(failures-1), capped at 1h
                         let backoff = MIN_RETRY_DELAY
                             .saturating_mul(1 << consecutive_failures.min(6).saturating_sub(1));
                         let cap = Duration::from_secs(3600);
                         server_delay.max(backoff).min(cap)
                     }
                     None if consecutive_failures > 0 => {
-                        // Non-429 failures also get backoff
                         let backoff = MIN_RETRY_DELAY
                             .saturating_mul(1 << consecutive_failures.min(6).saturating_sub(1));
                         backoff.min(Duration::from_secs(3600))
@@ -421,7 +404,7 @@ impl ClaudeUsage {
 
     fn render_popover(
         &self,
-        t: &crate::theme::ThemeColors,
+        t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let data = self.data.lock();
@@ -463,7 +446,6 @@ impl ClaudeUsage {
                         .child(
                             v_flex()
                                 .gap(px(8.0))
-                                // Title
                                 .child(
                                     div()
                                         .text_size(px(12.0))
@@ -471,23 +453,18 @@ impl ClaudeUsage {
                                         .text_color(rgb(t.text_primary))
                                         .child("Claude Usage"),
                                 )
-                                // Session (5h) row
                                 .when_some(data.five_hour.as_ref(), |el, tier| {
                                     el.child(render_tier_row(t, "Session (5h)", tier))
                                 })
-                                // Weekly (7d) row
                                 .when_some(data.seven_day.as_ref(), |el, tier| {
                                     el.child(render_tier_row(t, "Weekly (7d)", tier))
                                 })
-                                // Sonnet row
                                 .when_some(data.seven_day_sonnet.as_ref(), |el, tier| {
                                     el.child(render_tier_row(t, "Sonnet (7d)", tier))
                                 })
-                                // Opus row
                                 .when_some(data.seven_day_opus.as_ref(), |el, tier| {
                                     el.child(render_tier_row(t, "Opus (7d)", tier))
                                 })
-                                // Time pace hint
                                 .when(
                                     data.five_hour.as_ref().and_then(|t| t.time_elapsed_pct).is_some()
                                         || data.seven_day.as_ref().and_then(|t| t.time_elapsed_pct).is_some(),
@@ -500,7 +477,6 @@ impl ClaudeUsage {
                                         )
                                     },
                                 )
-                                // Extra usage row
                                 .when_some(data.extra_usage.as_ref(), |el, extra| {
                                     if !extra.is_enabled {
                                         return el;
@@ -542,7 +518,7 @@ impl ClaudeUsage {
     }
 }
 
-fn utilization_color(t: &crate::theme::ThemeColors, pct: f64) -> u32 {
+fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
     if pct > 80.0 {
         t.metric_critical
     } else if pct > 60.0 {
@@ -553,7 +529,7 @@ fn utilization_color(t: &crate::theme::ThemeColors, pct: f64) -> u32 {
 }
 
 fn render_tier_row(
-    t: &crate::theme::ThemeColors,
+    t: &ThemeColors,
     label: &str,
     tier: &TierUsage,
 ) -> impl IntoElement {
@@ -592,20 +568,17 @@ fn render_tier_row(
         .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct))
 }
 
-/// Render a combined progress bar: usage fill on top of a time-elapsed marker.
-/// The time marker is a thin vertical line showing where you "should" be.
 fn render_usage_with_time_bar(
-    t: &crate::theme::ThemeColors,
+    t: &ThemeColors,
     usage_pct: f64,
     time_pct: Option<f64>,
 ) -> impl IntoElement {
     let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
-    let usage_color = utilization_color(t, usage_pct);
 
     let pace_color = match time_pct {
-        Some(tp) if usage_pct > tp + 15.0 => t.metric_critical, // spending too fast
-        Some(tp) if usage_pct > tp + 5.0 => t.metric_warning,   // slightly fast
-        _ => t.metric_normal,                                     // on pace or under
+        Some(tp) if usage_pct > tp + 15.0 => t.metric_critical,
+        Some(tp) if usage_pct > tp + 5.0 => t.metric_warning,
+        _ => t.metric_normal,
     };
 
     div()
@@ -614,7 +587,6 @@ fn render_usage_with_time_bar(
         .rounded(px(2.0))
         .bg(rgb(t.bg_secondary))
         .relative()
-        // Usage fill
         .child(
             div()
                 .h_full()
@@ -622,7 +594,6 @@ fn render_usage_with_time_bar(
                 .bg(rgb(pace_color))
                 .w(relative(clamped_usage / 100.0)),
         )
-        // Time elapsed marker (thin vertical line)
         .when_some(time_pct, |el, tp| {
             let clamped_time = tp.clamp(0.0, 100.0) as f32;
             el.child(
@@ -638,7 +609,7 @@ fn render_usage_with_time_bar(
         })
 }
 
-fn render_progress_bar(t: &crate::theme::ThemeColors, pct: f64) -> impl IntoElement {
+fn render_progress_bar(t: &ThemeColors, pct: f64) -> impl IntoElement {
     let clamped = pct.clamp(0.0, 100.0) as f32;
     let color = utilization_color(t, pct);
 

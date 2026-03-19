@@ -124,8 +124,20 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    setting_setter!(set_claude_code_integration, claude_code_integration, bool);
-    setting_setter!(set_codex_integration, codex_integration, bool);
+    /// Enable or disable an extension by ID.
+    pub fn set_extension_enabled(&mut self, extension_id: &str, enabled: bool, cx: &mut Context<Self>) {
+        if enabled {
+            self.settings.enabled_extensions.insert(extension_id.to_string());
+        } else {
+            self.settings.enabled_extensions.remove(extension_id);
+        }
+        self.save_and_notify(cx);
+    }
+
+    /// Check if an extension is enabled.
+    pub fn is_extension_enabled(&self, extension_id: &str) -> bool {
+        self.settings.enabled_extensions.contains(extension_id)
+    }
 
     /// Set sidebar open state
     pub fn set_sidebar_open(&mut self, value: bool, cx: &mut Context<Self>) {
