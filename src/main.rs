@@ -18,7 +18,6 @@ mod simple_root;
 mod terminal;
 mod theme;
 mod ui;
-mod updater;
 mod views;
 mod workspace;
 
@@ -421,7 +420,11 @@ fn main() {
         let mut ext_registry = okena_extensions::ExtensionRegistry::new();
         ext_registry.register(okena_ext_claude::register());
         ext_registry.register(okena_ext_codex::register());
+        ext_registry.register(okena_ext_updater::register());
         cx.set_global(ext_registry);
+
+        // Initialize updater (sets GlobalUpdateInfo global, cleans old binary)
+        okena_ext_updater::init(cx);
 
         // Register theme provider for extensions
         cx.set_global(okena_extensions::GlobalThemeProvider(|cx| {

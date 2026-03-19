@@ -118,11 +118,6 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Set auto-update enabled/disabled
-    pub fn set_auto_update_enabled(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.auto_update_enabled = value;
-        self.save_and_notify(cx);
-    }
 
     /// Enable or disable an extension by ID.
     pub fn set_extension_enabled(&mut self, extension_id: &str, enabled: bool, cx: &mut Context<Self>) {

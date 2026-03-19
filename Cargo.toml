@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mobile/native", "crates/okena-core", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex"]
+members = [".", "mobile/native", "crates/okena-core", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater"]
 resolver = "2"
 
 [package]
@@ -16,6 +16,7 @@ okena-core = { path = "crates/okena-core", features = ["client"] }
 okena-extensions = { path = "crates/okena-extensions" }
 okena-ext-claude = { path = "crates/okena-ext-claude" }
 okena-ext-codex = { path = "crates/okena-ext-codex" }
+okena-ext-updater = { path = "crates/okena-ext-updater" }
 
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

@@ -4232,6 +4232,7 @@ dependencies = [
  "okena-core",
  "okena-ext-claude",
  "okena-ext-codex",
+ "okena-ext-updater",
  "okena-extensions",
  "parking_lot",
  "portable-pty",
@@ -4300,6 +4301,24 @@ dependencies = [
  "parking_lot",
  "reqwest",
  "serde_json",
+ "smol",
+]
+
+[[package]]
+name = "okena-ext-updater"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-extensions",
+ "parking_lot",
+ "reqwest",
+ "semver",
+ "serde_json",
+ "sha2",
  "smol",
 ]
 

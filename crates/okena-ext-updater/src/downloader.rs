@@ -1,13 +1,10 @@
-use crate::updater::UpdateInfo;
-use crate::updater::UpdateStatus;
+use crate::status::{UpdateInfo, UpdateStatus};
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Download an asset to `~/.config/okena/updates/`, reporting progress via `UpdateInfo`.
-/// If a `checksum_url` is provided, downloads the SHA256SUMS file and verifies the asset.
-/// Returns the path to the downloaded file.
+/// Download an asset, reporting progress via `UpdateInfo`.
 pub async fn download_asset(
     url: String,
     asset_name: String,
@@ -32,11 +29,10 @@ fn download_blocking(
     update_info: &UpdateInfo,
     cancel_token: u64,
 ) -> Result<PathBuf> {
-    let updates_dir = crate::workspace::persistence::get_config_dir().join("updates");
+    let updates_dir = crate::process::get_config_dir().join("updates");
     std::fs::create_dir_all(&updates_dir)
         .context("failed to create updates directory")?;
 
-    // Clean previous downloads before starting a new one
     cleanup_updates_dir();
 
     let dest = updates_dir.join(asset_name);
@@ -64,7 +60,6 @@ fn download_blocking(
     let mut reader = resp;
     let mut buf = [0u8; 65536];
 
-    // Set initial downloading status so the UI shows progress immediately
     update_info.set_status(UpdateStatus::Downloading {
         version: version.to_string(),
         progress: 0,
@@ -72,7 +67,6 @@ fn download_blocking(
 
     loop {
         if update_info.is_cancelled(cancel_token) {
-            // Clean up partial download
             drop(file);
             let _ = std::fs::remove_file(&dest);
             anyhow::bail!("download cancelled");
@@ -101,7 +95,6 @@ fn download_blocking(
 
     file.flush().context("failed to flush download")?;
 
-    // Validate downloaded size when server reported content-length
     if total > 0 && downloaded != total {
         let _ = std::fs::remove_file(&dest);
         anyhow::bail!(
@@ -111,7 +104,6 @@ fn download_blocking(
         );
     }
 
-    // Reject zero-byte downloads
     if downloaded == 0 {
         let _ = std::fs::remove_file(&dest);
         anyhow::bail!("downloaded file is empty");
@@ -121,14 +113,12 @@ fn download_blocking(
     Ok(dest)
 }
 
-/// Verify the SHA256 checksum of a downloaded file against a remote SHA256SUMS file.
 fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Result<()> {
     use sha2::{Sha256, Digest};
     use std::io::Read;
 
     log::info!("Verifying checksum for {}", asset_name);
 
-    // Download the checksums file
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(format!("okena/{}", env!("CARGO_PKG_VERSION")))
@@ -144,7 +134,6 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
         .text()
         .context("failed to read checksum file")?;
 
-    // Parse SHA256SUMS format: "<hex>  <filename>" or "<hex> <filename>"
     let expected_hash = body
         .lines()
         .find_map(|line| {
@@ -157,7 +146,6 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
         })
         .with_context(|| format!("no checksum found for '{}' in SHA256SUMS", asset_name))?;
 
-    // Compute actual hash
     let mut file = std::fs::File::open(file_path)
         .context("failed to open downloaded file for checksum")?;
     let mut hasher = Sha256::new();
@@ -172,7 +160,6 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
     let actual_hash = format!("{:x}", hasher.finalize());
 
     if actual_hash != expected_hash {
-        // Remove the corrupt download
         let _ = std::fs::remove_file(file_path);
         anyhow::bail!(
             "checksum mismatch: expected {}, got {}",
@@ -185,9 +172,8 @@ fn verify_checksum(file_path: &Path, asset_name: &str, checksum_url: &str) -> Re
     Ok(())
 }
 
-/// Remove all files and directories in `~/.config/okena/updates/`.
 pub fn cleanup_updates_dir() {
-    let updates_dir = crate::workspace::persistence::get_config_dir().join("updates");
+    let updates_dir = crate::process::get_config_dir().join("updates");
     if updates_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&updates_dir) {
             for entry in entries.flatten() {

@@ -56,11 +56,7 @@ impl SettingsPanel {
                                 .child(SimpleInput::new(&self.listen_address_input).text_size(px(12.0))),
                         ),
                 )
-            })
-            .child(self.render_toggle(
-                "auto-update", "Auto Update", s.auto_update_enabled, true,
-                |state, val, cx| state.set_auto_update_enabled(val, cx), cx,
-            ));
+            });
 
         // Dynamic extension toggles from the registry.
         // Collect metadata first to avoid holding an immutable borrow on cx while calling render_toggle.

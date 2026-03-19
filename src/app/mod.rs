@@ -1,7 +1,6 @@
 mod detached_terminals;
 pub mod headless;
 mod remote_commands;
-mod update_checker;
 
 use crate::git::watcher::GitStatusWatcher;
 use crate::workspace::worktree_sync::WorktreeSyncWatcher;
@@ -14,7 +13,6 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::settings::GlobalSettings;
 use crate::views::panels::toast::ToastManager;
-use crate::updater::{GlobalUpdateInfo, UpdateInfo};
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
 use crate::workspace::persistence;
@@ -377,34 +375,8 @@ impl Okena {
         })
         .detach();
 
-        // ── Self-updater setup ──────────────────────────────────────────
-        // Clean up leftover .old binary from a previous update
-        crate::updater::installer::cleanup_old_binary();
-
-        let update_info = UpdateInfo::new();
-        cx.set_global(GlobalUpdateInfo(update_info.clone()));
-
-        let auto_update_was_enabled = settings.read(cx).get().auto_update_enabled;
-        if auto_update_was_enabled {
-            Self::start_update_checker(update_info.clone(), cx);
-        }
-
-        // Observe settings to start/stop update checker (only on actual change)
-        let update_info_for_obs = update_info;
-        let mut prev_enabled = auto_update_was_enabled;
-        cx.observe(&settings, move |_this, settings, cx| {
-            let enabled = settings.read(cx).get().auto_update_enabled;
-            if enabled == prev_enabled {
-                return;
-            }
-            prev_enabled = enabled;
-            if enabled {
-                Self::start_update_checker(update_info_for_obs.clone(), cx);
-            } else {
-                update_info_for_obs.cancel();
-            }
-        })
-        .detach();
+        // Note: updater is now handled by the okena-ext-updater extension.
+        // GlobalUpdateInfo is set in main.rs via okena_ext_updater::init().
 
         manager
     }
@@ -571,7 +543,11 @@ impl Okena {
                             }
                         }
                     }
-                    this.root_view.update(cx, |_, cx| cx.notify());
+                    // Only notify root_view for exit events (which need UI cleanup).
+                    // Data-only events are handled by each TerminalPane's dirty check loop.
+                    if !exit_events.is_empty() {
+                        this.root_view.update(cx, |_, cx| cx.notify());
+                    }
                 });
             }
         })

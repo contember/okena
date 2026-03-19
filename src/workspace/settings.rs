@@ -346,9 +346,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
 
-    /// Enable automatic update checking (default: true)
-    #[serde(default = "default_auto_update_enabled")]
-    pub auto_update_enabled: bool,
+    /// Legacy: auto_update_enabled flag. Migrated to enabled_extensions.
+    #[serde(default = "default_auto_update_enabled", skip_serializing)]
+    auto_update_enabled: bool,
 
     /// Set of enabled extension IDs (replaces per-extension bool flags).
     #[serde(default)]
@@ -652,8 +652,12 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         if settings.codex_integration {
             settings.enabled_extensions.insert("codex".to_string());
         }
+        if settings.auto_update_enabled {
+            settings.enabled_extensions.insert("updater".to_string());
+        }
         settings.claude_code_integration = false;
         settings.codex_integration = false;
+        settings.auto_update_enabled = false;
         settings.version = 3;
     }
 
@@ -899,11 +903,22 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v2_no_integrations_stays_empty() {
+    fn migrate_v2_no_integrations_only_updater() {
+        // auto_update_enabled defaults to true, so updater is migrated
         let json = r#"{"version": 2}"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
-        assert!(migrated.enabled_extensions.is_empty());
+        assert_eq!(migrated.enabled_extensions.len(), 1);
+        assert!(migrated.enabled_extensions.contains("updater"));
+        assert!(!migrated.enabled_extensions.contains("claude-code"));
+    }
+
+    #[test]
+    fn migrate_v2_auto_update_disabled() {
+        let json = r#"{"version": 2, "auto_update_enabled": false}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert!(!migrated.enabled_extensions.contains("updater"));
     }
 
     #[test]

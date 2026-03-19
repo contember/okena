@@ -8,12 +8,10 @@ pub struct ReleaseAsset {
     pub version: String,
     pub asset_url: String,
     pub asset_name: String,
-    /// URL to a SHA256SUMS file in the release (if present).
     pub checksum_url: Option<String>,
 }
 
 /// Check GitHub for the latest release.
-/// Returns `Some(ReleaseAsset)` when a newer version exists, `None` otherwise.
 pub async fn check_for_update() -> Result<Option<ReleaseAsset>> {
     smol::unblock(check_blocking).await
 }
@@ -65,7 +63,6 @@ fn check_blocking() -> Result<Option<ReleaseAsset>> {
         .as_array()
         .context("missing assets array")?;
 
-    // Look for the platform asset and an optional SHA256SUMS file
     let mut found_asset: Option<(String, String)> = None;
     let mut checksum_url: Option<String> = None;
 
@@ -93,7 +90,6 @@ fn check_blocking() -> Result<Option<ReleaseAsset>> {
         }));
     }
 
-    // Asset not uploaded yet for this platform — treat as "no update" rather than error
     log::warn!(
         "Release {} exists but no matching asset '{}' found",
         remote_version, expected_asset
@@ -101,7 +97,6 @@ fn check_blocking() -> Result<Option<ReleaseAsset>> {
     Ok(None)
 }
 
-/// Return the expected asset filename for the current platform.
 fn platform_asset_name() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return "okena-linux-x64.tar.gz";
