@@ -245,6 +245,7 @@ impl Sidebar {
                 sidebar_visibility_button(
                     ElementId::Name(format!("visibility-{}", project.id).into()),
                     project.show_in_overview,
+                    project.terminal_ids.len(),
                     "project-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" },
                     &t,
@@ -432,6 +433,7 @@ impl Sidebar {
                     sidebar_visibility_button(
                         ElementId::Name(format!("visibility-wt-{}", project_id).into()),
                         project.show_in_overview,
+                        project.terminal_ids.len(),
                         "worktree-item",
                         if project.show_in_overview { "Hide Worktree" } else { "Show Worktree" },
                         &t,
@@ -945,7 +947,7 @@ impl Sidebar {
             .child(
                 sidebar_visibility_button(
                     ElementId::Name(format!("gc-vis-{}", project.id).into()),
-                    project.show_in_overview, "group-child-item",
+                    project.show_in_overview, project.terminal_ids.len(), "group-child-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
                 )
                 .on_click(cx.listener({
@@ -1170,7 +1172,7 @@ impl Sidebar {
             .child(
                 sidebar_visibility_button(
                     ElementId::Name(format!("fgc-vis-{}", project.id).into()),
-                    project.show_in_overview, "fgc-item",
+                    project.show_in_overview, project.terminal_ids.len(), "fgc-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
                 )
                 .on_click(cx.listener({

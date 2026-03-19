@@ -488,6 +488,7 @@ impl Sidebar {
                 sidebar_visibility_button(
                     ElementId::Name(format!("fp-visibility-{}", project.id).into()),
                     project.show_in_overview,
+                    project.terminal_ids.len(),
                     "folder-project-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" },
                     &t,

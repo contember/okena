@@ -268,18 +268,66 @@ pub fn sidebar_visibility_toggle(
 
 /// Visibility toggle button with hover-reveal behavior.
 ///
-/// Shows on hover via `group_name`, or always when `show_in_overview` is false.
+/// When hidden and has terminals (`hidden_terminal_count > 0`), shows a terminal
+/// count badge by default. On hover, the badge is replaced by the eye icon.
+/// Otherwise, shows the eye icon on hover only.
+///
 /// Caller chains `.on_click()` to handle the toggle action.
 pub fn sidebar_visibility_button(
     id: impl Into<ElementId>,
     show_in_overview: bool,
+    hidden_terminal_count: usize,
     group_name: &'static str,
     tooltip_text: &'static str,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    sidebar_visibility_toggle(id, show_in_overview, t)
-        .opacity(0.0)
-        .when(show_in_overview, |d| d.opacity(1.0))
-        .group_hover(group_name, |s| s.opacity(1.0))
-        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+    let show_badge = !show_in_overview && hidden_terminal_count > 0;
+
+    if show_badge {
+        // Hidden with terminals: show badge, on hover switch to eye
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .cursor_pointer()
+            .w(px(18.0))
+            .h(px(18.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .relative()
+            .child(
+                // Badge (visible by default, hidden on group hover)
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.text_muted))
+                    .group_hover(group_name, |s| s.opacity(0.0))
+                    .child(format!("{}", hidden_terminal_count))
+            )
+            .child(
+                // Eye icon (hidden by default, visible on group hover)
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.0)
+                    .group_hover(group_name, |s| s.opacity(1.0))
+                    .child(
+                        svg()
+                            .path("icons/eye.svg")
+                            .size(px(12.0))
+                            .text_color(rgb(t.text_muted))
+                    )
+            )
+            .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+    } else {
+        sidebar_visibility_toggle(id, show_in_overview, t)
+            .opacity(0.0)
+            .when(show_in_overview, |d| d.opacity(1.0))
+            .group_hover(group_name, |s| s.opacity(1.0))
+            .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+    }
 }
