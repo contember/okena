@@ -2818,6 +2818,36 @@ const COMMIT_ROW_H: f32 = 24.0;
 /// Connector row height.
 const CONNECTOR_ROW_H: f32 = 10.0;
 
+/// Render a ref label pill (e.g. "HEAD -> main", "origin/main", "tag: v1.0").
+fn render_ref_label(ref_name: &str, t: &ThemeColors) -> AnyElement {
+    let color = if ref_name.contains("HEAD") {
+        t.term_cyan
+    } else if ref_name.starts_with("tag:") {
+        t.term_yellow
+    } else if ref_name.starts_with("origin/") || ref_name.contains('/') {
+        t.term_green
+    } else {
+        t.term_magenta
+    };
+    let bg = {
+        let c: Hsla = rgb(color).into();
+        hsla(c.h, c.s, c.l, 0.15)
+    };
+    div()
+        .px(px(4.0))
+        .py(px(1.0))
+        .rounded(px(3.0))
+        .bg(bg)
+        .text_size(px(10.0))
+        .text_color(rgb(color))
+        .flex_shrink_0()
+        .max_w(px(140.0))
+        .text_ellipsis()
+        .overflow_hidden()
+        .child(ref_name.to_string())
+        .into_any_element()
+}
+
 fn render_graph_row(
     row: &git::GraphRow,
     index: usize,
@@ -2881,6 +2911,7 @@ fn render_graph_row(
                                 .min_w_0()
                                 .child(entry.message.clone()),
                         )
+                        .children(entry.refs.iter().map(|r| render_ref_label(r, t)))
                         .child(
                             div()
                                 .text_size(px(11.0))

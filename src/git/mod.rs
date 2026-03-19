@@ -172,6 +172,8 @@ pub struct CommitLogEntry {
     pub is_merge: bool,
     /// Graph prefix characters (e.g. "| * |")
     pub graph: String,
+    /// Ref decorations (e.g. "HEAD -> main", "origin/main", "tag: v1.0")
+    pub refs: Vec<String>,
 }
 
 /// A row in the commit graph — either a commit or a graph connector line.
