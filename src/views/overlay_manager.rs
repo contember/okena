@@ -1102,9 +1102,18 @@ impl OverlayManager {
     // Diff viewer (parametric)
     // ========================================================================
 
-    /// Show diff viewer for a project, optionally selecting a specific file.
-    pub fn show_diff_viewer(&mut self, provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::DiffProvider>, select_file: Option<String>, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, cx));
+    /// Show diff viewer for a project, optionally selecting a specific file, diff mode, commit message, and commit navigation list.
+    pub fn show_diff_viewer(
+        &mut self,
+        provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::DiffProvider>,
+        select_file: Option<String>,
+        mode: Option<okena_core::types::DiffMode>,
+        commit_message: Option<String>,
+        commits: Option<Vec<crate::git::CommitLogEntry>>,
+        commit_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, mode, commit_message, commits, commit_index, cx));
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {

@@ -82,11 +82,25 @@ pub struct DiffViewer {
     current_file_old_content: Option<String>,
     /// Cached new file content for re-highlighting on theme change.
     current_file_new_content: Option<String>,
+    /// Commit message for display when viewing a commit diff.
+    commit_message: Option<String>,
+    /// List of commits for prev/next navigation.
+    commits: Vec<crate::git::CommitLogEntry>,
+    /// Current index in the commits list.
+    commit_index: usize,
 }
 
 impl DiffViewer {
-    /// Create a new diff viewer with the given provider, optionally selecting a specific file.
-    pub fn new(provider: Arc<dyn provider::DiffProvider>, select_file: Option<String>, cx: &mut Context<Self>) -> Self {
+    /// Create a new diff viewer with the given provider, optionally selecting a specific file, mode, commit message, and commit navigation list.
+    pub fn new(
+        provider: Arc<dyn provider::DiffProvider>,
+        select_file: Option<String>,
+        mode: Option<DiffMode>,
+        commit_message: Option<String>,
+        commits: Option<Vec<crate::git::CommitLogEntry>>,
+        commit_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let settings = settings_entity(cx).read(cx);
         let file_font_size = settings.settings.file_font_size;
@@ -136,6 +150,9 @@ impl DiffViewer {
             is_dark,
             current_file_old_content: None,
             current_file_new_content: None,
+            commit_message,
+            commits: commits.unwrap_or_default(),
+            commit_index: commit_index.unwrap_or(0),
         };
 
         if !provider.is_git_repo() {
@@ -143,12 +160,12 @@ impl DiffViewer {
             return viewer;
         }
 
-        viewer.load_diff_async(DiffMode::WorkingTree, select_file, cx);
+        viewer.load_diff_async(mode.unwrap_or(DiffMode::WorkingTree), select_file, cx);
         viewer
     }
 
     fn load_diff_async(&mut self, mode: DiffMode, select_file: Option<String>, cx: &mut Context<Self>) {
-        self.diff_mode = mode;
+        self.diff_mode = mode.clone();
         self.loading = true;
         self.error_message = None;
         self.raw_files.clear();
@@ -169,6 +186,7 @@ impl DiffViewer {
         let ignore_whitespace = self.ignore_whitespace;
 
         cx.spawn(async move |this, cx| {
+            let mode_for_fallback = mode.clone();
             let result = smol::unblock(move || {
                 provider.get_diff(mode, ignore_whitespace)
             }).await;
@@ -179,11 +197,11 @@ impl DiffViewer {
                     Ok(diff_result) => {
                         if diff_result.is_empty() {
                             // Auto-fallback: if WorkingTree is empty, try Staged
-                            if mode == DiffMode::WorkingTree {
+                            if mode_for_fallback == DiffMode::WorkingTree {
                                 this.load_diff_async(DiffMode::Staged, select_file, cx);
                                 return;
                             }
-                            this.error_message = Some(format!("No {} changes", mode.display_name().to_lowercase()));
+                            this.error_message = Some(format!("No {} changes", mode_for_fallback.display_name().to_lowercase()));
                         } else {
                             this.store_diff_result(diff_result);
                             this.build_file_tree();
@@ -226,7 +244,7 @@ impl DiffViewer {
 
         let provider = self.provider.clone();
         let file_path = raw_file.display_name().to_string();
-        let diff_mode = self.diff_mode;
+        let diff_mode = self.diff_mode.clone();
         let syntax_set = self.syntax_set.clone();
         let is_dark = self.is_dark;
 
@@ -313,7 +331,7 @@ impl DiffViewer {
 
     fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
         self.ignore_whitespace = !self.ignore_whitespace;
-        let mode = self.diff_mode;
+        let mode = self.diff_mode.clone();
         self.load_diff_async(mode, None, cx);
         // Save to global settings
         settings_entity(cx).update(cx, |settings, cx| {
@@ -361,6 +379,37 @@ impl DiffViewer {
 
     fn close(&self, cx: &mut Context<Self>) {
         cx.emit(DiffViewerEvent::Close);
+    }
+
+    fn has_commits(&self) -> bool {
+        !self.commits.is_empty()
+    }
+
+    fn can_prev_commit(&self) -> bool {
+        self.has_commits() && self.commit_index > 0
+    }
+
+    fn can_next_commit(&self) -> bool {
+        self.has_commits() && self.commit_index + 1 < self.commits.len()
+    }
+
+    fn prev_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.can_prev_commit() { return; }
+        self.commit_index -= 1;
+        self.navigate_to_current_commit(cx);
+    }
+
+    fn next_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.can_next_commit() { return; }
+        self.commit_index += 1;
+        self.navigate_to_current_commit(cx);
+    }
+
+    fn navigate_to_current_commit(&mut self, cx: &mut Context<Self>) {
+        let commit = &self.commits[self.commit_index];
+        self.commit_message = Some(commit.message.clone());
+        let mode = DiffMode::Commit(commit.hash.clone());
+        self.load_diff_async(mode, None, cx);
     }
 
     fn get_selected_text(&self) -> Option<String> {
@@ -464,7 +513,7 @@ impl Render for DiffViewer {
         let focus_handle = self.focus_handle.clone();
         let has_error = self.error_message.is_some();
         let error_message = self.error_message.clone();
-        let diff_mode = self.diff_mode;
+        let diff_mode = self.diff_mode.clone();
         let is_working = diff_mode == DiffMode::WorkingTree;
         let has_files = !self.file_stats.is_empty();
         // Gutter: two number columns + separator, matching render_line layout
@@ -524,6 +573,8 @@ impl Render for DiffViewer {
                         this.scroll_x = (this.scroll_x + 40.0).min(max);
                         cx.notify();
                     }
+                    "[" => this.prev_commit(cx),
+                    "]" => this.next_commit(cx),
                     "c" if modifiers.platform || modifiers.control => this.copy_selection(cx),
                     "a" if modifiers.platform || modifiers.control => this.select_all(cx),
                     _ => {}
@@ -571,7 +622,11 @@ impl Render for DiffViewer {
                     .max_w(px(1400.0))
                     .h(relative(0.88))
                     .max_h(px(950.0))
-                    .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, is_working, self.ignore_whitespace, cx))
+                    .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), cx))
+                    // Commit info bar (when viewing a commit with navigation)
+                    .when(self.has_commits(), |d| {
+                        d.child(self.render_commit_info_bar(&t, cx))
+                    })
                     .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
                     .child(self.render_footer(&t)),
             )

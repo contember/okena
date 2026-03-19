@@ -7,6 +7,7 @@ use crate::views::components::segmented_toggle;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
+use okena_core::types::DiffMode;
 use std::sync::Arc;
 
 impl DiffViewer {
@@ -17,10 +18,13 @@ impl DiffViewer {
         file_count: usize,
         total_added: usize,
         total_removed: usize,
-        is_working: bool,
+        diff_mode: &DiffMode,
         ignore_whitespace: bool,
+        commit_message: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let is_working = *diff_mode == DiffMode::WorkingTree;
+        let hide_mode_toggle = matches!(diff_mode, DiffMode::Commit(_) | DiffMode::BranchCompare { .. });
         let is_unified = self.view_mode == DiffViewMode::Unified;
 
         div()
@@ -33,13 +37,53 @@ impl DiffViewer {
             .justify_between()
             .child(
                 h_flex()
-                    .gap(px(16.0))
-                    .child(
+                    .gap(px(10.0))
+                    .min_w_0()
+                    // Title
+                    .child({
+                        let title = match diff_mode {
+                            DiffMode::Commit(_) => commit_message.unwrap_or("Commit").to_string(),
+                            DiffMode::BranchCompare { base, head } => format!("{base} \u{2192} {head}"),
+                            _ => "Changes".to_string(),
+                        };
                         div()
                             .text_size(px(15.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
-                            .child("Changes"),
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .min_w_0()
+                            .max_w(px(400.0))
+                            .child(title)
+                    })
+                    // Clickable short hash (copy on click) — for commit mode
+                    .when_some(
+                        if let DiffMode::Commit(hash) = diff_mode {
+                            Some(hash.clone())
+                        } else {
+                            None
+                        },
+                        |d, hash| {
+                            let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                            d.child(
+                                div()
+                                    .id("commit-hash-copy")
+                                    .text_size(px(11.0))
+                                    .font_family("monospace")
+                                    .text_color(rgb(t.term_yellow))
+                                    .cursor_pointer()
+                                    .px(px(5.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
+                                        crate::views::panels::toast::ToastManager::success("Hash copied".to_string(), cx);
+                                    })
+                                    .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Copy commit hash").build(_window, cx))
+                                    .child(short),
+                            )
+                        },
                     )
                     .when(has_files, |d| {
                         d.child(
@@ -128,16 +172,18 @@ impl DiffViewer {
                                 t,
                             )),
                     )
-                    // Diff mode toggle
-                    .child(
-                        div()
-                            .id("diff-mode-toggle")
-                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
-                            .child(segmented_toggle(
-                                &[("Unstaged", is_working), ("Staged", !is_working)],
-                                t,
-                            )),
-                    )
+                    // Diff mode toggle (hidden for commit/branch compare diffs)
+                    .when(!hide_mode_toggle, |d| {
+                        d.child(
+                            div()
+                                .id("diff-mode-toggle")
+                                .on_click(cx.listener(|this, _, _window, cx| this.toggle_mode(cx)))
+                                .child(segmented_toggle(
+                                    &[("Unstaged", is_working), ("Staged", !is_working)],
+                                    t,
+                                )),
+                        )
+                    })
                     // Separator
                     .child(
                         div()
@@ -167,6 +213,116 @@ impl DiffViewer {
                             ),
                     ),
             )
+    }
+
+    /// Commit navigation bar: prev/next arrows, author, date, hash, position indicator.
+    pub(super) fn render_commit_info_bar(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::tooltip::Tooltip;
+
+        let commit = self.commits.get(self.commit_index);
+        let can_prev = self.can_prev_commit();
+        let can_next = self.can_next_commit();
+        let position = format!("{}/{}", self.commit_index + 1, self.commits.len());
+
+        h_flex()
+            .px(px(20.0))
+            .py(px(6.0))
+            .gap(px(8.0))
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            // Prev button
+            .child(
+                div()
+                    .id("commit-nav-prev")
+                    .cursor(if can_prev { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .when(can_prev, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .text_size(px(12.0))
+                    .text_color(rgb(if can_prev { t.text_secondary } else { t.text_muted }))
+                    .when(can_prev, |d| {
+                        d.on_click(cx.listener(|this, _, _window, cx| this.prev_commit(cx)))
+                    })
+                    .child("\u{25C0}")
+                    .tooltip(move |_window, cx| Tooltip::new("Previous commit  [").build(_window, cx)),
+            )
+            // Position
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.text_muted))
+                    .min_w(px(36.0))
+                    .text_align(TextAlign::Center)
+                    .child(position),
+            )
+            // Next button
+            .child(
+                div()
+                    .id("commit-nav-next")
+                    .cursor(if can_next { CursorStyle::PointingHand } else { CursorStyle::default() })
+                    .w(px(24.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.0))
+                    .when(can_next, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .text_size(px(12.0))
+                    .text_color(rgb(if can_next { t.text_secondary } else { t.text_muted }))
+                    .when(can_next, |d| {
+                        d.on_click(cx.listener(|this, _, _window, cx| this.next_commit(cx)))
+                    })
+                    .child("\u{25B6}")
+                    .tooltip(move |_window, cx| Tooltip::new("Next commit  ]").build(_window, cx)),
+            )
+            // Separator
+            .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(t.border)))
+            // Commit metadata
+            .when_some(commit.cloned(), |d, commit| {
+                let hash = commit.hash.clone();
+                let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
+                let time_str = crate::git::format_relative_time(commit.timestamp);
+                d
+                    // Hash (clickable, copies to clipboard)
+                    .child(
+                        div()
+                            .id("commit-info-hash")
+                            .text_size(px(11.0))
+                            .font_family("monospace")
+                            .text_color(rgb(t.term_yellow))
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
+                                crate::views::panels::toast::ToastManager::success("Hash copied".to_string(), cx);
+                            })
+                            .tooltip(|_window, cx| Tooltip::new("Copy hash").build(_window, cx))
+                            .child(short),
+                    )
+                    // Author
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_secondary))
+                            .child(commit.author.clone()),
+                    )
+                    // Date
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgb(t.text_muted))
+                            .child(time_str),
+                    )
+            })
     }
 
     pub(super) fn render_content(
@@ -534,6 +690,7 @@ impl DiffViewer {
     }
 
     pub(super) fn render_footer(&self, t: &ThemeColors) -> impl IntoElement {
+        let has_commits = self.has_commits();
         div()
             .px(px(16.0))
             .py(px(8.0))
@@ -546,9 +703,14 @@ impl DiffViewer {
                 h_flex()
                     .gap(px(20.0))
                     .child(self.render_hint("Esc", "close", t))
-                    .child(self.render_hint("Tab", "staged/unstaged", t))
+                    .when(!has_commits, |d| {
+                        d.child(self.render_hint("Tab", "staged/unstaged", t))
+                    })
                     .child(self.render_hint("S", "split", t))
-                    .child(self.render_hint("↑↓", "navigate", t))
+                    .child(self.render_hint("↑↓", "files", t))
+                    .when(has_commits, |d| {
+                        d.child(self.render_hint("[ ]", "commits", t))
+                    })
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {
                             "⌘C"

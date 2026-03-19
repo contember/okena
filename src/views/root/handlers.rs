@@ -340,7 +340,7 @@ impl RootView {
                         om.toggle_add_project_dialog(rm, cx);
                     });
                 }
-                OverlayRequest::DiffViewer { project_id, file } => {
+                OverlayRequest::DiffViewer { project_id, file, mode, commit_message, commits, commit_index } => {
                     use crate::views::overlays::diff_viewer::provider::{DiffProvider, LocalDiffProvider, RemoteDiffProvider};
                     let ws = self.workspace.read(cx);
                     if let Some(project) = ws.project(&project_id) {
@@ -363,7 +363,7 @@ impl RootView {
                             std::sync::Arc::new(LocalDiffProvider::new(project.path.clone()))
                         };
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_diff_viewer(provider, file, cx);
+                            om.show_diff_viewer(provider, file, mode, commit_message, commits, commit_index, cx);
                         });
                     }
                 }

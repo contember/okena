@@ -693,7 +693,7 @@ impl Render for RootView {
 
                     if let Some(project_id) = project_id {
                         this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::DiffViewer { project_id, file: None }, cx);
+                            broker.push_overlay_request(OverlayRequest::DiffViewer { project_id, file: None, mode: None, commit_message: None, commits: None, commit_index: None }, cx);
                         });
                     }
                 }
