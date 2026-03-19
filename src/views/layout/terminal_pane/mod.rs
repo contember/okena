@@ -502,9 +502,15 @@ impl TerminalPane {
 
 impl Drop for TerminalPane {
     fn drop(&mut self) {
-        if let Some(ref tid) = self.terminal_id {
-            crate::views::root::unregister_content_pane(tid);
-        }
+        // Don't unregister from ContentPaneRegistry here.
+        // A new TerminalPane for the same terminal_id may have already
+        // registered its content pane before this Drop runs (old entity is
+        // dropped after the replacement is assigned). Unconditional removal
+        // would delete the NEW pane's registration, causing it to miss
+        // dirty notifications (visible as ~500ms input lag, relying on
+        // cursor blink to trigger repaints).
+        // Instead, stale WeakEntity entries expire naturally — the PTY
+        // event loop's weak_content.update() returns Err and is ignored.
     }
 }
 
