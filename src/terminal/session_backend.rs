@@ -525,19 +525,71 @@ fn extract_dir_name(path: &str) -> String {
 /// and don't include Homebrew or MacPorts paths where tmux/screen are typically installed
 #[cfg(not(windows))]
 pub fn get_extended_path() -> String {
-    // Try to get the full PATH from the user's login shell.
+    // Try to get the full PATH from the user's interactive shell.
     // Desktop entries and app bundles start with a minimal PATH that misses
     // user-installed tools (~/.cargo/bin, ~/.bun/bin, fnm, nvm, etc.).
+    //
+    // Use -ic (interactive, NOT login) because most PATH additions live in
+    // .bashrc / .zshrc (interactive config), not in .bash_profile / .profile
+    // (login config). Bash interactive-login shells don't auto-source .bashrc,
+    // so -lic would miss them when .bash_profile exists but doesn't source .bashrc.
+    //
+    // Print a unique marker so we can extract the PATH even when the shell
+    // config prints extra output (motd, fortune, greetings, etc.).
+    const MARKER: &str = "__OKENA_PATH__=";
     if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
-        if let Ok(output) = Command::new(&shell)
-            .args(["-lc", "echo $PATH"])
-            .output()
-        {
-            let login_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !login_path.is_empty() {
-                return login_path;
+        let script = format!("printf '{}%s\\n' \"$PATH\"", MARKER);
+        // Timeout after 5 s to avoid blocking app startup if shell hangs.
+        let result = (|| -> std::io::Result<std::process::Output> {
+            let child = Command::new(&shell)
+                .args(["-ic", &script])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let pid = child.id();
+            std::thread::spawn(move || {
+                let _ = tx.send(child.wait_with_output());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(result) => result,
+                Err(_) => {
+                    // Timed out — kill the shell process
+                    log::warn!("Login shell PATH resolution timed out after 5s, killing pid {}", pid);
+                    #[cfg(unix)]
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "login shell timed out"))
+                }
+            }
+        })();
+        match result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Find the last marker line (in case shell config sources itself)
+                if let Some(login_path) = stdout
+                    .lines()
+                    .rev()
+                    .find_map(|line| line.strip_prefix(MARKER))
+                {
+                    let login_path = login_path.trim();
+                    if !login_path.is_empty() {
+                        log::info!("Resolved login PATH ({} entries)", login_path.matches(':').count() + 1);
+                        return login_path.to_string();
+                    }
+                }
+                log::warn!(
+                    "Login shell produced no PATH marker (stdout {} bytes, status {:?})",
+                    output.stdout.len(),
+                    output.status.code(),
+                );
+            }
+            Err(e) => {
+                log::warn!("Failed to run login shell for PATH: {}", e);
             }
         }
+    } else {
+        log::warn!("$SHELL not set, cannot resolve login PATH");
     }
 
     let current_path = std::env::var("PATH").unwrap_or_default();
@@ -559,7 +611,10 @@ pub fn get_extended_path() -> String {
     }
 
     #[cfg(not(target_os = "macos"))]
-    current_path
+    {
+        log::warn!("Falling back to inherited PATH: {}", current_path);
+        current_path
+    }
 }
 
 /// Check if dtach is available on the system
