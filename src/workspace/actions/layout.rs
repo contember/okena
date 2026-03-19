@@ -1280,6 +1280,7 @@ mod gpui_tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 
@@ -1523,6 +1524,7 @@ mod gpui_tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 

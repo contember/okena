@@ -158,6 +158,11 @@ pub(crate) fn validate_workspace_data(
             }
             project.service_terminals.clear();
 
+            // Agent sessions: terminal IDs are about to become invalid, but the
+            // layout_path field lets us match them to new terminals after restart.
+            // Keep only sessions that have a captured session_id (worth restoring).
+            project.agent_sessions.retain(|_, s| s.session_id.is_some());
+
             // Reset Running hooks to Succeeded (the process is dead after restart)
             for entry in project.hook_terminals.values_mut() {
                 if entry.status == HookTerminalStatus::Running {
@@ -182,6 +187,7 @@ pub(crate) fn validate_workspace_data(
             .unwrap_or_default();
         project.terminal_names.retain(|id, _| layout_ids.contains(id));
         project.hidden_terminals.retain(|id, _| layout_ids.contains(id));
+        project.agent_sessions.retain(|id, _| layout_ids.contains(id));
     }
 
     // Populate worktree_ids from worktree_info back-references (migration for old data)
@@ -502,6 +508,7 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
                 remote_host: None,
                 remote_git_status: None,
                 hook_terminals: HashMap::new(),
+                agent_sessions: HashMap::new(),
             };
 
             // Insert after parent in project_order
@@ -559,6 +566,7 @@ pub fn default_workspace() -> WorkspaceData {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }],
         project_order: vec![project_id],
         project_widths: HashMap::new(),
@@ -593,6 +601,7 @@ mod tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 

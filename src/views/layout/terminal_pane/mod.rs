@@ -149,6 +149,7 @@ impl TerminalPane {
         pane.start_dirty_check_loop(cx);
         pane.start_cursor_blink_loop(cx);
         pane.start_idle_check_loop(cx);
+        pane.start_agent_detection_loop(cx);
 
         pane
     }
@@ -353,6 +354,113 @@ impl TerminalPane {
         .detach();
     }
 
+    /// Start agent detection loop — periodically checks if an AI agent is running
+    /// in this terminal and captures its session ID for recovery on restart.
+    fn start_agent_detection_loop(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+            // Wait a bit for the terminal to initialize before first check
+            smol::Timer::after(Duration::from_secs(5)).await;
+
+            let detect_interval = Duration::from_secs(5);
+            let scan_interval = Duration::from_secs(10);
+            let mut agent_detected = false;
+            let mut session_id_captured = false;
+
+            loop {
+                let interval = if !agent_detected { detect_interval } else { scan_interval };
+                smol::Timer::after(interval).await;
+
+                if session_id_captured {
+                    // Nothing more to do — session ID is persisted
+                    // But keep checking in case the agent restarts with a new session
+                    smol::Timer::after(Duration::from_secs(30)).await;
+                    session_id_captured = false;
+                    agent_detected = false;
+                }
+
+                // Step 1: gather terminal info
+                // Use get_service_pids() which resolves through tmux/screen/dtach
+                // to find the actual shell PID (not the session client PID).
+                let info = this.update(cx, |pane, _cx| {
+                    let terminal = pane.terminal.as_ref()?;
+                    let tid = pane.terminal_id.clone()?;
+                    let service_pids = pane.backend.get_service_pids(&tid);
+                    log::debug!(
+                        "Agent detection: terminal {} service_pids={:?}",
+                        tid, service_pids
+                    );
+                    if service_pids.is_empty() {
+                        return None;
+                    }
+                    Some((terminal.clone(), service_pids, tid, pane.project_id.clone(), pane.layout_path.clone()))
+                });
+
+                let (terminal, service_pids, terminal_id, project_id, layout_path) = match info {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        log::debug!("Agent detection: no terminal info available, skipping");
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+
+                // Step 2: detect agent process + read session ID (off main thread)
+                // Search descendants of ALL service PIDs (covers tmux pane PIDs, dtach daemons, etc.)
+                if !agent_detected {
+                    let detected = smol::unblock(move || {
+                        service_pids.iter()
+                            .find_map(|&pid| crate::terminal::agents::detect_agent_process(pid))
+                    }).await;
+
+                    if let Some(agent) = detected {
+                        agent_detected = true;
+                        let at = agent.agent_type.clone();
+                        // Read session ID immediately from agent's session file
+                        let session_id = smol::unblock(move || {
+                            crate::terminal::agents::read_agent_session_id(&agent)
+                        }).await;
+                        let tid = terminal_id.clone();
+                        let pid2 = project_id.clone();
+                        let lp = layout_path.clone();
+                        let sid = session_id.clone();
+                        log::info!(
+                            "Agent detected: {:?} in terminal {} session_id={:?}",
+                            at, tid, sid
+                        );
+
+                        // Record detection + session ID in workspace
+                        let _ = this.update(cx, |pane, cx| {
+                            pane.workspace.update(cx, |ws, cx| {
+                                if let Some(project) = ws.project_mut(&pid2) {
+                                    project.agent_sessions.insert(tid, crate::workspace::state::AgentSession {
+                                        agent_type: at,
+                                        session_id: sid.clone(),
+                                        detected_at: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs(),
+                                        layout_path: lp,
+                                    });
+                                    ws.notify_data(cx);
+                                }
+                            });
+                        });
+                        session_id_captured = sid.is_some();
+                    }
+                    continue;
+                }
+
+                // Step 3: if session ID wasn't captured yet, reset detection
+                // to re-detect on the next cycle (agent might not have written
+                // its session file yet).
+                if !session_id_captured {
+                    agent_detected = false;
+                }
+            }
+        })
+        .detach();
+    }
+
     // === Terminal creation ===
 
     /// Create terminal for existing PTY.
@@ -437,8 +545,31 @@ impl TerminalPane {
         {
             Ok(terminal_id) => {
                 self.terminal_id = Some(terminal_id.clone());
+
+                // Check for a saved agent session to restore (matched by layout path)
+                let agent_resume = {
+                    let ws = self.workspace.read(cx);
+                    ws.project(&self.project_id).and_then(|project| {
+                        project.agent_sessions.values()
+                            .find(|s| s.layout_path == self.layout_path && s.session_id.is_some())
+                            .map(|s| s.agent_type.resume_command(s.session_id.as_ref().unwrap()))
+                    })
+                };
+
                 self.workspace.update(cx, |ws, cx| {
                     ws.set_terminal_id(&self.project_id, &self.layout_path, terminal_id.clone(), cx);
+
+                    // Migrate agent session from old terminal_id to new one
+                    if let Some(project) = ws.project_mut(&self.project_id) {
+                        let existing: Option<crate::workspace::state::AgentSession> = project.agent_sessions.values()
+                            .find(|s| s.layout_path == self.layout_path)
+                            .cloned();
+                        if let Some(session) = existing {
+                            // Remove old entry (keyed by old terminal_id) and insert with new key
+                            project.agent_sessions.retain(|_, s| s.layout_path != self.layout_path);
+                            project.agent_sessions.insert(terminal_id.clone(), session);
+                        }
+                    }
                 });
 
                 let size = TerminalSize::default();
@@ -451,7 +582,18 @@ impl TerminalPane {
                 self.terminal = Some(terminal.clone());
 
                 // Update child entities
-                self.update_child_terminals(terminal, cx);
+                self.update_child_terminals(terminal.clone(), cx);
+
+                // Auto-resume agent session if one was saved
+                if let Some(resume_cmd) = agent_resume {
+                    let term = terminal.clone();
+                    cx.spawn(async move |_this: WeakEntity<TerminalPane>, _cx| {
+                        // Wait for shell prompt to be ready
+                        smol::Timer::after(Duration::from_millis(1500)).await;
+                        term.send_input(&format!("{}\r", resume_cmd));
+                        log::info!("Auto-resumed agent session: {}", resume_cmd);
+                    }).detach();
+                }
 
                 self.pending_focus = true;
                 cx.notify();

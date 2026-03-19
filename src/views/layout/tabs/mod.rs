@@ -18,6 +18,7 @@ use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use gpui_component::tooltip::Tooltip;
 use gpui::prelude::*;
 use std::collections::HashSet;
 
@@ -98,10 +99,17 @@ impl LayoutContainer {
         let terminal_id_for_close = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
 
+        // Check if active terminal has an agent session
+        let has_agent = terminal_id.as_ref().map_or(false, |tid| {
+            ctx.workspace.read(cx).project(&ctx.project_id)
+                .map_or(false, |p| p.agent_sessions.contains_key(tid))
+        });
+
         // Clone context for each action - much cleaner than individual clones
         let ctx_split_v = ctx.clone();
         let ctx_split_h = ctx.clone();
         let ctx_add_tab = ctx.clone();
+        let ctx_agent = ctx.clone();
         let ctx_minimize = ctx.clone();
         let ctx_fullscreen = ctx.clone();
         let ctx_detach = ctx.clone();
@@ -169,6 +177,27 @@ impl LayoutContainer {
                         }
                     }),
             )
+            // Agent Info (conditional: only shown for agent terminals)
+            .when(has_agent, |el| {
+                let terminal_id_for_agent = terminal_id.clone();
+                let request_broker = self.request_broker.clone();
+                el.child(
+                    header_button_base(HeaderAction::AgentInfo, &id_suffix, ButtonSize::COMPACT, &t, None)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(ref tid) = terminal_id_for_agent {
+                                request_broker.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(
+                                        crate::workspace::requests::OverlayRequest::AgentSessionInfo {
+                                            project_id: ctx_agent.project_id.clone(),
+                                            terminal_id: tid.clone(),
+                                        },
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+            })
             // Minimize
             .child(
                 header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
@@ -426,6 +455,12 @@ impl LayoutContainer {
                 project_for_names.as_ref().map_or(false, |p| p.hook_terminals.contains_key(tid))
             });
 
+            // Check if this terminal has an agent session (and grab tooltip info)
+            let agent_session = terminal_id.as_ref().and_then(|tid| {
+                project_for_names.as_ref()?.agent_sessions.get(tid).cloned()
+            });
+            let has_agent = agent_session.is_some();
+
             // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
@@ -515,10 +550,29 @@ impl LayoutContainer {
                             }))
                             .into_any_element()
                     } else {
-                        let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_color = if is_hook { rgb(t.term_yellow) } else if has_agent { rgb(t.term_cyan) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
+                        let icon_path = if has_agent { "icons/agent.svg" } else { "icons/terminal.svg" };
+
+                        // Build agent tooltip text
+                        let agent_tooltip = agent_session.as_ref().map(|s| {
+                            match &s.session_id {
+                                Some(sid) => format!("{} ({})", s.agent_type.display_name(), sid),
+                                None => format!("{} (detecting session...)", s.agent_type.display_name()),
+                            }
+                        });
+
+                        let icon = svg().path(icon_path).size(px(12.0)).text_color(icon_color);
                         h_flex()
                             .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
+                            .child(if let Some(tip) = agent_tooltip {
+                                div()
+                                    .id(format!("agent-tip-{}-{}", i, terminal_id.as_deref().unwrap_or("?")))
+                                    .child(icon)
+                                    .tooltip(move |_window, cx| Tooltip::new(tip.clone()).build(_window, cx))
+                                    .into_any_element()
+                            } else {
+                                icon.into_any_element()
+                            })
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())

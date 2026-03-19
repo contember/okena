@@ -448,6 +448,13 @@ impl Sidebar {
 
         // Priority: user-set custom name > non-prompt OSC title > directory fallback
         // Also check for bell notification and cached idle/waiting state
+        let agent_session = {
+            let ws = self.workspace.read(cx);
+            ws.project(&project_id)
+                .and_then(|p| p.agent_sessions.get(&terminal_id).cloned())
+        };
+        let has_agent = agent_session.is_some();
+
         let (terminal_name, has_bell, is_waiting, idle_label) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(&project_id);
@@ -516,38 +523,55 @@ impl Sidebar {
                     });
                 }
             }))
-            .child(
-                // Terminal icon - different for minimized and bell state
-                div()
+            .child({
+                // Terminal icon - different for minimized, bell, and agent state
+                let agent_tooltip = agent_session.as_ref().map(|s| {
+                    match &s.session_id {
+                        Some(sid) => format!("{} ({})", s.agent_type.display_name(), sid),
+                        None => format!("{} (detecting session...)", s.agent_type.display_name()),
+                    }
+                });
+                let icon = svg()
+                    .path(if has_bell {
+                        "icons/bell.svg"
+                    } else if has_agent {
+                        "icons/agent.svg"
+                    } else if is_minimized {
+                        "icons/terminal-minimized.svg"
+                    } else {
+                        "icons/terminal.svg"
+                    })
+                    .size(px(12.0))
+                    .text_color(if has_bell {
+                        rgb(t.border_bell)
+                    } else if has_agent {
+                        rgb(t.term_cyan)
+                    } else if is_waiting {
+                        rgb(t.border_idle)
+                    } else if is_minimized {
+                        rgb(t.text_muted)
+                    } else if is_inactive_tab {
+                        rgb(t.text_muted)
+                    } else {
+                        rgb(t.success)
+                    });
+                let icon_container = div()
                     .flex_shrink_0()
                     .w(px(14.0))
                     .h(px(14.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        svg()
-                            .path(if has_bell {
-                                "icons/bell.svg"
-                            } else if is_minimized {
-                                "icons/terminal-minimized.svg"
-                            } else {
-                                "icons/terminal.svg"
-                            })
-                            .size(px(12.0))
-                            .text_color(if has_bell {
-                                rgb(t.border_bell)
-                            } else if is_waiting {
-                                rgb(t.border_idle)
-                            } else if is_minimized {
-                                rgb(t.text_muted)
-                            } else if is_inactive_tab {
-                                rgb(t.text_muted)
-                            } else {
-                                rgb(t.success)
-                            })
-                    ),
-            )
+                    .child(icon);
+                if let Some(tip) = agent_tooltip {
+                    icon_container
+                        .id(format!("{}agent-tip-{}", id_prefix, terminal_id))
+                        .tooltip(move |_window, cx| Tooltip::new(tip.clone()).build(_window, cx))
+                        .into_any_element()
+                } else {
+                    icon_container.into_any_element()
+                }
+            })
             .child(
                 // Terminal name (or input if renaming)
                 if is_renaming {

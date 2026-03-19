@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod backend;
 pub mod input;
 pub mod pty_manager;
