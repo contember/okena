@@ -249,7 +249,7 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let has_nested_worktrees = project.nested_worktree_count > 0;
+        let has_worktrees = project.worktree_count > 0;
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
@@ -339,7 +339,7 @@ impl Sidebar {
                 }
             }))
             .child({
-                let has_expandable_content = has_layout || has_nested_worktrees || !project.services.is_empty();
+                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-fp-{}", project.id).into()),
@@ -449,6 +449,39 @@ impl Sidebar {
                         }
                     }))
                     .tooltip(|_window, cx| Tooltip::new("Quick Create Worktree").build(_window, cx))
+                )
+            })
+            // Manage worktrees button
+            .when(project.is_git_repo && !project.is_worktree, |d| {
+                let project_id = project.id.clone();
+                d.child(
+                    div()
+                        .id(ElementId::Name(format!("fp-wt-list-{}", project_id).into()))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .w(px(18.0))
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .opacity(0.0)
+                        .group_hover("folder-project-item", |s| s.opacity(1.0))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_mouse_down(MouseButton::Left, cx.listener({
+                            let project_id = project_id.clone();
+                            move |this, event: &MouseDownEvent, _window, cx| {
+                                this.show_worktree_list(project_id.clone(), f32::from(event.position.y), cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(
+                            svg()
+                                .path("icons/git-branch.svg")
+                                .size(px(12.0))
+                                .text_color(rgb(t.text_secondary))
+                        )
+                        .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Manage Worktrees").build(_window, cx))
                 )
             })
             .child(
