@@ -996,9 +996,9 @@ mod tests {
         let wrapper = "devcontainer exec -- {shell}";
         let wrapped = apply_shell_wrapper(&shell, wrapper);
         match &wrapped {
-            ShellType::Custom { path, args } => {
-                assert_eq!(path, "sh");
-                assert_eq!(args[0], "-c");
+            ShellType::Custom { path: _, args } => {
+                // for_command uses $SHELL -ic on Unix
+                assert!(args[0] == "-c" || args[0] == "-ic", "got: {}", args[0]);
                 assert!(args[1].contains("devcontainer exec -- exec /bin/zsh --login"), "got: {}", args[1]);
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
@@ -1015,9 +1015,9 @@ mod tests {
         let wrapper = "echo hello && {shell}";
         let wrapped = apply_shell_wrapper(&shell, wrapper);
         match &wrapped {
-            ShellType::Custom { path, args } => {
-                assert_eq!(path, "sh");
-                assert_eq!(args[0], "-c");
+            ShellType::Custom { path: _, args } => {
+                // for_command uses $SHELL -ic on Unix
+                assert!(args[0] == "-c" || args[0] == "-ic", "got: {}", args[0]);
                 assert!(args[1].contains("echo hello && exec /bin/zsh"), "got: {}", args[1]);
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),

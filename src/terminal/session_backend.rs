@@ -6,6 +6,12 @@ use std::collections::HashMap;
 #[cfg(windows)]
 use std::sync::Mutex;
 
+/// Get the user's login shell, falling back to /bin/sh.
+#[cfg(unix)]
+fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
 /// Backend for persistent terminal sessions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum SessionBackend {
@@ -174,7 +180,10 @@ impl ResolvedBackend {
                 // rename-window: set meaningful window name from directory
                 let window_name = extract_dir_name(cwd);
                 let initial_program = match command {
-                    Some(cmd) => format!(" 'sh' '-c' {}", shell_escape(cmd)),
+                    Some(cmd) => {
+                        let sh = user_shell();
+                        format!(" {} '-ic' {}", shell_escape(&sh), shell_escape(cmd))
+                    }
                     None => String::new(),
                 };
                 let tmux_cmd = format!(
@@ -199,8 +208,8 @@ impl ResolvedBackend {
                     session_name.to_string(),
                 ];
                 if let Some(cmd) = command {
-                    args.push("sh".to_string());
-                    args.push("-c".to_string());
+                    args.push(user_shell());
+                    args.push("-ic".to_string());
                     args.push(cmd.to_string());
                 }
                 Some(("screen".to_string(), args))
@@ -217,10 +226,12 @@ impl ResolvedBackend {
                 // 3. Run dtach with the user's shell (or custom command)
                 let socket_path = get_dtach_socket_path(session_name);
                 let program = match command {
-                    Some(cmd) => format!("sh -c {}", shell_escape(cmd)),
+                    Some(cmd) => {
+                        let sh = user_shell();
+                        format!("{} -ic {}", shell_escape(&sh), shell_escape(cmd))
+                    }
                     None => {
-                        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                        shell_escape(&shell)
+                        shell_escape(&user_shell())
                     }
                 };
 
@@ -520,101 +531,147 @@ fn extract_dir_name(path: &str) -> String {
         .to_string()
 }
 
-/// Get extended PATH for macOS app bundles
-/// App bundles start with minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
-/// and don't include Homebrew or MacPorts paths where tmux/screen are typically installed
+/// Build a complete PATH for child processes (terminals and services).
+///
+/// Desktop entries and app bundles inherit a minimal PATH that misses
+/// user-installed tools. We scan well-known directories directly instead
+/// of spawning a shell, which is fragile (login vs interactive, .bash_profile
+/// vs .bashrc, hangs, extra output, etc.).
 #[cfg(not(windows))]
 pub fn get_extended_path() -> String {
-    // Try to get the full PATH from the user's interactive shell.
-    // Desktop entries and app bundles start with a minimal PATH that misses
-    // user-installed tools (~/.cargo/bin, ~/.bun/bin, fnm, nvm, etc.).
-    //
-    // Use -ic (interactive, NOT login) because most PATH additions live in
-    // .bashrc / .zshrc (interactive config), not in .bash_profile / .profile
-    // (login config). Bash interactive-login shells don't auto-source .bashrc,
-    // so -lic would miss them when .bash_profile exists but doesn't source .bashrc.
-    //
-    // Print a unique marker so we can extract the PATH even when the shell
-    // config prints extra output (motd, fortune, greetings, etc.).
-    const MARKER: &str = "__OKENA_PATH__=";
-    if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
-        let script = format!("printf '{}%s\\n' \"$PATH\"", MARKER);
-        // Timeout after 5 s to avoid blocking app startup if shell hangs.
-        let result = (|| -> std::io::Result<std::process::Output> {
-            let child = Command::new(&shell)
-                .args(["-ic", &script])
-                .stdin(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?;
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            let pid = child.id();
-            std::thread::spawn(move || {
-                let _ = tx.send(child.wait_with_output());
-            });
-            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(result) => result,
-                Err(_) => {
-                    // Timed out — kill the shell process
-                    log::warn!("Login shell PATH resolution timed out after 5s, killing pid {}", pid);
-                    #[cfg(unix)]
-                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-                    Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "login shell timed out"))
-                }
-            }
-        })();
-        match result {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                // Find the last marker line (in case shell config sources itself)
-                if let Some(login_path) = stdout
-                    .lines()
-                    .rev()
-                    .find_map(|line| line.strip_prefix(MARKER))
-                {
-                    let login_path = login_path.trim();
-                    if !login_path.is_empty() {
-                        log::info!("Resolved login PATH ({} entries)", login_path.matches(':').count() + 1);
-                        return login_path.to_string();
-                    }
-                }
-                log::warn!(
-                    "Login shell produced no PATH marker (stdout {} bytes, status {:?})",
-                    output.stdout.len(),
-                    output.status.code(),
-                );
-            }
-            Err(e) => {
-                log::warn!("Failed to run login shell for PATH: {}", e);
-            }
-        }
-    } else {
-        log::warn!("$SHELL not set, cannot resolve login PATH");
-    }
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
 
     let current_path = std::env::var("PATH").unwrap_or_default();
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return current_path,
+    };
 
-    #[cfg(target_os = "macos")]
-    {
-        let extra_paths = [
-            "/opt/homebrew/bin",      // Homebrew on Apple Silicon
-            "/usr/local/bin",         // Homebrew on Intel / manual installs
-            "/opt/local/bin",         // MacPorts
-            "/usr/local/sbin",
-            "/opt/homebrew/sbin",
-        ];
-        let mut paths: Vec<&str> = extra_paths.iter().copied().collect();
-        if !current_path.is_empty() {
-            paths.push(&current_path);
+    // Well-known user bin directories, checked in order.
+    // Only existing directories are added.
+    let candidates: Vec<PathBuf> = vec![
+        // Rust / Cargo
+        home.join(".cargo/bin"),
+        // Bun
+        home.join(".bun/bin"),
+        // Deno
+        home.join(".deno/bin"),
+        // Go
+        home.join("go/bin"),
+        // pnpm
+        home.join(".local/share/pnpm"),
+        // fnm (fast node manager)
+        home.join(".local/share/fnm"),
+        // pip / pipx / user scripts
+        home.join(".local/bin"),
+        // user bin
+        home.join("bin"),
+        // Fly.io
+        home.join(".fly/bin"),
+        // Homebrew (macOS)
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/homebrew/sbin"),
+        // Manual installs / Homebrew on Intel
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/local/sbin"),
+        // MacPorts
+        PathBuf::from("/opt/local/bin"),
+        // Snap (Linux)
+        PathBuf::from("/snap/bin"),
+    ];
+
+    // Preserve insertion order, deduplicate via HashSet.
+    // User dirs first, then inherited PATH entries.
+    let mut result: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push = |s: String| {
+        if seen.insert(s.clone()) {
+            result.push(s);
         }
-        return paths.join(":");
+    };
+
+    for dir in &candidates {
+        if dir.is_dir() {
+            if let Some(s) = dir.to_str() {
+                push(s.to_string());
+            }
+        }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        log::warn!("Falling back to inherited PATH: {}", current_path);
-        current_path
+    // Also resolve fnm's current Node version if fnm is installed
+    resolve_fnm_path(&home, &mut result, &mut seen);
+
+    // Source .cargo/env if it exists — it may define CARGO_HOME in a non-default location
+    if let Some(extra) = source_cargo_env(&home) {
+        let cargo_bin = Path::new(&extra).join("bin");
+        if cargo_bin.is_dir() {
+            if let Some(s) = cargo_bin.to_str() {
+                if seen.insert(s.to_string()) {
+                    result.push(s.to_string());
+                }
+            }
+        }
     }
+
+    // Append inherited PATH entries (keeps system paths at the end)
+    for entry in current_path.split(':') {
+        if !entry.is_empty() && seen.insert(entry.to_string()) {
+            result.push(entry.to_string());
+        }
+    }
+
+    log::info!("Extended PATH ({} entries)", result.len());
+    result.join(":")
+}
+
+/// Try to find fnm's current Node bin directory.
+#[cfg(not(windows))]
+fn resolve_fnm_path(home: &std::path::Path, result: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+    // fnm stores the active version in $FNM_MULTISHELL_PATH or we can run `fnm env`.
+    // But to avoid spawning processes, check the default symlink location.
+    let fnm_dir = home.join(".local/share/fnm");
+    if !fnm_dir.is_dir() {
+        return;
+    }
+    // fnm aliases: default → specific version
+    let default_alias = fnm_dir.join("aliases/default");
+    if let Ok(version) = std::fs::read_link(&default_alias)
+        .or_else(|_| std::fs::read_to_string(&default_alias).map(std::path::PathBuf::from))
+    {
+        // version is either an absolute path or just a version string like "v22.14.0"
+        let node_bin = if version.is_absolute() {
+            version.join("installation/bin")
+        } else {
+            fnm_dir.join("node-versions").join(version.to_string_lossy().trim()).join("installation/bin")
+        };
+        if node_bin.is_dir() {
+            if let Some(s) = node_bin.to_str() {
+                if seen.insert(s.to_string()) {
+                    result.push(s.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Check if .cargo/env defines a custom CARGO_HOME.
+#[cfg(not(windows))]
+fn source_cargo_env(home: &std::path::Path) -> Option<String> {
+    let env_file = home.join(".cargo/env");
+    let content = std::fs::read_to_string(env_file).ok()?;
+    // Look for: export CARGO_HOME="..." or CARGO_HOME="..."
+    for line in content.lines() {
+        let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+        if let Some(rest) = line.strip_prefix("CARGO_HOME=") {
+            let val = rest.trim_matches('"').trim_matches('\'');
+            if !val.is_empty() && val != "$HOME/.cargo" {
+                return Some(val.replace("$HOME", &home.to_string_lossy()));
+            }
+        }
+    }
+    None
 }
 
 /// Check if dtach is available on the system
@@ -768,7 +825,8 @@ mod tests {
         assert_eq!(program, "sh");
         assert_eq!(args[0], "-c");
         assert!(args[1].contains("dtach -A"));
-        assert!(args[1].contains("sh -c"));
+        // Inner command uses the user's shell with -ic
+        assert!(args[1].contains("-ic"));
         assert!(args[1].contains("npm run dev"));
     }
 
@@ -781,7 +839,8 @@ mod tests {
         assert_eq!(program, "sh");
         assert_eq!(args[0], "-c");
         assert!(args[1].contains("tmux new-session -A"));
-        assert!(args[1].contains("'sh' '-c'"));
+        // Inner command uses the user's shell with -ic
+        assert!(args[1].contains("'-ic'"));
         assert!(args[1].contains("npm run dev"));
     }
 
@@ -791,8 +850,8 @@ mod tests {
         let result = backend.build_command("test-session", "/home/user", None);
         assert!(result.is_some());
         let (_, args) = result.unwrap();
-        // Without a command, no 'sh' '-c' should appear after the cwd
-        assert!(!args[1].contains("'sh' '-c'"));
+        // Without a command, no '-ic' should appear after the cwd
+        assert!(!args[1].contains("'-ic'"));
     }
 
     #[test]
@@ -805,8 +864,9 @@ mod tests {
         assert_eq!(args[0], "-D");
         assert_eq!(args[1], "-R");
         assert_eq!(args[2], "test-session");
-        assert_eq!(args[3], "sh");
-        assert_eq!(args[4], "-c");
+        // Inner command uses the user's shell with -ic
+        assert_eq!(args[3], user_shell());
+        assert_eq!(args[4], "-ic");
         assert_eq!(args[5], "npm run dev");
     }
 

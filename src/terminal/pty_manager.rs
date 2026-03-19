@@ -252,10 +252,10 @@ impl PtyManager {
     /// On Windows, also returns WSL distro/backend info for session persistence.
     #[cfg(unix)]
     fn build_terminal_command(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> CommandBuilder {
-        // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
+        // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         // so it can be passed to the session backend
         let custom_command = match shell {
-            Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
+            Some(ShellType::Custom { args, .. }) if args.len() == 2 && (args[0] == "-c" || args[0] == "-ic") => {
                 Some(args[1].as_str())
             }
             _ => None,
@@ -302,9 +302,9 @@ impl PtyManager {
         use crate::terminal::session_backend::resolve_for_wsl;
         use crate::terminal::shell_config::windows_path_to_wsl;
 
-        // Extract custom command from ShellType::Custom{path:"sh", args:["-c", cmd]}
+        // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         let custom_command = match shell {
-            Some(ShellType::Custom { path, args }) if path == "sh" && args.len() == 2 && args[0] == "-c" => {
+            Some(ShellType::Custom { args, .. }) if args.len() == 2 && (args[0] == "-c" || args[0] == "-ic") => {
                 Some(args[1].as_str())
             }
             _ => None,

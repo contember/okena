@@ -52,8 +52,9 @@ impl Default for ShellType {
 }
 
 impl ShellType {
-    /// Create a shell type that runs a single command via the platform's command shell.
-    /// Uses `sh -c` on Unix and `cmd /C` on Windows.
+    /// Create a shell type that runs a single command via the user's shell.
+    /// Uses `$SHELL -ic` on Unix (interactive, so .bashrc/.zshrc is sourced)
+    /// and `cmd /C` on Windows.
     pub fn for_command(command: String) -> Self {
         if cfg!(windows) {
             ShellType::Custom {
@@ -61,9 +62,10 @@ impl ShellType {
                 args: vec!["/C".to_string(), command],
             }
         } else {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
             ShellType::Custom {
-                path: "sh".to_string(),
-                args: vec!["-c".to_string(), command],
+                path: shell,
+                args: vec!["-ic".to_string(), command],
             }
         }
     }
