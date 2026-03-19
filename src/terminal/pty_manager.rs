@@ -1,5 +1,5 @@
 use crate::terminal::session_backend::{ResolvedBackend, SessionBackend};
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 use crate::terminal::session_backend::get_extended_path;
 use crate::terminal::shell_config::ShellType;
 use anyhow::Result;
@@ -363,9 +363,9 @@ impl PtyManager {
             cmd.env("LANG", "en_US.UTF-8");
         }
 
-        // On macOS, extend PATH to include Homebrew/MacPorts paths
-        // App bundles start with minimal PATH and won't find tmux/screen otherwise
-        #[cfg(target_os = "macos")]
+        // Extend PATH for child processes. Desktop entries and app bundles start
+        // with a minimal PATH missing user tools (~/.cargo/bin, ~/.bun/bin, etc.)
+        #[cfg(not(windows))]
         cmd.env("PATH", get_extended_path());
     }
 

@@ -523,23 +523,43 @@ fn extract_dir_name(path: &str) -> String {
 /// Get extended PATH for macOS app bundles
 /// App bundles start with minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
 /// and don't include Homebrew or MacPorts paths where tmux/screen are typically installed
-#[cfg(target_os = "macos")]
+#[cfg(not(windows))]
 pub fn get_extended_path() -> String {
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let extra_paths = [
-        "/opt/homebrew/bin",      // Homebrew on Apple Silicon
-        "/usr/local/bin",         // Homebrew on Intel / manual installs
-        "/opt/local/bin",         // MacPorts
-        "/usr/local/sbin",
-        "/opt/homebrew/sbin",
-    ];
-
-    // Prepend extra paths to current PATH
-    let mut paths: Vec<&str> = extra_paths.iter().copied().collect();
-    if !current_path.is_empty() {
-        paths.push(&current_path);
+    // Try to get the full PATH from the user's login shell.
+    // Desktop entries and app bundles start with a minimal PATH that misses
+    // user-installed tools (~/.cargo/bin, ~/.bun/bin, fnm, nvm, etc.).
+    if let Some(shell) = std::env::var("SHELL").ok().filter(|s| !s.is_empty()) {
+        if let Ok(output) = Command::new(&shell)
+            .args(["-lc", "echo $PATH"])
+            .output()
+        {
+            let login_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !login_path.is_empty() {
+                return login_path;
+            }
+        }
     }
-    paths.join(":")
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
+    {
+        let extra_paths = [
+            "/opt/homebrew/bin",      // Homebrew on Apple Silicon
+            "/usr/local/bin",         // Homebrew on Intel / manual installs
+            "/opt/local/bin",         // MacPorts
+            "/usr/local/sbin",
+            "/opt/homebrew/sbin",
+        ];
+        let mut paths: Vec<&str> = extra_paths.iter().copied().collect();
+        if !current_path.is_empty() {
+            paths.push(&current_path);
+        }
+        return paths.join(":");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    current_path
 }
 
 /// Check if dtach is available on the system
