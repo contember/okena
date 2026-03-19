@@ -364,6 +364,7 @@ impl RootView {
                                 remote_git_status: api_project.git_status.clone(),
                                 default_shell: None,
                                 hook_terminals: std::collections::HashMap::new(),
+                                agent_sessions: std::collections::HashMap::new(),
                             });
                         }
                     });

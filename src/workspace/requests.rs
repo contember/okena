@@ -53,6 +53,10 @@ pub enum OverlayRequest {
         position: gpui::Point<gpui::Pixels>,
     },
     ShowServiceLog { project_id: String, service_name: String },
+    AgentSessionInfo {
+        project_id: String,
+        terminal_id: String,
+    },
 }
 
 /// Requests consumed by Sidebar::render()

@@ -413,6 +413,23 @@ impl RootView {
                 OverlayRequest::ShowServiceLog { project_id, service_name } => {
                     self.handle_show_service_log(project_id, service_name, cx);
                 }
+                OverlayRequest::AgentSessionInfo { project_id, terminal_id } => {
+                    let info = self.workspace.read(cx).project(&project_id)
+                        .and_then(|p| p.agent_sessions.get(&terminal_id).cloned());
+                    if let Some(session) = info {
+                        let msg = match &session.session_id {
+                            Some(sid) => format!(
+                                "{} — Session: {}",
+                                session.agent_type.display_name(), sid
+                            ),
+                            None => format!(
+                                "{} — Session ID not yet captured",
+                                session.agent_type.display_name()
+                            ),
+                        };
+                        crate::views::panels::toast::ToastManager::info(msg, cx);
+                    }
+                }
             }
         }
     }

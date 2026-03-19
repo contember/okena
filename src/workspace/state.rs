@@ -95,6 +95,45 @@ impl WorktreeMetadata {
     }
 }
 
+/// Type of AI coding agent detected in a terminal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentType {
+    Claude,
+    Copilot,
+}
+
+impl AgentType {
+    /// Build the CLI command to resume a specific session.
+    pub fn resume_command(&self, session_id: &str) -> String {
+        match self {
+            AgentType::Claude => format!("claude --resume {}", session_id),
+            AgentType::Copilot => format!("copilot --resume {}", session_id),
+        }
+    }
+
+    /// Display name for UI.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AgentType::Claude => "Claude Code",
+            AgentType::Copilot => "Copilot CLI",
+        }
+    }
+}
+
+/// Persisted agent session info for a terminal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub agent_type: AgentType,
+    /// Session ID captured from terminal output (None until captured).
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Unix timestamp (seconds) when the agent was first detected.
+    pub detected_at: u64,
+    /// Layout path when detected (stable across restarts even when terminal IDs change).
+    #[serde(default)]
+    pub layout_path: Vec<usize>,
+}
+
 /// Status of a hook terminal in the service panel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HookTerminalStatus {
@@ -177,6 +216,10 @@ pub struct ProjectData {
     /// Hook terminals displayed in the service panel (persisted across restarts)
     #[serde(default)]
     pub hook_terminals: HashMap<String, HookTerminalEntry>,
+    /// Detected AI agent sessions (terminal_id -> session info).
+    /// Persisted across restarts to enable automatic session recovery.
+    #[serde(default)]
+    pub agent_sessions: HashMap<String, AgentSession>,
 }
 
 impl ProjectData {
@@ -1648,6 +1691,7 @@ mod tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 
@@ -2537,6 +2581,7 @@ mod workspace_tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 
@@ -3306,6 +3351,7 @@ mod gpui_tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 

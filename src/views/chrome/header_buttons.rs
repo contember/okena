@@ -14,6 +14,7 @@ pub enum HeaderAction {
     SplitVertical,
     SplitHorizontal,
     AddTab,
+    AgentInfo,
     Minimize,
     ExportBuffer,
     Fullscreen,
@@ -31,6 +32,7 @@ impl HeaderAction {
             HeaderAction::SplitVertical => "icons/split-vertical.svg",
             HeaderAction::SplitHorizontal => "icons/split-horizontal.svg",
             HeaderAction::AddTab => "icons/tabs.svg",
+            HeaderAction::AgentInfo => "icons/agent.svg",
             HeaderAction::Minimize => "icons/minimize.svg",
             HeaderAction::ExportBuffer => "icons/copy.svg",
             HeaderAction::Fullscreen => "icons/fullscreen.svg",
@@ -48,6 +50,7 @@ impl HeaderAction {
             HeaderAction::SplitVertical => "Split Vertical",
             HeaderAction::SplitHorizontal => "Split Horizontal",
             HeaderAction::AddTab => "Add Tab",
+            HeaderAction::AgentInfo => "Agent Session Info",
             HeaderAction::Minimize => "Minimize",
             HeaderAction::ExportBuffer => "Export Buffer to File",
             HeaderAction::Fullscreen => "Fullscreen",
@@ -68,7 +71,7 @@ impl HeaderAction {
             HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
             HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
             HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
-            HeaderAction::ExportBuffer | HeaderAction::Detach
+            HeaderAction::AgentInfo | HeaderAction::ExportBuffer | HeaderAction::Detach
             | HeaderAction::ZoomPrev | HeaderAction::ZoomNext | HeaderAction::ExitZoom => None,
         }
     }
@@ -84,6 +87,7 @@ impl HeaderAction {
             HeaderAction::SplitVertical => "split-vertical-btn",
             HeaderAction::SplitHorizontal => "split-horizontal-btn",
             HeaderAction::AddTab => "add-tab-btn",
+            HeaderAction::AgentInfo => "agent-info-btn",
             HeaderAction::Minimize => "minimize-btn",
             HeaderAction::ExportBuffer => "export-buffer-btn",
             HeaderAction::Fullscreen => "fullscreen-btn",

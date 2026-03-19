@@ -76,6 +76,7 @@ impl Workspace {
             remote_git_status: None,
             default_shell,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         };
         let project_hooks = project.hooks.clone();
         self.data.projects.push(project);
@@ -415,6 +416,7 @@ impl Workspace {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -526,6 +528,7 @@ impl Workspace {
             remote_host: None,
             remote_git_status: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         };
 
         // Insert after parent in project_order
@@ -721,6 +724,7 @@ mod tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 
@@ -851,6 +855,7 @@ mod gpui_tests {
             remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
         }
     }
 
