@@ -39,24 +39,6 @@ impl Workspace {
             project.show_in_overview = new_visible;
             true
         });
-
-        // Propagate to worktree children
-        for child_id in self.worktree_child_ids(project_id) {
-            self.with_project(&child_id, cx, |project| {
-                project.show_in_overview = new_visible;
-                true
-            });
-        }
-    }
-
-    /// Toggle visibility of a single project without cascading to worktree children.
-    /// Used for worktree items (including the main worktree entry) so toggling one
-    /// worktree doesn't affect siblings or the parent project header.
-    pub fn toggle_single_project_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        self.with_project(project_id, cx, |project| {
-            project.show_in_overview = !project.show_in_overview;
-            true
-        });
     }
 
     /// Add a new project
@@ -589,6 +571,95 @@ impl Workspace {
     }
 
     /// Remove a worktree project and its git worktree
+    /// Migrate all worktrees of a parent project to match the current path template.
+    /// Returns the number of worktrees successfully moved.
+    pub fn migrate_worktrees_to_template(&mut self, parent_project_id: &str, cx: &mut Context<Self>) -> Result<usize, String> {
+        let template = crate::settings::settings(cx).worktree.path_template.clone();
+        let parent = self.project(parent_project_id)
+            .ok_or_else(|| "Parent project not found".to_string())?;
+        let main_repo_path = parent.path.clone();
+        let worktree_ids = parent.worktree_ids.clone();
+
+        let mut moved_count = 0;
+        for wt_id in &worktree_ids {
+            let Some(project) = self.project(wt_id) else { continue };
+            let Some(ref wt_info) = project.worktree_info else { continue };
+
+            // Check if this worktree already matches the template
+            if wt_info.matches_template(&template) {
+                continue;
+            }
+
+            // Compute the new path from the template
+            let git_root = std::path::Path::new(&wt_info.main_repo_path);
+            let (new_worktree_path, _) = crate::git::repository::compute_target_paths(
+                git_root,
+                std::path::Path::new(""),
+                &template,
+                &wt_info.branch_name,
+            );
+
+            let current_path = std::path::PathBuf::from(&wt_info.worktree_path);
+            let new_path = std::path::PathBuf::from(&new_worktree_path);
+
+            // Skip if paths are the same (shouldn't happen, but safety check)
+            if current_path == new_path { continue; }
+
+            // Skip if current path doesn't exist on disk
+            if !current_path.exists() { continue; }
+
+            // Move the git worktree
+            if let Err(e) = crate::git::move_worktree(&current_path, &new_path) {
+                log::warn!("Failed to move worktree {}: {}", wt_id, e);
+                continue;
+            }
+
+            // Update the project's paths in workspace state
+            let wt_id = wt_id.clone();
+            let new_wt_path = new_worktree_path.clone();
+            // Compute new project path (account for monorepo subdir)
+            let subdir = std::path::Path::new(&project.path)
+                .strip_prefix(&wt_info.worktree_path)
+                .unwrap_or(std::path::Path::new(""));
+            let new_project_path = crate::git::repository::project_path_in_worktree(&new_worktree_path, subdir);
+
+            self.with_project(&wt_id, cx, |project| {
+                project.path = new_project_path;
+                if let Some(ref mut wt) = project.worktree_info {
+                    wt.worktree_path = new_wt_path;
+                }
+                true
+            });
+            moved_count += 1;
+        }
+
+        // Update baseline in settings so the toast doesn't show again
+        if moved_count > 0 {
+            crate::settings::settings_entity(cx).update(cx, |settings, _cx| {
+                settings.update_worktree_template_baseline(template);
+            });
+        }
+
+        Ok(moved_count)
+    }
+
+    /// Migrate all worktrees across all projects to match the current path template.
+    /// Returns the total number of worktrees successfully moved.
+    pub fn migrate_all_worktrees_to_template(&mut self, cx: &mut Context<Self>) -> usize {
+        let parent_ids: Vec<String> = self.data().projects.iter()
+            .filter(|p| !p.worktree_ids.is_empty() && p.worktree_info.is_none())
+            .map(|p| p.id.clone())
+            .collect();
+
+        let mut total = 0;
+        for parent_id in &parent_ids {
+            if let Ok(count) = self.migrate_worktrees_to_template(parent_id, cx) {
+                total += count;
+            }
+        }
+        total
+    }
+
     pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;

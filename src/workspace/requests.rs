@@ -25,7 +25,16 @@ pub enum OverlayRequest {
     FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
     ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
     AddProjectDialog,
-    DiffViewer { project_id: String, file: Option<String> },
+    DiffViewer {
+        project_id: String,
+        file: Option<String>,
+        mode: Option<okena_core::types::DiffMode>,
+        commit_message: Option<String>,
+        /// Commit list for navigation (prev/next) in the diff viewer.
+        commits: Option<Vec<crate::git::CommitLogEntry>>,
+        /// Current index into the commits list.
+        commit_index: Option<usize>,
+    },
     RemoteConnect,
     RemoteConnectionContextMenu { connection_id: String, connection_name: String, is_pairing: bool, position: gpui::Point<gpui::Pixels> },
     TerminalContextMenu {

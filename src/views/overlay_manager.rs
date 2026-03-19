@@ -251,6 +251,9 @@ pub enum OverlayManagerEvent {
     /// Context menu: Close all worktrees of a parent project
     CloseAllWorktrees { project_id: String },
 
+    /// Context menu: Migrate worktrees to match current path template
+    MigrateWorktrees { project_id: String },
+
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
 
@@ -742,6 +745,12 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
+                ContextMenuEvent::MigrateWorktrees { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::MigrateWorktrees {
+                        project_id: project_id.clone(),
+                    });
+                }
                 ContextMenuEvent::ReloadServices { project_id } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ReloadServices {
@@ -1102,9 +1111,18 @@ impl OverlayManager {
     // Diff viewer (parametric)
     // ========================================================================
 
-    /// Show diff viewer for a project, optionally selecting a specific file.
-    pub fn show_diff_viewer(&mut self, provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::DiffProvider>, select_file: Option<String>, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, cx));
+    /// Show diff viewer for a project, optionally selecting a specific file, diff mode, commit message, and commit navigation list.
+    pub fn show_diff_viewer(
+        &mut self,
+        provider: std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::DiffProvider>,
+        select_file: Option<String>,
+        mode: Option<okena_core::types::DiffMode>,
+        commit_message: Option<String>,
+        commits: Option<Vec<crate::git::CommitLogEntry>>,
+        commit_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, mode, commit_message, commits, commit_index, cx));
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {

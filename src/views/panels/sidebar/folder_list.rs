@@ -46,7 +46,6 @@ impl Sidebar {
         project_count: usize,
         idle_terminal_count: usize,
         is_cursor: bool,
-        is_focused: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -56,20 +55,22 @@ impl Sidebar {
         let is_collapsed = folder.collapsed;
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
-        let is_active_filter = self.workspace.read(cx).active_folder_filter() == Some(&folder.id);
+        let ws = self.workspace.read(cx);
+        let is_active_filter = ws.active_folder_filter() == Some(&folder.id)
+            && ws.focused_project_id().is_none();
 
         // Folder header row
         div()
             .id(ElementId::Name(format!("folder-row-{}", folder.id).into()))
             .h(px(24.0))
-            .pl(px(8.0))
+            .pl(px(4.0))
             .pr(px(8.0))
             .flex()
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_focused || is_active_filter, |d| d.bg(rgb(t.bg_hover)))
+            .when(is_active_filter, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             // Drag source for folder reordering
             .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {
@@ -199,18 +200,6 @@ impl Sidebar {
                 )
             })
             .child(
-                // Project count badge
-                div()
-                    .flex_shrink_0()
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .text_size(px(10.0))
-                    .text_color(rgb(t.text_muted))
-                    .child(format!("{}", project_count)),
-            )
-            .child(
                 // Delete folder button (on hover)
                 {
                     let folder_id = folder_id.clone();
@@ -260,8 +249,8 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let has_worktrees = project.worktree_count > 0;
-        let is_expanded = self.is_project_expanded(&project.id, has_worktrees);
+        let has_nested_worktrees = project.nested_worktree_count > 0;
+        let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let folder_id = folder_id.to_string();
@@ -345,12 +334,12 @@ impl Sidebar {
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.focus_project_terminal(&project_id, cx);
+                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
             }))
             .child({
-                let has_expandable_content = has_layout || has_worktrees;
+                let has_expandable_content = has_layout || has_nested_worktrees || !project.services.is_empty();
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-fp-{}", project.id).into()),
@@ -360,18 +349,14 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
-                            if has_worktrees {
-                                this.toggle_worktrees_collapsed(&project_id);
-                            } else {
-                                this.toggle_expanded(&project_id);
-                            }
+                            this.toggle_expanded(&project_id);
                             cx.notify();
                             cx.stop_propagation();
                         }
                     }))
                     .into_any_element()
                 } else {
-                    div().flex_shrink_0().w(px(16.0)).h(px(16.0)).into_any_element()
+                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
                 }
             })
             .child({
@@ -380,12 +365,24 @@ impl Sidebar {
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
                     ElementId::Name(format!("fp-folder-icon-{}", project.id).into()),
-                    div()
-                        .flex_shrink_0()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(folder_color)),
+                    if project.is_worktree {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(folder_color))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(folder_color))
+                            .into_any_element()
+                    },
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
@@ -413,7 +410,7 @@ impl Sidebar {
                             } else {
                                 this.cursor_index = None;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.focus_project_terminal(&project_id, cx);
+                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -432,7 +429,6 @@ impl Sidebar {
                         .bg(rgb(t.border_idle))
                 )
             })
-            .child(sidebar_terminal_badge(has_layout, terminal_count, &t))
             // Quick create button — only visible on hover
             .when(show_quick_create, |d| {
                 d.child(

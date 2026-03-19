@@ -70,22 +70,22 @@ impl SettingsPanel {
                 section_container(&t)
                     .child(hook_input_row(
                         "hook-project-open", "On Project Open",
-                        "Command to run when a project is opened",
+                        "Runs when a project is added to the workspace or on startup",
                         &h1, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-project-close", "On Project Close",
-                        "Command to run when a project is closed",
+                        "Runs when a project is removed from the workspace",
                         &h2, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-worktree-create", "On Worktree Create",
-                        "Command to run after a git worktree is created",
+                        "Runs in the new worktree directory after git worktree add completes",
                         &h3, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-worktree-close", "On Worktree Close",
-                        "Command to run after a git worktree is removed",
+                        "Runs after a worktree project is removed from the workspace",
                         &h4, "", &t, false,
                     )),
             )
@@ -94,59 +94,67 @@ impl SettingsPanel {
                 section_container(&t)
                     .child(hook_input_row(
                         "hook-terminal-on-create", "On Terminal Create",
-                        "Command to run when a new terminal is created",
+                        "Runs inside each new terminal after the shell starts",
                         &t1, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-terminal-on-close", "On Terminal Close",
-                        "Command to run when a terminal is closed",
+                        "Runs when a terminal process exits",
                         &t2, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-terminal-shell-wrapper", "Shell Wrapper",
-                        "Wrap the shell command (use {shell} as placeholder)",
+                        "Wraps the shell invocation. Use {shell} as placeholder for the original command",
                         &t3, "", &t, false,
                     )),
             )
-            .child(section_header("Merge & Removal Hooks", &t))
+            .child(section_header("Worktree Close Flow", &t))
+            .child(
+                div()
+                    .mx(px(16.0))
+                    .mb(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(rgb(t.text_muted))
+                    .child(merge_env_note),
+            )
             .child(
                 div()
                     .mx(px(16.0))
                     .mb(px(8.0))
                     .text_size(px(10.0))
                     .text_color(rgb(t.text_muted))
-                    .child(merge_env_note),
+                    .child("Close flow: stash \u{2192} fetch \u{2192} pre merge \u{2192} rebase \u{2192} merge \u{2192} post merge \u{2192} remove"),
             )
             .child(
                 section_container(&t)
                     .child(hook_input_row(
                         "hook-pre-merge", "Pre Merge",
-                        "Sync hook before merge begins (abort on failure)",
+                        "Runs before rebase + merge. Blocks the flow \u{2014} non-zero exit aborts the merge",
                         &h5, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-post-merge", "Post Merge",
-                        "Async hook after successful merge",
+                        "Runs after branch is merged into the default branch",
                         &h6, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-before-worktree-remove", "Before Worktree Remove",
-                        "Sync hook before worktree is deleted (abort on failure)",
+                        "Runs before git worktree remove. Blocks \u{2014} non-zero exit aborts removal",
                         &h7, "", &t, true,
                     ))
                     .child(hook_input_row(
-                        "hook-worktree-removed", "Worktree Removed",
-                        "Async hook after worktree is deleted",
+                        "hook-worktree-removed", "After Worktree Remove",
+                        "Runs after the worktree directory is deleted from disk",
                         &h8, "", &t, true,
                     ))
                     .child(hook_input_row(
                         "hook-on-rebase-conflict", "On Rebase Conflict",
-                        "Async hook when rebase fails (env: $OKENA_REBASE_ERROR)",
+                        "Runs when rebase fails due to conflicts. Extra env: $OKENA_REBASE_ERROR",
                         &h9, "", &t, true,
                     ))
                     .child(hook_input_row(
-                        "hook-on-dirty-worktree-close", "On Dirty Worktree Close",
-                        "Async hook when closing worktree with uncommitted changes",
+                        "hook-on-dirty-worktree-close", "On Dirty Close",
+                        "Runs when closing a worktree that has uncommitted changes without merging",
                         &h10, "", &t, false,
                     )),
             )

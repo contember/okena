@@ -189,7 +189,7 @@ impl Sidebar {
                     this.cursor_index = None;
                     // Focus the project when clicking a service
                     this.workspace.update(cx, |ws, cx| {
-                        ws.focus_project_terminal(&project_id, cx);
+                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                     // Open/toggle the service log panel
                     this.request_broker.update(cx, |broker, cx| {

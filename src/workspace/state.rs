@@ -83,6 +83,18 @@ pub struct WorktreeMetadata {
     pub branch_name: String,
 }
 
+impl WorktreeMetadata {
+    /// Check if this worktree's path matches the configured path template.
+    pub fn matches_template(&self, template: &str) -> bool {
+        crate::git::repository::worktree_matches_template(
+            &self.main_repo_path,
+            &self.branch_name,
+            &self.worktree_path,
+            template,
+        )
+    }
+}
+
 /// Status of a hook terminal in the service panel.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HookTerminalStatus {

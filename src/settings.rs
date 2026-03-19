@@ -22,6 +22,11 @@ impl Global for GlobalSettings {}
 pub struct SettingsState {
     pub settings: AppSettings,
     save_pending: Arc<AtomicBool>,
+    /// The worktree path template that was active when settings were loaded or last migrated.
+    /// Used to detect meaningful changes and suggest worktree migration.
+    worktree_template_baseline: String,
+    /// Debounced task for template migration toast (dropped/replaced on each keystroke)
+    template_migration_task: Option<gpui::Task<()>>,
 }
 
 /// Macro to generate setter methods with clamping and auto-save
@@ -58,9 +63,12 @@ macro_rules! setting_setter {
 
 impl SettingsState {
     pub fn new(settings: AppSettings) -> Self {
+        let baseline = settings.worktree.path_template.clone();
         Self {
             settings,
             save_pending: Arc::new(AtomicBool::new(false)),
+            worktree_template_baseline: baseline,
+            template_migration_task: None,
         }
     }
 
@@ -229,10 +237,32 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Set worktree path template
+    /// Set worktree path template.
+    /// Shows a migration suggestion toast when the template changes from its baseline value.
     pub fn set_worktree_path_template(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.worktree.path_template = value;
+        self.settings.worktree.path_template = value.clone();
         self.save_and_notify(cx);
+
+        // Debounced check: after user stops typing, compare with baseline and suggest migration.
+        // Storing the task handle cancels the previous debounce timer on each keystroke.
+        let baseline = self.worktree_template_baseline.clone();
+        self.template_migration_task = Some(cx.spawn(async move |_this, cx| {
+            smol::Timer::after(std::time::Duration::from_millis(1500)).await;
+            let _ = cx.update(|cx| {
+                let current = crate::settings::settings(cx).worktree.path_template.clone();
+                if current == value && current != baseline && !baseline.is_empty() {
+                    ToastManager::info(
+                        "Worktree path template changed. Existing worktrees can be migrated from the context menu.",
+                        cx,
+                    );
+                }
+            });
+        }));
+    }
+
+    /// Update the worktree template baseline (called after migration completes).
+    pub fn update_worktree_template_baseline(&mut self, template: String) {
+        self.worktree_template_baseline = template;
     }
 
     /// Set worktree default merge

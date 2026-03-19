@@ -1,5 +1,5 @@
 use crate::git;
-use crate::git::repository::{normalize_path, project_path_in_worktree, compute_target_paths};
+use crate::git::repository::{normalize_path, compute_target_paths};
 use crate::keybindings::Cancel;
 use crate::process::command;
 use crate::settings::settings;
@@ -43,8 +43,6 @@ pub struct WorktreeDialog {
     filtered_branches: Vec<usize>,
     selected_branch_index: Option<usize>,
     branch_search_input: Entity<SimpleInputState>,
-    custom_path_input: Entity<SimpleInputState>,
-    use_custom_path: bool,
     error_message: Option<String>,
     focus_handle: FocusHandle,
     initialized: bool,
@@ -96,11 +94,6 @@ impl WorktreeDialog {
             input
         });
 
-        let custom_path_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Custom worktree path...")
-        });
-
         let filtered_branches: Vec<usize> = (0..branches.len()).collect();
         let focus_handle = cx.focus_handle();
         let path_template = settings(cx).worktree.path_template;
@@ -115,8 +108,6 @@ impl WorktreeDialog {
             filtered_branches,
             selected_branch_index: None,
             branch_search_input,
-            custom_path_input,
-            use_custom_path: false,
             error_message: None,
             focus_handle,
             initialized: false,
@@ -207,20 +198,7 @@ impl WorktreeDialog {
             }
         };
 
-        let (worktree_path, project_path) = if self.use_custom_path {
-            let custom = self.custom_path_input.read(cx).value().trim().to_string();
-            if custom.is_empty() {
-                self.error_message = Some("Custom path cannot be empty".to_string());
-                cx.notify();
-                return;
-            }
-            // For custom paths, the worktree path IS the custom path;
-            // append subdir for the project path
-            let proj = project_path_in_worktree(&custom, &self.subdir);
-            (custom, proj)
-        } else {
-            self.get_target_paths(&branch)
-        };
+        let (worktree_path, project_path) = self.get_target_paths(&branch);
         let project_id = self.project_id.clone();
         let git_root = self.git_root.clone();
 
@@ -463,10 +441,7 @@ impl Render for WorktreeDialog {
         self.filter_branches(cx);
 
         let branch_search_input = self.branch_search_input.clone();
-        let custom_path_input = self.custom_path_input.clone();
         let search_input_focused = self.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
-        let custom_path_focused = self.custom_path_input.read(cx).focus_handle(cx).is_focused(window);
-        let use_custom_path = self.use_custom_path;
         let pr_mode = self.pr_mode;
 
         div()
@@ -680,69 +655,6 @@ impl Render for WorktreeDialog {
                                     // Branch list or PR list
                                     .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
                                     .when(pr_mode, |d| d.child(self.render_pr_list(t, cx)))
-                                    // Custom path checkbox
-                                    .child(
-                                        div()
-                                            .id("custom-path-checkbox")
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.0))
-                                            .py(px(4.0))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.use_custom_path = !this.use_custom_path;
-                                                if this.use_custom_path {
-                                                    // Pre-fill with auto-generated path for current branch
-                                                    let branch = if let Some(filtered_idx) = this.selected_branch_index {
-                                                        this.filtered_branches.get(filtered_idx)
-                                                            .and_then(|&idx| this.branches.get(idx))
-                                                            .cloned()
-                                                    } else {
-                                                        let val = this.branch_search_input.read(cx).value().trim().to_string();
-                                                        if val.is_empty() { None } else { Some(val) }
-                                                    };
-                                                    if let Some(branch) = branch {
-                                                        let (worktree_path, _) = this.get_target_paths(&branch);
-                                                        this.custom_path_input.update(cx, |input, cx| {
-                                                            input.set_value(&worktree_path, cx);
-                                                        });
-                                                    }
-                                                }
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div()
-                                                    .w(px(16.0))
-                                                    .h(px(16.0))
-                                                    .rounded(px(3.0))
-                                                    .border_1()
-                                                    .border_color(rgb(t.border_active))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .when(use_custom_path, |d| {
-                                                        d.bg(rgb(t.border_active)).child(
-                                                            svg()
-                                                                .path("icons/check.svg")
-                                                                .size(px(12.0))
-                                                                .text_color(rgb(t.text_primary)),
-                                                        )
-                                                    }),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.0))
-                                                    .text_color(rgb(t.text_primary))
-                                                    .child("Use custom path"),
-                                            ),
-                                    )
-                                    // Custom path input (shown when enabled)
-                                    .when(use_custom_path, |d| {
-                                        d.child(
-                                            input_container(&t, Some(custom_path_focused))
-                                                .child(SimpleInput::new(&custom_path_input).text_size(px(12.0))),
-                                        )
-                                    })
                             )
                     )
                     // Error message

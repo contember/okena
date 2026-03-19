@@ -18,6 +18,7 @@ pub enum ContextMenuEvent {
     RenameDirectory { project_id: String, project_path: String },
     CloseWorktree { project_id: String },
     CloseAllWorktrees { project_id: String },
+    MigrateWorktrees { project_id: String },
     DeleteProject { project_id: String },
     ConfigureHooks { project_id: String },
     ReloadServices { project_id: String },
@@ -100,6 +101,12 @@ impl ContextMenu {
         });
     }
 
+    fn migrate_worktrees(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::MigrateWorktrees {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
     fn reload_services(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::ReloadServices {
             project_id: self.request.project_id.clone(),
@@ -135,6 +142,18 @@ impl Render for ContextMenu {
         let is_git_repo = git::is_git_repo(std::path::Path::new(&project_path));
         let worktree_count = ws.data().projects.iter()
             .filter(|p| p.worktree_info.as_ref().map_or(false, |wt| wt.parent_project_id == self.request.project_id))
+            .count();
+
+        // Count worktrees that don't match the current path template (migratable)
+        let wt_path_template = crate::settings::settings(cx).worktree.path_template.clone();
+        let migratable_worktree_count = ws.data().projects.iter()
+            .filter(|p| {
+                p.worktree_info.as_ref().map_or(false, |wt| {
+                    wt.parent_project_id == self.request.project_id
+                        && !wt.worktree_path.is_empty()
+                        && !wt.matches_template(&wt_path_template)
+                })
+            })
             .count();
 
         let project_path_for_worktree = project_path.clone();
@@ -193,6 +212,20 @@ impl Render for ContextMenu {
                             )
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.close_all_worktrees(cx);
+                            }))
+                        )
+                    })
+                    // Migrate Worktrees option (only when worktrees don't match current template)
+                    .when(migratable_worktree_count > 0, |d| {
+                        d.child(
+                            menu_item(
+                                "context-menu-migrate-worktrees",
+                                "icons/git-branch.svg",
+                                &format!("Migrate Worktrees ({})", migratable_worktree_count),
+                                &t,
+                            )
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.migrate_worktrees(cx);
                             }))
                         )
                     })
