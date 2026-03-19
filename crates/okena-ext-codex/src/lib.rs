@@ -18,5 +18,6 @@ pub fn register() -> ExtensionRegistration {
             let usage = app.new(|cx| usage::CodexUsage::new(cx));
             vec![status.into(), usage.into()]
         })),
+        status_bar_right_widgets: None,
     }
 }

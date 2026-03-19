@@ -31,7 +31,10 @@ pub type StatusBarWidgetFactory = Arc<dyn Fn(&mut App) -> Vec<AnyView>>;
 /// A registered extension with its capabilities.
 pub struct ExtensionRegistration {
     pub manifest: ExtensionManifest,
+    /// Widgets rendered on the left side of the status bar (after CPU/MEM).
     pub status_bar_widgets: Option<StatusBarWidgetFactory>,
+    /// Widgets rendered on the right side of the status bar (before version/time).
+    pub status_bar_right_widgets: Option<StatusBarWidgetFactory>,
 }
 
 /// Global registry of all extensions, set via `cx.set_global()`.
@@ -88,6 +91,7 @@ mod tests {
                 default_enabled: true,
             },
             status_bar_widgets: None,
+            status_bar_right_widgets: None,
         });
 
         assert_eq!(registry.extensions().len(), 1);
@@ -104,6 +108,7 @@ mod tests {
                 default_enabled: true,
             },
             status_bar_widgets: None,
+            status_bar_right_widgets: None,
         });
         registry.register(ExtensionRegistration {
             manifest: ExtensionManifest {
@@ -112,6 +117,7 @@ mod tests {
                 default_enabled: false,
             },
             status_bar_widgets: None,
+            status_bar_right_widgets: None,
         });
 
         let defaults = registry.default_enabled_ids();

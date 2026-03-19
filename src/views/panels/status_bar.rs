@@ -69,8 +69,10 @@ impl SystemInfoCache {
 pub struct StatusBar {
     workspace: Entity<Workspace>,
     cache: Arc<Mutex<SystemInfoCache>>,
-    /// Extension widgets: (extension_id, widgets)
+    /// Extension widgets for left side: (extension_id, widgets)
     extension_widgets: Vec<(String, Vec<AnyView>)>,
+    /// Extension widgets for right side: (extension_id, widgets)
+    extension_right_widgets: Vec<(String, Vec<AnyView>)>,
     sidebar_open: bool,
 }
 
@@ -103,23 +105,33 @@ impl StatusBar {
 
         // Clone extension factories out of the global registry, then call them.
         // The Arc clone releases the borrow on the global before we call factory(cx).
-        let factories: Vec<(String, okena_extensions::StatusBarWidgetFactory)> =
-            if let Some(registry) = cx.try_global::<ExtensionRegistry>() {
-                registry.extensions().iter().filter_map(|ext| {
-                    let factory = ext.status_bar_widgets.as_ref()?.clone();
-                    Some((ext.manifest.id.to_string(), factory))
-                }).collect()
-            } else {
-                Vec::new()
-            };
-        let extension_widgets: Vec<(String, Vec<AnyView>)> = factories.into_iter()
+        let (left_factories, right_factories): (
+            Vec<(String, okena_extensions::StatusBarWidgetFactory)>,
+            Vec<(String, okena_extensions::StatusBarWidgetFactory)>,
+        ) = if let Some(registry) = cx.try_global::<ExtensionRegistry>() {
+            let left = registry.extensions().iter().filter_map(|ext| {
+                let factory = ext.status_bar_widgets.as_ref()?.clone();
+                Some((ext.manifest.id.to_string(), factory))
+            }).collect();
+            let right = registry.extensions().iter().filter_map(|ext| {
+                let factory = ext.status_bar_right_widgets.as_ref()?.clone();
+                Some((ext.manifest.id.to_string(), factory))
+            }).collect();
+            (left, right)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let extension_widgets: Vec<(String, Vec<AnyView>)> = left_factories.into_iter()
+            .map(|(id, factory)| (id, factory(cx)))
+            .collect();
+        let extension_right_widgets: Vec<(String, Vec<AnyView>)> = right_factories.into_iter()
             .map(|(id, factory)| (id, factory(cx)))
             .collect();
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        Self { workspace, cache, extension_widgets, sidebar_open: true }
+        Self { workspace, cache, extension_widgets, extension_right_widgets, sidebar_open: true }
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -173,9 +185,13 @@ impl Render for StatusBar {
             t.metric_normal
         };
 
-        // Collect enabled extension widgets
+        // Collect enabled extension widgets (left and right)
         let enabled_extensions = &settings_entity(cx).read(cx).settings.enabled_extensions;
-        let enabled_ext_widgets: Vec<&Vec<AnyView>> = self.extension_widgets.iter()
+        let enabled_left_widgets: Vec<&Vec<AnyView>> = self.extension_widgets.iter()
+            .filter(|(id, _)| enabled_extensions.contains(id.as_str()))
+            .map(|(_, widgets)| widgets)
+            .collect();
+        let enabled_right_widgets: Vec<&Vec<AnyView>> = self.extension_right_widgets.iter()
             .filter(|(id, _)| enabled_extensions.contains(id.as_str()))
             .map(|(_, widgets)| widgets)
             .collect();
@@ -247,8 +263,8 @@ impl Render for StatusBar {
                             )
                     );
 
-                // Extension widgets
-                for widgets in &enabled_ext_widgets {
+                // Left-side extension widgets
+                for widgets in &enabled_left_widgets {
                     for widget in *widgets {
                         left = left.child(widget.clone());
                     }
@@ -260,6 +276,13 @@ impl Render for StatusBar {
             .child({
                 let mut right = h_flex()
                     .gap(px(8.0));
+
+                // Right-side extension widgets
+                for widgets in &enabled_right_widgets {
+                    for widget in *widgets {
+                        right = right.child(widget.clone());
+                    }
+                }
 
                 // Show remote server status if active
                 if let Some(remote_info) = cx.try_global::<crate::remote::GlobalRemoteInfo>() {

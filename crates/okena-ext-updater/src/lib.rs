@@ -20,7 +20,8 @@ pub fn register() -> ExtensionRegistration {
             name: "Auto Update",
             default_enabled: true,
         },
-        status_bar_widgets: Some(Arc::new(|app| {
+        status_bar_widgets: None,
+        status_bar_right_widgets: Some(Arc::new(|app| {
             let widget = app.new(|cx| crate::status::UpdateStatusWidget::new(cx));
             vec![widget.into()]
         })),
