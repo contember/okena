@@ -8,7 +8,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::grid::{Scroll, Dimensions};
 use parking_lot::Mutex;
 use regex::Regex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -231,6 +231,9 @@ pub struct Terminal {
     has_bell: Arc<Mutex<bool>>,
     /// Dirty flag - set when terminal content changes, cleared after render
     dirty: AtomicBool,
+    /// Content generation counter - incremented on each process_output call.
+    /// Used by UrlDetector to skip redundant detect_urls() when content hasn't changed.
+    content_generation: AtomicU64,
     /// Who controls resize for this terminal (server UI vs remote client).
     resize_owner: Mutex<ResizeOwner>,
     /// Initial working directory (for resolving relative file paths in URL detection)
@@ -287,6 +290,7 @@ impl Terminal {
             title,
             has_bell,
             dirty: AtomicBool::new(false),
+            content_generation: AtomicU64::new(0),
             resize_owner: Mutex::new(ResizeOwner::Local),
             initial_cwd,
             last_output_time: Arc::new(Mutex::new(Instant::now())),
@@ -304,14 +308,19 @@ impl Terminal {
 
         processor.advance(&mut *term, data);
         self.dirty.store(true, Ordering::Relaxed);
+        self.content_generation.fetch_add(1, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
     }
 
-    /// Check if terminal has pending changes (and clear the flag)
-    /// Note: Kept for potential external use, main path uses subscribe_dirty()
-    #[allow(dead_code)]
+    /// Check if terminal has pending changes (and clear the flag).
+    /// Used by PTY event loop for direct content pane notification.
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    /// Get the current content generation counter.
+    pub fn content_generation(&self) -> u64 {
+        self.content_generation.load(Ordering::Relaxed)
     }
 
     /// Send input to the PTY
@@ -399,6 +408,7 @@ impl Terminal {
         let current = term.grid().display_offset();
         if current > 0 {
             term.scroll_display(Scroll::Delta(-(current as i32)));
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -422,6 +432,8 @@ impl Terminal {
         let term_size = TermSize::new(new_size.cols as usize, new_size.rows as usize);
         term.resize(term_size);
         drop(term);
+
+        self.content_generation.fetch_add(1, Ordering::Relaxed);
 
         // Debounce transport resize
         let now = std::time::Instant::now();
@@ -474,6 +486,7 @@ impl Terminal {
         let mut term = self.term.lock();
         let term_size = TermSize::new(cols as usize, rows as usize);
         term.resize(term_size);
+        self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mark this terminal as locally controlled (server UI input).
@@ -519,6 +532,7 @@ impl Terminal {
         };
         term.scroll_display(scroll);
         *self.scroll_offset.lock() += delta;
+        self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Scroll up by lines
@@ -1217,6 +1231,7 @@ impl Terminal {
         let delta = offset as i32 - current as i32;
         if delta != 0 {
             term.scroll_display(Scroll::Delta(delta));
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 

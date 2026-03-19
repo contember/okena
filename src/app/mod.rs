@@ -434,8 +434,9 @@ impl Okena {
                     Err(_) => break,
                 };
 
-                // Collect exit events for service manager processing
+                // Collect exit events and track which terminals received data
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
+                let mut dirty_terminal_ids: Vec<String> = Vec::new();
 
                 // Process first event + broadcast to remote subscribers
                 match &event {
@@ -444,6 +445,7 @@ impl Okena {
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
                             terminal.process_output(data);
                         }
+                        dirty_terminal_ids.push(terminal_id.clone());
                         broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
@@ -463,6 +465,7 @@ impl Okena {
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
                                 terminal.process_output(data);
                             }
+                            dirty_terminal_ids.push(terminal_id.clone());
                             broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
@@ -543,8 +546,20 @@ impl Okena {
                             }
                         }
                     }
-                    // Only notify root_view for exit events (which need UI cleanup).
-                    // Data-only events are handled by each TerminalPane's dirty check loop.
+                    // Notify dirty terminal content panes directly (batched in one update).
+                    // All notifications happen in the same GPUI update → single layout pass.
+                    if !dirty_terminal_ids.is_empty() {
+                        dirty_terminal_ids.dedup();
+                        let registry = crate::views::root::content_pane_registry().lock();
+                        for tid in &dirty_terminal_ids {
+                            if let Some(weak_content) = registry.get(tid) {
+                                let _ = weak_content.update(cx, |_content, cx| {
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }
+
                     if !exit_events.is_empty() {
                         this.root_view.update(cx, |_, cx| cx.notify());
                     }

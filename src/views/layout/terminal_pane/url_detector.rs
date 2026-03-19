@@ -12,10 +12,14 @@ use std::sync::Arc;
 pub struct UrlDetector {
     /// Detected URL matches
     matches: Vec<URLMatch>,
+    /// Cached Arc of matches (rebuilt only when matches change)
+    matches_cache: Arc<Vec<URLMatch>>,
     /// Currently hovered URL group
     hovered_group: Option<usize>,
     /// Cache of path existence checks to avoid repeated syscalls
     path_exists_cache: HashMap<String, bool>,
+    /// Last terminal content generation we processed (skip if unchanged)
+    last_generation: u64,
 }
 
 impl Default for UrlDetector {
@@ -28,8 +32,10 @@ impl UrlDetector {
     pub fn new() -> Self {
         Self {
             matches: Vec::new(),
+            matches_cache: Arc::new(Vec::new()),
             hovered_group: None,
             path_exists_cache: HashMap::new(),
+            last_generation: u64::MAX, // force first update
         }
     }
 
@@ -70,8 +76,15 @@ impl UrlDetector {
     }
 
     /// Update URL matches from terminal content.
+    /// Skips detection if terminal content hasn't changed since last call.
     pub fn update_matches(&mut self, terminal: &Option<Arc<Terminal>>) {
         if let Some(terminal) = terminal {
+            let content_gen = terminal.content_generation();
+            if content_gen == self.last_generation {
+                return;
+            }
+            self.last_generation = content_gen;
+
             let detected = terminal.detect_urls();
             let cwd = terminal.initial_cwd();
 
@@ -109,6 +122,7 @@ impl UrlDetector {
                     }
                 })
                 .collect();
+            self.matches_cache = Arc::new(self.matches.clone());
         }
     }
 
@@ -152,9 +166,9 @@ impl UrlDetector {
         self.hovered_group
     }
 
-    /// Get an Arc of the current matches for rendering.
+    /// Get an Arc of the current matches for rendering (cheap Arc::clone).
     pub fn matches_arc(&self) -> Arc<Vec<URLMatch>> {
-        Arc::new(self.matches.clone())
+        self.matches_cache.clone()
     }
 
     /// Open URL in default browser.

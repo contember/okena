@@ -146,7 +146,7 @@ impl TerminalPane {
         }
 
         // Start background loops
-        pane.start_dirty_check_loop(cx);
+        // Note: dirty check is handled centrally by PTY event loop (see app/mod.rs)
         pane.start_cursor_blink_loop(cx);
         pane.start_idle_check_loop(cx);
 
@@ -207,37 +207,6 @@ impl TerminalPane {
 
     // === Background loops ===
 
-    /// Start dirty check loop.
-    fn start_dirty_check_loop(&self, cx: &mut Context<Self>) {
-        use std::time::Duration;
-
-        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
-            let interval = Duration::from_millis(8);
-            loop {
-                smol::Timer::after(interval).await;
-
-                let should_notify = this.update(cx, |pane, _cx| {
-                    if let Some(ref terminal) = pane.terminal {
-                        terminal.take_dirty()
-                    } else {
-                        false
-                    }
-                });
-
-                match should_notify {
-                    Ok(true) => {
-                        let _ = this.update(cx, |_pane, cx| {
-                            cx.notify();
-                        });
-                    }
-                    Ok(false) => {}
-                    Err(_) => break,
-                }
-            }
-        })
-        .detach();
-    }
-
     /// Start cursor blink loop.
     fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
         use std::time::Duration;
@@ -249,17 +218,28 @@ impl TerminalPane {
 
                 let result = this.update(cx, |pane, cx| {
                     if settings(cx).cursor_blink {
+                        // Only blink cursor on the focused pane
+                        if !pane.was_focused {
+                            // Ensure cursor is visible when not focused
+                            if !pane.cursor_visible {
+                                pane.cursor_visible = true;
+                                pane.content.update(cx, |content, _| {
+                                    content.set_cursor_visible(true);
+                                });
+                            }
+                            return;
+                        }
                         pane.cursor_visible = !pane.cursor_visible;
-                        pane.content.update(cx, |content, _| {
+                        pane.content.update(cx, |content, cx| {
                             content.set_cursor_visible(pane.cursor_visible);
+                            cx.notify();
                         });
-                        cx.notify();
                     } else if !pane.cursor_visible {
                         pane.cursor_visible = true;
-                        pane.content.update(cx, |content, _| {
+                        pane.content.update(cx, |content, cx| {
                             content.set_cursor_visible(true);
+                            cx.notify();
                         });
-                        cx.notify();
                     }
                 });
 
@@ -339,10 +319,9 @@ impl TerminalPane {
                 // Flag as waiting if: idle + no child processes running
                 let is_waiting = is_idle && !has_children;
 
-                // Step 4: update cache and notify on transitions or while waiting
-                // (continuous notify while waiting keeps the duration display updated)
+                // Step 4: update cache and notify only on state transitions
                 terminal.set_waiting_for_input(is_waiting);
-                if is_waiting || is_waiting != was_waiting {
+                if is_waiting != was_waiting {
                     was_waiting = is_waiting;
                     let _ = this.update(cx, |_pane, cx| {
                         cx.notify();
@@ -465,6 +444,12 @@ impl TerminalPane {
 
     /// Update terminal reference in child entities.
     fn update_child_terminals(&mut self, terminal: Arc<Terminal>, cx: &mut Context<Self>) {
+        // Register content pane for direct dirty notification from PTY event loop
+        crate::views::root::register_content_pane(
+            terminal.terminal_id.clone(),
+            self.content.downgrade(),
+        );
+
         self.content.update(cx, |content, cx| {
             content.set_terminal(Some(terminal.clone()), cx);
         });
@@ -513,6 +498,14 @@ impl TerminalPane {
         })
     }
 
+}
+
+impl Drop for TerminalPane {
+    fn drop(&mut self) {
+        if let Some(ref tid) = self.terminal_id {
+            crate::views::root::unregister_content_pane(tid);
+        }
+    }
 }
 
 impl_focusable!(TerminalPane);

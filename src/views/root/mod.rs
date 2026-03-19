@@ -31,6 +31,28 @@ use std::sync::Arc;
 /// Shared terminals registry for PTY event routing
 pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<Terminal>>>>;
 
+/// Registry mapping terminal_id → WeakEntity<TerminalContent> for direct
+/// dirty notification from PTY event loop (avoids per-pane polling).
+pub type ContentPaneRegistry = Arc<Mutex<HashMap<String, WeakEntity<super::layout::terminal_pane::TerminalContent>>>>;
+
+/// Global content pane registry instance.
+static CONTENT_PANE_REGISTRY: std::sync::OnceLock<ContentPaneRegistry> = std::sync::OnceLock::new();
+
+/// Get or init the global content pane registry.
+pub fn content_pane_registry() -> &'static ContentPaneRegistry {
+    CONTENT_PANE_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// Register a terminal content pane for direct dirty notification.
+pub fn register_content_pane(terminal_id: String, content: WeakEntity<super::layout::terminal_pane::TerminalContent>) {
+    content_pane_registry().lock().insert(terminal_id, content);
+}
+
+/// Unregister a terminal content pane.
+pub fn unregister_content_pane(terminal_id: &str) {
+    content_pane_registry().lock().remove(terminal_id);
+}
+
 /// Root view of the application
 pub struct RootView {
     workspace: Entity<Workspace>,
