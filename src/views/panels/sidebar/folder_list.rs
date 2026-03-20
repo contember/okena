@@ -45,8 +45,9 @@ impl Sidebar {
         &self,
         folder: &FolderData,
         index: usize,
-        project_count: usize,
+        _project_count: usize,
         idle_terminal_count: usize,
+        all_hidden: bool,
         is_cursor: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -74,6 +75,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_active_filter, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(all_hidden, |d| d.opacity(0.75))
             // Drag source for folder reordering
             .on_drag(FolderDrag { folder_id: folder_id.clone(), folder_name: folder_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| FolderDragView { name: drag.folder_name.clone() })
@@ -239,7 +241,6 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.project_rename, &project.id);
 
-        let terminal_count = project.terminal_ids.len();
         let has_layout = project.has_layout;
 
         // Count idle terminals when project is collapsed (not expanded)
@@ -262,6 +263,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(!project.show_in_overview, |d| d.opacity(0.75))
             // Drag source
             .on_drag(super::ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| super::ProjectDragView { name: drag.project_name.clone() })
@@ -380,12 +382,14 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(!project.show_in_overview && !project.terminal_ids.is_empty(), |d| {
+                d.child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
+            })
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 sidebar_visibility_button(
                     ElementId::Name(format!("fp-visibility-{}", project.id).into()),
                     project.show_in_overview,
-                    project.terminal_ids.len(),
                     "folder-project-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" },
                     &t,

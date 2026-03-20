@@ -129,8 +129,6 @@ pub struct Sidebar {
     /// Project IDs that have been auto-expanded due to hook terminals.
     /// Tracked so we only auto-expand once (user can collapse afterward).
     hook_auto_expanded: HashSet<String>,
-    /// Projects with worktrees that were auto-expanded (one-time).
-    worktree_auto_expanded: HashSet<String>,
     /// Parent project IDs with in-flight worktree creation (debounce guard)
     creating_worktree: HashSet<String>,
     /// Project ID for which the worktree list popover is open
@@ -205,7 +203,6 @@ impl Sidebar {
             service_manager: None,
             collapsed_groups: HashSet::new(),
             hook_auto_expanded: HashSet::new(),
-            worktree_auto_expanded: HashSet::new(),
             creating_worktree: HashSet::new(),
             worktree_list_project_id: None,
             worktree_list_click_y: 0.0,
@@ -1326,7 +1323,6 @@ pub(super) struct SidebarHookInfo {
     pub terminal_id: String,
     pub label: String,
     pub status: crate::workspace::state::HookTerminalStatus,
-    pub hook_type: String,
     pub command: String,
     pub cwd: String,
 }
@@ -1360,16 +1356,12 @@ pub(super) struct SidebarProjectInfo {
     pub is_closing: bool,
     /// True if this worktree is being created (git fetch + worktree add in progress)
     pub is_creating: bool,
-    /// Project path (for quick worktree creation)
-    pub path: String,
-    /// Whether this project is inside a git repo (for showing quick create button)
-    pub is_git_repo: bool,
     /// Whether this project is itself a worktree
     pub is_worktree: bool,
 }
 
 impl SidebarProjectInfo {
-    fn from_project(project: &ProjectData, is_git_repo: bool) -> Self {
+    fn from_project(project: &ProjectData) -> Self {
         let layout = project.layout.as_ref();
         Self {
             id: project.id.clone(),
@@ -1401,15 +1393,12 @@ impl SidebarProjectInfo {
                     terminal_id: tid.clone(),
                     label: entry.label.clone(),
                     status: entry.status.clone(),
-                    hook_type: entry.hook_type.clone(),
                     command: entry.command.clone(),
                     cwd: entry.cwd.clone(),
                 }
             }).collect(),
             is_closing: false,
             is_creating: false,
-            path: project.path.clone(),
-            is_git_repo,
             is_worktree: project.worktree_info.is_some(),
         }
     }
@@ -1467,12 +1456,6 @@ impl Render for Sidebar {
             .map(|p| (p.id.as_str(), p))
             .collect();
 
-        // Batch is_git_repo check — single cache lock instead of per-project
-        let project_paths: Vec<&std::path::Path> = workspace.data().projects.iter()
-            .map(|p| std::path::Path::new(&p.path))
-            .collect();
-        let git_repo_map = crate::git::batch_is_git_repo(&project_paths);
-
         // Build worktree children map using parent's worktree_ids for deterministic ordering
         // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
@@ -1482,8 +1465,7 @@ impl Render for Sidebar {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
-                        let is_git = *git_repo_map.get(std::path::Path::new(&p.path)).unwrap_or(&false);
-                        let mut info = SidebarProjectInfo::from_project(p, is_git);
+                        let mut info = SidebarProjectInfo::from_project(p);
                         info.is_closing = workspace.closing_projects.contains(&p.id);
                         info.is_creating = workspace.creating_projects.contains(&p.id);
                         // Inherit parent project's color for visual association
@@ -1551,8 +1533,7 @@ impl Render for Sidebar {
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
                     .map(|p| {
-                        let is_git = *git_repo_map.get(std::path::Path::new(&p.path)).unwrap_or(&false);
-                        let mut info = SidebarProjectInfo::from_project(p, is_git);
+                        let mut info = SidebarProjectInfo::from_project(p);
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
@@ -1594,8 +1575,7 @@ impl Render for Sidebar {
                     }
                 }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
-                let is_git = *git_repo_map.get(std::path::Path::new(&project.path)).unwrap_or(&false);
-                let mut project_info = SidebarProjectInfo::from_project(project, is_git);
+                let mut project_info = SidebarProjectInfo::from_project(project);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
@@ -1680,8 +1660,9 @@ impl Render for Sidebar {
                         let is_cursor = cursor_index == Some(flat_idx);
                         // Group header highlights when focused non-individual (showing all)
                         let is_focused_group = focused_project_id.as_ref() == Some(&project.id) && !focus_individual;
+                        let all_hidden = !project.show_in_overview && worktree_children.iter().all(|c| !c.show_in_overview);
                         flat_elements.push(
-                            self.render_project_group_header(&project, 4.0, "gh", "group-header-item", project_list::GroupHeaderDragConfig::TopLevel { index }, is_cursor, is_focused_group, window, cx).into_any_element()
+                            self.render_project_group_header(&project, 4.0, "gh", "group-header-item", project_list::GroupHeaderDragConfig::TopLevel { index }, all_hidden, is_cursor, is_focused_group, window, cx).into_any_element()
                         );
                         flat_idx += 1;
 
@@ -1745,8 +1726,9 @@ impl Render for Sidebar {
                     } else {
                         0
                     };
+                    let all_hidden = projects.iter().all(|p| !p.show_in_overview) && worktree_children.values().flat_map(|c| c.iter()).all(|c| !c.show_in_overview);
                     flat_elements.push(
-                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, is_cursor, window, cx).into_any_element()
+                        self.render_folder_header(&folder, index, projects.len(), idle_terminal_count, all_hidden, is_cursor, window, cx).into_any_element()
                     );
                     flat_idx += 1;
 
@@ -1761,7 +1743,10 @@ impl Render for Sidebar {
                                 let is_cursor = cursor_index == Some(flat_idx);
                                 let is_focused_group = focused_project_id.as_ref() == Some(&fp.id) && !focus_individual;
                                 flat_elements.push(
-                                    self.render_project_group_header(fp, 20.0, "fgh", "fgh-item", project_list::GroupHeaderDragConfig::InFolder { folder_id: folder.id.clone() }, is_cursor, is_focused_group, window, cx).into_any_element()
+                                    {
+                                    let all_hidden = !fp.show_in_overview && fp_wt_children.map_or(true, |c| c.iter().all(|c| !c.show_in_overview));
+                                    self.render_project_group_header(fp, 20.0, "fgh", "fgh-item", project_list::GroupHeaderDragConfig::InFolder { folder_id: folder.id.clone() }, all_hidden, is_cursor, is_focused_group, window, cx).into_any_element()
+                                    }
                                 );
                                 flat_idx += 1;
 

@@ -106,32 +106,6 @@ pub fn sidebar_name_label(
         .child(name.into())
 }
 
-/// Terminal count badge (number) with fixed width for vertical alignment.
-/// When there are no terminals, renders an invisible placeholder of the same size.
-pub fn sidebar_terminal_badge(
-    has_layout: bool,
-    count: usize,
-    t: &ThemeColors,
-) -> AnyElement {
-    if has_layout && count > 0 {
-        div()
-            .flex_shrink_0()
-            .min_w(px(18.0))
-            .h(px(14.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_secondary))
-            .text_size(px(10.0))
-            .text_color(rgb(t.text_muted))
-            .child(format!("{}", count))
-            .into_any_element()
-    } else {
-        div().into_any_element()
-    }
-}
-
 /// Collapsible group header (e.g. "Terminals (3)" or "Services (2)").
 ///
 /// Returns a `Stateful<Div>` so the caller can chain `.on_click()` to toggle collapse.
@@ -222,6 +196,19 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
         )
 }
 
+/// Terminal count badge for hidden/inactive projects.
+/// Shown inline after the project name as a small highlighted badge.
+pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors) -> Div {
+    div()
+        .flex_shrink_0()
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .bg(rgb(t.bg_secondary))
+        .text_size(px(10.0))
+        .text_color(rgb(t.text_secondary))
+        .child(format!("{}", count))
+}
+
 /// Visibility toggle (eye / eye-off).
 ///
 /// Caller chains `.on_click()` to toggle visibility.
@@ -235,66 +222,19 @@ pub fn sidebar_visibility_toggle(
 
 /// Visibility toggle button with hover-reveal behavior.
 ///
-/// When hidden and has terminals (`hidden_terminal_count > 0`), shows a terminal
-/// count badge by default. On hover, the badge is replaced by the eye icon.
-/// Otherwise, shows the eye icon on hover only.
+/// Shows the eye icon on hover only.
 ///
 /// Caller chains `.on_click()` to handle the toggle action.
 pub fn sidebar_visibility_button(
     id: impl Into<ElementId>,
     show_in_overview: bool,
-    hidden_terminal_count: usize,
     group_name: &'static str,
     tooltip_text: &'static str,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    let show_badge = !show_in_overview && hidden_terminal_count > 0;
-
-    if show_badge {
-        // Hidden with terminals: show badge, on hover switch to eye
-        div()
-            .id(id)
-            .flex_shrink_0()
-            .cursor_pointer()
-            .w(px(18.0))
-            .h(px(18.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.0))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .relative()
-            .child(
-                // Badge (visible by default, hidden on group hover)
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(t.text_muted))
-                    .group_hover(group_name, |s| s.opacity(0.0))
-                    .child(format!("{}", hidden_terminal_count))
-            )
-            .child(
-                // Eye icon (hidden by default, visible on group hover)
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .opacity(0.0)
-                    .group_hover(group_name, |s| s.opacity(1.0))
-                    .child(
-                        svg()
-                            .path("icons/eye.svg")
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_muted))
-                    )
-            )
-            .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
-    } else {
-        sidebar_visibility_toggle(id, show_in_overview, t)
-            .opacity(0.0)
-            .when(show_in_overview, |d| d.opacity(1.0))
-            .group_hover(group_name, |s| s.opacity(1.0))
-            .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
-    }
+    sidebar_visibility_toggle(id, show_in_overview, t)
+        .opacity(0.0)
+        .when(show_in_overview, |d| d.opacity(1.0))
+        .group_hover(group_name, |s| s.opacity(1.0))
+        .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
 }

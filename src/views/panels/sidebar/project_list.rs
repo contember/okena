@@ -57,6 +57,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(!project.show_in_overview, |d| d.opacity(0.75))
             // Drag source
             .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
@@ -164,6 +165,9 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(!project.show_in_overview && !project.terminal_ids.is_empty(), |d| {
+                d.child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
+            })
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .when(project.worktree_count > 0, |d| {
                 d.child(sidebar_worktree_badge(project.worktree_count, &t))
@@ -172,7 +176,6 @@ impl Sidebar {
                 sidebar_visibility_button(
                     ElementId::Name(format!("visibility-{}", project.id).into()),
                     project.show_in_overview,
-                    project.terminal_ids.len(),
                     "project-item",
                     if project.show_in_overview { "Hide Project" } else { "Show Project" },
                     &t,
@@ -226,6 +229,7 @@ impl Sidebar {
             .when(!is_busy, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
             .when(is_focused_project && !is_busy, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(!project.show_in_overview && !is_busy, |d| d.opacity(0.75))
             // Drag source for worktree reordering
             .when(!parent_id.is_empty(), |d| {
                 let wt_id = project_id.clone();
@@ -329,6 +333,9 @@ impl Sidebar {
                     .into_any_element()
                 },
             )
+            .when(!project.show_in_overview && !project.terminal_ids.is_empty() && !is_busy, |d| {
+                d.child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
+            })
             .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
             .when(is_busy, |d| {
                 d.child(
@@ -344,7 +351,6 @@ impl Sidebar {
                     sidebar_visibility_button(
                         ElementId::Name(format!("visibility-wt-{}", project_id).into()),
                         project.show_in_overview,
-                        project.terminal_ids.len(),
                         "worktree-item",
                         if project.show_in_overview { "Hide Worktree" } else { "Show Worktree" },
                         &t,
@@ -607,6 +613,7 @@ impl Sidebar {
         id_prefix: &str,
         group_name: &'static str,
         drag_config: GroupHeaderDragConfig,
+        all_hidden: bool,
         is_cursor: bool,
         is_focused_project: bool,
         _window: &mut Window,
@@ -633,6 +640,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(all_hidden, |d| d.opacity(0.75))
             .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
             })
@@ -787,6 +795,7 @@ impl Sidebar {
             .hover(|s| s.bg(rgb(t.bg_hover)))
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
+            .when(!project.show_in_overview, |d| d.opacity(0.75))
             .on_click(cx.listener({
                 let project_id = project_id.clone();
                 move |this, _, _window, cx| {
@@ -841,11 +850,14 @@ impl Sidebar {
                 }))
                 .into_any_element(),
             )
+            .when(!project.show_in_overview && !project.terminal_ids.is_empty(), |d| {
+                d.child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
+            })
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 sidebar_visibility_button(
                     ElementId::Name(format!("{}-vis-{}", id_prefix, project.id).into()),
-                    project.show_in_overview, project.terminal_ids.len(), group_name,
+                    project.show_in_overview, group_name,
                     if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
                 )
                 .on_click(cx.listener({
