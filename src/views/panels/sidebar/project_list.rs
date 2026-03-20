@@ -131,7 +131,7 @@ impl Sidebar {
                     color_dot(folder_color, project.is_worktree),
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
+                    this.show_color_picker(project_id.clone(), event.position, cx);
                     cx.stop_propagation();
                 }))
             })
@@ -732,7 +732,7 @@ impl Sidebar {
                     color_dot(folder_color, false),
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
+                    this.show_color_picker(project_id.clone(), event.position, cx);
                     cx.stop_propagation();
                 }))
             })

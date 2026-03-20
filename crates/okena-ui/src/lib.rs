@@ -18,6 +18,7 @@ pub mod input;
 pub mod list_row;
 pub mod menu;
 pub mod modal;
+pub mod popover;
 pub mod selectable_list;
 pub mod settings;
 pub mod theme;

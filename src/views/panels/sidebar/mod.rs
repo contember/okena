@@ -104,8 +104,8 @@ pub struct Sidebar {
     folder_click_detector: ClickDetector<String>,
     /// Folder ID for which color picker is shown
     color_picker_folder_id: Option<String>,
-    /// Y position (window coords) where the color picker was triggered
-    color_picker_click_y: f32,
+    /// Anchor position (window coords) for the currently open popover
+    popover_anchor: gpui::Point<gpui::Pixels>,
     /// Sidebar requests drained from Workspace by observer, applied in render() (needs Window)
     pending_sidebar_requests: Vec<SidebarRequest>,
     /// Focus handle for keyboard event capture
@@ -133,8 +133,6 @@ pub struct Sidebar {
     creating_worktree: HashSet<String>,
     /// Project ID for which the worktree list popover is open
     worktree_list_project_id: Option<String>,
-    /// Y position (window coords) where the worktree list was triggered
-    worktree_list_click_y: f32,
     /// Cached git worktrees for the worktree list popover (computed eagerly on show)
     worktree_list_entries: Vec<(String, String)>,
 }
@@ -191,7 +189,7 @@ impl Sidebar {
             folder_rename: None,
             folder_click_detector: ClickDetector::new(),
             color_picker_folder_id: None,
-            color_picker_click_y: 0.0,
+            popover_anchor: gpui::point(gpui::px(0.0), gpui::px(0.0)),
             pending_sidebar_requests: Vec::new(),
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -205,7 +203,6 @@ impl Sidebar {
             hook_auto_expanded: HashSet::new(),
             creating_worktree: HashSet::new(),
             worktree_list_project_id: None,
-            worktree_list_click_y: 0.0,
             worktree_list_entries: Vec::new(),
         }
     }
@@ -576,17 +573,17 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn show_color_picker(&mut self, project_id: String, click_y: f32, cx: &mut Context<Self>) {
+    pub(super) fn show_color_picker(&mut self, project_id: String, anchor: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.color_picker_project_id = Some(project_id);
         self.color_picker_folder_id = None;
-        self.color_picker_click_y = click_y;
+        self.popover_anchor = anchor;
         cx.notify();
     }
 
-    pub(super) fn show_folder_color_picker(&mut self, folder_id: String, click_y: f32, cx: &mut Context<Self>) {
+    pub(super) fn show_folder_color_picker(&mut self, folder_id: String, anchor: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.color_picker_folder_id = Some(folder_id);
         self.color_picker_project_id = None;
-        self.color_picker_click_y = click_y;
+        self.popover_anchor = anchor;
         cx.notify();
     }
 
@@ -596,7 +593,7 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn show_worktree_list(&mut self, project_id: String, click_y: f32, cx: &mut Context<Self>) {
+    pub(super) fn show_worktree_list(&mut self, project_id: String, anchor: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         let project_path = self.workspace.read(cx).project(&project_id)
             .map(|p| p.path.clone())
             .unwrap_or_default();
@@ -604,7 +601,7 @@ impl Sidebar {
             std::path::Path::new(&project_path),
         );
         self.worktree_list_project_id = Some(project_id);
-        self.worktree_list_click_y = click_y;
+        self.popover_anchor = anchor;
         cx.notify();
     }
 
@@ -1437,8 +1434,8 @@ impl Render for Sidebar {
                     self.spawn_quick_create_worktree(&project_id, cx);
                 }
                 SidebarRequest::ShowWorktreeList { project_id } => {
-                    // Use a default Y position since we don't have click coords from context menu
-                    self.show_worktree_list(project_id, 200.0, cx);
+                    // Use a default position since we don't have click coords from context menu
+                    self.show_worktree_list(project_id, gpui::point(gpui::px(40.0), gpui::px(200.0)), cx);
                 }
             }
         }
@@ -1857,47 +1854,36 @@ impl Render for Sidebar {
                     .children(flat_elements)
                     .child(self.render_remote_section(cx)),
             )
-            // Color picker overlay
+            // Color picker popover
             .when(has_color_picker, |d: Div| {
+                let anchor = self.popover_anchor;
                 d.child(
-                    // Backdrop to close picker when clicking outside
-                    div()
-                        .id("color-picker-backdrop")
-                        .absolute()
-                        .inset_0()
+                    okena_ui::popover::popover_backdrop("color-picker-backdrop")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.hide_color_picker(cx);
                         }))
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
                 )
                 .when(color_picker_project_id.is_some(), |d: Div| {
                     let project_id = color_picker_project_id.unwrap();
-                    d.child(self.render_color_picker(&project_id, cx))
+                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_color_picker(&project_id, cx)))
                 })
                 .when(color_picker_folder_id.is_some(), |d: Div| {
                     let folder_id = color_picker_folder_id.unwrap();
-                    d.child(self.render_folder_color_picker(&folder_id, cx))
+                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_folder_color_picker(&folder_id, cx)))
                 })
             })
             // Worktree list popover
             .when(has_worktree_list, |d: Div| {
+                let anchor = self.popover_anchor;
                 d.child(
-                    div()
-                        .id("worktree-list-backdrop")
-                        .absolute()
-                        .inset_0()
+                    okena_ui::popover::popover_backdrop("worktree-list-backdrop")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.hide_worktree_list(cx);
                         }))
-                        .on_scroll_wheel(|_, _, cx| {
-                            cx.stop_propagation();
-                        })
                 )
                 .map(|d| {
                     let project_id = worktree_list_project_id.unwrap();
-                    d.child(self.render_worktree_list(&project_id, cx))
+                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_worktree_list(&project_id, cx)))
                 })
             })
     }

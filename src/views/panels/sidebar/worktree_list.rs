@@ -43,30 +43,9 @@ impl Sidebar {
             })
             .collect();
 
-        let picker_top = {
-            let title_bar_offset = if cfg!(target_os = "macos") { 28.0 } else { 32.0 };
-            (self.worktree_list_click_y - title_bar_offset - 4.0).max(8.0)
-        };
-
-        div()
-            .absolute()
-            .occlude()
-            .top(px(picker_top))
-            .left(px(30.0))
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .rounded(px(6.0))
-            .shadow_lg()
-            .p(px(8.0))
+        okena_ui::popover::popover_panel("worktree-list-panel", &t)
             .w(px(280.0))
             .max_h(px(400.0))
-            .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_scroll_wheel(|_: &ScrollWheelEvent, _, cx| {
-                cx.stop_propagation();
-            })
             .child(
                 div()
                     .text_size(px(11.0))
@@ -75,7 +54,7 @@ impl Sidebar {
                     .pb(px(6.0))
                     .child("WORKTREES")
             )
-            .when(worktrees.is_empty(), |d: Div| {
+            .when(worktrees.is_empty(), |d| {
                 d.child(
                     div()
                         .text_size(px(12.0))
