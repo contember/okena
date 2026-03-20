@@ -314,6 +314,46 @@ impl ResolvedBackend {
     }
 }
 
+/// Remove dtach socket files whose dtach process is no longer running.
+/// Called once at startup to clean up after crashes or ungraceful exits.
+#[cfg(unix)]
+pub fn cleanup_stale_dtach_sockets() {
+    let dir = get_dtach_socket_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return, // dir doesn't exist yet — nothing to clean
+    };
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            continue;
+        }
+
+        // Check if any process still has this socket open
+        let has_listener = Command::new("lsof")
+            .arg("-t")
+            .arg(&path)
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false);
+
+        if !has_listener {
+            let _ = std::fs::remove_file(&path);
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        log::info!(
+            "Cleaned up {} stale dtach socket(s) from {:?}",
+            removed,
+            dir
+        );
+    }
+}
+
 /// Resolve a session backend for a specific WSL distro.
 /// Runs `wsl.exe -d <distro> -- sh -c "command -v <tool>"` to check availability.
 /// Results are cached per (distro, preference) pair so detection runs at most once.
