@@ -93,6 +93,8 @@ pub struct RootView {
     pane_switcher_entity: Option<Entity<pane_switcher::PaneSwitcher>>,
     /// Service manager (set by Okena after creation)
     service_manager: Option<Entity<ServiceManager>>,
+    /// Last focused project ID (for scroll-to-focused detection)
+    last_scroll_project: Option<String>,
 }
 
 impl RootView {
@@ -180,7 +182,20 @@ impl RootView {
             git_watcher: None,
             pane_switch_active: false,
             pane_switcher_entity: None,
+            last_scroll_project: None,
         };
+
+        // Observe workspace to scroll focused project into view
+        cx.observe(&view.workspace, |this, workspace, cx| {
+            let focused_project = workspace.read(cx)
+                .focus_manager.focused_terminal_state()
+                .map(|f| f.project_id.clone());
+
+            if focused_project != this.last_scroll_project && focused_project.is_some() {
+                this.last_scroll_project = focused_project.clone();
+                this.scroll_to_focused_project(focused_project.as_deref(), cx);
+            }
+        }).detach();
 
         // Initialize project columns
         view.sync_project_columns(cx);

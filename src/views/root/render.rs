@@ -11,6 +11,90 @@ use std::future::Future;
 use super::RootView;
 
 impl RootView {
+    /// Normalize raw project widths to percentages summing to 100%.
+    fn normalize_widths(raw_widths: &[f32]) -> Vec<f32> {
+        let total: f32 = raw_widths.iter().sum();
+        if total > 0.0 {
+            raw_widths.iter().map(|w| w / total * 100.0).collect()
+        } else {
+            let n = raw_widths.len();
+            vec![100.0 / n as f32; n]
+        }
+    }
+
+    /// Convert normalized percentage widths to pixel widths.
+    fn to_pixel_widths(widths: &[f32], container_width: f32, min_col_width: f32) -> Vec<f32> {
+        let num_dividers = widths.len().saturating_sub(1) as f32;
+        let available_width = (container_width - num_dividers * 1.0).max(0.0);
+        widths.iter()
+            .map(|w| (available_width * w / 100.0).max(min_col_width))
+            .collect()
+    }
+
+    /// Scroll the projects grid horizontally to ensure the focused project column is visible.
+    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, cx: &Context<Self>) {
+        let focused_id = match focused_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let workspace = self.workspace.read(cx);
+
+        // Don't scroll when zoomed to a single project
+        if workspace.focus_manager.fullscreen_project_id().is_some() {
+            return;
+        }
+
+        let visible_projects: Vec<String> = workspace.visible_projects()
+            .iter().map(|p| p.id.clone()).collect();
+        let num_projects = visible_projects.len();
+        if num_projects <= 1 {
+            return;
+        }
+
+        // Find the focused project's index
+        let focused_idx = match visible_projects.iter().position(|id| id == focused_id) {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        let settings = settings_entity(cx).read(cx).settings.clone();
+        let container_width = f32::from(self.projects_grid_bounds.borrow().size.width);
+
+        let raw_widths: Vec<f32> = visible_projects.iter()
+            .map(|id| workspace.get_project_width(id, num_projects))
+            .collect();
+        let widths = Self::normalize_widths(&raw_widths);
+        let pixel_widths = Self::to_pixel_widths(&widths, container_width, settings.min_column_width);
+
+        // Compute the left edge (x offset) of the focused column
+        let mut col_left: f32 = 0.0;
+        for i in 0..focused_idx {
+            col_left += pixel_widths[i] + 1.0; // +1 for divider
+        }
+        let col_right = col_left + pixel_widths[focused_idx];
+
+        // Current scroll viewport: offset is negative (scrolled left = more negative)
+        let current_offset = f32::from(self.projects_scroll_handle.offset().x);
+        let viewport_left = -current_offset;
+        let viewport_right = viewport_left + container_width;
+
+        // Determine if we need to scroll
+        let new_offset = if col_left < viewport_left {
+            // Column is off-screen to the left — scroll to show its left edge
+            -col_left
+        } else if col_right > viewport_right {
+            // Column is off-screen to the right — scroll to show its right edge
+            -(col_right - container_width)
+        } else {
+            return; // already visible
+        };
+
+        let max_offset = self.projects_scroll_handle.max_offset();
+        let clamped = new_offset.clamp(-f32::from(max_offset.width), 0.0);
+        self.projects_scroll_handle.set_offset(point(px(clamped), px(0.0)));
+    }
+
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // Sync project columns to handle newly added projects
         self.sync_project_columns(cx);
@@ -67,39 +151,24 @@ impl RootView {
         }
 
         // Get widths for each project
-        // When only one project is visible (focused), always use 100%
-        // Otherwise, normalize widths so they sum to 100%
-        let widths: Vec<f32> = if num_projects == 1 {
-            vec![100.0]
-        } else if num_projects == 0 {
-            vec![]
+        let settings = settings_entity(cx).read(cx).settings.clone();
+
+        let widths: Vec<f32> = if num_projects <= 1 {
+            vec![100.0; num_projects]
         } else {
             let workspace = self.workspace.read(cx);
             let raw_widths: Vec<f32> = visible_projects.iter()
                 .map(|id| workspace.get_project_width(id, num_projects))
                 .collect();
-
-            // Normalize widths to sum to 100%
-            let total: f32 = raw_widths.iter().sum();
-            if total > 0.0 {
-                raw_widths.iter().map(|w| w / total * 100.0).collect()
-            } else {
-                vec![100.0 / num_projects as f32; num_projects]
-            }
+            Self::normalize_widths(&raw_widths)
         };
 
         // Persistent bounds reference for resize calculation (survives across renders)
         let container_bounds = self.projects_grid_bounds.clone();
 
         // Compute pixel widths from percentages, accounting for divider widths
-        let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
-        let num_dividers = num_projects.saturating_sub(1) as f32;
         let container_width = f32::from(container_bounds.borrow().size.width);
-        let available_width = (container_width - num_dividers * 1.0).max(0.0);
-
-        let pixel_widths: Vec<f32> = widths.iter()
-            .map(|w| (available_width * w / 100.0).max(min_col_width))
-            .collect();
+        let pixel_widths = Self::to_pixel_widths(&widths, container_width, settings.min_column_width);
 
         // Build interleaved columns and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
