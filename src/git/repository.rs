@@ -694,57 +694,6 @@ pub fn get_ci_checks(path: &Path) -> Option<super::CiCheckSummary> {
 }
 
 /// List worktrees found in the template container directory.
-/// Scans the parent directory derived from the path template for subdirectories
-/// that are git working trees. Returns vec of (path, branch_name) pairs.
-pub fn list_template_worktrees(git_root: &Path, template: &str) -> Vec<(String, String)> {
-    let repo_name = match git_root.file_name().and_then(|n| n.to_str()) {
-        Some(n) => n,
-        None => return vec![],
-    };
-    let expanded = template.replace("{repo}", repo_name);
-
-    // Split at {branch} to get the container directory prefix
-    let prefix = match expanded.split("{branch}").next() {
-        Some(p) if p != expanded => p,
-        _ => return vec![],
-    };
-
-    let container = {
-        let path = PathBuf::from(prefix);
-        if path.is_relative() {
-            normalize_path(&git_root.join(&path))
-        } else {
-            path
-        }
-    };
-
-    let entries = match std::fs::read_dir(&container) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() || !path.join(".git").exists() {
-            continue;
-        }
-        let path_str = match path.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        if let Ok(output) = safe_output(command("git").args(["-C", path_str, "rev-parse", "--abbrev-ref", "HEAD"])) {
-            if output.status.success() {
-                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !branch.is_empty() && branch != "HEAD" {
-                    result.push((path.to_string_lossy().to_string(), branch));
-                }
-            }
-        }
-    }
-    result
-}
-
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
