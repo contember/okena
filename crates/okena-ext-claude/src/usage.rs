@@ -54,6 +54,8 @@ pub struct ClaudeUsage {
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
+    /// Send on this channel to wake up the fetch loop and retry immediately.
+    wake_tx: smol::channel::Sender<()>,
 }
 
 fn read_access_token() -> Option<String> {
@@ -239,6 +241,7 @@ impl ClaudeUsage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let data: Arc<Mutex<Option<UsageData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
+        let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
@@ -338,7 +341,16 @@ impl ClaudeUsage {
                     None => USAGE_INTERVAL,
                 };
                 log::info!("[claude-usage] next fetch in {}s", delay.as_secs());
-                smol::Timer::after(delay).await;
+                // Race: sleep vs wake signal (e.g. when UI becomes visible but has no data)
+                let woken = smol::future::or(
+                    async { smol::Timer::after(delay).await; false },
+                    async { let _ = wake_rx.recv().await; true },
+                ).await;
+                // Drain any extra wake signals
+                while wake_rx.try_recv().is_ok() {}
+                if woken {
+                    consecutive_failures = 0;
+                }
             }
         })
         .detach();
@@ -348,6 +360,7 @@ impl ClaudeUsage {
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            wake_tx,
         }
     }
 
@@ -638,7 +651,12 @@ impl Render for ClaudeUsage {
                 let sd = d.seven_day.as_ref().map(|t| t.utilization);
                 (fh, sd)
             }
-            None => return div().size_0().into_any_element(),
+            None => {
+                // Wake the fetch loop so it retries immediately (e.g. after toggle on/off
+                // or if the first fetch failed and backoff is waiting).
+                let _ = self.wake_tx.try_send(());
+                return div().size_0().into_any_element();
+            }
         };
         drop(data);
 
