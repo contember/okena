@@ -385,7 +385,7 @@ impl TerminalPane {
         );
 
         // Read fresh path and project info from workspace state
-        let (project_path, project_name, project_hooks, parent_hooks) = {
+        let (project_path, project_name, project_hooks, parent_hooks, is_worktree) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(&self.project_id);
             let path = project.map(|p| p.path.clone())
@@ -396,18 +396,21 @@ impl TerminalPane {
                 .and_then(|p| p.worktree_info.as_ref())
                 .and_then(|wt| ws.project(&wt.parent_project_id))
                 .map(|p| p.hooks.clone());
-            (path, name, hooks_cfg, parent)
+            let is_wt = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
+            (path, name, hooks_cfg, parent, is_wt)
         };
+
+        let env = hooks::terminal_hook_env(&self.project_id, &project_name, &project_path, is_worktree);
 
         // Apply shell_wrapper if configured
         let global_hooks = settings(cx).hooks;
         if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_shell_wrapper(&shell, &wrapper);
+            shell = hooks::apply_shell_wrapper(&shell, &wrapper, &env);
         }
 
         // Apply on_create: wrap shell to run command first, then exec into shell
         if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx) {
-            shell = hooks::apply_on_create(&shell, &cmd);
+            shell = hooks::apply_on_create(&shell, &cmd, &env);
         }
 
         match self

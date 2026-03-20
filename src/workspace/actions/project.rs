@@ -603,6 +603,9 @@ impl Workspace {
         // for backwards compatibility with worktrees created before monorepo support
         let worktree_path = std::path::PathBuf::from(&project_path);
 
+        // Resolve branch BEFORE removal (git worktree remove deletes the checkout)
+        let branch = crate::git::get_current_branch(&worktree_path).unwrap_or_default();
+
         // Remove the git worktree
         crate::git::remove_worktree(&worktree_path, force)?;
 
@@ -610,7 +613,7 @@ impl Workspace {
         self.delete_project(project_id, cx);
 
         // Fire worktree-specific hook (runs headlessly since project is deleted)
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, cx);
 
         Ok(())
     }
