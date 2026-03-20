@@ -2674,6 +2674,18 @@ impl Render for ProjectColumn {
 
                 let is_creating = workspace.creating_projects.contains(&self.project_id);
 
+                // Soft tinted background based on folder color (when enabled)
+                let bg_color = if crate::settings::settings(cx).color_tinted_background {
+                    let color = workspace.effective_folder_color(&project);
+                    if color != crate::theme::FolderColor::Default {
+                        rgb(crate::ui::tint_color(t.bg_primary, t.get_folder_color(color), 0.025))
+                    } else {
+                        rgb(t.bg_primary)
+                    }
+                } else {
+                    rgb(t.bg_primary)
+                };
+
                 // Content: layout, creating state, or empty bookmark state
                 let content = if has_layout {
                     // Ensure layout container exists (created once, not every render)
@@ -2700,7 +2712,7 @@ impl Render for ProjectColumn {
                     .flex_col()
                     .size_full()
                     .min_h_0()
-                    .bg(rgb(t.bg_primary))
+                    .bg(bg_color)
                     .child(self.render_header(&project, cx))
                     .child(content)
                     .child(self.render_service_panel(cx))

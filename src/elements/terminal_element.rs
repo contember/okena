@@ -55,6 +55,8 @@ pub struct TerminalElement {
     cursor_visible: bool,
     cursor_style: CursorShape,
     zoom_level: f32,
+    /// Optional background tint color (u32 RGB) blended softly into the terminal background.
+    bg_tint: Option<u32>,
 }
 
 impl TerminalElement {
@@ -69,7 +71,13 @@ impl TerminalElement {
             cursor_visible: true,
             cursor_style: CursorShape::Block,
             zoom_level: 1.0,
+            bg_tint: None,
         }
+    }
+
+    pub fn with_bg_tint(mut self, tint: Option<u32>) -> Self {
+        self.bg_tint = tint;
+        self
     }
 
     pub fn with_zoom(mut self, zoom_level: f32) -> Self {
@@ -310,10 +318,14 @@ impl Element for TerminalElement {
 
         // Paint background using theme color (different for focused vs unfocused)
         let is_focused = self.focus_handle.is_focused(window);
-        let bg_color = if is_focused {
+        let base_bg = if is_focused {
             t.term_background
         } else {
             t.term_background_unfocused
+        };
+        let bg_color = match self.bg_tint {
+            Some(tint) => crate::ui::tint_color(base_bg, tint, 0.025),
+            None => base_bg,
         };
         window.paint_quad(fill(bounds, rgb(bg_color)));
 
