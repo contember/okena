@@ -7,6 +7,8 @@ use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
+use okena_ui::color_dot::color_dot;
+use okena_ui::icon_button::icon_button;
 
 use super::item_widgets::*;
 use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag, WorktreeDrag, WorktreeDragView};
@@ -125,24 +127,7 @@ impl Sidebar {
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
                     ElementId::Name(format!("folder-icon-{}", project.id).into()),
-                    if project.is_worktree {
-                        div()
-                            .flex_shrink_0()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(rgb(folder_color))
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_shrink_0()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(folder_color))
-                            .into_any_element()
-                    },
+                    color_dot(folder_color, project.is_worktree),
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
@@ -305,7 +290,7 @@ impl Sidebar {
             .child({
                 // Hollow circle indicator for all worktrees
                 let folder_color = t.get_folder_color(project.folder_color);
-                let color = if project.is_orphan { rgb(t.warning) } else { rgb(folder_color) };
+                let dot_color = if project.is_orphan { t.warning } else { folder_color };
                 div()
                     .flex_shrink_0()
                     .w(px(14.0))
@@ -313,14 +298,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .w(px(8.0))
-                            .h(px(8.0))
-                            .rounded(px(4.0))
-                            .border_1()
-                            .border_color(color)
-                    )
+                    .child(color_dot(dot_color, true))
             })
             .child(
                 if is_renaming {
@@ -558,16 +536,11 @@ impl Sidebar {
                     .group_hover("terminal-item", |s| s.opacity(1.0))
                     .child(
                         // Minimize/restore button
-                        div()
-                            .id(ElementId::Name(format!("{}minimize-{}", id_prefix, terminal_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                        icon_button(
+                            ElementId::Name(format!("{}minimize-{}", id_prefix, terminal_id).into()),
+                            "icons/minimize.svg",
+                            &t,
+                        )
                             .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                                 cx.stop_propagation();
                             }))
@@ -584,12 +557,6 @@ impl Sidebar {
                                     }
                                 }
                             }))
-                            .child(
-                                svg()
-                                    .path("icons/minimize.svg")
-                                    .size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
                             .tooltip({
                                 let tooltip_text = if is_minimized { "Restore" } else { "Minimize" };
                                 move |_window, cx| {
@@ -601,16 +568,11 @@ impl Sidebar {
                     )
                     .child(
                         // Fullscreen button
-                        div()
-                            .id(ElementId::Name(format!("{}fullscreen-{}", id_prefix, terminal_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                        icon_button(
+                            ElementId::Name(format!("{}fullscreen-{}", id_prefix, terminal_id).into()),
+                            "icons/fullscreen.svg",
+                            &t,
+                        )
                             .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                                 cx.stop_propagation();
                             }))
@@ -627,12 +589,6 @@ impl Sidebar {
                                     }
                                 }
                             }))
-                            .child(
-                                svg()
-                                    .path("icons/fullscreen.svg")
-                                    .size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                            )
                             .tooltip(|_window, cx| {
                                 Tooltip::new("Fullscreen")
                                     .action(&ToggleFullscreen as &dyn Action, None)
@@ -757,7 +713,7 @@ impl Sidebar {
                 let project_id = project.id.clone();
                 sidebar_color_indicator(
                     ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
-                    div().flex_shrink_0().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color)).into_any_element(),
+                    color_dot(folder_color, false),
                 )
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                     this.show_color_picker(project_id.clone(), f32::from(event.position.y), cx);
@@ -869,9 +825,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(rgb(folder_color))
-                    )
+                    .child(color_dot(folder_color, false))
             })
             .child(
                 sidebar_name_label(ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()), project.name.clone(), &t)

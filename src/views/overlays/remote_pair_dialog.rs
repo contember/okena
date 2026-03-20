@@ -6,9 +6,10 @@
 use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{
-    button, button_primary, input_container, labeled_input, modal_backdrop, modal_content,
+    input_container, labeled_input, modal_backdrop, modal_content,
     modal_header, SimpleInput, SimpleInputState,
 };
+use okena_ui::dialog_actions::dialog_actions;
 use gpui::prelude::*;
 use gpui::*;
 
@@ -117,24 +118,13 @@ impl Render for RemotePairDialog {
                                     ),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.0))
-                                    .justify_end()
-                                    .child(
-                                        button("cancel-pair-btn", "Cancel", &t)
-                                            .on_click(
-                                                cx.listener(|this, _, _window, cx| {
-                                                    this.close(cx);
-                                                }),
-                                            ),
-                                    )
-                                    .child(
-                                        button_primary("confirm-pair-btn", "Pair", &t)
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.pair(cx);
-                                            })),
-                                    ),
+                                dialog_actions(
+                                    "Cancel",
+                                    cx.listener(|this, _, _window, cx| { this.close(cx); }),
+                                    "Pair",
+                                    cx.listener(|this, _, _window, cx| { this.pair(cx); }),
+                                    &t,
+                                ),
                             ),
                     ),
             )

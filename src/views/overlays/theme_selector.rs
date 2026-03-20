@@ -1,7 +1,7 @@
 use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::{
-    get_themes_dir, load_custom_themes, theme, theme_entity, with_alpha, ThemeColors, ThemeInfo, ThemeMode,
+    get_themes_dir, load_custom_themes, theme, theme_entity, ThemeColors, ThemeInfo, ThemeMode,
     DARK_THEME, HIGH_CONTRAST_THEME, LIGHT_THEME, PASTEL_DARK_THEME,
 };
 use crate::views::components::{
@@ -11,6 +11,7 @@ use crate::views::components::{
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
+use okena_ui::selectable_list::selectable_list_item;
 
 /// Theme selection entry with preview and info
 #[derive(Clone)]
@@ -282,18 +283,15 @@ impl ThemeSelector {
         let description = entry.info.description.clone();
         let is_custom = entry.info.id.starts_with("custom:");
 
-        div()
-            .id(ElementId::Name(format!("theme-{}", index).into()))
-            .cursor_pointer()
-            .flex()
-            .items_center()
+        selectable_list_item(
+                ElementId::Name(format!("theme-{}", index).into()),
+                is_selected,
+                &t,
+            )
             .gap(px(12.0))
-            .px(px(12.0))
             .py(px(10.0))
             .border_b_1()
             .border_color(rgb(t.border))
-            .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.15)))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {

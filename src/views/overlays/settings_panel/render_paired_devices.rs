@@ -1,5 +1,6 @@
 use crate::theme::theme;
 use gpui::*;
+use okena_ui::empty_state::empty_state;
 
 use super::components::*;
 use super::SettingsPanel;
@@ -13,31 +14,13 @@ impl SettingsPanel {
         if self.auth_store.is_none() {
             return content
                 .child(section_header("Paired Devices", &t))
-                .child(
-                    section_container(&t).child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(16.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(t.text_muted))
-                            .child("Remote server is not running"),
-                    ),
-                );
+                .child(section_container(&t).child(empty_state("Remote server is not running", &t).py(px(16.0))));
         }
 
         if self.paired_devices.is_empty() {
             return content
                 .child(section_header("Paired Devices", &t))
-                .child(
-                    section_container(&t).child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(16.0))
-                            .text_size(px(13.0))
-                            .text_color(rgb(t.text_muted))
-                            .child("No devices are currently paired"),
-                    ),
-                );
+                .child(section_container(&t).child(empty_state("No devices are currently paired", &t).py(px(16.0))));
         }
 
         let now_secs = std::time::SystemTime::now()

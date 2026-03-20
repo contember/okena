@@ -6,13 +6,15 @@
 //! - Type to filter projects
 
 use crate::keybindings::Cancel;
-use crate::theme::{theme, with_alpha};
+use crate::theme::theme;
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     modal_header, search_input_area, substring_filter, ListOverlayAction, ListOverlayConfig,
     ListOverlayState,
 };
 use crate::workspace::state::{ProjectData, Workspace};
+use okena_ui::empty_state::empty_state;
+use okena_ui::selectable_list::selectable_list_item;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -93,18 +95,15 @@ impl ProjectSwitcher {
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
 
-        div()
-            .id(ElementId::Name(format!("project-{}", display_index).into()))
-            .cursor_pointer()
-            .flex()
-            .items_center()
+        selectable_list_item(
+                ElementId::Name(format!("project-{}", display_index).into()),
+                is_selected,
+                &t,
+            )
             .gap(px(12.0))
-            .px(px(12.0))
             .py(px(10.0))
             .border_b_1()
             .border_color(rgb(t.border))
-            .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.15)))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
@@ -255,14 +254,7 @@ impl Render for ProjectSwitcher {
                                 },
                             ))
                             .when(self.state.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px(px(12.0))
-                                        .py(px(20.0))
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(empty_message.clone()),
-                                )
+                                d.child(empty_state(empty_message.clone(), &t))
                             }),
                     )
                     .child(keyboard_hints_footer(&[("Enter", "focus"), ("Space", "toggle visibility"), ("Esc", "close")], &t)),

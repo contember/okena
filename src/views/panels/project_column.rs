@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use okena_core::api::ActionRequest;
+use okena_ui::icon_action_button::icon_action_button;
 
 /// Delay before showing diff summary popover (ms)
 const HOVER_DELAY_MS: u64 = 400;
@@ -2010,20 +2011,12 @@ impl ProjectColumn {
                                 d
                                     // Start All
                                     .child(
-                                        div()
-                                            .id("svc-panel-start-all")
-                                            .cursor_pointer()
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(3.0))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.term_green))
-                                            .child("▶▶")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        icon_action_button(
+                                            "svc-panel-start-all",
+                                            "▶▶",
+                                            t.term_green,
+                                            &t,
+                                        )
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 cx.stop_propagation();
                                                 this.dispatch_service_action(ActionRequest::StartAllServices {
@@ -2034,20 +2027,12 @@ impl ProjectColumn {
                                     )
                                     // Stop All
                                     .child(
-                                        div()
-                                            .id("svc-panel-stop-all")
-                                            .cursor_pointer()
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(3.0))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.term_red))
-                                            .child("■■")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        icon_action_button(
+                                            "svc-panel-stop-all",
+                                            "■■",
+                                            t.term_red,
+                                            &t,
+                                        )
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 cx.stop_propagation();
                                                 this.dispatch_service_action(ActionRequest::StopAllServices {
@@ -2058,20 +2043,12 @@ impl ProjectColumn {
                                     )
                                     // Reload
                                     .child(
-                                        div()
-                                            .id("svc-panel-reload")
-                                            .cursor_pointer()
-                                            .w(px(22.0))
-                                            .h(px(22.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(3.0))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_secondary))
-                                            .child("⟳")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                        icon_action_button(
+                                            "svc-panel-reload",
+                                            "⟳",
+                                            t.text_secondary,
+                                            &t,
+                                        )
                                             .on_click(cx.listener(|this, _, _window, cx| {
                                                 cx.stop_propagation();
                                                 this.dispatch_service_action(ActionRequest::ReloadServices {
@@ -2103,20 +2080,12 @@ impl ProjectColumn {
                                     // Start button (when stopped/crashed)
                                     .when(active_is_stopped, |d| {
                                         d.child(
-                                            div()
-                                                .id("svc-panel-start")
-                                                .cursor_pointer()
-                                                .w(px(22.0))
-                                                .h(px(22.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(3.0))
-                                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                .text_size(px(10.0))
-                                                .text_color(rgb(t.term_green))
-                                                .child("▶")
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                            icon_action_button(
+                                                "svc-panel-start",
+                                                "▶",
+                                                t.term_green,
+                                                &t,
+                                            )
                                                 .on_click(cx.listener(|this, _, _window, cx| {
                                                     cx.stop_propagation();
                                                     if let Some(name) = this.active_service_name.clone() {
@@ -2132,20 +2101,12 @@ impl ProjectColumn {
                                     // Restart button (when running)
                                     .when(active_is_running, |d| {
                                         d.child(
-                                            div()
-                                                .id("svc-panel-restart")
-                                                .cursor_pointer()
-                                                .w(px(22.0))
-                                                .h(px(22.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(3.0))
-                                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                .text_size(px(10.0))
-                                                .text_color(rgb(t.text_secondary))
-                                                .child("⟳")
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                            icon_action_button(
+                                                "svc-panel-restart",
+                                                "⟳",
+                                                t.text_secondary,
+                                                &t,
+                                            )
                                                 .on_click(cx.listener(|this, _, _window, cx| {
                                                     cx.stop_propagation();
                                                     if let Some(name) = this.active_service_name.clone() {
@@ -2161,20 +2122,12 @@ impl ProjectColumn {
                                     // Stop button (when running)
                                     .when(active_is_running, |d| {
                                         d.child(
-                                            div()
-                                                .id("svc-panel-stop")
-                                                .cursor_pointer()
-                                                .w(px(22.0))
-                                                .h(px(22.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .rounded(px(3.0))
-                                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                .text_size(px(10.0))
-                                                .text_color(rgb(t.term_red))
-                                                .child("■")
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                            icon_action_button(
+                                                "svc-panel-stop",
+                                                "■",
+                                                t.term_red,
+                                                &t,
+                                            )
                                                 .on_click(cx.listener(|this, _, _window, cx| {
                                                     cx.stop_propagation();
                                                     if let Some(name) = this.active_service_name.clone() {
@@ -2584,20 +2537,12 @@ impl ProjectColumn {
                     .group_hover(group_name, |s| s.opacity(1.0))
                     .when(!is_running && !is_starting, |d| {
                         d.child(
-                            div()
-                                .id(ElementId::Name(format!("svc-overview-play-{}", idx).into()))
-                                .cursor_pointer()
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.term_green))
-                                .child("▶")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            icon_action_button(
+                                ElementId::Name(format!("svc-overview-play-{}", idx).into()),
+                                "▶",
+                                t.term_green,
+                                &t,
+                            )
                                 .on_click(cx.listener({
                                     let name = name.clone();
                                     move |this, _, _window, cx| {
@@ -2614,20 +2559,12 @@ impl ProjectColumn {
                     .when(is_running, |d| {
                         d
                             .child(
-                                div()
-                                    .id(ElementId::Name(format!("svc-overview-restart-{}", idx).into()))
-                                    .cursor_pointer()
-                                    .w(px(22.0))
-                                    .h(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.text_secondary))
-                                    .child("⟳")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                icon_action_button(
+                                    ElementId::Name(format!("svc-overview-restart-{}", idx).into()),
+                                    "⟳",
+                                    t.text_secondary,
+                                    &t,
+                                )
                                     .on_click(cx.listener({
                                         let name = name.clone();
                                         move |this, _, _window, cx| {
@@ -2641,20 +2578,12 @@ impl ProjectColumn {
                                     .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
                             )
                             .child(
-                                div()
-                                    .id(ElementId::Name(format!("svc-overview-stop-{}", idx).into()))
-                                    .cursor_pointer()
-                                    .w(px(22.0))
-                                    .h(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.term_red))
-                                    .child("■")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                icon_action_button(
+                                    ElementId::Name(format!("svc-overview-stop-{}", idx).into()),
+                                    "■",
+                                    t.term_red,
+                                    &t,
+                                )
                                     .on_click(cx.listener({
                                         let name = name.clone();
                                         move |this, _, _window, cx| {

@@ -4,14 +4,15 @@
 //! similar to VS Code's Cmd+P file picker.
 
 use crate::keybindings::Cancel;
-use crate::theme::{theme, with_alpha};
+use crate::theme::theme;
 use crate::views::components::{
     keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area,
     ListOverlayConfig,
 };
 use gpui::*;
 use gpui_component::h_flex;
-use gpui::prelude::*;
+use okena_ui::empty_state::empty_state;
+use okena_ui::selectable_list::selectable_list_item;
 use std::path::PathBuf;
 
 /// Binary/non-openable file extensions that get pushed to the bottom of results.
@@ -458,16 +459,12 @@ impl FileSearchDialog {
             Self::styled_text_with_highlights(&dir_path, &dir_positions, t.border_active)
         };
 
-        div()
-            .id(ElementId::Name(format!("file-{}", filtered_index).into()))
+        selectable_list_item(
+                ElementId::Name(format!("file-{}", filtered_index).into()),
+                is_selected,
+                &t,
+            )
             .w_full()
-            .cursor_pointer()
-            .flex()
-            .items_center()
-            .px(px(12.0))
-            .py(px(8.0))
-            .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.15)))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
@@ -589,18 +586,10 @@ impl Render for FileSearchDialog {
                     .child(if self.filtered_files.is_empty() {
                         div()
                             .flex_1()
-                            .child(
-                                div()
-                                    .px(px(12.0))
-                                    .py(px(20.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(if self.files.is_empty() {
-                                        "No files found in project"
-                                    } else {
-                                        "No matching files"
-                                    }),
-                            )
+                            .child(empty_state(
+                                if self.files.is_empty() { "No files found in project" } else { "No matching files" },
+                                &t,
+                            ))
                             .into_any_element()
                     } else {
                         let filtered = self.filtered_files.clone();

@@ -7,6 +7,7 @@ use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
+use okena_ui::icon_action_button::icon_action_button_sized;
 
 use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
 use super::item_widgets::sidebar_group_header;
@@ -56,21 +57,7 @@ impl Sidebar {
                 .opacity(0.0)
                 .group_hover("services-header", |s| s.opacity(1.0))
                 .child(
-                    // Start All button
-                    div()
-                        .id(ElementId::Name(format!("svc-start-all-{}", project_id).into()))
-                        .cursor_pointer()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child("▶")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    icon_action_button_sized(ElementId::Name(format!("svc-start-all-{}", project_id).into()), "▶", t.text_secondary, 18.0, &t)
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             move |this, _, _window, cx| {
@@ -83,21 +70,7 @@ impl Sidebar {
                         .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
                 )
                 .child(
-                    // Stop All button
-                    div()
-                        .id(ElementId::Name(format!("svc-stop-all-{}", project_id).into()))
-                        .cursor_pointer()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child("■")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    icon_action_button_sized(ElementId::Name(format!("svc-stop-all-{}", project_id).into()), "■", t.text_secondary, 18.0, &t)
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             move |this, _, _window, cx| {
@@ -110,21 +83,7 @@ impl Sidebar {
                         .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
                 )
                 .child(
-                    // Reload button
-                    div()
-                        .id(ElementId::Name(format!("svc-reload-{}", project_id).into()))
-                        .cursor_pointer()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.0))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child("⟳")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    icon_action_button_sized(ElementId::Name(format!("svc-reload-{}", project_id).into()), "⟳", t.text_secondary, 18.0, &t)
                         .on_click(cx.listener({
                             let project_id = project_id.clone();
                             move |this, _, _window, cx| {
@@ -291,22 +250,8 @@ impl Sidebar {
                     .opacity(0.0)
                     .group_hover("service-item", |s| s.opacity(1.0))
                     .when(!is_running && !is_starting, |d| {
-                        // Play button for stopped/crashed services
                         d.child(
-                            div()
-                                .id(ElementId::Name(format!("svc-play-{}-{}", project_id, service_name).into()))
-                                .cursor_pointer()
-                                .w(px(18.0))
-                                .h(px(18.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .text_size(px(10.0))
-                                .text_color(rgb(t.term_green))
-                                .child("▶")
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            icon_action_button_sized(ElementId::Name(format!("svc-play-{}-{}", project_id, service_name).into()), "▶", t.term_green, 18.0, &t)
                                 .on_click(cx.listener({
                                     let project_id = project_id.clone();
                                     let service_name = service_name.clone();
@@ -324,21 +269,7 @@ impl Sidebar {
                     .when(is_running, |d| {
                         d
                             .child(
-                                // Restart button
-                                div()
-                                    .id(ElementId::Name(format!("svc-restart-{}-{}", project_id, service_name).into()))
-                                    .cursor_pointer()
-                                    .w(px(18.0))
-                                    .h(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.text_secondary))
-                                    .child("⟳")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                icon_action_button_sized(ElementId::Name(format!("svc-restart-{}-{}", project_id, service_name).into()), "⟳", t.text_secondary, 18.0, &t)
                                     .on_click(cx.listener({
                                         let project_id = project_id.clone();
                                         let service_name = service_name.clone();
@@ -353,21 +284,7 @@ impl Sidebar {
                                     .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
                             )
                             .child(
-                                // Stop button
-                                div()
-                                    .id(ElementId::Name(format!("svc-stop-{}-{}", project_id, service_name).into()))
-                                    .cursor_pointer()
-                                    .w(px(18.0))
-                                    .h(px(18.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.term_red))
-                                    .child("■")
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                icon_action_button_sized(ElementId::Name(format!("svc-stop-{}-{}", project_id, service_name).into()), "■", t.term_red, 18.0, &t)
                                     .on_click(cx.listener({
                                         let project_id = project_id.clone();
                                         let service_name = service_name.clone();

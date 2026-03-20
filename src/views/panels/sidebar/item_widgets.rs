@@ -8,6 +8,7 @@ use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use okena_ui::icon_button::icon_button;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
 ///
@@ -226,26 +227,10 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
 /// Caller chains `.on_click()` to toggle visibility.
 pub fn sidebar_visibility_toggle(
     id: impl Into<ElementId>,
-    show_in_overview: bool,
+    _show_in_overview: bool,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .cursor_pointer()
-        .w(px(18.0))
-        .h(px(18.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.0))
-        .hover(|s| s.bg(rgb(t.bg_hover)))
-        .child(
-            svg()
-                .path("icons/eye.svg")
-                .size(px(12.0))
-                .text_color(rgb(t.text_muted)),
-        )
+    icon_button(id, "icons/eye.svg", t)
 }
 
 /// Visibility toggle button with hover-reveal behavior.

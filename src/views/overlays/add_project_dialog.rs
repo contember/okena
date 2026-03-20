@@ -4,9 +4,10 @@ use crate::keybindings::Cancel;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::theme::theme;
 use crate::views::components::{
-    button, button_primary, input_container, labeled_input, modal_backdrop, modal_content,
+    button, input_container, labeled_input, modal_backdrop, modal_content,
     modal_header, PathAutoCompleteState, SimpleInput, SimpleInputState,
 };
+use okena_ui::dialog_actions::dialog_actions;
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
@@ -401,24 +402,13 @@ impl Render for AddProjectDialog {
                             })
                             // Action buttons
                             .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.0))
-                                    .justify_end()
-                                    .child(
-                                        button("cancel-add-btn", "Cancel", &t).on_click(
-                                            cx.listener(|this, _, _window, cx| {
-                                                this.close(cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        button_primary("confirm-add-btn", "Add", &t).on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.add_project(window, cx);
-                                            }),
-                                        ),
-                                    ),
+                                dialog_actions(
+                                    "Cancel",
+                                    cx.listener(|this, _, _window, cx| { this.close(cx); }),
+                                    "Add",
+                                    cx.listener(|this, _, window, cx| { this.add_project(window, cx); }),
+                                    &t,
+                                ),
                             ),
                     )
                     // Path suggestions overlay (only for local target)

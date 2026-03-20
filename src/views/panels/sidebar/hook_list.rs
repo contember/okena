@@ -4,6 +4,7 @@ use crate::theme::theme;
 use crate::workspace::state::HookTerminalStatus;
 use gpui::*;
 use gpui::prelude::*;
+use okena_ui::icon_button::icon_button;
 
 use super::{Sidebar, SidebarProjectInfo, SidebarHookInfo, GroupKind};
 use super::item_widgets::sidebar_group_header;
@@ -120,22 +121,11 @@ impl Sidebar {
                         let command = hook.command.clone();
                         let cwd = hook.cwd.clone();
                         |el| el.child(
-                            div()
-                                .id(ElementId::Name(format!("hook-rerun-{}", terminal_id).into()))
-                                .cursor_pointer()
-                                .w(px(18.0))
-                                .h(px(18.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(3.0))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .child(
-                                    svg()
-                                        .path("icons/refresh.svg")
-                                        .size(px(10.0))
-                                        .text_color(rgb(t.text_muted)),
-                                )
+                            icon_button(
+                                ElementId::Name(format!("hook-rerun-{}", terminal_id).into()),
+                                "icons/refresh.svg",
+                                &t,
+                            )
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(move |this, _, _window, cx| {
                                     cx.stop_propagation();
@@ -151,22 +141,11 @@ impl Sidebar {
                     })
                     // Dismiss button
                     .child(
-                        div()
-                            .id(ElementId::Name(format!("hook-dismiss-{}", terminal_id).into()))
-                            .cursor_pointer()
-                            .w(px(18.0))
-                            .h(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .child(
-                                svg()
-                                    .path("icons/close.svg")
-                                    .size(px(10.0))
-                                    .text_color(rgb(t.text_muted)),
-                            )
+                        icon_button(
+                            ElementId::Name(format!("hook-dismiss-{}", terminal_id).into()),
+                            "icons/close.svg",
+                            &t,
+                        )
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener({
                                 let terminal_id = terminal_id.clone();

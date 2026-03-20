@@ -1,5 +1,5 @@
 use crate::keybindings::{format_keystroke, get_action_descriptions, get_config, Cancel};
-use crate::theme::{theme, with_alpha};
+use crate::theme::theme;
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     search_input_area, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
@@ -7,6 +7,8 @@ use crate::views::components::{
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
+use okena_ui::empty_state::empty_state;
+use okena_ui::selectable_list::selectable_list_item;
 
 /// Command entry for the palette
 #[derive(Clone)]
@@ -106,16 +108,12 @@ impl CommandPalette {
         let category = command.category.clone();
         let keybinding = command.keybinding.clone();
 
-        div()
-            .id(ElementId::Name(format!("command-{}", filtered_index).into()))
-            .cursor_pointer()
-            .flex()
-            .items_center()
+        selectable_list_item(
+                ElementId::Name(format!("command-{}", filtered_index).into()),
+                is_selected,
+                &t,
+            )
             .justify_between()
-            .px(px(12.0))
-            .py(px(8.0))
-            .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.15)))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -239,14 +237,7 @@ impl Render for CommandPalette {
                                     .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
                             )
                             .when(self.state.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .px(px(12.0))
-                                        .py(px(20.0))
-                                        .text_size(px(13.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(empty_message.clone()),
-                                )
+                                d.child(empty_state(empty_message.clone(), &t))
                             }),
                     )
                     .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),
