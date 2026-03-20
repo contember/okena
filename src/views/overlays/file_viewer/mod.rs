@@ -138,7 +138,7 @@ impl FileViewer {
             expanded_folders,
             selected_file_index,
             tree_scroll_handle: ScrollHandle::new(),
-            sidebar_visible: false,
+            sidebar_visible: true,
             is_dark,
         };
 
