@@ -1,5 +1,9 @@
 # Okena - Development Notes
 
+## Git Rules
+
+- **Never revert or discard changes you didn't make.** If you see unexpected modifications in the working tree (e.g. from worktrees, other branches, or manual edits), leave them alone. Only stage and commit your own work.
+
 Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 
 ## Build Commands
