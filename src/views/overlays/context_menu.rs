@@ -15,7 +15,7 @@ pub enum ContextMenuEvent {
     AddTerminal { project_id: String },
     CreateWorktree { project_id: String, project_path: String },
     QuickCreateWorktree { project_id: String },
-    ManageWorktrees { project_id: String },
+    ManageWorktrees { project_id: String, position: gpui::Point<gpui::Pixels> },
     RenameProject { project_id: String, project_name: String },
     RenameDirectory { project_id: String, project_path: String },
     CloseWorktree { project_id: String },
@@ -104,6 +104,7 @@ impl ContextMenu {
     fn manage_worktrees(&self, cx: &mut Context<Self>) {
         cx.emit(ContextMenuEvent::ManageWorktrees {
             project_id: self.request.project_id.clone(),
+            position: self.request.position,
         });
     }
 

@@ -1433,9 +1433,8 @@ impl Render for Sidebar {
                 SidebarRequest::QuickCreateWorktree { project_id } => {
                     self.spawn_quick_create_worktree(&project_id, cx);
                 }
-                SidebarRequest::ShowWorktreeList { project_id } => {
-                    // Use a default position since we don't have click coords from context menu
-                    self.show_worktree_list(project_id, gpui::point(gpui::px(40.0), gpui::px(200.0)), cx);
+                SidebarRequest::ShowWorktreeList { project_id, position } => {
+                    self.show_worktree_list(project_id, position, cx);
                 }
             }
         }
@@ -1854,37 +1853,55 @@ impl Render for Sidebar {
                     .children(flat_elements)
                     .child(self.render_remote_section(cx)),
             )
-            // Color picker popover
+            // Color picker popover (deferred so backdrop covers entire window)
             .when(has_color_picker, |d: Div| {
                 let anchor = self.popover_anchor;
-                d.child(
-                    okena_ui::popover::popover_backdrop("color-picker-backdrop")
+                let panel = if let Some(project_id) = color_picker_project_id {
+                    self.render_color_picker(&project_id, cx).into_any_element()
+                } else if let Some(folder_id) = color_picker_folder_id {
+                    self.render_folder_color_picker(&folder_id, cx).into_any_element()
+                } else {
+                    return d;
+                };
+                d.child(deferred(
+                    div()
+                        .id("color-picker-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.hide_color_picker(cx);
                         }))
-                )
-                .when(color_picker_project_id.is_some(), |d: Div| {
-                    let project_id = color_picker_project_id.unwrap();
-                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_color_picker(&project_id, cx)))
-                })
-                .when(color_picker_folder_id.is_some(), |d: Div| {
-                    let folder_id = color_picker_folder_id.unwrap();
-                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_folder_color_picker(&folder_id, cx)))
-                })
+                        .on_scroll_wheel(|_, _, cx| { cx.stop_propagation(); })
+                        .child(
+                            anchored()
+                                .position(anchor)
+                                .snap_to_window()
+                                .child(panel)
+                        )
+                ))
             })
-            // Worktree list popover
+            // Worktree list popover (deferred so backdrop covers entire window)
             .when(has_worktree_list, |d: Div| {
                 let anchor = self.popover_anchor;
-                d.child(
-                    okena_ui::popover::popover_backdrop("worktree-list-backdrop")
+                let project_id = worktree_list_project_id.unwrap();
+                d.child(deferred(
+                    div()
+                        .id("worktree-list-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                             this.hide_worktree_list(cx);
                         }))
-                )
-                .map(|d| {
-                    let project_id = worktree_list_project_id.unwrap();
-                    d.child(okena_ui::popover::popover_anchored(anchor, self.render_worktree_list(&project_id, cx)))
-                })
+                        .on_scroll_wheel(|_, _, cx| { cx.stop_propagation(); })
+                        .child(
+                            anchored()
+                                .position(anchor)
+                                .snap_to_window()
+                                .child(self.render_worktree_list(&project_id, cx))
+                        )
+                ))
             })
     }
 }

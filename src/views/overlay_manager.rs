@@ -252,7 +252,7 @@ pub enum OverlayManagerEvent {
     QuickCreateWorktree { project_id: String },
 
     /// Context menu: Open manage worktrees popover in sidebar
-    ManageWorktrees { project_id: String },
+    ManageWorktrees { project_id: String, position: gpui::Point<gpui::Pixels> },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -745,10 +745,11 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
-                ContextMenuEvent::ManageWorktrees { project_id } => {
+                ContextMenuEvent::ManageWorktrees { project_id, position } => {
                     this.hide_context_menu(cx);
                     cx.emit(OverlayManagerEvent::ManageWorktrees {
                         project_id: project_id.clone(),
+                        position: *position,
                     });
                 }
                 ContextMenuEvent::ReloadServices { project_id } => {

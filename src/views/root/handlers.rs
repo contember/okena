@@ -107,10 +107,11 @@ impl RootView {
                     }, cx);
                 });
             }
-            OverlayManagerEvent::ManageWorktrees { project_id } => {
+            OverlayManagerEvent::ManageWorktrees { project_id, position } => {
                 self.request_broker.update(cx, |broker, cx| {
                     broker.push_sidebar_request(crate::workspace::requests::SidebarRequest::ShowWorktreeList {
                         project_id: project_id.clone(),
+                        position: *position,
                     }, cx);
                 });
             }
