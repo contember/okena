@@ -163,8 +163,12 @@ impl Sidebar {
                         }
                     }));
                     if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                        div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                            .child(name_label.flex_shrink())
+                        div().min_w_0().flex().items_center().gap(px(2.0))
+                            .child(
+                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
+                                    .child(project_name.clone())
+                            )
                             .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                             .into_any_element()
                     } else {
@@ -335,8 +339,12 @@ impl Sidebar {
                         }
                     }));
                     if !project.show_in_overview && !project.terminal_ids.is_empty() && !is_busy {
-                        div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                            .child(name_label.flex_shrink())
+                        div().min_w_0().flex().items_center().gap(px(2.0))
+                            .child(
+                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
+                                    .child(project_name.clone())
+                            )
                             .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                             .into_any_element()
                     } else {
@@ -857,8 +865,12 @@ impl Sidebar {
                     }
                 }));
                 if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                    div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                        .child(name_label.flex_shrink())
+                    div().min_w_0().flex().items_center().gap(px(2.0))
+                        .child(
+                            div().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                                .text_size(px(12.0)).text_color(rgb(t.text_primary))
+                                .child(project.name.clone())
+                        )
                         .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                         .into_any_element()
                 } else {

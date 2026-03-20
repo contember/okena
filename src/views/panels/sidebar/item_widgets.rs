@@ -201,9 +201,10 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
 pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors) -> Div {
     div()
         .flex_shrink_0()
+        .ml(px(4.0))
         .px(px(4.0))
         .rounded(px(3.0))
-        .bg(rgb(t.bg_secondary))
+        .bg(rgb(t.bg_header))
         .text_size(px(10.0))
         .text_color(rgb(t.text_secondary))
         .child(format!("{}", count))
