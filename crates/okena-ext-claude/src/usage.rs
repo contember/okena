@@ -58,6 +58,8 @@ pub struct ClaudeUsage {
     wake_tx: smol::channel::Sender<()>,
     /// Whether a wake signal has already been sent (avoids spamming from render).
     wake_sent: Arc<AtomicBool>,
+    /// Background polling task. Cancelled automatically when this entity is dropped.
+    _poll_task: Task<()>,
 }
 
 fn read_access_token() -> Option<String> {
@@ -247,7 +249,7 @@ impl ClaudeUsage {
         let wake_sent = Arc::new(AtomicBool::new(false));
         let wake_sent_for_task = wake_sent.clone();
 
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+        let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
             loop {
                 // Returns (Option<UsageData>, Option<Duration>) — data + optional retry delay
@@ -326,11 +328,14 @@ impl ClaudeUsage {
                     *data_for_task.lock() = Some(fetched);
                     consecutive_failures = 0;
                     wake_sent_for_task.store(false, Ordering::SeqCst);
-                    let _ = this.update(cx, |_this, cx| {
-                        cx.notify();
-                    });
+                    if this.update(cx, |_this, cx| cx.notify()).is_err() {
+                        break;
+                    }
                 } else {
                     consecutive_failures = consecutive_failures.saturating_add(1);
+                    if this.update(cx, |_, _| {}).is_err() {
+                        break;
+                    }
                 }
 
                 let delay = match retry_after {
@@ -359,8 +364,7 @@ impl ClaudeUsage {
                 // to avoid retry storms when render() wakes us during 429s.
                 let _ = woken;
             }
-        })
-        .detach();
+        });
 
         Self {
             data,
@@ -369,6 +373,7 @@ impl ClaudeUsage {
             hover_token: Arc::new(AtomicU64::new(0)),
             wake_tx,
             wake_sent,
+            _poll_task: poll_task,
         }
     }
 

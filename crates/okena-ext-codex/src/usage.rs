@@ -60,6 +60,8 @@ pub struct CodexUsage {
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
+    /// Background polling task. Cancelled automatically when this entity is dropped.
+    _poll_task: Task<()>,
 }
 
 /// Read Codex OAuth credentials from ~/.codex/auth.json
@@ -360,7 +362,7 @@ impl CodexUsage {
         let data: Arc<Mutex<Option<UsageData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
 
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+        let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
             loop {
                 let result = smol::unblock(fetch_usage).await;
@@ -368,11 +370,14 @@ impl CodexUsage {
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
                     consecutive_failures = 0;
-                    let _ = this.update(cx, |_this, cx| {
-                        cx.notify();
-                    });
+                    if this.update(cx, |_this, cx| cx.notify()).is_err() {
+                        break;
+                    }
                 } else {
                     consecutive_failures = consecutive_failures.saturating_add(1);
+                    if this.update(cx, |_, _| {}).is_err() {
+                        break;
+                    }
                 }
 
                 let delay = if consecutive_failures > 0 {
@@ -384,14 +389,14 @@ impl CodexUsage {
                 };
                 smol::Timer::after(delay).await;
             }
-        })
-        .detach();
+        });
 
         Self {
             data,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            _poll_task: poll_task,
         }
     }
 

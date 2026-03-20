@@ -47,6 +47,8 @@ pub struct CodexStatus {
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
+    /// Background polling task. Cancelled automatically when this entity is dropped.
+    _poll_task: Task<()>,
 }
 
 impl CodexStatus {
@@ -54,7 +56,7 @@ impl CodexStatus {
         let data: Arc<Mutex<Option<StatusData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
 
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+        let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {
                 let result = smol::unblock(|| {
                     let client = reqwest::blocking::Client::builder()
@@ -138,21 +140,23 @@ impl CodexStatus {
 
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
-                    let _ = this.update(cx, |_this, cx| {
-                        cx.notify();
-                    });
+                    if this.update(cx, |_this, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                } else if this.update(cx, |_, _| {}).is_err() {
+                    break;
                 }
 
                 smol::Timer::after(STATUS_INTERVAL).await;
             }
-        })
-        .detach();
+        });
 
         Self {
             data,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            _poll_task: poll_task,
         }
     }
 

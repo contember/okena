@@ -3,7 +3,7 @@ mod usage;
 mod ui_helpers;
 
 use gpui::AppContext as _;
-use okena_extensions::{ExtensionManifest, ExtensionRegistration};
+use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};
 use std::sync::Arc;
 
 pub fn register() -> ExtensionRegistration {
@@ -13,11 +13,14 @@ pub fn register() -> ExtensionRegistration {
             name: "Claude Code",
             default_enabled: false,
         },
-        status_bar_widgets: Some(Arc::new(|app| {
+        activate: Arc::new(|app| {
             let status = app.new(|cx| status::ClaudeStatus::new(cx));
             let usage = app.new(|cx| usage::ClaudeUsage::new(cx));
-            vec![status.into(), usage.into()]
-        })),
-        status_bar_right_widgets: None,
+            ExtensionInstance {
+                status_bar_widgets: vec![status.into(), usage.into()],
+                status_bar_right_widgets: vec![],
+            }
+        }),
+        settings_view: None,
     }
 }

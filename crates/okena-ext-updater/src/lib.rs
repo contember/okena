@@ -6,7 +6,7 @@ mod status;
 mod update_checker;
 
 use gpui::AppContext as _;
-use okena_extensions::{ExtensionManifest, ExtensionRegistration};
+use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};
 use std::sync::Arc;
 
 // Re-export public types used by the host app
@@ -20,11 +20,14 @@ pub fn register() -> ExtensionRegistration {
             name: "Auto Update",
             default_enabled: true,
         },
-        status_bar_widgets: None,
-        status_bar_right_widgets: Some(Arc::new(|app| {
+        activate: Arc::new(|app| {
             let widget = app.new(|cx| crate::status::UpdateStatusWidget::new(cx));
-            vec![widget.into()]
-        })),
+            ExtensionInstance {
+                status_bar_widgets: vec![],
+                status_bar_right_widgets: vec![widget.into()],
+            }
+        }),
+        settings_view: None,
     }
 }
 
