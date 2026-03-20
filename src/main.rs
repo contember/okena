@@ -424,7 +424,7 @@ fn main() {
         cx.set_global(ext_registry);
 
         // Initialize updater (sets GlobalUpdateInfo global, cleans old binary)
-        okena_ext_updater::init(cx);
+        okena_ext_updater::init(env!("CARGO_PKG_VERSION"), cx);
 
         // Register theme provider for extensions
         cx.set_global(okena_extensions::GlobalThemeProvider(|cx| {

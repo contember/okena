@@ -12,14 +12,15 @@ pub struct ReleaseAsset {
 }
 
 /// Check GitHub for the latest release.
-pub async fn check_for_update() -> Result<Option<ReleaseAsset>> {
-    smol::unblock(check_blocking).await
+/// `app_version` should be the host application's version (e.g. from the root Cargo.toml).
+pub async fn check_for_update(app_version: String) -> Result<Option<ReleaseAsset>> {
+    smol::unblock(move || check_blocking(&app_version)).await
 }
 
-fn check_blocking() -> Result<Option<ReleaseAsset>> {
+fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
-        .user_agent(format!("okena/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("okena/{}", app_version))
         .build()
         .context("failed to build HTTP client")?;
 
@@ -48,7 +49,7 @@ fn check_blocking() -> Result<Option<ReleaseAsset>> {
     let remote_version = Version::parse(remote_version_str)
         .context("invalid remote version")?;
 
-    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
+    let current_version = Version::parse(app_version)
         .context("invalid current version")?;
 
     if remote_version <= current_version {

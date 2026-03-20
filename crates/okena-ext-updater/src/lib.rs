@@ -30,9 +30,10 @@ pub fn register() -> ExtensionRegistration {
 
 /// Initialize the updater: set GlobalUpdateInfo global, clean up old binary,
 /// start background checker. Called by the host app at startup.
-pub fn init(cx: &mut gpui::App) {
+/// `app_version` should be the host application's version (from root Cargo.toml).
+pub fn init(app_version: &str, cx: &mut gpui::App) {
     installer::cleanup_old_binary();
 
-    let update_info = UpdateInfo::new();
+    let update_info = UpdateInfo::new(app_version.to_string());
     cx.set_global(GlobalUpdateInfo(update_info));
 }

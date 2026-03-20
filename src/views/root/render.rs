@@ -491,7 +491,7 @@ impl Render for RootView {
                     let token = info.current_token();
                     cx.notify();
                     cx.spawn(async move |_this, cx| {
-                        match okena_ext_updater::checker::check_for_update().await {
+                        match okena_ext_updater::checker::check_for_update(info.app_version()).await {
                             Ok(Some(release)) => {
                                 if info.is_homebrew() {
                                     info.set_status(okena_ext_updater::UpdateStatus::BrewUpdate {

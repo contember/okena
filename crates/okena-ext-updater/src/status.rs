@@ -53,10 +53,11 @@ pub struct UpdateInfo {
     inner: Arc<Mutex<UpdateInfoInner>>,
     running: Arc<AtomicBool>,
     cancel_token: Arc<AtomicU64>,
+    app_version: Arc<String>,
 }
 
 impl UpdateInfo {
-    pub fn new() -> Self {
+    pub fn new(app_version: String) -> Self {
         Self {
             inner: Arc::new(Mutex::new(UpdateInfoInner {
                 status: UpdateStatus::Idle,
@@ -66,7 +67,12 @@ impl UpdateInfo {
             })),
             running: Arc::new(AtomicBool::new(false)),
             cancel_token: Arc::new(AtomicU64::new(0)),
+            app_version: Arc::new(app_version),
         }
+    }
+
+    pub fn app_version(&self) -> String {
+        (*self.app_version).clone()
     }
 
     pub fn status(&self) -> UpdateStatus {

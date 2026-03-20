@@ -48,7 +48,7 @@ pub fn start_update_checker(update_info: UpdateInfo, cx: &mut Context<UpdateStat
             update_info.set_status(UpdateStatus::Checking);
             let _ = this.update(cx, |_, cx| cx.notify());
 
-            match crate::checker::check_for_update().await {
+            match crate::checker::check_for_update(update_info.app_version()).await {
                 Ok(Some(release)) => {
                     if update_info.is_homebrew() {
                         update_info.set_status(UpdateStatus::BrewUpdate {
