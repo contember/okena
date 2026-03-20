@@ -3,7 +3,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +56,8 @@ pub struct ClaudeUsage {
     hover_token: Arc<AtomicU64>,
     /// Send on this channel to wake up the fetch loop and retry immediately.
     wake_tx: smol::channel::Sender<()>,
+    /// Whether a wake signal has already been sent (avoids spamming from render).
+    wake_sent: Arc<AtomicBool>,
 }
 
 fn read_access_token() -> Option<String> {
@@ -242,6 +244,8 @@ impl ClaudeUsage {
         let data: Arc<Mutex<Option<UsageData>>> = Arc::new(Mutex::new(None));
         let data_for_task = data.clone();
         let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
+        let wake_sent = Arc::new(AtomicBool::new(false));
+        let wake_sent_for_task = wake_sent.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
@@ -285,9 +289,11 @@ impl ClaudeUsage {
                                     .and_then(|v| v.to_str().ok())
                                     .and_then(|v| v.parse::<u64>().ok())
                                     .unwrap_or(USAGE_INTERVAL.as_secs() * 2);
+                                let effective = Duration::from_secs(retry_secs)
+                                    .max(MIN_RETRY_DELAY);
                                 log::warn!(
                                     "[claude-usage] rate limited (429), retrying in {}s",
-                                    retry_secs
+                                    effective.as_secs()
                                 );
                                 return (None, Some(Duration::from_secs(retry_secs)));
                             }
@@ -319,6 +325,7 @@ impl ClaudeUsage {
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
                     consecutive_failures = 0;
+                    wake_sent_for_task.store(false, Ordering::SeqCst);
                     let _ = this.update(cx, |_this, cx| {
                         cx.notify();
                     });
@@ -348,9 +355,9 @@ impl ClaudeUsage {
                 ).await;
                 // Drain any extra wake signals
                 while wake_rx.try_recv().is_ok() {}
-                if woken {
-                    consecutive_failures = 0;
-                }
+                // Don't reset consecutive_failures on wake — preserve backoff
+                // to avoid retry storms when render() wakes us during 429s.
+                let _ = woken;
             }
         })
         .detach();
@@ -361,6 +368,7 @@ impl ClaudeUsage {
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
             wake_tx,
+            wake_sent,
         }
     }
 
@@ -652,9 +660,11 @@ impl Render for ClaudeUsage {
                 (fh, sd)
             }
             None => {
-                // Wake the fetch loop so it retries immediately (e.g. after toggle on/off
-                // or if the first fetch failed and backoff is waiting).
-                let _ = self.wake_tx.try_send(());
+                // Wake the fetch loop once (e.g. after toggle on/off or if the
+                // first fetch failed). Only send one signal to avoid retry storms.
+                if !self.wake_sent.swap(true, Ordering::SeqCst) {
+                    let _ = self.wake_tx.try_send(());
+                }
                 return div().size_0().into_any_element();
             }
         };
