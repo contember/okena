@@ -1184,7 +1184,7 @@ impl SseDecode for crate::api::state::ProjectInfo {
             id: var_id,
             name: var_name,
             path: var_path,
-            is_visible: var_isVisible,
+            show_in_overview: var_isVisible,
             terminal_ids: var_terminalIds,
             terminal_names: var_terminalNames,
         };
@@ -1414,7 +1414,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::state::ProjectInfo {
             self.id.into_into_dart().into_dart(),
             self.name.into_into_dart().into_dart(),
             self.path.into_into_dart().into_dart(),
-            self.is_visible.into_into_dart().into_dart(),
+            self.show_in_overview.into_into_dart().into_dart(),
             self.terminal_ids.into_into_dart().into_dart(),
             self.terminal_names.into_into_dart().into_dart(),
         ]
@@ -1660,7 +1660,7 @@ impl SseEncode for crate::api::state::ProjectInfo {
         <String>::sse_encode(self.id, serializer);
         <String>::sse_encode(self.name, serializer);
         <String>::sse_encode(self.path, serializer);
-        <bool>::sse_encode(self.is_visible, serializer);
+        <bool>::sse_encode(self.show_in_overview, serializer);
         <Vec<String>>::sse_encode(self.terminal_ids, serializer);
         <std::collections::HashMap<String, String>>::sse_encode(self.terminal_names, serializer);
     }

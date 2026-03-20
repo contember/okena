@@ -1139,7 +1139,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
       path: dco_decode_String(arr[2]),
-      isVisible: dco_decode_bool(arr[3]),
+      showInOverview: dco_decode_bool(arr[3]),
       terminalIds: dco_decode_list_String(arr[4]),
       terminalNames: dco_decode_Map_String_String_None(arr[5]),
     );
@@ -1401,14 +1401,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_id = sse_decode_String(deserializer);
     var var_name = sse_decode_String(deserializer);
     var var_path = sse_decode_String(deserializer);
-    var var_isVisible = sse_decode_bool(deserializer);
+    var var_showInOverview = sse_decode_bool(deserializer);
     var var_terminalIds = sse_decode_list_String(deserializer);
     var var_terminalNames = sse_decode_Map_String_String_None(deserializer);
     return ProjectInfo(
       id: var_id,
       name: var_name,
       path: var_path,
-      isVisible: var_isVisible,
+      showInOverview: var_showInOverview,
       terminalIds: var_terminalIds,
       terminalNames: var_terminalNames,
     );
@@ -1658,7 +1658,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.id, serializer);
     sse_encode_String(self.name, serializer);
     sse_encode_String(self.path, serializer);
-    sse_encode_bool(self.isVisible, serializer);
+    sse_encode_bool(self.showInOverview, serializer);
     sse_encode_list_String(self.terminalIds, serializer);
     sse_encode_Map_String_String_None(self.terminalNames, serializer);
   }

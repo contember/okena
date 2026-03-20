@@ -65,7 +65,7 @@ class ProjectInfo {
   final String id;
   final String name;
   final String path;
-  final bool isVisible;
+  final bool showInOverview;
   final List<String> terminalIds;
   final Map<String, String> terminalNames;
 
@@ -73,7 +73,7 @@ class ProjectInfo {
     required this.id,
     required this.name,
     required this.path,
-    required this.isVisible,
+    required this.showInOverview,
     required this.terminalIds,
     required this.terminalNames,
   });
@@ -83,7 +83,7 @@ class ProjectInfo {
       id.hashCode ^
       name.hashCode ^
       path.hashCode ^
-      isVisible.hashCode ^
+      showInOverview.hashCode ^
       terminalIds.hashCode ^
       terminalNames.hashCode;
 
@@ -95,7 +95,7 @@ class ProjectInfo {
           id == other.id &&
           name == other.name &&
           path == other.path &&
-          isVisible == other.isVisible &&
+          showInOverview == other.showInOverview &&
           terminalIds == other.terminalIds &&
           terminalNames == other.terminalNames;
 }
