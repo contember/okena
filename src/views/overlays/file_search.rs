@@ -12,6 +12,7 @@ use crate::views::components::{
 use gpui::*;
 use gpui_component::h_flex;
 use okena_ui::empty_state::empty_state;
+use okena_ui::file_icon::file_icon;
 use okena_ui::selectable_list::selectable_list_item;
 use std::path::PathBuf;
 
@@ -506,6 +507,8 @@ impl FileSearchDialog {
                     this.open_selected(cx);
                 }),
             )
+            .gap(px(8.0))
+            .child(file_icon(filename, &t))
             .child(
                 div()
                     .flex_1()
