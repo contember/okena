@@ -11,6 +11,7 @@
 
 pub mod code_view;
 pub mod dropdown;
+pub mod file_icon;
 pub mod file_tree;
 pub mod list_overlay;
 pub mod modal_backdrop;
@@ -26,7 +27,7 @@ pub use list_overlay::{
     ListOverlayState,
 };
 pub use modal_backdrop::{fullscreen_overlay, modal_backdrop, modal_content, modal_header};
-pub use ui_helpers::{badge, button, button_primary, code_block_container, context_menu_panel, input_container, keyboard_hint, keyboard_hints_footer, labeled_input, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color, menu_separator, search_input_area, segmented_toggle, shell_indicator_chip};
+pub use ui_helpers::{badge, button, button_primary, code_block_container, context_menu_panel, input_container, keyboard_hint, keyboard_hints_footer, labeled_input, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color, menu_separator, search_input_area, search_input_area_selected, segmented_toggle, shell_indicator_chip};
 pub use path_autocomplete::PathAutoCompleteState;
 pub use rename_state::{
     cancel_rename, finish_rename, is_renaming, rename_input, start_rename_with_blur,

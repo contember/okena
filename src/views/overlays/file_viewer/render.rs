@@ -10,6 +10,7 @@ use crate::views::components::{
 };
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
+use crate::views::components::file_icon::render_file_icon;
 use crate::views::components::FileTreeNode;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -264,12 +265,8 @@ impl FileViewer {
                             this.select_file(file_index, cx);
                         }))
                         .child(
-                            svg()
-                                .path("icons/file.svg")
-                                .size(px(14.0))
-                                .text_color(rgb(t.text_muted))
-                                .mr(px(4.0))
-                                .flex_shrink_0(),
+                            render_file_icon(&file.filename)
+                                .mr(px(4.0)),
                         )
                         .child(
                             div()
