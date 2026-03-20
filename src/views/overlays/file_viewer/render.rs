@@ -221,6 +221,14 @@ impl FileViewer {
                             .flex_shrink_0(),
                     )
                     .child(
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_muted))
+                            .mr(px(4.0))
+                            .flex_shrink_0(),
+                    )
+                    .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(rgb(t.text_muted))
@@ -255,6 +263,14 @@ impl FileViewer {
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.select_file(file_index, cx);
                         }))
+                        .child(
+                            svg()
+                                .path("icons/file.svg")
+                                .size(px(14.0))
+                                .text_color(rgb(t.text_muted))
+                                .mr(px(4.0))
+                                .flex_shrink_0(),
+                        )
                         .child(
                             div()
                                 .text_size(px(13.0))
