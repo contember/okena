@@ -6,6 +6,21 @@ use crate::theme::ThemeColors;
 use gpui::*;
 use gpui_component::v_flex;
 
+/// Create a fullscreen overlay that fills the entire window.
+///
+/// Used for content-heavy views (diff viewer, file viewer) that benefit
+/// from maximum screen real estate. No backdrop, no rounded corners.
+pub fn fullscreen_overlay(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(id.into()))
+        .occlude()
+        .absolute()
+        .inset_0()
+        .bg(rgb(t.bg_primary))
+        .flex()
+        .flex_col()
+}
+
 /// Create a modal backdrop with click-to-close functionality.
 ///
 /// Returns a positioned div that covers the screen with a semi-transparent overlay.

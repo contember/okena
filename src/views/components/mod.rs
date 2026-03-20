@@ -25,7 +25,7 @@ pub use list_overlay::{
     handle_list_overlay_key, substring_filter, ListOverlayAction, ListOverlayConfig,
     ListOverlayState,
 };
-pub use modal_backdrop::{modal_backdrop, modal_content, modal_header};
+pub use modal_backdrop::{fullscreen_overlay, modal_backdrop, modal_content, modal_header};
 pub use ui_helpers::{badge, button, button_primary, code_block_container, context_menu_panel, input_container, keyboard_hint, keyboard_hints_footer, labeled_input, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color, menu_separator, search_input_area, segmented_toggle, shell_indicator_chip};
 pub use path_autocomplete::PathAutoCompleteState;
 pub use rename_state::{

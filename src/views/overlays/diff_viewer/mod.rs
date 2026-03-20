@@ -15,7 +15,7 @@ use crate::keybindings::Cancel;
 use crate::settings::settings_entity;
 use crate::theme::{theme, theme_entity};
 use crate::ui::{copy_to_clipboard, Selection2DNonEmpty, SelectionState};
-use crate::views::components::{build_file_tree, extract_selected_text, modal_backdrop, modal_content, syntax::load_syntax_set};
+use crate::views::components::{build_file_tree, extract_selected_text, fullscreen_overlay, syntax::load_syntax_set};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -540,10 +540,9 @@ impl Render for DiffViewer {
             window.focus(&focus_handle, cx);
         }
 
-        modal_backdrop("diff-viewer-backdrop", &t)
+        fullscreen_overlay("diff-viewer", &t)
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
-            .items_center()
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 if this.selection.normalized_non_empty().is_some() {
                     this.selection.clear();
@@ -579,14 +578,6 @@ impl Render for DiffViewer {
                     _ => {}
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    if this.scrollbar_drag.is_none() && this.h_scrollbar_drag.is_none() {
-                        this.close(cx);
-                    }
-                }),
-            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
@@ -615,20 +606,13 @@ impl Render for DiffViewer {
                     }
                 }),
             )
-            .child(
-                modal_content("diff-viewer-modal", &t)
-                    .w(relative(0.92))
-                    .max_w(px(1400.0))
-                    .h(relative(0.88))
-                    .max_h(px(950.0))
-                    .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), cx))
-                    // Commit info bar (when viewing a commit with navigation)
-                    .when(self.has_commits(), |d| {
-                        d.child(self.render_commit_info_bar(&t, cx))
-                    })
-                    .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
-                    .child(self.render_footer(&t)),
-            )
+            .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), cx))
+            // Commit info bar (when viewing a commit with navigation)
+            .when(self.has_commits(), |d| {
+                d.child(self.render_commit_info_bar(&t, cx))
+            })
+            .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
+            .child(self.render_footer(&t))
     }
 }
 

@@ -5,7 +5,7 @@ use crate::theme::{theme, ThemeColors};
 use crate::ui::{Selection1DExtension, Selection2DNonEmpty};
 use crate::views::components::{
     build_styled_text_with_backgrounds, code_block_container, find_word_boundaries,
-    get_scrollbar_geometry, modal_backdrop, modal_content, segmented_toggle, selection_bg_ranges,
+    fullscreen_overlay, get_scrollbar_geometry, segmented_toggle, selection_bg_ranges,
     HighlightedLine,
 };
 use super::markdown_renderer::RenderedNode;
@@ -387,10 +387,10 @@ impl Render for FileViewer {
             window.focus(&focus_handle, cx);
         }
 
-        modal_backdrop("file-viewer-backdrop", &t)
+        fullscreen_overlay("file-viewer", &t)
             .track_focus(&focus_handle)
             .key_context("FileViewer")
-            .items_center()
+            .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 let is_preview = this.display_mode == DisplayMode::Preview;
                 if is_preview && this.markdown_selection.normalized_non_empty().is_some() {
@@ -432,15 +432,6 @@ impl Render for FileViewer {
                     _ => {}
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    // Don't close if scrollbar is being dragged
-                    if this.scrollbar_drag.is_none() {
-                        this.close(cx);
-                    }
-                }),
-            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 if this.scrollbar_drag.is_some() {
                     let y = f32::from(event.position.y);
@@ -455,16 +446,8 @@ impl Render for FileViewer {
                     }
                 }),
             )
+            // Header with toggle for markdown files
             .child(
-                modal_content("file-viewer-modal", &t)
-                    // Larger modal - 90% width, 85% height with max bounds
-                    .w(relative(0.9))
-                    .max_w(px(1200.0))
-                    .h(relative(0.85))
-                    .max_h(px(900.0))
-                    .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
-                    // Custom header with toggle for markdown files
-                    .child(
                         div()
                             .px(px(16.0))
                             .py(px(12.0))
@@ -876,8 +859,7 @@ impl Render for FileViewer {
                                             ),
                                     ),
                             ),
-                    ),
-            )
+                    )
     }
 }
 
