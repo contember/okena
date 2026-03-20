@@ -1,13 +1,14 @@
-use crate::git::{list_git_worktrees, list_template_worktrees};
 use crate::workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use std::path::Path;
 use std::time::Duration;
 
-/// Periodically discovers new git worktrees and removes stale worktree projects.
+/// Periodically removes stale worktree projects whose directories no longer exist.
 ///
-/// Follows the `GitStatusWatcher` pattern: a GPUI entity with a `cx.spawn` async loop.
+/// Worktrees are only added as projects explicitly by the user (via the worktree
+/// list popover or the create worktree dialog). This watcher only cleans up
+/// worktree projects that have become stale (directory deleted externally).
 pub struct WorktreeSyncWatcher {
     workspace: Entity<Workspace>,
 }
@@ -26,89 +27,17 @@ impl WorktreeSyncWatcher {
             loop {
                 smol::Timer::after(Duration::from_secs(30)).await;
 
-                // Collect project info from workspace and settings
-                let (parent_projects, current_worktrees, existing_paths, removing_paths, path_template) = cx.update(|cx| {
+                // Collect current worktree projects
+                let current_worktrees: Vec<(String, String)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
-                    let parents: Vec<(String, String)> = ws.data().projects.iter()
-                        .filter(|p| p.worktree_info.is_none() && !p.is_remote)
-                        .map(|p| (p.id.clone(), p.path.clone()))
-                        .collect();
-                    let worktrees: Vec<(String, String)> = ws.data().projects.iter()
+                    ws.data().projects.iter()
                         .filter(|p| p.worktree_info.is_some())
                         .map(|p| (p.id.clone(), p.path.clone()))
-                        .collect();
-                    let paths: std::collections::HashSet<String> = ws.data().projects.iter()
-                        .map(|p| p.path.clone())
-                        .collect();
-                    let removing = ws.removing_worktree_paths.clone();
-                    let template = crate::settings::settings(cx).worktree.path_template.clone();
-                    (parents, worktrees, paths, removing, template)
+                        .collect()
                 });
-
-                // Run git worktree discovery on blocking thread
-                let discovered = smol::unblock({
-                    let parent_projects = parent_projects.clone();
-                    let existing_paths = existing_paths.clone();
-                    let removing_paths = removing_paths.clone();
-                    let path_template = path_template.clone();
-                    move || {
-                        // Build canonical sets for dedup with git output
-                        let canonical_existing: std::collections::HashSet<String> = existing_paths.iter()
-                            .map(|p| Path::new(p).canonicalize()
-                                .map(|c| c.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| p.clone()))
-                            .collect();
-                        let canonical_removing: std::collections::HashSet<String> = removing_paths.iter()
-                            .map(|p| Path::new(p).canonicalize()
-                                .map(|c| c.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| p.clone()))
-                            .collect();
-
-                        let mut new_worktrees = Vec::new();
-                        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-                        for (parent_id, parent_path) in &parent_projects {
-                            if !Path::new(parent_path).exists() {
-                                continue;
-                            }
-                            let canonical_parent = Path::new(parent_path)
-                                .canonicalize()
-                                .map(|c| c.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| parent_path.clone());
-
-                            // Discover from git worktree list + template directory scan
-                            let git_root = crate::git::get_repo_root(Path::new(parent_path))
-                                .unwrap_or_else(|| parent_path.into());
-                            let mut candidates = list_git_worktrees(Path::new(parent_path));
-                            candidates.extend(list_template_worktrees(&git_root, &path_template));
-
-                            for (wt_path, branch) in candidates {
-                                if wt_path == *parent_path || wt_path == canonical_parent {
-                                    continue;
-                                }
-                                if existing_paths.contains(&wt_path) || canonical_existing.contains(&wt_path) {
-                                    continue;
-                                }
-                                if removing_paths.contains(&wt_path) || canonical_removing.contains(&wt_path) {
-                                    continue;
-                                }
-                                if !Path::new(&wt_path).exists() {
-                                    continue;
-                                }
-                                // Dedup across git list and template scan
-                                if !seen_paths.insert(wt_path.clone()) {
-                                    continue;
-                                }
-                                new_worktrees.push((parent_id.clone(), parent_path.clone(), wt_path, branch));
-                            }
-                        }
-                        new_worktrees
-                    }
-                }).await;
 
                 // Check for stale worktrees on blocking thread
                 let stale_ids = smol::unblock({
-                    let current_worktrees = current_worktrees;
                     move || {
                         current_worktrees.iter()
                             .filter(|(_, path)| !Path::new(path).exists())
@@ -117,23 +46,13 @@ impl WorktreeSyncWatcher {
                     }
                 }).await;
 
-                // Apply changes if any
-                if !discovered.is_empty() || !stale_ids.is_empty() {
+                // Remove stale worktrees
+                if !stale_ids.is_empty() {
                     cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
-                            for (parent_id, main_repo_path, wt_path, branch) in &discovered {
-                                ws.add_discovered_worktree(
-                                    wt_path,
-                                    branch,
-                                    parent_id,
-                                    main_repo_path,
-                                );
-                            }
-
                             for id in &stale_ids {
                                 ws.remove_stale_worktree(id);
                             }
-
                             ws.notify_data(cx);
                         });
                     });

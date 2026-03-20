@@ -280,7 +280,7 @@ fn run_headless(listen_addr: IpAddr) {
         let app_settings = settings_entity.read(cx).get().clone();
 
         // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend, &app_settings.worktree.path_template).unwrap_or_else(|e| {
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
             persistence::default_workspace()
         });
@@ -439,7 +439,7 @@ fn main() {
         let app_settings = settings_entity.read(cx).get().clone();
 
         // Load or create workspace
-        let workspace_data = persistence::load_workspace(app_settings.session_backend, &app_settings.worktree.path_template).unwrap_or_else(|e| {
+        let workspace_data = persistence::load_workspace(app_settings.session_backend).unwrap_or_else(|e| {
             log::error!("Failed to load workspace: {}. A backup may have been saved to {:?}. Using default workspace.", e, persistence::get_workspace_path().with_extension("json.bak"));
             let backup_path = persistence::get_workspace_path().with_extension("json.bak");
             ToastManager::post(

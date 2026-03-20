@@ -1,6 +1,8 @@
 use crate::terminal::session_backend::SessionBackend;
 use crate::theme::FolderColor;
-use crate::workspace::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData, WorktreeMetadata};
+use crate::workspace::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData};
+#[cfg(test)]
+use crate::workspace::state::WorktreeMetadata;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -257,7 +259,7 @@ pub(crate) fn validate_workspace_data(
 /// If the file is corrupted, backs it up as `workspace.json.bak` and returns an error.
 /// On error, the caller should fall back to `default_workspace()` — auto-save is
 /// automatically blocked to prevent overwriting valid data on disk.
-pub fn load_workspace(backend: SessionBackend, worktree_path_template: &str) -> Result<WorkspaceData> {
+pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
     let path = get_workspace_path();
 
     // If workspace.json is missing, try to auto-recover from backup
@@ -305,7 +307,7 @@ pub fn load_workspace(backend: SessionBackend, worktree_path_template: &str) -> 
         let session_backend = backend.resolve();
         let clear_ids = !session_backend.supports_persistence();
         validate_workspace_data(&mut data, clear_ids, backend);
-        sync_worktrees(&mut data, worktree_path_template);
+        sync_worktrees(&mut data);
 
         // Successful load — allow saving
         LOADED_FROM_DEFAULT.store(false, Ordering::Relaxed);
@@ -408,112 +410,12 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
     data
 }
 
-/// Discover worktrees from git and sync them into workspace data.
+/// Remove stale worktree projects whose directories no longer exist on disk.
 ///
-/// For each non-worktree, non-remote project, discovers worktrees via
-/// `git worktree list` and the configured path template directory.
-/// Adds any worktree paths not already tracked as projects. Also removes
-/// worktree projects whose directories no longer exist on disk.
-pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
-    use crate::git::{list_git_worktrees, list_template_worktrees};
-
-    // Collect existing project paths for dedup
-    let existing_paths: std::collections::HashSet<String> = data.projects.iter()
-        .map(|p| p.path.clone())
-        .collect();
-
-    // Collect parent projects (non-worktree, non-remote, with existing directories)
-    // Store both original and canonical paths for comparison with git output
-    let parents: Vec<(String, String, String)> = data.projects.iter()
-        .filter(|p| p.worktree_info.is_none() && !p.is_remote)
-        .filter(|p| Path::new(&p.path).exists())
-        .map(|p| {
-            let canonical = Path::new(&p.path)
-                .canonicalize()
-                .map(|c| c.to_string_lossy().to_string())
-                .unwrap_or_else(|_| p.path.clone());
-            (p.id.clone(), p.path.clone(), canonical)
-        })
-        .collect();
-
-    // Build canonical existing paths for dedup
-    let canonical_existing: std::collections::HashSet<String> = existing_paths.iter()
-        .map(|p| Path::new(p).canonicalize()
-            .map(|c| c.to_string_lossy().to_string())
-            .unwrap_or_else(|_| p.clone()))
-        .collect();
-
-    // Discovery: add new worktree projects
-    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (parent_id, parent_path, canonical_parent) in &parents {
-        let git_root = crate::git::get_repo_root(Path::new(parent_path))
-            .unwrap_or_else(|| parent_path.into());
-        let mut candidates = list_git_worktrees(Path::new(parent_path));
-        candidates.extend(list_template_worktrees(&git_root, path_template));
-
-        for (wt_path, branch) in candidates {
-            // Skip the main repo's own path (compare canonical)
-            if wt_path == *parent_path || wt_path == *canonical_parent {
-                continue;
-            }
-            // Skip if already tracked (compare both raw and canonical)
-            if existing_paths.contains(&wt_path) || canonical_existing.contains(&wt_path) {
-                continue;
-            }
-            // Skip if directory doesn't exist
-            if !Path::new(&wt_path).exists() {
-                continue;
-            }
-            // Dedup across git list and template scan
-            if !seen_paths.insert(wt_path.clone()) {
-                continue;
-            }
-
-            let dir_name = Path::new(&wt_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("worktree");
-            let project_name = format!("{} ({})", dir_name, branch);
-            let new_id = uuid::Uuid::new_v4().to_string();
-
-            let project = ProjectData {
-                id: new_id.clone(),
-                name: project_name,
-                path: wt_path,
-                show_in_overview: false,
-                layout: Some(LayoutNode::new_terminal()),
-                terminal_names: HashMap::new(),
-                hidden_terminals: HashMap::new(),
-                worktree_info: Some(WorktreeMetadata {
-                    parent_project_id: parent_id.clone(),
-                    main_repo_path: String::new(),
-                    worktree_path: String::new(),
-                    branch_name: String::new(),
-                }),
-                worktree_ids: Vec::new(),
-                default_shell: None,
-                folder_color: FolderColor::default(),
-                hooks: super::settings::HooksConfig::default(),
-                is_remote: false,
-                connection_id: None,
-                service_terminals: HashMap::new(),
-                remote_services: Vec::new(),
-                remote_host: None,
-                remote_git_status: None,
-                hook_terminals: HashMap::new(),
-            };
-
-            // Insert after parent in project_order
-            data.projects.push(project);
-            if let Some(parent_index) = data.project_order.iter().position(|pid| pid == parent_id) {
-                data.project_order.insert(parent_index + 1, new_id);
-            } else {
-                data.project_order.push(new_id);
-            }
-        }
-    }
-
-    // Cleanup: remove worktree projects whose directories no longer exist
+/// Worktrees are only added as projects explicitly by the user (via the worktree
+/// list popover or the create worktree dialog). This function only cleans up
+/// worktree projects that have become stale.
+pub(crate) fn sync_worktrees(data: &mut WorkspaceData) {
     let stale_ids: Vec<String> = data.projects.iter()
         .filter(|p| p.worktree_info.is_some())
         .filter(|p| !Path::new(&p.path).exists())
@@ -949,7 +851,7 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data, "");
+        sync_worktrees(&mut data);
 
         // Stale worktree should be removed
         assert_eq!(data.projects.len(), 1);
@@ -980,7 +882,7 @@ mod tests {
             }],
         );
 
-        sync_worktrees(&mut data, "");
+        sync_worktrees(&mut data);
 
         assert_eq!(data.folders[0].project_ids, vec!["p1".to_string()]);
     }
@@ -1004,114 +906,11 @@ mod tests {
             vec![],
         );
 
-        sync_worktrees(&mut data, "");
+        sync_worktrees(&mut data);
 
         // Should still have both projects
         assert_eq!(data.projects.len(), 2);
         assert!(data.project_order.contains(&"wt1".to_string()));
-    }
-
-    #[test]
-    fn sync_worktrees_discovers_from_real_git_repo() {
-        use std::process::Command;
-
-        let tmp = std::env::temp_dir().join(format!("okena-test-sync-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        // Canonicalize to match git's output (e.g. /private/var on macOS)
-        let tmp = tmp.canonicalize().unwrap();
-        let repo_path = tmp.join("main-repo");
-        let wt_path = tmp.join("my-worktree");
-
-        // Initialize a git repo with a commit
-        std::fs::create_dir_all(&repo_path).unwrap();
-        Command::new("git").args(["init"]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test"]).current_dir(&repo_path).output().unwrap();
-        std::fs::write(repo_path.join("file.txt"), "hello").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo_path).output().unwrap();
-
-        // Create a worktree
-        Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "feature-branch"])
-            .current_dir(&repo_path)
-            .output()
-            .unwrap();
-
-        assert!(wt_path.exists(), "worktree directory should exist");
-
-        // Set up workspace with the main repo project (use canonical path)
-        let mut parent_project = make_project("p1");
-        parent_project.path = repo_path.to_string_lossy().to_string();
-
-        let mut data = make_workspace(
-            vec![parent_project],
-            vec!["p1"],
-            vec![],
-        );
-
-        sync_worktrees(&mut data, "");
-
-        // Should discover the worktree
-        assert_eq!(data.projects.len(), 2, "should discover one worktree");
-        let wt = data.projects.iter().find(|p| p.worktree_info.is_some()).unwrap();
-        assert_eq!(wt.path, wt_path.to_string_lossy().to_string());
-        assert!(wt.name.contains("feature-branch"));
-        let wt_info = wt.worktree_info.as_ref().unwrap();
-        assert_eq!(wt_info.parent_project_id, "p1");
-
-        // Should be placed after parent in order
-        let parent_pos = data.project_order.iter().position(|id| id == "p1").unwrap();
-        let wt_pos = data.project_order.iter().position(|id| id == &wt.id).unwrap();
-        assert_eq!(wt_pos, parent_pos + 1);
-    }
-
-    #[test]
-    fn sync_worktrees_skips_already_tracked() {
-        use std::process::Command;
-
-        let tmp = std::env::temp_dir().join(format!("okena-test-skip-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        let tmp = tmp.canonicalize().unwrap();
-        let repo_path = tmp.join("main-repo");
-        let wt_path = tmp.join("my-worktree");
-
-        // Set up real git repo with worktree
-        std::fs::create_dir_all(&repo_path).unwrap();
-        Command::new("git").args(["init"]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test"]).current_dir(&repo_path).output().unwrap();
-        std::fs::write(repo_path.join("file.txt"), "hello").unwrap();
-        Command::new("git").args(["add", "."]).current_dir(&repo_path).output().unwrap();
-        Command::new("git").args(["commit", "-m", "init"]).current_dir(&repo_path).output().unwrap();
-        Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "feature"])
-            .current_dir(&repo_path)
-            .output()
-            .unwrap();
-
-        // Set up workspace with BOTH parent and worktree already tracked
-        let mut parent = make_project("p1");
-        parent.path = repo_path.to_string_lossy().to_string();
-        let mut existing_wt = make_project("wt-existing");
-        existing_wt.path = wt_path.to_string_lossy().to_string();
-        existing_wt.worktree_info = Some(WorktreeMetadata {
-            parent_project_id: "p1".to_string(),
-            main_repo_path: repo_path.to_string_lossy().to_string(),
-            worktree_path: wt_path.to_string_lossy().to_string(),
-            branch_name: "test-branch".to_string(),
-        });
-
-        let mut data = make_workspace(
-            vec![parent, existing_wt],
-            vec!["p1", "wt-existing"],
-            vec![],
-        );
-
-        sync_worktrees(&mut data, "");
-
-        // Should NOT create a duplicate
-        assert_eq!(data.projects.len(), 2);
     }
 
     // === validate_workspace_data worktree migration ===
