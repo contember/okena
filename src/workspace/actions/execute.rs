@@ -442,6 +442,7 @@ pub fn spawn_uninitialized_terminals(
     let project_path = project.path.clone();
     let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
+    let is_worktree = project.worktree_info.is_some();
     let parent_hooks = project.worktree_info.as_ref()
         .and_then(|wt| ws.project(&wt.parent_project_id))
         .map(|p| p.hooks.clone());
@@ -458,6 +459,7 @@ pub fn spawn_uninitialized_terminals(
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
     let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx);
+    let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree);
 
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {
@@ -469,12 +471,12 @@ pub fn spawn_uninitialized_terminals(
 
         // Apply shell_wrapper if configured
         if let Some(ref wrapper) = shell_wrapper {
-            shell = hooks::apply_shell_wrapper(&shell, wrapper);
+            shell = hooks::apply_shell_wrapper(&shell, wrapper, &env);
         }
 
         // Apply on_create: wrap shell to run command first, then exec into shell
         if let Some(ref cmd) = on_create_cmd {
-            shell = hooks::apply_on_create(&shell, cmd);
+            shell = hooks::apply_on_create(&shell, cmd, &env);
         }
 
         match backend.create_terminal(&project_path, Some(&shell)) {

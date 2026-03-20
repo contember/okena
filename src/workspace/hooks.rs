@@ -161,6 +161,67 @@ fn is_valid_env_key(key: &str) -> bool {
     bytes[1..].iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Build shell export statements from a HashMap of env vars.
+/// POSIX: `export KEY='value'; ` with single-quote escaping.
+/// Windows: `set "KEY=value" && ` with cmd.exe escaping.
+fn build_export_prefix(env_vars: &HashMap<String, String>) -> String {
+    let safe_env: Vec<_> = env_vars
+        .iter()
+        .filter(|(k, _)| is_valid_env_key(k))
+        .collect();
+
+    if safe_env.is_empty() {
+        return String::new();
+    }
+
+    if cfg!(windows) {
+        let parts: Vec<_> = safe_env
+            .iter()
+            .map(|(k, v)| {
+                let escaped = v
+                    .replace('^', "^^")
+                    .replace('%', "%%")
+                    .replace('"', "\\\"")
+                    .replace('&', "^&")
+                    .replace('|', "^|")
+                    .replace('<', "^<")
+                    .replace('>', "^>")
+                    .replace('(', "^(")
+                    .replace(')', "^)");
+                format!("set \"{}={}\"", k, escaped)
+            })
+            .collect();
+        format!("{} && ", parts.join(" && "))
+    } else {
+        let parts: Vec<_> = safe_env
+            .iter()
+            .map(|(k, v)| format!("export {}='{}'; ", k, v.replace('\'', "'\\''")))
+            .collect();
+        parts.join("")
+    }
+}
+
+/// Build environment variables for terminal hooks.
+/// Includes base project vars and, for worktree projects, OKENA_BRANCH.
+pub fn terminal_hook_env(
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    is_worktree: bool,
+) -> HashMap<String, String> {
+    let mut env = project_env(project_id, project_name, project_path);
+    if is_worktree {
+        let path = std::path::Path::new(project_path);
+        let branch = crate::git::get_git_status(path)
+            .and_then(|s| s.branch)
+            .or_else(|| crate::git::get_current_branch(path));
+        if let Some(branch) = branch {
+            env.insert("OKENA_BRANCH".into(), branch);
+        }
+    }
+    env
+}
+
 /// Build a `std::process::Command` for headless hook execution.
 /// Handles platform dispatch (sh -c / cmd /C), env vars, and cwd.
 fn build_headless_command(command: &str, env_vars: &HashMap<String, String>) -> std::process::Command {
@@ -559,12 +620,14 @@ pub fn fire_on_worktree_close(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    branch: &str,
     cx: &App,
 ) {
     let global_hooks = settings(cx).hooks;
     if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.worktree.on_close) {
-        let env = project_env(project_id, project_name, project_path);
-        log::info!("Running on_worktree_close hook for project '{}'", project_name);
+        let mut env = project_env(project_id, project_name, project_path);
+        env.insert("OKENA_BRANCH".into(), branch.into());
+        log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
         let monitor = try_monitor(cx);
         run_hook(cmd, env, monitor.as_ref(), "on_worktree_close", project_name, None, project_id, true);
     }
@@ -768,10 +831,12 @@ pub fn resolve_terminal_on_create(
 
 /// Apply the `terminal.on_create` command by wrapping the shell to run
 /// the command first, then `exec` into the original shell.
-/// Produces: `sh -c '<on_create_cmd>; exec <shell_cmd>'`
-pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str) -> ShellType {
+/// Environment variables are exported so they persist in the shell session.
+/// Produces: `sh -c 'export K=V; ...; <on_create_cmd>; exec <shell_cmd>'`
+pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMap<String, String>) -> ShellType {
     let shell_cmd = shell.to_command_string();
-    let script = format!("{}; exec {}", on_create_cmd, shell_cmd);
+    let prefix = build_export_prefix(env_vars);
+    let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
     ShellType::for_command(script)
 }
 
@@ -784,6 +849,8 @@ pub fn fire_terminal_on_close(
     project_name: &str,
     project_path: &str,
     terminal_id: &str,
+    terminal_name: Option<&str>,
+    is_worktree: bool,
     exit_code: Option<u32>,
     cx: &App,
 ) {
@@ -791,8 +858,20 @@ pub fn fire_terminal_on_close(
     if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_close) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
+        if let Some(name) = terminal_name {
+            env.insert("OKENA_TERMINAL_NAME".into(), name.into());
+        }
         if let Some(code) = exit_code {
             env.insert("OKENA_EXIT_CODE".into(), code.to_string());
+        }
+        if is_worktree {
+            let path = std::path::Path::new(project_path);
+            let branch = crate::git::get_git_status(path)
+                .and_then(|s| s.branch)
+                .or_else(|| crate::git::get_current_branch(path));
+            if let Some(branch) = branch {
+                env.insert("OKENA_BRANCH".into(), branch);
+            }
         }
         log::info!("Running terminal.on_close hook for terminal '{}'", terminal_id);
         let monitor = try_monitor(cx);
@@ -812,20 +891,22 @@ pub fn resolve_shell_wrapper(
 
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
 /// The wrapper template uses `{shell}` as a placeholder for the resolved shell command.
+/// Environment variables are exported so they persist in the shell session.
 ///
 /// If the result contains shell metacharacters (`&&`, `||`, `;`, `|`), it is wrapped
 /// in `sh -c` for proper execution. Otherwise, it is split into executable + args directly,
 /// avoiding an extra `sh` process layer (important for session backends like dtach/tmux).
 ///
 /// The shell is expected to be already resolved (not `ShellType::Default`).
-pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str) -> ShellType {
+pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str, env_vars: &HashMap<String, String>) -> ShellType {
     let shell_cmd = shell.to_command_string();
     // Replace {shell} with `exec <shell>` so the shell replaces the wrapper process.
     // This is critical for session backends (dtach/tmux) that monitor the top-level process.
     let wrapped = wrapper.replace("{shell}", &format!("exec {}", shell_cmd));
+    let prefix = build_export_prefix(env_vars);
     // Always use for_command (sh -c '...') so that build_terminal_command can extract
     // the inner command for session backend integration (dtach/tmux/screen).
-    ShellType::for_command(wrapped)
+    ShellType::for_command(format!("{}{}", prefix, wrapped))
 }
 
 #[cfg(test)]
@@ -994,7 +1075,7 @@ mod tests {
             args: vec!["--login".to_string()],
         };
         let wrapper = "devcontainer exec -- {shell}";
-        let wrapped = apply_shell_wrapper(&shell, wrapper);
+        let wrapped = apply_shell_wrapper(&shell, wrapper, &HashMap::new());
         match &wrapped {
             ShellType::Custom { path: _, args } => {
                 // for_command uses $SHELL -ic on Unix
@@ -1013,7 +1094,7 @@ mod tests {
             args: vec![],
         };
         let wrapper = "echo hello && {shell}";
-        let wrapped = apply_shell_wrapper(&shell, wrapper);
+        let wrapped = apply_shell_wrapper(&shell, wrapper, &HashMap::new());
         match &wrapped {
             ShellType::Custom { path: _, args } => {
                 // for_command uses $SHELL -ic on Unix
@@ -1031,5 +1112,86 @@ mod tests {
             args: vec![],
         };
         assert_eq!(shell.to_command_string(), "/usr/bin/fish");
+    }
+
+    #[test]
+    fn build_export_prefix_empty() {
+        assert_eq!(build_export_prefix(&HashMap::new()), "");
+    }
+
+    #[test]
+    fn build_export_prefix_single_var() {
+        let mut env = HashMap::new();
+        env.insert("MY_VAR".into(), "hello".into());
+        let prefix = build_export_prefix(&env);
+        assert!(prefix.contains("MY_VAR"), "got: {}", prefix);
+        assert!(prefix.contains("hello"), "got: {}", prefix);
+        if cfg!(windows) {
+            assert!(prefix.contains("set"), "got: {}", prefix);
+        } else {
+            assert!(prefix.contains("export"), "got: {}", prefix);
+        }
+    }
+
+    #[test]
+    fn build_export_prefix_escapes_single_quotes() {
+        let mut env = HashMap::new();
+        env.insert("VAR".into(), "it's a test".into());
+        let prefix = build_export_prefix(&env);
+        if !cfg!(windows) {
+            // POSIX: single quotes with '\'' escaping
+            assert!(prefix.contains("'\\''"), "Expected single-quote escape in: {}", prefix);
+        }
+    }
+
+    #[test]
+    fn build_export_prefix_filters_invalid_keys() {
+        let mut env = HashMap::new();
+        env.insert("GOOD_KEY".into(), "val".into());
+        env.insert("BAD;KEY".into(), "val".into());
+        env.insert("123BAD".into(), "val".into());
+        let prefix = build_export_prefix(&env);
+        assert!(prefix.contains("GOOD_KEY"), "got: {}", prefix);
+        assert!(!prefix.contains("BAD;KEY"), "got: {}", prefix);
+        assert!(!prefix.contains("123BAD"), "got: {}", prefix);
+    }
+
+    #[test]
+    fn apply_on_create_with_env_vars() {
+        let shell = ShellType::Custom {
+            path: "/bin/bash".to_string(),
+            args: vec![],
+        };
+        let mut env = HashMap::new();
+        env.insert("OKENA_PROJECT_ID".into(), "proj-123".into());
+        let result = apply_on_create(&shell, "echo hello", &env);
+        match &result {
+            ShellType::Custom { path: _, args } => {
+                let cmd = &args[1];
+                assert!(cmd.contains("export OKENA_PROJECT_ID="), "got: {}", cmd);
+                assert!(cmd.contains("echo hello"), "got: {}", cmd);
+                assert!(cmd.contains("exec /bin/bash"), "got: {}", cmd);
+            }
+            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn apply_shell_wrapper_with_env_vars() {
+        let shell = ShellType::Custom {
+            path: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let mut env = HashMap::new();
+        env.insert("OKENA_PROJECT_NAME".into(), "my-project".into());
+        let result = apply_shell_wrapper(&shell, "wrapper {shell}", &env);
+        match &result {
+            ShellType::Custom { path: _, args } => {
+                let cmd = &args[1];
+                assert!(cmd.contains("export OKENA_PROJECT_NAME="), "got: {}", cmd);
+                assert!(cmd.contains("wrapper exec /bin/zsh"), "got: {}", cmd);
+            }
+            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+        }
     }
 }

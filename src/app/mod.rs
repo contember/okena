@@ -521,7 +521,9 @@ impl Okena {
                                             let parent_hooks = p.worktree_info.as_ref()
                                                 .and_then(|wt| ws.project(&wt.parent_project_id))
                                                 .map(|pp| pp.hooks.clone());
-                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), *exit_code))
+                                            let terminal_name = p.terminal_names.get(tid).cloned();
+                                            let is_worktree = p.worktree_info.is_some();
+                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), terminal_name, is_worktree, *exit_code))
                                         } else {
                                             None
                                         }
@@ -529,10 +531,10 @@ impl Okena {
                                 })
                                 .collect()
                         };
-                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, exit_code) in terminal_close_infos {
+                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, terminal_name, is_worktree, exit_code) in terminal_close_infos {
                             crate::workspace::hooks::fire_terminal_on_close(
                                 &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
-                                &project_path, &terminal_id, exit_code, cx,
+                                &project_path, &terminal_id, terminal_name.as_deref(), is_worktree, exit_code, cx,
                             );
                         }
 
@@ -669,6 +671,7 @@ impl Okena {
                 &pending.project_id,
                 &project_name,
                 &project_path,
+                &pending.branch,
                 cx,
             );
             let _ = crate::workspace::hooks::fire_worktree_removed(
