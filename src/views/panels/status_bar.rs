@@ -5,8 +5,9 @@ use crate::workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
-use okena_extensions::ExtensionRegistry;
+use okena_extensions::{ExtensionInstance, ExtensionRegistry};
 use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
@@ -69,10 +70,11 @@ impl SystemInfoCache {
 pub struct StatusBar {
     workspace: Entity<Workspace>,
     cache: Arc<Mutex<SystemInfoCache>>,
-    /// Extension widgets for left side: (extension_id, widgets)
-    extension_widgets: Vec<(String, Vec<AnyView>)>,
-    /// Extension widgets for right side: (extension_id, widgets)
-    extension_right_widgets: Vec<(String, Vec<AnyView>)>,
+    /// Activate functions cloned from registry (keyed by extension ID).
+    activate_fns: Vec<(String, okena_extensions::ActivateFn)>,
+    /// Active extension instances. Dropping an instance deactivates the extension
+    /// (cancels background tasks, releases views).
+    active_extensions: HashMap<String, ExtensionInstance>,
     sidebar_open: bool,
 }
 
@@ -103,35 +105,61 @@ impl StatusBar {
             }
         }).detach();
 
-        // Clone extension factories out of the global registry, then call them.
-        // The Arc clone releases the borrow on the global before we call factory(cx).
-        let (left_factories, right_factories): (
-            Vec<(String, okena_extensions::StatusBarWidgetFactory)>,
-            Vec<(String, okena_extensions::StatusBarWidgetFactory)>,
-        ) = if let Some(registry) = cx.try_global::<ExtensionRegistry>() {
-            let left = registry.extensions().iter().filter_map(|ext| {
-                let factory = ext.status_bar_widgets.as_ref()?.clone();
-                Some((ext.manifest.id.to_string(), factory))
-            }).collect();
-            let right = registry.extensions().iter().filter_map(|ext| {
-                let factory = ext.status_bar_right_widgets.as_ref()?.clone();
-                Some((ext.manifest.id.to_string(), factory))
-            }).collect();
-            (left, right)
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let extension_widgets: Vec<(String, Vec<AnyView>)> = left_factories.into_iter()
-            .map(|(id, factory)| (id, factory(cx)))
-            .collect();
-        let extension_right_widgets: Vec<(String, Vec<AnyView>)> = right_factories.into_iter()
-            .map(|(id, factory)| (id, factory(cx)))
-            .collect();
+        // Clone activate functions from the global registry.
+        let activate_fns: Vec<_> = cx.try_global::<ExtensionRegistry>()
+            .map(|registry| {
+                registry.extensions().iter()
+                    .map(|ext| (ext.manifest.id.to_string(), ext.activate.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Activate initially enabled extensions
+        let enabled = settings_entity(cx).read(cx).settings.enabled_extensions.clone();
+        let active_extensions = Self::activate_extensions(&activate_fns, &enabled, cx);
+
+        // Observe settings to sync extensions when enabled_extensions changes
+        let settings = settings_entity(cx);
+        cx.observe(&settings, |this, entity, cx| {
+            let enabled = entity.read(cx).settings.enabled_extensions.clone();
+            this.sync_extensions(&enabled, cx);
+        }).detach();
 
         // Re-render when workspace changes (for focused project updates)
         cx.observe(&workspace, |_, _, cx| cx.notify()).detach();
 
-        Self { workspace, cache, extension_widgets, extension_right_widgets, sidebar_open: true }
+        Self {
+            workspace, cache, activate_fns, active_extensions, sidebar_open: true,
+        }
+    }
+
+    /// Activate extensions that are in the enabled set.
+    fn activate_extensions(
+        activate_fns: &[(String, okena_extensions::ActivateFn)],
+        enabled: &HashSet<String>,
+        cx: &mut App,
+    ) -> HashMap<String, ExtensionInstance> {
+        activate_fns.iter()
+            .filter(|(id, _)| enabled.contains(id.as_str()))
+            .map(|(id, activate)| (id.clone(), activate(cx)))
+            .collect()
+    }
+
+    /// Sync active extensions with the current enabled set.
+    /// Activates newly enabled extensions, deactivates disabled ones
+    /// (dropping the instance cancels background tasks and releases views).
+    fn sync_extensions(&mut self, enabled: &HashSet<String>, cx: &mut Context<Self>) {
+        // Deactivate disabled (drop instances → cancel tasks)
+        self.active_extensions.retain(|id, _| enabled.contains(id.as_str()));
+
+        // Activate newly enabled
+        for (id, activate) in &self.activate_fns {
+            if enabled.contains(id.as_str()) && !self.active_extensions.contains_key(id) {
+                self.active_extensions.insert(id.clone(), activate(cx));
+            }
+        }
+
+        cx.notify();
     }
 
     pub fn set_sidebar_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -185,15 +213,16 @@ impl Render for StatusBar {
             t.metric_normal
         };
 
-        // Collect enabled extension widgets (left and right)
-        let enabled_extensions = &settings_entity(cx).read(cx).settings.enabled_extensions;
-        let enabled_left_widgets: Vec<&Vec<AnyView>> = self.extension_widgets.iter()
-            .filter(|(id, _)| enabled_extensions.contains(id.as_str()))
-            .map(|(_, widgets)| widgets)
+        // Collect widgets in stable registry order from active extensions
+        let left_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+            .filter_map(|(id, _)| self.active_extensions.get(id))
+            .map(|inst| &inst.status_bar_widgets)
+            .filter(|w| !w.is_empty())
             .collect();
-        let enabled_right_widgets: Vec<&Vec<AnyView>> = self.extension_right_widgets.iter()
-            .filter(|(id, _)| enabled_extensions.contains(id.as_str()))
-            .map(|(_, widgets)| widgets)
+        let right_widgets: Vec<&Vec<AnyView>> = self.activate_fns.iter()
+            .filter_map(|(id, _)| self.active_extensions.get(id))
+            .map(|inst| &inst.status_bar_right_widgets)
+            .filter(|w| !w.is_empty())
             .collect();
 
         div()
@@ -264,7 +293,7 @@ impl Render for StatusBar {
                     );
 
                 // Left-side extension widgets
-                for widgets in &enabled_left_widgets {
+                for widgets in &left_widgets {
                     for widget in *widgets {
                         left = left.child(widget.clone());
                     }
@@ -278,7 +307,7 @@ impl Render for StatusBar {
                     .gap(px(8.0));
 
                 // Right-side extension widgets
-                for widgets in &enabled_right_widgets {
+                for widgets in &right_widgets {
                     for widget in *widgets {
                         right = right.child(widget.clone());
                     }
