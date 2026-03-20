@@ -11,6 +11,7 @@ pub mod context_menu_backdrop;
 pub mod dialog_actions;
 pub mod dropdown;
 pub mod empty_state;
+pub mod file_icon;
 pub mod expand;
 pub mod icon_action_button;
 pub mod icon_button;

@@ -10,7 +10,7 @@ use crate::views::components::{
 };
 use super::markdown_renderer::RenderedNode;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
-use crate::views::components::file_icon::render_file_icon;
+use crate::views::components::file_icon::file_icon;
 use crate::views::components::FileTreeNode;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -265,7 +265,7 @@ impl FileViewer {
                             this.select_file(file_index, cx);
                         }))
                         .child(
-                            render_file_icon(&file.filename)
+                            file_icon(&file.filename, t)
                                 .mr(px(4.0)),
                         )
                         .child(

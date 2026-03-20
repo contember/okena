@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use super::file_icon::render_file_icon;
+use super::file_icon::file_icon;
 use crate::theme::ThemeColors;
 use gpui::prelude::*;
 use gpui::*;
@@ -118,7 +118,7 @@ pub fn render_file_row(
                 .child(status_char),
         )
         // File type icon
-        .child(render_file_icon(filename))
+        .child(file_icon(filename, t))
         // Filename
         .child(
             div()
