@@ -500,8 +500,14 @@ pub fn load_settings() -> AppSettings {
     // First, try direct deserialization (fast path for valid settings)
     match serde_json::from_str::<AppSettings>(&content) {
         Ok(mut settings) => {
-            // Run migrations if needed
+            let old_version = settings.version;
             settings = migrate_settings(settings);
+            if settings.version != old_version {
+                log::info!("Settings migrated from v{} to v{}", old_version, settings.version);
+                if let Err(e) = save_settings(&settings) {
+                    log::warn!("Failed to save migrated settings: {}", e);
+                }
+            }
             return settings;
         }
         Err(e) => {
@@ -669,14 +675,6 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
             SETTINGS_VERSION
         );
         settings.version = SETTINGS_VERSION;
-    }
-
-    // Save if we migrated
-    if original_version != settings.version {
-        log::info!("Settings migrated from v{} to v{}", original_version, settings.version);
-        if let Err(e) = save_settings(&settings) {
-            log::warn!("Failed to save migrated settings: {}", e);
-        }
     }
 
     settings
