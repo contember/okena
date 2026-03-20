@@ -164,7 +164,7 @@ impl Sidebar {
                     }));
                     if !project.show_in_overview && !project.terminal_ids.is_empty() {
                         div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                            .child(name_label.flex_shrink(1.0).flex_grow_0())
+                            .child(name_label.flex_shrink())
                             .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                             .into_any_element()
                     } else {
@@ -336,7 +336,7 @@ impl Sidebar {
                     }));
                     if !project.show_in_overview && !project.terminal_ids.is_empty() && !is_busy {
                         div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                            .child(name_label.flex_shrink(1.0).flex_grow_0())
+                            .child(name_label.flex_shrink())
                             .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                             .into_any_element()
                     } else {
@@ -858,7 +858,7 @@ impl Sidebar {
                 }));
                 if !project.show_in_overview && !project.terminal_ids.is_empty() {
                     div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
-                        .child(name_label.flex_shrink(1.0).flex_grow_0())
+                        .child(name_label.flex_shrink())
                         .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
                         .into_any_element()
                 } else {
