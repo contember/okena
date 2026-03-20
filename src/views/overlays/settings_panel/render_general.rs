@@ -20,6 +20,10 @@ impl SettingsPanel {
                 |state, val, cx| state.set_show_focused_border(val, cx), cx,
             ))
             .child(self.render_toggle(
+                "color-tinted-bg", "Color Tinted Background", s.color_tinted_background, true,
+                |state, val, cx| state.set_color_tinted_background(val, cx), cx,
+            ))
+            .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
             ))
@@ -79,11 +83,12 @@ impl SettingsPanel {
             ));
         }
 
-        section = section.child(self.render_number_stepper(
-            "min-col-width", "Min Column Width", s.min_column_width,
-            "{}px", 50.0, 60.0, false,
-            |state, val, cx| state.set_min_column_width(val, cx), cx,
-        ));
+        section = section
+            .child(self.render_number_stepper(
+                "min-col-width", "Min Column Width", s.min_column_width,
+                "{}px", 50.0, 60.0, false,
+                |state, val, cx| state.set_min_column_width(val, cx), cx,
+            ));
 
         div()
             .child(section_header("Appearance", &t))

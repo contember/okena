@@ -274,6 +274,9 @@ pub struct AppSettings {
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
+    /// Tint project backgrounds with the folder color
+    #[serde(default)]
+    pub color_tinted_background: bool,
 
     // Font settings
     /// Terminal font size (default: 14.0)
@@ -388,6 +391,7 @@ impl Default for AppSettings {
             active_session: None,
             sidebar: SidebarSettings::default(),
             show_focused_border: default_show_focused_border(),
+            color_tinted_background: false,
             font_size: default_font_size(),
             font_family: default_font_family(),
             line_height: default_line_height(),
@@ -571,6 +575,9 @@ fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
 
     if let Some(v) = obj.get("show_focused_border").and_then(|v| v.as_bool()) {
         settings.show_focused_border = v;
+    }
+    if let Some(v) = obj.get("color_tinted_background").and_then(|v| v.as_bool()) {
+        settings.color_tinted_background = v;
     }
 
     if let Some(v) = obj.get("font_size").and_then(|v| v.as_f64()) {

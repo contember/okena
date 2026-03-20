@@ -811,6 +811,17 @@ impl Workspace {
             .map(|parent| parent.path.clone())
     }
 
+    /// Get the effective folder color for a project, resolving through worktree parent if needed.
+    pub fn effective_folder_color(&self, project: &ProjectData) -> FolderColor {
+        if let Some(ref wt) = project.worktree_info {
+            self.project(&wt.parent_project_id)
+                .map(|p| p.folder_color)
+                .unwrap_or(project.folder_color)
+        } else {
+            project.folder_color
+        }
+    }
+
     /// Get a mutable project by ID
     pub(crate) fn project_mut(&mut self, id: &str) -> Option<&mut ProjectData> {
         self.data.projects.iter_mut().find(|p| p.id == id)

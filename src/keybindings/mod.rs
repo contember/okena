@@ -75,6 +75,7 @@ actions!(
         StartAllServices,
         StopAllServices,
         ShowHookLog,
+        EqualizeLayout,
     ]
 );
 
@@ -229,6 +230,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "TogglePaneSwitcher" => Some(KeyBinding::new(keystroke, TogglePaneSwitcher, context)),
         "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
+        "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

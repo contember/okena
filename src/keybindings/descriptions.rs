@@ -10,7 +10,7 @@ use super::{
     ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
     StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
-    ZoomIn, ZoomOut,
+    ZoomIn, ZoomOut, EqualizeLayout,
 };
 
 /// Get human-readable descriptions for all actions
@@ -464,6 +464,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Install a downloaded update",
             category: "Global",
             factory: || Box::new(InstallUpdate),
+        },
+    );
+    map.insert(
+        "EqualizeLayout",
+        ActionDescription {
+            name: "Equalize Layout",
+            description: "Equalize columns and panes to match the focused one",
+            category: "Layout",
+            factory: || Box::new(EqualizeLayout),
         },
     );
 

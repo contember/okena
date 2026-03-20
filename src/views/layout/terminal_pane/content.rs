@@ -348,10 +348,29 @@ impl TerminalContent {
 impl Render for TerminalContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let term_bg = if self.focus_handle.is_focused(window) {
+        let base_bg = if self.focus_handle.is_focused(window) {
             t.term_background
         } else {
             t.term_background_unfocused
+        };
+
+        // Resolve folder color tint for this project (when enabled)
+        let bg_tint = if crate::settings::settings(cx).color_tinted_background {
+            let ws = self.workspace.read(cx);
+            ws.project(&self.project_id).and_then(|p| {
+                let color = ws.effective_folder_color(p);
+                if color != crate::theme::FolderColor::Default {
+                    Some(t.get_folder_color(color))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+        let term_bg = match bg_tint {
+            Some(tint) => crate::ui::tint_color(base_bg, tint, 0.025),
+            None => base_bg,
         };
 
         // Update URL matches
@@ -468,6 +487,7 @@ impl Render for TerminalContent {
                     .child(
                         TerminalElement::new(terminal_clone, focus_handle)
                             .with_zoom(zoom_level)
+                            .with_bg_tint(bg_tint)
                             .with_search(self.search_matches.clone(), self.search_current_index)
                             .with_urls(
                                 self.url_detector.matches_arc(),

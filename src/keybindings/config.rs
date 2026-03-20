@@ -266,6 +266,14 @@ impl KeybindingConfig {
             ],
         );
 
+        bindings.insert(
+            "EqualizeLayout".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-e", None),
+                KeybindingEntry::new("ctrl-shift-e", None),
+            ],
+        );
+
         Self {
             version: 1,
             bindings,
