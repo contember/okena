@@ -130,11 +130,6 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Check if an extension is enabled.
-    pub fn is_extension_enabled(&self, extension_id: &str) -> bool {
-        self.settings.enabled_extensions.contains(extension_id)
-    }
-
     /// Set sidebar open state
     pub fn set_sidebar_open(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.sidebar.is_open = value;
@@ -266,11 +261,6 @@ impl SettingsState {
                 }
             });
         }));
-    }
-
-    /// Update the worktree template baseline (called after migration completes).
-    pub fn update_worktree_template_baseline(&mut self, template: String) {
-        self.worktree_template_baseline = template;
     }
 
     /// Set worktree default merge

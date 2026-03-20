@@ -148,31 +148,6 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
     }
 }
 
-/// Move a git worktree to a new location on disk.
-/// Uses `git worktree move` which updates git's internal bookkeeping.
-pub fn move_worktree(current_path: &Path, new_path: &Path) -> Result<(), String> {
-    let current_str = current_path.to_str().ok_or("Invalid current worktree path")?;
-    let new_str = new_path.to_str().ok_or("Invalid new worktree path")?;
-
-    // Create parent directory for new path if it doesn't exist
-    if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create target directory: {}", e))?;
-    }
-
-    let output = safe_output(
-        command("git").args(["-C", current_str, "worktree", "move", current_str, new_str]),
-    )
-    .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
-}
-
 /// Fast worktree removal: delete the directory and prune stale worktree metadata.
 /// Much faster than `git worktree remove` which does expensive status checks.
 /// Only safe when the caller has already handled dirty state (stash/discard).

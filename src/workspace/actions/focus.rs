@@ -39,17 +39,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Focus a project's first terminal without zooming the main view.
-    /// Used by sidebar clicks to highlight and focus without hiding other projects.
-    ///
-    /// If the project itself has no layout (e.g. it only has worktree children),
-    /// drills into the first worktree child that has a terminal.
-    pub fn focus_project_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        self.focus_first_terminal_in(project_id);
-        self.touch_project(project_id);
-        cx.notify();
-    }
-
     /// Toggle folder selection: sets folder filter and focuses the first terminal inside.
     /// If the folder is already selected, deselects it.
     pub fn toggle_folder_focus(&mut self, folder_id: &str, cx: &mut Context<Self>) {

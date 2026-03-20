@@ -514,7 +514,6 @@ impl Render for DiffViewer {
         let has_error = self.error_message.is_some();
         let error_message = self.error_message.clone();
         let diff_mode = self.diff_mode.clone();
-        let is_working = diff_mode == DiffMode::WorkingTree;
         let has_files = !self.file_stats.is_empty();
         // Gutter: two number columns + separator, matching render_line layout
         let char_width = self.char_width();

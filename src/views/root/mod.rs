@@ -48,11 +48,6 @@ pub fn register_content_pane(terminal_id: String, content: WeakEntity<super::lay
     content_pane_registry().lock().insert(terminal_id, content);
 }
 
-/// Unregister a terminal content pane.
-pub fn unregister_content_pane(terminal_id: &str) {
-    content_pane_registry().lock().remove(terminal_id);
-}
-
 /// Root view of the application
 pub struct RootView {
     workspace: Entity<Workspace>,

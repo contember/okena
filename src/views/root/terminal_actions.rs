@@ -72,7 +72,7 @@ impl RootView {
         );
 
         // Get project info for hooks
-        let (project_name, project_hooks, parent_hooks) = {
+        let (_project_name, project_hooks, parent_hooks) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(project_id);
             let name = project.map(|p| p.name.clone()).unwrap_or_default();

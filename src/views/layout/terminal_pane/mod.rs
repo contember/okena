@@ -385,7 +385,7 @@ impl TerminalPane {
         );
 
         // Read fresh path and project info from workspace state
-        let (project_path, project_name, project_hooks, parent_hooks) = {
+        let (project_path, _project_name, project_hooks, parent_hooks) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(&self.project_id);
             let path = project.map(|p| p.path.clone())

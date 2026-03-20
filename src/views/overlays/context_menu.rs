@@ -140,10 +140,6 @@ impl Render for ContextMenu {
         let project_path = project.map(|p| p.path.clone()).unwrap_or_default();
         let is_worktree = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
         let is_git_repo = git::is_git_repo(std::path::Path::new(&project_path));
-        let worktree_count = ws.data().projects.iter()
-            .filter(|p| p.worktree_info.as_ref().map_or(false, |wt| wt.parent_project_id == self.request.project_id))
-            .count();
-
         let project_path_for_worktree = project_path.clone();
         let project_path_for_rename_dir = project_path.clone();
         let project_name_for_rename = project_name.clone();

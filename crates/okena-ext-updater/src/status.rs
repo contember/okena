@@ -1,5 +1,4 @@
 use okena_extensions::ThemeColors;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
 use parking_lot::Mutex;

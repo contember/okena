@@ -80,12 +80,15 @@ pub struct WorktreeMetadata {
     pub parent_project_id: String,
     /// Deprecated: resolved dynamically from parent project path.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub main_repo_path: String,
     /// Deprecated: same as project.path.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub worktree_path: String,
     /// Deprecated: read from git at runtime.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub branch_name: String,
 }
 
@@ -623,18 +626,6 @@ impl Workspace {
 
         // Pre-build worktree children lookup only when folder filter is active
         // (it's the only code path that needs parent→children resolution)
-        let wt_children_by_parent: Option<HashMap<&str, Vec<&ProjectData>>> = folder_filter.map(|_| {
-            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
-            for p in &self.data.projects {
-                if let Some(ref wi) = p.worktree_info {
-                    map.entry(wi.parent_project_id.as_str())
-                        .or_default()
-                        .push(p);
-                }
-            }
-            map
-        });
-
         // Pre-compute worktree children whose parent lives in a folder.
         // These must only be added during folder expansion (not from project_order),
         // because their position in project_order may not reflect the folder ordering.
@@ -1050,12 +1041,6 @@ impl LayoutNode {
                 }
             }
         }
-    }
-
-    /// Clear all terminal IDs in this layout tree (used on app restart)
-    /// Also resets minimized and detached state since terminals need to be created first
-    pub fn clear_terminal_ids(&mut self) {
-        self.clear_terminal_ids_except(&HashSet::new());
     }
 
     /// Clear terminal IDs except those in the `keep` set (e.g. hook terminals).
@@ -1577,6 +1562,7 @@ impl LayoutNode {
 mod tests {
     use crate::workspace::state::{LayoutNode, SplitDirection};
     use crate::terminal::shell_config::ShellType;
+    use std::collections::HashSet;
 
     // === Helper constructors ===
 
@@ -1825,7 +1811,7 @@ mod tests {
             terminal_minimized("t1"),
             terminal_detached("t2"),
         ]);
-        node.clear_terminal_ids();
+        node.clear_terminal_ids_except(&HashSet::new());
         assert!(node.collect_terminal_ids().is_empty());
         // Also check minimized/detached reset
         match &node {

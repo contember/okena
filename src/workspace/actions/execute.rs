@@ -440,7 +440,6 @@ pub fn spawn_uninitialized_terminals(
     };
 
     let project_path = project.path.clone();
-    let project_name = project.name.clone();
     let project_hooks = project.hooks.clone();
     let parent_hooks = project.worktree_info.as_ref()
         .and_then(|wt| ws.project(&wt.parent_project_id))

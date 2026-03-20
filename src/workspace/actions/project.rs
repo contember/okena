@@ -366,8 +366,8 @@ impl Workspace {
         &mut self,
         parent_project_id: &str,
         branch: &str,
-        repo_path: &std::path::Path,
-        worktree_path: &str,
+        _repo_path: &std::path::Path,
+        _worktree_path: &str,
         project_path: &str,
         fire_hooks: bool,
         cx: &mut Context<Self>,
@@ -484,7 +484,7 @@ impl Workspace {
         wt_path: &str,
         branch: &str,
         parent_id: &str,
-        main_repo_path: &str,
+        _main_repo_path: &str,
     ) {
         // Double-check it's not already tracked
         if self.data.projects.iter().any(|p| p.path == wt_path) {

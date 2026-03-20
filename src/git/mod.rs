@@ -3,7 +3,7 @@ pub mod diff;
 pub(crate) mod repository;
 pub mod watcher;
 
-pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, batch_is_git_repo, get_file_contents_for_diff};
+pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
 pub use repository::{
     create_worktree,
     remove_worktree,
@@ -168,6 +168,7 @@ pub struct CommitLogEntry {
     /// Unix timestamp of the commit
     pub timestamp: i64,
     /// Whether this is a merge commit (2+ parents)
+    #[allow(dead_code)] // used in tests
     pub is_merge: bool,
     /// Graph prefix characters (e.g. "| * |")
     pub graph: String,

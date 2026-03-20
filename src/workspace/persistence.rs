@@ -476,7 +476,6 @@ pub(crate) fn sync_worktrees(data: &mut WorkspaceData, path_template: &str) {
             let project_name = format!("{} ({})", dir_name, branch);
             let new_id = uuid::Uuid::new_v4().to_string();
 
-            let wt_path_clone = wt_path.clone();
             let project = ProjectData {
                 id: new_id.clone(),
                 name: project_name,
