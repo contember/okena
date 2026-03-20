@@ -4234,6 +4234,7 @@ dependencies = [
  "okena-ext-codex",
  "okena-ext-updater",
  "okena-extensions",
+ "okena-ui",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
@@ -4329,6 +4330,16 @@ dependencies = [
  "gpui",
  "okena-core",
  "serde_json",
+]
+
+[[package]]
+name = "okena-ui"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "gpui",
+ "gpui-component",
+ "okena-core",
 ]
 
 [[package]]

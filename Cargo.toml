@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mobile/native", "crates/okena-core", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater"]
+members = [".", "mobile/native", "crates/okena-core", "crates/okena-ui", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater"]
 resolver = "2"
 
 [package]
@@ -11,6 +11,7 @@ license = "MIT"
 [dependencies]
 # Shared core types
 okena-core = { path = "crates/okena-core", features = ["client"] }
+okena-ui = { path = "crates/okena-ui" }
 
 # Extension system
 okena-extensions = { path = "crates/okena-extensions" }

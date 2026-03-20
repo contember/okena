@@ -1,0 +1,11 @@
+[package]
+name = "okena-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+alacritty_terminal = "0.25"
