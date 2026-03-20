@@ -6,7 +6,7 @@
 use crate::keybindings::Cancel;
 use crate::theme::theme;
 use crate::views::components::{
-    keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area,
+    keyboard_hint, modal_backdrop, modal_content, modal_header, search_input_area_selected,
     ListOverlayConfig,
 };
 use gpui::*;
@@ -78,6 +78,15 @@ pub struct FileEntry {
     pub filename: String,
 }
 
+/// Remembered state from the last file search session.
+#[derive(Default)]
+struct FileSearchMemory {
+    query: String,
+    selected_index: usize,
+}
+
+impl Global for FileSearchMemory {}
+
 /// File search dialog for finding files in a project
 pub struct FileSearchDialog {
     focus_handle: FocusHandle,
@@ -88,33 +97,48 @@ pub struct FileSearchDialog {
     selected_index: usize,
     project_path: PathBuf,
     config: ListOverlayConfig,
+    /// When true, the entire query is "selected" — first keystroke replaces it.
+    select_all: bool,
 }
 
 impl FileSearchDialog {
-    /// Create a new file search dialog for the given project path.
+    /// Create a new file search dialog, restoring the last query if available.
     pub fn new(project_path: PathBuf, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
 
-        // Scan files in the project
         let files = Self::scan_files(&project_path);
-        let filtered_files: Vec<(usize, Vec<usize>)> = (0..files.len()).map(|i| (i, vec![])).collect();
 
         let config = ListOverlayConfig::new("Go to File")
             .searchable("Type to search files...")
             .size(650.0, 550.0)
             .key_context("FileSearchDialog");
 
-        Self {
+        // Restore from previous session
+        let memory = cx.try_global::<FileSearchMemory>();
+        let (query, restored_index) = memory
+            .map(|m| (m.query.clone(), m.selected_index))
+            .unwrap_or_default();
+        let select_all = !query.is_empty();
+
+        let mut dialog = Self {
             focus_handle,
             scroll_handle,
-            search_query: String::new(),
+            search_query: query,
             files,
-            filtered_files,
+            filtered_files: vec![],
             selected_index: 0,
             project_path,
             config,
+            select_all,
+        };
+
+        dialog.filter_files();
+        if restored_index < dialog.filtered_files.len() {
+            dialog.selected_index = restored_index;
         }
+
+        dialog
     }
 
     /// Scan files in the project directory.
@@ -194,8 +218,17 @@ impl FileSearchDialog {
         }
     }
 
-    /// Close the dialog.
+    /// Save current state for next open.
+    fn save_memory(&self, cx: &mut Context<Self>) {
+        cx.set_global(FileSearchMemory {
+            query: self.search_query.clone(),
+            selected_index: self.selected_index,
+        });
+    }
+
+    /// Close the dialog, saving state for next open.
     fn close(&self, cx: &mut Context<Self>) {
+        self.save_memory(cx);
         cx.emit(FileSearchDialogEvent::Close);
     }
 
@@ -203,6 +236,7 @@ impl FileSearchDialog {
     fn open_selected(&self, cx: &mut Context<Self>) {
         if let Some(&(file_index, _)) = self.filtered_files.get(self.selected_index) {
             let file = &self.files[file_index];
+            self.save_memory(cx);
             cx.emit(FileSearchDialogEvent::FileSelected(file.path.clone()));
         }
     }
@@ -537,18 +571,25 @@ impl Render for FileSearchDialog {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
                     "up" => {
+                        this.select_all = false;
                         if this.select_prev() {
                             cx.notify();
                         }
                     }
                     "down" => {
+                        this.select_all = false;
                         if this.select_next() {
                             cx.notify();
                         }
                     }
                     "enter" => this.open_selected(cx),
                     "backspace" => {
-                        if !this.search_query.is_empty() {
+                        if this.select_all {
+                            this.search_query.clear();
+                            this.select_all = false;
+                            this.filter_files();
+                            cx.notify();
+                        } else if !this.search_query.is_empty() {
                             this.search_query.pop();
                             this.filter_files();
                             cx.notify();
@@ -558,6 +599,10 @@ impl Render for FileSearchDialog {
                         let Some(ch) = key.chars().next() else { return };
 
                         if SEARCH_CHARS.contains(ch) {
+                            if this.select_all {
+                                this.search_query.clear();
+                                this.select_all = false;
+                            }
                             this.search_query.push(ch);
                             this.filter_files();
                             cx.notify();
@@ -582,7 +627,7 @@ impl Render for FileSearchDialog {
                         &t,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area(&search_query, self.config.search_placeholder.as_ref().map(|s| s.as_str()).unwrap_or(""), &t))
+                    .child(search_input_area_selected(&search_query, self.config.search_placeholder.as_ref().map(|s| s.as_str()).unwrap_or(""), self.select_all, &t))
                     .child(if self.filtered_files.is_empty() {
                         div()
                             .flex_1()

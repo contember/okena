@@ -2,13 +2,21 @@ use crate::keybindings::{format_keystroke, get_action_descriptions, get_config, 
 use crate::theme::theme;
 use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
-    search_input_area, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
+    search_input_area_selected, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
+
+/// Remembered state from the last command palette session.
+#[derive(Default)]
+struct CommandPaletteMemory {
+    query: String,
+}
+
+impl Global for CommandPaletteMemory {}
 
 /// Command entry for the palette
 #[derive(Clone)]
@@ -29,6 +37,8 @@ struct CommandEntry {
 pub struct CommandPalette {
     focus_handle: FocusHandle,
     state: ListOverlayState<CommandEntry>,
+    /// When true, the entire query is "selected" — first keystroke replaces it.
+    select_all: bool,
 }
 
 impl CommandPalette {
@@ -69,19 +79,40 @@ impl CommandPalette {
             .keyboard_hints(vec![("Enter", "to select"), ("Esc", "to close")])
             .key_context("CommandPalette");
 
+        // Restore from previous session
+        let query = cx.try_global::<CommandPaletteMemory>()
+            .map(|m| m.query.clone())
+            .unwrap_or_default();
+        let select_all = !query.is_empty();
+
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
 
-        Self { focus_handle, state }
+        let mut palette = Self { focus_handle, state, select_all };
+
+        if !query.is_empty() {
+            palette.state.search_query = query;
+            palette.filter_commands();
+        }
+
+        palette
+    }
+
+    fn save_memory(&self, cx: &mut Context<Self>) {
+        cx.set_global(CommandPaletteMemory {
+            query: self.state.search_query.clone(),
+        });
     }
 
     fn close(&self, cx: &mut Context<Self>) {
+        self.save_memory(cx);
         cx.emit(CommandPaletteEvent::Close);
     }
 
     fn execute_command(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(filter_result) = self.state.filtered.get(index) {
             let command = &self.state.items[filter_result.index];
+            self.save_memory(cx);
             window.dispatch_action((command.factory)(), cx);
             cx.emit(CommandPaletteEvent::Close);
         }
@@ -194,6 +225,31 @@ impl Render for CommandPalette {
                 this.close(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                // Handle select_all: on typing or backspace, clear query first
+                if this.select_all {
+                    match key {
+                        "backspace" => {
+                            this.state.search_query.clear();
+                            this.select_all = false;
+                            this.filter_commands();
+                            cx.notify();
+                            return;
+                        }
+                        k if k.len() == 1 => {
+                            let ch = k.chars().next().unwrap();
+                            if "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./".contains(ch) {
+                                this.state.search_query.clear();
+                                this.select_all = false;
+                                // Fall through to handle_list_overlay_key which will push the char
+                            }
+                        }
+                        "up" | "down" => {
+                            this.select_all = false;
+                        }
+                        _ => {}
+                    }
+                }
                 match handle_list_overlay_key(&mut this.state, event, &[]) {
                     ListOverlayAction::Close => this.close(cx),
                     ListOverlayAction::SelectPrev | ListOverlayAction::SelectNext => {
@@ -222,7 +278,7 @@ impl Render for CommandPalette {
                     .w(px(config_width))
                     .max_h(px(config_max_height))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(search_input_area(&search_query, &search_placeholder, &t))
+                    .child(search_input_area_selected(&search_query, &search_placeholder, self.select_all, &t))
                     .child(
                         // Command list
                         div()
