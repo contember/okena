@@ -91,7 +91,7 @@ impl RootView {
         };
 
         let max_offset = self.projects_scroll_handle.max_offset();
-        let clamped = new_offset.clamp(-f32::from(max_offset.width), 0.0);
+        let clamped = new_offset.clamp(-f32::from(max_offset.x), 0.0);
         self.projects_scroll_handle.set_offset(point(px(clamped), px(0.0)));
     }
 
