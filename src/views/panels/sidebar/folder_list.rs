@@ -359,7 +359,7 @@ impl Sidebar {
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
-                    sidebar_name_label(
+                    let name_label = sidebar_name_label(
                         ElementId::Name(format!("fp-project-name-{}", project.id).into()),
                         project_name.clone(),
                         &t,
@@ -378,13 +378,17 @@ impl Sidebar {
                             }
                             cx.stop_propagation();
                         }
-                    }))
-                    .into_any_element()
+                    }));
+                    if !project.show_in_overview && !project.terminal_ids.is_empty() {
+                        div().flex_1().min_w_0().flex().items_center().gap(px(4.0))
+                            .child(name_label.flex_shrink(1.0).flex_grow_0())
+                            .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
+                            .into_any_element()
+                    } else {
+                        name_label.into_any_element()
+                    }
                 },
             )
-            .when(!project.show_in_overview && !project.terminal_ids.is_empty(), |d| {
-                d.child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-            })
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
                 sidebar_visibility_button(
