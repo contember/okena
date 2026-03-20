@@ -1,8 +1,12 @@
 use okena_extensions::ThemeColors;
+use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use parking_lot::Mutex;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,8 +131,13 @@ fn refresh_access_token(auth: &CodexAuth) -> Option<String> {
 }
 
 fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
-    let used = v["used_percent"].as_u64()?;
-    let window_seconds = v["limit_window_seconds"].as_u64().unwrap_or(0);
+    let used = v["used_percent"]
+        .as_u64()
+        .or_else(|| v["used_percent"].as_f64().map(|v| v.round() as u64))?;
+    let window_seconds = v["limit_window_seconds"]
+        .as_u64()
+        .or_else(|| v["window_minutes"].as_u64().map(|v| v.saturating_mul(60)))
+        .unwrap_or(0);
     let reset_at = v["reset_at"].as_u64().unwrap_or(0);
 
     let time_elapsed_pct = if window_seconds > 0 && reset_at > 0 {
@@ -150,6 +159,110 @@ fn parse_window(v: &serde_json::Value) -> Option<RateLimitWindow> {
         reset_at,
         time_elapsed_pct,
     })
+}
+
+fn plan_type_from_access_token(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let jwt_payload: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    jwt_payload["https://api.openai.com/auth"]["chatgpt_plan_type"]
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_session_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+fn fetch_usage_from_local_sessions(auth: &CodexAuth) -> Option<UsageData> {
+    let sessions_dir = dirs::home_dir()?.join(".codex/sessions");
+    let mut session_files = Vec::new();
+
+    collect_session_files(&sessions_dir, &mut session_files);
+    session_files.sort();
+
+    for path in session_files.into_iter().rev() {
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let reader = BufReader::new(file);
+        let mut latest_in_file = None;
+
+        for line in reader.lines().map_while(Result::ok) {
+            let parsed: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            if parsed["type"].as_str() != Some("event_msg")
+                || parsed["payload"]["type"].as_str() != Some("token_count")
+            {
+                continue;
+            }
+
+            let rate_limits = &parsed["payload"]["rate_limits"];
+            if !rate_limits.is_object() {
+                continue;
+            }
+
+            let primary_window = rate_limits["primary"]
+                .as_object()
+                .and_then(|_| parse_window(&rate_limits["primary"]));
+            let secondary_window = rate_limits["secondary"]
+                .as_object()
+                .and_then(|_| parse_window(&rate_limits["secondary"]));
+            let credits = rate_limits["credits"].as_object().map(|c| CreditsInfo {
+                has_credits: c
+                    .get("has_credits")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                unlimited: c
+                    .get("unlimited")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                balance: c
+                    .get("balance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+            });
+
+            if primary_window.is_some() || secondary_window.is_some() {
+                latest_in_file = Some(UsageData {
+                    plan_type: rate_limits["plan_type"]
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| plan_type_from_access_token(&auth.access_token))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    primary_window,
+                    secondary_window,
+                    review_primary: None,
+                    credits,
+                });
+            }
+        }
+
+        if latest_in_file.is_some() {
+            return latest_in_file;
+        }
+    }
+
+    None
 }
 
 fn try_fetch_with_token(
@@ -189,13 +302,13 @@ fn fetch_usage() -> Option<UsageData> {
                 Ok(resp) => resp,
                 Err(status) => {
                     log::warn!("[codex-usage] API returned {:?} after token refresh", status);
-                    return None;
+                    return fetch_usage_from_local_sessions(&auth);
                 }
             }
         }
         Err(status) => {
             log::warn!("[codex-usage] API returned {:?}", status);
-            return None;
+            return fetch_usage_from_local_sessions(&auth);
         }
     };
 

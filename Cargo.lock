@@ -4294,6 +4294,7 @@ dependencies = [
 name = "okena-ext-codex"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dirs 5.0.1",
  "gpui",
  "gpui-component",
