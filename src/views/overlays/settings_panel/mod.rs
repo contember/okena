@@ -802,8 +802,8 @@ impl Render for SettingsPanel {
             .child(
                 modal_content("settings-panel-modal", &t)
                     .relative()
-                    .w(px(620.0))
-                    .max_h(px(560.0))
+                    .w(px(720.0))
+                    .h(px(560.0))
                     // Header with project selector and edit button
                     .child(self.render_header(cx))
                     // Main body: sidebar + content
