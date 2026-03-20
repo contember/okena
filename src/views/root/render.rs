@@ -227,11 +227,11 @@ impl RootView {
                     return;
                 };
                 let max_offset = scroll_handle_for_wheel.max_offset();
-                if max_offset.width <= px(2.0) {
+                if max_offset.x <= px(2.0) {
                     return;
                 }
                 let current = scroll_handle_for_wheel.offset();
-                let new_x = (current.x + scroll_amount).clamp(-max_offset.width, px(0.0));
+                let new_x = (current.x + scroll_amount).clamp(-max_offset.x, px(0.0));
                 scroll_handle_for_wheel.set_offset(point(new_x, current.y));
                 cx.notify();
             }))
@@ -270,7 +270,7 @@ impl RootView {
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                             let max_offset = this.projects_scroll_handle.max_offset();
-                            if max_offset.width <= px(2.0) {
+                            if max_offset.x <= px(2.0) {
                                 return;
                             }
                             this.hscroll_dragging = true;
@@ -279,7 +279,7 @@ impl RootView {
                                 let track_width = f32::from(bounds.size.width);
                                 let relative_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
                                 let ratio = (relative_x / track_width).clamp(0.0, 1.0);
-                                let new_x = -ratio * f32::from(max_offset.width);
+                                let new_x = -ratio * f32::from(max_offset.x);
                                 this.projects_scroll_handle.set_offset(point(px(new_x), px(0.0)));
                             }
                             cx.notify();
@@ -290,14 +290,14 @@ impl RootView {
                             return;
                         }
                         let max_offset = this.projects_scroll_handle.max_offset();
-                        if max_offset.width <= px(2.0) {
+                        if max_offset.x <= px(2.0) {
                             return;
                         }
                         if let Some(bounds) = *this.hscroll_bounds.borrow() {
                             let track_width = f32::from(bounds.size.width);
                             let relative_x = f32::from(event.position.x) - f32::from(bounds.origin.x);
                             let ratio = (relative_x / track_width).clamp(0.0, 1.0);
-                            let new_x = -ratio * f32::from(max_offset.width);
+                            let new_x = -ratio * f32::from(max_offset.x);
                             this.projects_scroll_handle.set_offset(point(px(new_x), px(0.0)));
                         }
                         cx.notify();
@@ -320,14 +320,14 @@ impl RootView {
                         },
                         move |bounds, _, window, _cx| {
                             let max_scroll = scroll_handle.max_offset();
-                            if max_scroll.width <= px(2.0) {
+                            if max_scroll.x <= px(2.0) {
                                 return;
                             }
                             let offset = scroll_handle.offset();
                             let track_width = f32::from(bounds.size.width);
-                            let content_width = track_width + f32::from(max_scroll.width);
+                            let content_width = track_width + f32::from(max_scroll.x);
                             let thumb_width = (track_width / content_width * track_width).max(30.0);
-                            let scroll_ratio = f32::from(-offset.x) / f32::from(max_scroll.width);
+                            let scroll_ratio = f32::from(-offset.x) / f32::from(max_scroll.x);
                             let thumb_x = scroll_ratio * (track_width - thumb_width);
 
                             let thumb_bounds = Bounds {

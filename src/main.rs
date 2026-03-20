@@ -197,6 +197,7 @@ fn set_app_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
             name: "Okena".into(),
+            disabled: false,
             items: vec![
                 MenuItem::action("About Okena", About),
                 MenuItem::separator(),
@@ -209,6 +210,7 @@ fn set_app_menus(cx: &mut App) {
         },
         Menu {
             name: "Edit".into(),
+            disabled: false,
             items: vec![
                 MenuItem::os_action("Undo", crate::keybindings::Copy, OsAction::Undo), // Using Copy as placeholder since we need an action
                 MenuItem::os_action("Redo", crate::keybindings::Copy, OsAction::Redo),
@@ -221,6 +223,7 @@ fn set_app_menus(cx: &mut App) {
         },
         Menu {
             name: "View".into(),
+            disabled: false,
             items: vec![
                 MenuItem::action("Command Palette", ShowCommandPalette),
                 MenuItem::action("Select Theme", ShowThemeSelector),
@@ -272,7 +275,7 @@ impl Global for GlobalHeadless {}
 fn run_headless(listen_addr: IpAddr) {
     println!("Starting Okena in headless mode...");
 
-    Application::headless().run(move |cx: &mut App| {
+    Application::with_platform(gpui_platform::current_platform(true)).run(move |cx: &mut App| {
         cx.set_quit_mode(QuitMode::Explicit);
 
         // Initialize global settings (must be before workspace load)
@@ -394,7 +397,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
+    Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets).run(move |cx: &mut App| {
         // Quit the app when the last window is closed (default on macOS is to keep running)
         cx.set_quit_mode(QuitMode::LastWindowClosed);
 
