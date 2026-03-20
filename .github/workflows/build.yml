@@ -47,6 +47,7 @@ jobs:
             libvulkan-dev \
             libegl1-mesa-dev \
             libssl-dev \
+            libfontconfig-dev \
             pkg-config \
             cmake
 
@@ -209,6 +210,7 @@ jobs:
             libvulkan-dev \
             libegl1-mesa-dev \
             libssl-dev \
+            libfontconfig-dev \
             pkg-config \
             cmake
 
