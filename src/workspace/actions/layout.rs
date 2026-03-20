@@ -989,6 +989,28 @@ impl Workspace {
             self.set_focused_terminal(target_project_id.to_string(), new_path, cx);
         }
     }
+
+    /// Equalize pane sizes in the focused terminal's parent split.
+    pub fn equalize_focused_split(&mut self, cx: &mut Context<Self>) {
+        if let Some(target) = self.focus_manager.focused_terminal_state() {
+            if let Some(project) = self.project_mut(&target.project_id) {
+                if let Some(ref mut layout) = project.layout {
+                    let parent_path = if target.layout_path.is_empty() {
+                        &target.layout_path[..]
+                    } else {
+                        &target.layout_path[..target.layout_path.len() - 1]
+                    };
+                    if let Some(node) = layout.get_at_path_mut(parent_path) {
+                        if let LayoutNode::Split { sizes, children, .. } = node {
+                            let n = children.len();
+                            *sizes = vec![100.0 / n as f32; n];
+                        }
+                    }
+                }
+            }
+        }
+        self.notify_data(cx);
+    }
 }
 
 #[cfg(test)]
@@ -1239,6 +1261,66 @@ mod tests {
                 assert_eq!(*active_tab, 2);
             }
             _ => panic!("Expected tabs"),
+        }
+    }
+
+    #[test]
+    fn test_equalize_parent_split_via_path() {
+        // Simulates what equalize_to_focused does for pane equalization:
+        // given a layout path, find the parent split and equalize its sizes.
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![70.0, 30.0],
+            children: vec![terminal_node("t1"), terminal_node("t2")],
+        };
+        // Focused terminal at path [1] → parent split at path []
+        let parent_path: &[usize] = &[];
+        if let Some(node) = layout.get_at_path_mut(parent_path) {
+            if let LayoutNode::Split { sizes, children, .. } = node {
+                let n = children.len();
+                *sizes = vec![100.0 / n as f32; n];
+            }
+        }
+        if let LayoutNode::Split { sizes, .. } = &layout {
+            assert_eq!(sizes, &vec![50.0, 50.0]);
+        } else {
+            panic!("Expected split");
+        }
+    }
+
+    #[test]
+    fn test_equalize_nested_parent_split_via_path() {
+        // Nested split: focused terminal at path [0, 1] → parent at [0]
+        let mut layout = LayoutNode::Split {
+            direction: SplitDirection::Vertical,
+            sizes: vec![60.0, 40.0],
+            children: vec![
+                LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    sizes: vec![80.0, 20.0],
+                    children: vec![terminal_node("t1"), terminal_node("t2")],
+                },
+                terminal_node("t3"),
+            ],
+        };
+        let parent_path: &[usize] = &[0];
+        if let Some(node) = layout.get_at_path_mut(parent_path) {
+            if let LayoutNode::Split { sizes, children, .. } = node {
+                let n = children.len();
+                *sizes = vec![100.0 / n as f32; n];
+            }
+        }
+        // Outer split unchanged
+        if let LayoutNode::Split { sizes, children, .. } = &layout {
+            assert_eq!(sizes, &vec![60.0, 40.0]);
+            // Inner split equalized
+            if let LayoutNode::Split { sizes: inner, .. } = &children[0] {
+                assert_eq!(inner, &vec![50.0, 50.0]);
+            } else {
+                panic!("Expected inner split");
+            }
+        } else {
+            panic!("Expected split");
         }
     }
 }

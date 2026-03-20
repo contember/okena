@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -400,6 +400,15 @@ impl Render for RootView {
                 this.workspace.update(cx, |ws, cx| {
                     ws.set_focused_project(None, cx);
                     ws.set_folder_filter(None, cx);
+                });
+            }))
+            // Handle equalize layout action
+            .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    // Clear custom column widths → equal distribution
+                    ws.data.project_widths.clear();
+                    // Equalize pane sizes in the focused terminal's parent split
+                    ws.equalize_focused_split(cx);
                 });
             }))
             // Handle focus sidebar action (keyboard navigation)
