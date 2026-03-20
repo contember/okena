@@ -189,6 +189,15 @@ fn theme(cx: &App) -> ThemeColors {
     okena_extensions::theme(cx)
 }
 
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(url).spawn(); }
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
+    #[cfg(windows)]
+    { let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn(); }
+}
+
 /// Status bar widget that shows update status.
 pub struct UpdateStatusWidget {
     _subscription: Option<()>,
@@ -220,46 +229,63 @@ impl Render for UpdateStatusWidget {
 
         match info.status() {
             UpdateStatus::Ready { version, .. } => {
-                div()
+                let release_url = format!(
+                    "https://github.com/contember/okena/releases/tag/v{}",
+                    version
+                );
+                h_flex()
                     .id("update-ready")
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(rgb(t.term_green))
-                    .text_color(rgb(t.bg_primary))
+                    .gap(px(6.0))
+                    .items_center()
                     .text_size(px(10.0))
-                    .child(format!("Update v{}", version))
-                    .on_click(cx.listener(|_this, _, _window, cx| {
-                        if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
-                            let info = gui.0.clone();
-                            if let UpdateStatus::Ready { version, path } = info.status() {
-                                info.set_status(UpdateStatus::Installing {
-                                    version: version.clone(),
-                                });
-                                cx.notify();
-                                cx.spawn(async move |_this, cx| {
-                                    let result = smol::unblock({
-                                        move || crate::installer::install_update(&path)
-                                    }).await;
-                                    match result {
-                                        Ok(_) => {
-                                            info.set_status(UpdateStatus::ReadyToRestart {
-                                                version,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            log::error!("Install failed: {}", e);
-                                            info.set_status(UpdateStatus::Failed {
-                                                error: e.to_string(),
-                                            });
-                                        }
+                    .child(
+                        div()
+                            .id("update-install")
+                            .cursor_pointer()
+                            .text_color(rgb(t.term_green))
+                            .child("New version available")
+                            .on_click(cx.listener(|_this, _, _window, cx| {
+                                if let Some(gui) = cx.try_global::<GlobalUpdateInfo>() {
+                                    let info = gui.0.clone();
+                                    if let UpdateStatus::Ready { version, path } = info.status() {
+                                        info.set_status(UpdateStatus::Installing {
+                                            version: version.clone(),
+                                        });
+                                        cx.notify();
+                                        cx.spawn(async move |_this, cx| {
+                                            let result = smol::unblock({
+                                                move || crate::installer::install_update(&path)
+                                            }).await;
+                                            match result {
+                                                Ok(_) => {
+                                                    info.set_status(UpdateStatus::ReadyToRestart {
+                                                        version,
+                                                    });
+                                                }
+                                                Err(e) => {
+                                                    log::error!("Install failed: {}", e);
+                                                    info.set_status(UpdateStatus::Failed {
+                                                        error: e.to_string(),
+                                                    });
+                                                }
+                                            }
+                                            let _ = _this.update(cx, |_, cx| cx.notify());
+                                        }).detach();
                                     }
-                                    let _ = _this.update(cx, |_, cx| cx.notify());
-                                }).detach();
-                            }
-                        }
-                    }))
+                                }
+                            }))
+                    )
+                    .child(
+                        div()
+                            .id("whats-new")
+                            .cursor_pointer()
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.text_color(rgb(t.text_primary)))
+                            .child("What's new")
+                            .on_click(move |_, _, _cx| {
+                                open_url(&release_url);
+                            })
+                    )
                     .into_any_element()
             }
             UpdateStatus::Installing { version } => {
@@ -271,17 +297,15 @@ impl Render for UpdateStatusWidget {
                     .child(format!("Installing v{}...", version))
                     .into_any_element()
             }
-            UpdateStatus::ReadyToRestart { version } => {
+            UpdateStatus::ReadyToRestart { .. } => {
                 div()
                     .id("update-restart")
                     .cursor_pointer()
                     .px(px(6.0))
                     .py(px(1.0))
-                    .rounded(px(3.0))
-                    .bg(rgb(t.term_green))
-                    .text_color(rgb(t.bg_primary))
+                    .text_color(rgb(t.term_green))
                     .text_size(px(10.0))
-                    .child(format!("Restart to v{}", version))
+                    .child("Restart to update")
                     .on_click(move |_, _, cx| {
                         crate::installer::restart_app(cx);
                     })
