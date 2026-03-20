@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Get the user's login shell, falling back to /bin/sh.
-#[cfg(unix)]
+/// On Windows this is only called in the WSL session-backend path where the
+/// result ends up inside a `wsl.exe -- sh -c "…"` command, so the /bin/sh
+/// fallback is appropriate.
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
