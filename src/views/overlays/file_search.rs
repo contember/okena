@@ -259,19 +259,12 @@ impl FileSearchDialog {
         self.selected_index = 0;
     }
 
-    /// Fuzzy match with scoring. Returns (score, matched_byte_positions) or None.
-    fn fuzzy_score(text: &str, query: &str, filename: &str, relative_path: &str) -> Option<(i32, Vec<usize>)> {
-        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
-        let query_chars: Vec<char> = query.chars().collect();
-
-        if query_chars.is_empty() {
-            return Some((0, vec![]));
-        }
-
-        // Find match positions greedily
+    /// Greedy character matching within a substring. Returns byte positions or None.
+    fn find_positions(text: &str, query_chars: &[char]) -> Option<Vec<usize>> {
         let mut positions = Vec::with_capacity(query_chars.len());
         let mut text_idx = 0;
-        for &qc in &query_chars {
+        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
+        for &qc in query_chars {
             let mut found = false;
             while text_idx < text_bytes.len() {
                 if text_bytes[text_idx].1 == qc {
@@ -286,20 +279,62 @@ impl FileSearchDialog {
                 return None;
             }
         }
+        Some(positions)
+    }
+
+    /// Fuzzy match with scoring. Returns (score, matched_byte_positions) or None.
+    fn fuzzy_score(text: &str, query: &str, filename: &str, relative_path: &str) -> Option<(i32, Vec<usize>)> {
+        let query_chars: Vec<char> = query.chars().collect();
+
+        if query_chars.is_empty() {
+            return Some((0, vec![]));
+        }
+
+        // Try to match entirely within the filename first for better highlights
+        let filename_lower = filename.to_lowercase();
+        let filename_start_byte = text.len().saturating_sub(filename_lower.len());
+        let positions = if let Some(fn_positions) =
+            Self::find_positions(&text[filename_start_byte..], &query_chars)
+        {
+            fn_positions.iter().map(|p| p + filename_start_byte).collect()
+        } else if let Some(path_positions) = Self::find_positions(text, &query_chars) {
+            path_positions
+        } else {
+            return None;
+        };
+
+        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
 
         // Calculate score
         let mut score: i32 = 0;
 
-        // Consecutive matches bonus
+        // Consecutive matches bonus + gap penalty (multiplier 2)
         for w in positions.windows(2) {
-            // Check if positions are adjacent in the original text
             let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
             let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
             if p1_text_idx == p0_text_idx + 1 {
                 score += 5;
             } else {
-                // Gap penalty
-                score -= (p1_text_idx - p0_text_idx - 1) as i32;
+                score -= (p1_text_idx - p0_text_idx - 1) as i32 * 2;
+            }
+        }
+
+        // Best contiguous streak bonus
+        if positions.len() > 1 {
+            let mut best_streak: usize = 1;
+            let mut current_streak: usize = 1;
+            for w in positions.windows(2) {
+                let p0 = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
+                let p1 = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
+                if p1 == p0 + 1 {
+                    current_streak += 1;
+                    best_streak = best_streak.max(current_streak);
+                } else {
+                    current_streak = 1;
+                }
+            }
+            if best_streak > 1 {
+                score += (best_streak as i32 - 1) * 15;
             }
         }
 
@@ -316,20 +351,23 @@ impl FileSearchDialog {
         }
 
         // Filename match bonus: matches in the filename portion score higher
-        let filename_lower = filename.to_lowercase();
-        let filename_start = if text.len() >= filename_lower.len() {
-            text.len() - filename_lower.len()
-        } else {
-            0
-        };
         for &pos in &positions {
-            if pos >= filename_start {
-                score += 20;
+            if pos >= filename_start_byte {
+                score += 25;
             }
         }
 
+        // Exact filename match bonus
+        if filename_lower == query {
+            score += 200;
+        } else if filename_lower.starts_with(query) {
+            score += 100;
+        } else if filename_lower.contains(query) {
+            score += 50;
+        }
+
         // Shorter path bonus
-        score -= (relative_path.len() / 10) as i32;
+        score -= (relative_path.len() / 8) as i32;
 
         // Binary extension penalty
         if let Some(ext) = std::path::Path::new(relative_path)
