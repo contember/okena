@@ -23,18 +23,32 @@ pub struct ExtensionManifest {
     pub default_enabled: bool,
 }
 
-/// Factory that creates status bar widgets. Called once during StatusBar init.
-/// Receives `&mut App` which allows creating entities via `app.new(|cx| ...)`.
-/// Uses `Arc` so the factory can be cloned out of the global registry without holding borrows.
-pub type StatusBarWidgetFactory = Arc<dyn Fn(&mut App) -> Vec<AnyView>>;
+/// Factory that creates a settings view for an extension.
+/// Called by the host settings panel when the extension's settings category is selected.
+pub type SettingsViewFactory = Arc<dyn Fn(&mut App) -> AnyView>;
+
+/// An active extension instance. Holds all resources created during activation.
+/// Dropping this deactivates the extension — views are released, and any `Task`
+/// handles stored in the underlying entities are cancelled automatically.
+pub struct ExtensionInstance {
+    /// Widgets rendered on the left side of the status bar (after CPU/MEM).
+    pub status_bar_widgets: Vec<AnyView>,
+    /// Widgets rendered on the right side of the status bar (before version/time).
+    pub status_bar_right_widgets: Vec<AnyView>,
+}
+
+/// Called when an extension is enabled. Creates views, entities, and background
+/// tasks. The returned `ExtensionInstance` is dropped when the extension is
+/// disabled, which triggers cleanup of all owned resources.
+pub type ActivateFn = Arc<dyn Fn(&mut App) -> ExtensionInstance>;
 
 /// A registered extension with its capabilities.
 pub struct ExtensionRegistration {
     pub manifest: ExtensionManifest,
-    /// Widgets rendered on the left side of the status bar (after CPU/MEM).
-    pub status_bar_widgets: Option<StatusBarWidgetFactory>,
-    /// Widgets rendered on the right side of the status bar (before version/time).
-    pub status_bar_right_widgets: Option<StatusBarWidgetFactory>,
+    /// Called when the extension is enabled. The returned instance is dropped on disable.
+    pub activate: ActivateFn,
+    /// Optional settings UI, rendered inside the host settings panel.
+    pub settings_view: Option<SettingsViewFactory>,
 }
 
 /// Global registry of all extensions, set via `cx.set_global()`.
@@ -75,9 +89,40 @@ pub trait ExtensionSettings {
     fn is_extension_enabled(&self, extension_id: &str) -> bool;
 }
 
+/// Global bridge for extensions to read/write their persisted settings.
+/// The host app registers an implementation at startup via `cx.set_global()`.
+pub struct ExtensionSettingsStore {
+    getter: Box<dyn Fn(&str, &App) -> Option<serde_json::Value>>,
+    setter: Box<dyn Fn(&str, serde_json::Value, &mut App)>,
+}
+
+impl Global for ExtensionSettingsStore {}
+
+impl ExtensionSettingsStore {
+    pub fn new(
+        getter: impl Fn(&str, &App) -> Option<serde_json::Value> + 'static,
+        setter: impl Fn(&str, serde_json::Value, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            getter: Box::new(getter),
+            setter: Box::new(setter),
+        }
+    }
+
+    /// Read the extension's settings blob.
+    pub fn get(&self, extension_id: &str, cx: &App) -> Option<serde_json::Value> {
+        (self.getter)(extension_id, cx)
+    }
+
+    /// Write the extension's settings blob (triggers auto-save via the host).
+    pub fn set(&self, extension_id: &str, value: serde_json::Value, cx: &mut App) {
+        (self.setter)(extension_id, value, cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionManifest, ExtensionRegistration, ExtensionRegistry};
+    use super::*;
 
     #[test]
     fn registry_register_and_lookup() {
@@ -90,8 +135,11 @@ mod tests {
                 name: "Test Extension",
                 default_enabled: true,
             },
-            status_bar_widgets: None,
-            status_bar_right_widgets: None,
+            activate: Arc::new(|_| ExtensionInstance {
+                status_bar_widgets: vec![],
+                status_bar_right_widgets: vec![],
+            }),
+            settings_view: None,
         });
 
         assert_eq!(registry.extensions().len(), 1);
@@ -107,8 +155,11 @@ mod tests {
                 name: "Enabled",
                 default_enabled: true,
             },
-            status_bar_widgets: None,
-            status_bar_right_widgets: None,
+            activate: Arc::new(|_| ExtensionInstance {
+                status_bar_widgets: vec![],
+                status_bar_right_widgets: vec![],
+            }),
+            settings_view: None,
         });
         registry.register(ExtensionRegistration {
             manifest: ExtensionManifest {
@@ -116,8 +167,11 @@ mod tests {
                 name: "Disabled",
                 default_enabled: false,
             },
-            status_bar_widgets: None,
-            status_bar_right_widgets: None,
+            activate: Arc::new(|_| ExtensionInstance {
+                status_bar_widgets: vec![],
+                status_bar_right_widgets: vec![],
+            }),
+            settings_view: None,
         });
 
         let defaults = registry.default_enabled_ids();

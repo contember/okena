@@ -431,6 +431,23 @@ fn main() {
             crate::theme::theme(cx)
         }));
 
+        // Register extension settings store (bridge for extensions to read/write settings)
+        cx.set_global(okena_extensions::ExtensionSettingsStore::new(
+            |ext_id, cx| {
+                settings::settings_entity(cx)
+                    .read(cx)
+                    .settings
+                    .extension_settings
+                    .get(ext_id)
+                    .cloned()
+            },
+            |ext_id, value, cx| {
+                settings::settings_entity(cx).update(cx, |state, cx| {
+                    state.set_extension_setting(ext_id, value, cx);
+                });
+            },
+        ));
+
         // Initialize hook execution monitor
         cx.set_global(workspace::hook_monitor::HookMonitor::new());
 

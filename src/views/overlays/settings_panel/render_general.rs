@@ -4,7 +4,6 @@ use crate::views::components::simple_input::SimpleInput;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::v_flex;
-use okena_extensions::ExtensionRegistry;
 
 use super::components::*;
 use super::SettingsPanel;
@@ -14,7 +13,7 @@ impl SettingsPanel {
         let t = theme(cx);
         let s = settings_entity(cx).read(cx).settings.clone();
 
-        let mut section = section_container(&t)
+        let section = section_container(&t)
             .child(self.render_toggle(
                 "focus-border", "Show Focus Border", s.show_focused_border, true,
                 |state, val, cx| state.set_show_focused_border(val, cx), cx,
@@ -60,30 +59,7 @@ impl SettingsPanel {
                                 .child(SimpleInput::new(&self.listen_address_input).text_size(px(12.0))),
                         ),
                 )
-            });
-
-        // Dynamic extension toggles from the registry.
-        // Collect metadata first to avoid holding an immutable borrow on cx while calling render_toggle.
-        let ext_infos: Vec<(String, String)> = cx.try_global::<ExtensionRegistry>()
-            .map(|registry| {
-                registry.extensions().iter().map(|ext| {
-                    (ext.manifest.id.to_string(), ext.manifest.name.to_string())
-                }).collect()
             })
-            .unwrap_or_default();
-
-        for (ext_id, ext_name) in ext_infos {
-            let enabled = s.enabled_extensions.contains(&ext_id);
-            let toggle_id = format!("ext-{}", ext_id);
-            let label = format!("{} Status", ext_name);
-            let ext_id_for_closure = ext_id.clone();
-            section = section.child(self.render_toggle(
-                &toggle_id, &label, enabled, true,
-                move |state, val, cx| state.set_extension_enabled(&ext_id_for_closure, val, cx), cx,
-            ));
-        }
-
-        section = section
             .child(self.render_number_stepper(
                 "min-col-width", "Min Column Width", s.min_column_width,
                 "{}px", 50.0, 60.0, false,

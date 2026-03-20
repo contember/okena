@@ -8,6 +8,7 @@ mod components;
 mod controls;
 mod footer;
 mod header;
+mod render_extensions;
 mod render_font;
 mod render_general;
 mod render_hooks;
@@ -30,6 +31,8 @@ use crate::views::components::simple_input::{InputChangedEvent, SimpleInputState
 use crate::workspace::state::Workspace;
 use gpui::*;
 use gpui::prelude::*;
+use okena_extensions::ExtensionRegistry;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ============================================================================
@@ -92,6 +95,8 @@ pub struct SettingsPanel {
     // Paired devices
     pub(super) paired_devices: Vec<TokenInfo>,
     pub(super) auth_store: Option<Arc<AuthStore>>,
+    /// Cached extension settings views (lazily created on first access).
+    extension_views: HashMap<String, AnyView>,
 }
 
 impl SettingsPanel {
@@ -585,6 +590,7 @@ impl SettingsPanel {
             listen_address_input,
             paired_devices,
             auth_store,
+            extension_views: HashMap::new(),
         }
     }
 
@@ -710,19 +716,51 @@ impl SettingsPanel {
     }
 
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match &self.active_category {
+            SettingsCategory::General => self.render_general(cx).into_any_element(),
+            SettingsCategory::Font => self.render_font(cx).into_any_element(),
+            SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
+            SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
+            SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
+            SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),
+            SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),
+            SettingsCategory::Extension(ext_id) => {
+                self.render_extension_settings(ext_id.clone(), cx)
+            }
+        };
+
         div()
             .id("settings-content")
             .flex_1()
             .overflow_y_scroll()
             .min_w_0()
-            .child(match self.active_category {
-                SettingsCategory::General => self.render_general(cx).into_any_element(),
-                SettingsCategory::Font => self.render_font(cx).into_any_element(),
-                SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
-                SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
-                SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
-                SettingsCategory::PairedDevices => self.render_paired_devices(cx).into_any_element(),
-            })
+            .child(content)
+    }
+
+    fn render_extension_settings(&mut self, ext_id: String, cx: &mut Context<Self>) -> AnyElement {
+        // Lazily create and cache the extension's settings view
+        if !self.extension_views.contains_key(&ext_id) {
+            // Clone the factory out to avoid holding a borrow on cx
+            let factory = cx
+                .try_global::<ExtensionRegistry>()
+                .and_then(|registry| {
+                    registry
+                        .extensions()
+                        .iter()
+                        .find(|ext| ext.manifest.id == ext_id)
+                        .and_then(|ext| ext.settings_view.clone())
+                });
+            if let Some(factory) = factory {
+                let view = factory(cx);
+                self.extension_views.insert(ext_id.clone(), view);
+            }
+        }
+
+        if let Some(view) = self.extension_views.get(&ext_id) {
+            view.clone().into_any_element()
+        } else {
+            div().into_any_element()
+        }
     }
 }
 

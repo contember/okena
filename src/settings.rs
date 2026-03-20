@@ -120,6 +120,12 @@ impl SettingsState {
     }
 
 
+    /// Set per-extension settings blob (opaque JSON value).
+    pub fn set_extension_setting(&mut self, extension_id: &str, value: serde_json::Value, cx: &mut Context<Self>) {
+        self.settings.extension_settings.insert(extension_id.to_string(), value);
+        self.save_and_notify(cx);
+    }
+
     /// Enable or disable an extension by ID.
     pub fn set_extension_enabled(&mut self, extension_id: &str, enabled: bool, cx: &mut Context<Self>) {
         if enabled {
