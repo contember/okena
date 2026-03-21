@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use super::GitStatus;
-use crate::process::{command, safe_output};
+use crate::GitStatus;
+use okena_core::process::{command, safe_output};
 
 /// Get the root directory of the git repository containing the given path.
 /// Returns None if the path is not inside a git repository.
@@ -695,7 +695,7 @@ pub fn get_ci_checks(path: &Path) -> Option<super::CiCheckSummary> {
 
 /// List worktrees found in the template container directory.
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
-pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+pub fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -709,7 +709,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 
 /// Given a worktree checkout path and a subdir, return the project path.
 /// If subdir is empty, returns the worktree path as-is.
-pub(crate) fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
+pub fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
     if subdir.as_os_str().is_empty() {
         worktree_path.to_string()
     } else {
@@ -722,7 +722,7 @@ pub(crate) fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> St
 
 /// Compute worktree and project paths from template, git root, and subdir.
 /// Returns (worktree_path, project_path).
-pub(crate) fn compute_target_paths(
+pub fn compute_target_paths(
     git_root: &Path,
     subdir: &Path,
     template: &str,

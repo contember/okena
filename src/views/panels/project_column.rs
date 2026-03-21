@@ -1,4 +1,4 @@
-use crate::git::{self, FileDiffSummary};
+use crate::git::{self, FileDiffSummary, PrStateColor, CiStatusColor};
 use crate::git::watcher::GitStatusWatcher;
 use crate::views::components::file_tree::build_file_tree;
 use crate::action_dispatch::ActionDispatcher;
