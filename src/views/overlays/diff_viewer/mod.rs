@@ -541,6 +541,9 @@ impl Render for DiffViewer {
         }
 
         fullscreen_overlay("diff-viewer", &t)
+            .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                d.top(px(28.0))
+            })
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {

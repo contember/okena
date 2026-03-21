@@ -401,6 +401,9 @@ impl Render for FileViewer {
         }
 
         fullscreen_overlay("file-viewer", &t)
+            .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                d.top(px(28.0))
+            })
             .track_focus(&focus_handle)
             .key_context("FileViewer")
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
