@@ -5,6 +5,9 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# Shared core types
+okena-core = { path = "../okena-core" }
+
 # Terminal Emulation
 alacritty_terminal = "0.25"
 
