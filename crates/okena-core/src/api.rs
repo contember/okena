@@ -580,7 +580,9 @@ mod tests {
             status: "running".into(),
             terminal_id: Some("t1".into()),
             ports: vec![3000, 5173],
+            exit_code: None,
             kind: "okena".into(),
+            is_extra: false,
         };
         let json = serde_json::to_string(&svc).unwrap();
         let parsed: ApiServiceInfo = serde_json::from_str(&json).unwrap();
