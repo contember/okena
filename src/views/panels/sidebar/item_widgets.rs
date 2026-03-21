@@ -8,6 +8,7 @@ use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
+use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
@@ -210,17 +211,6 @@ pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors) -> Div {
         .child(format!("{}", count))
 }
 
-/// Visibility toggle (eye / eye-off).
-///
-/// Caller chains `.on_click()` to toggle visibility.
-pub fn sidebar_visibility_toggle(
-    id: impl Into<ElementId>,
-    _show_in_overview: bool,
-    t: &ThemeColors,
-) -> Stateful<Div> {
-    icon_button(id, "icons/eye.svg", t)
-}
-
 /// Visibility toggle button with hover-reveal behavior.
 ///
 /// Shows the eye icon on hover only.
@@ -233,9 +223,62 @@ pub fn sidebar_visibility_button(
     tooltip_text: &'static str,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    sidebar_visibility_toggle(id, show_in_overview, t)
+    icon_button(id, "icons/eye.svg", t)
         .opacity(0.0)
         .when(show_in_overview, |d| d.opacity(1.0))
         .group_hover(group_name, |s| s.opacity(1.0))
         .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
+}
+
+/// Project/worktree name with optional terminal count badge for hidden projects.
+///
+/// When the project is hidden and has terminals, renders the name alongside
+/// a count badge. Otherwise returns the name_label as-is.
+pub fn sidebar_name_or_badge(
+    name_label: Stateful<Div>,
+    name: &str,
+    show_in_overview: bool,
+    terminal_count: usize,
+    t: &ThemeColors,
+) -> AnyElement {
+    if !show_in_overview && terminal_count > 0 {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.0))
+                    .text_color(rgb(t.text_primary))
+                    .child(name.to_string()),
+            )
+            .child(sidebar_terminal_count_badge(terminal_count, t))
+            .into_any_element()
+    } else {
+        name_label.into_any_element()
+    }
+}
+
+/// Non-interactive color dot container (14×16).
+///
+/// Used for worktree and group-child items that don't need a click handler.
+pub fn sidebar_plain_color_dot(folder_color: u32, is_worktree: bool) -> Div {
+    div()
+        .flex_shrink_0()
+        .w(px(14.0))
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(color_dot(folder_color, is_worktree))
+}
+
+/// Empty spacer matching expand arrow dimensions (12×16).
+pub fn sidebar_expand_spacer() -> Div {
+    div().flex_shrink_0().w(px(12.0)).h(px(16.0))
 }

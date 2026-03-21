@@ -106,20 +106,17 @@ impl Sidebar {
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-{}", project.id).into()),
-                        is_expanded,
-                        &t,
-                    )
-                    .on_click(cx.listener({
+                        is_expanded, &t,
+                    ).on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
                             this.toggle_expanded(&project_id);
                             cx.notify();
                             cx.stop_propagation();
                         }
-                    }))
-                    .into_any_element()
+                    })).into_any_element()
                 } else {
-                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
+                    sidebar_expand_spacer().into_any_element()
                 }
             })
             .child({
@@ -136,7 +133,6 @@ impl Sidebar {
                 }))
             })
             .child(
-                // Project name (or input if renaming)
                 if is_renaming {
                     sidebar_rename_input("project-rename-input", &self.project_rename, &t)
                         .map(|el| el.into_any_element())
@@ -162,18 +158,7 @@ impl Sidebar {
                             cx.stop_propagation();
                         }
                     }));
-                    if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                        div().min_w_0().flex().items_center().gap(px(2.0))
-                            .child(
-                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
-                                    .child(project_name.clone())
-                            )
-                            .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-                            .into_any_element()
-                    } else {
-                        name_label.into_any_element()
-                    }
+                    sidebar_name_or_badge(name_label, &project_name, project.show_in_overview, project.terminal_ids.len(), &t)
                 },
             )
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
@@ -283,34 +268,23 @@ impl Sidebar {
                 if has_expandable_content {
                     sidebar_expand_arrow(
                         ElementId::Name(format!("expand-wt-{}", project.id).into()),
-                        is_expanded,
-                        &t,
-                    )
-                    .on_click(cx.listener({
+                        is_expanded, &t,
+                    ).on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
                             this.toggle_expanded(&project_id);
                             cx.notify();
                             cx.stop_propagation();
                         }
-                    }))
-                    .into_any_element()
+                    })).into_any_element()
                 } else {
-                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
+                    sidebar_expand_spacer().into_any_element()
                 }
             })
             .child({
-                // Hollow circle indicator for all worktrees
                 let folder_color = t.get_folder_color(project.folder_color);
                 let dot_color = if project.is_orphan { t.warning } else { folder_color };
-                div()
-                    .flex_shrink_0()
-                    .w(px(14.0))
-                    .h(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(color_dot(dot_color, true))
+                sidebar_plain_color_dot(dot_color, true)
             })
             .child(
                 if is_renaming {
@@ -338,18 +312,8 @@ impl Sidebar {
                             cx.stop_propagation();
                         }
                     }));
-                    if !project.show_in_overview && !project.terminal_ids.is_empty() && !is_busy {
-                        div().min_w_0().flex().items_center().gap(px(2.0))
-                            .child(
-                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
-                                    .child(project_name.clone())
-                            )
-                            .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-                            .into_any_element()
-                    } else {
-                        name_label.into_any_element()
-                    }
+                    let show = project.show_in_overview || is_busy;
+                    sidebar_name_or_badge(name_label, &project_name, show, project.terminal_ids.len(), &t)
                 },
             )
             .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
@@ -831,26 +795,20 @@ impl Sidebar {
             .child({
                 let has_expandable = has_layout || !project.services.is_empty();
                 if has_expandable {
-                    sidebar_expand_arrow(ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()), is_expanded, &t)
-                    .on_click(cx.listener({
+                    sidebar_expand_arrow(
+                        ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()),
+                        is_expanded, &t,
+                    ).on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| { this.toggle_expanded(&project_id); cx.notify(); cx.stop_propagation(); }
-                    }))
-                    .into_any_element()
+                    })).into_any_element()
                 } else {
-                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
+                    sidebar_expand_spacer().into_any_element()
                 }
             })
             .child({
                 let folder_color = t.get_folder_color(project.folder_color);
-                div()
-                    .flex_shrink_0()
-                    .w(px(14.0))
-                    .h(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(color_dot(folder_color, false))
+                sidebar_plain_color_dot(folder_color, false)
             })
             .child({
                 let name_label = sidebar_name_label(ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()), project.name.clone(), &t)
@@ -864,18 +822,7 @@ impl Sidebar {
                         cx.stop_propagation();
                     }
                 }));
-                if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                    div().min_w_0().flex().items_center().gap(px(2.0))
-                        .child(
-                            div().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                                .text_size(px(12.0)).text_color(rgb(t.text_primary))
-                                .child(project.name.clone())
-                        )
-                        .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-                        .into_any_element()
-                } else {
-                    name_label.into_any_element()
-                }
+                sidebar_name_or_badge(name_label, &project.name, project.show_in_overview, project.terminal_ids.len(), &t)
             })
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
             .child(
