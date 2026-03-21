@@ -1,3 +1,4 @@
+use okena_terminal::pty_manager::PtyOutputSink;
 use tokio::sync::broadcast;
 
 /// A PTY output event for broadcast to WebSocket subscribers.
@@ -31,5 +32,11 @@ impl PtyBroadcaster {
     /// Create a new subscriber receiver.
     pub fn subscribe(&self) -> broadcast::Receiver<PtyBroadcastEvent> {
         self.tx.subscribe()
+    }
+}
+
+impl PtyOutputSink for PtyBroadcaster {
+    fn publish(&self, terminal_id: String, data: Vec<u8>) {
+        self.publish(terminal_id, data);
     }
 }

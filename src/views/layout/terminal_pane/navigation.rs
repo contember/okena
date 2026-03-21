@@ -3,7 +3,7 @@
 //! Contains directional navigation between panes, sequential navigation,
 //! search open/close/next/prev, and keyboard input handling.
 
-use crate::terminal::input::key_to_bytes;
+use crate::terminal::input::gpui_key_to_bytes as key_to_bytes;
 use crate::views::layout::navigation::{get_pane_map, NavigationDirection};
 use gpui::*;
 
