@@ -155,11 +155,21 @@ if [[ "$CREATE_DMG" == true ]]; then
     # Create symlink to Applications
     ln -s /Applications "$DMG_TEMP/Applications"
 
-    # Create DMG
-    hdiutil create -volname "$APP_NAME" \
-        -srcfolder "$DMG_TEMP" \
-        -ov -format UDZO \
-        "$DMG_PATH"
+    # Create DMG (retry up to 3 times — hdiutil can fail with "Resource busy" on CI)
+    for attempt in 1 2 3; do
+        if hdiutil create -volname "$APP_NAME" \
+            -srcfolder "$DMG_TEMP" \
+            -ov -format UDZO \
+            "$DMG_PATH"; then
+            break
+        fi
+        echo "    hdiutil failed (attempt $attempt/3), retrying in 5s..."
+        sleep 5
+        if [[ $attempt -eq 3 ]]; then
+            echo "Error: hdiutil create failed after 3 attempts"
+            exit 1
+        fi
+    done
 
     # Clean up
     rm -rf "$DMG_TEMP"
