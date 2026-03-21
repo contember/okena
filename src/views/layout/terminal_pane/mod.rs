@@ -146,7 +146,12 @@ impl TerminalPane {
         }
 
         // Start background loops
-        // Note: dirty check is handled centrally by PTY event loop (see app/mod.rs)
+        // Note: dirty check for local terminals is handled centrally by PTY event loop
+        // (see app/mod.rs). Remote terminals receive data on a tokio thread without
+        // GPUI notification, so they need their own dirty-check loop.
+        if pane.terminal_id.as_deref().is_some_and(|id| id.starts_with("remote:")) {
+            pane.start_remote_dirty_check_loop(cx);
+        }
         pane.start_cursor_blink_loop(cx);
         pane.start_idle_check_loop(cx);
 
@@ -206,6 +211,30 @@ impl TerminalPane {
     }
 
     // === Background loops ===
+
+    /// Dirty-check loop for remote terminals.
+    ///
+    /// Remote terminal data arrives on a tokio thread via `ConnectionHandler::on_terminal_output`,
+    /// which calls `terminal.process_output()` and sets the dirty flag — but has no access to
+    /// GPUI context to call `cx.notify()`. This loop polls the dirty flag and triggers a repaint.
+    /// Local terminals don't need this because the PTY event loop notifies content panes directly.
+    fn start_remote_dirty_check_loop(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+            let interval = Duration::from_millis(8);
+            loop {
+                smol::Timer::after(interval).await;
+                let result = this.update(cx, |pane, cx| {
+                    if pane.terminal.as_ref().is_some_and(|t| t.take_dirty()) {
+                        pane.content.update(cx, |_, cx| cx.notify());
+                    }
+                });
+                if result.is_err() {
+                    break; // Pane dropped
+                }
+            }
+        })
+        .detach();
+    }
 
     /// Start cursor blink loop.
     fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {

@@ -551,12 +551,21 @@ impl Okena {
                     if !dirty_terminal_ids.is_empty() {
                         dirty_terminal_ids.dedup();
                         let registry = crate::views::root::content_pane_registry().lock();
+                        let mut any_local_pane = false;
                         for tid in &dirty_terminal_ids {
                             if let Some(weak_content) = registry.get(tid) {
                                 let _ = weak_content.update(cx, |_content, cx| {
                                     cx.notify();
                                 });
+                                any_local_pane = true;
                             }
+                        }
+                        // Remote-only terminals have no local content pane. Without
+                        // cx.notify(), GPUI's draw cycle won't run and the event loop
+                        // effectively stalls. Notify root_view to keep GPUI responsive
+                        // for bridge commands, state queries, and other remote work.
+                        if !any_local_pane {
+                            this.root_view.update(cx, |_, cx| cx.notify());
                         }
                     }
 
@@ -721,3 +730,4 @@ impl Render for Okena {
         div().size_full().child(self.root_view.clone())
     }
 }
+
