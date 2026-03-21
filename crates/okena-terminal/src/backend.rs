@@ -1,6 +1,6 @@
-use crate::terminal::terminal::TerminalTransport;
-use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::shell_config::ShellType;
+use crate::terminal::TerminalTransport;
+use crate::pty_manager::PtyManager;
+use crate::shell_config::ShellType;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;

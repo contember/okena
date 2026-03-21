@@ -4429,6 +4429,7 @@ dependencies = [
  "okena-ext-codex",
  "okena-ext-updater",
  "okena-extensions",
+ "okena-terminal",
  "okena-ui",
  "parking_lot",
  "portable-pty",
@@ -4526,6 +4527,22 @@ dependencies = [
  "gpui",
  "okena-core",
  "serde_json",
+]
+
+[[package]]
+name = "okena-terminal"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel 2.5.0",
+ "libc",
+ "log",
+ "parking_lot",
+ "portable-pty",
+ "regex",
+ "serde",
+ "uuid",
 ]
 
 [[package]]

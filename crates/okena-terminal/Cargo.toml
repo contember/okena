@@ -1,0 +1,28 @@
+[package]
+name = "okena-terminal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+# Terminal Emulation
+alacritty_terminal = "0.25"
+
+# PTY Management
+portable-pty = "0.9"
+
+# Async & Threading
+async-channel = "2.3"
+parking_lot = "0.12"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+# System
+libc = "0.2"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4"] }
+log = "0.4"
+anyhow = "1.0"
+regex = "1.10"
