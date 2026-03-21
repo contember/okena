@@ -4538,6 +4538,7 @@ dependencies = [
  "async-channel 2.5.0",
  "libc",
  "log",
+ "okena-core",
  "parking_lot",
  "portable-pty",
  "regex",
