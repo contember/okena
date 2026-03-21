@@ -1,17 +1,35 @@
-use gpui::KeyDownEvent;
+/// Keyboard modifiers for terminal input conversion.
+#[derive(Clone, Debug, Default)]
+pub struct KeyModifiers {
+    pub control: bool,
+    pub shift: bool,
+    pub alt: bool,
+    /// Platform key (Cmd on macOS, Win on Windows/Linux)
+    pub platform: bool,
+}
 
-/// Convert a GPUI key event to terminal input bytes
+/// A key event for terminal input conversion.
+/// Framework-agnostic representation — convert from your UI framework's key events.
+#[derive(Clone, Debug)]
+pub struct KeyEvent {
+    /// Key name (e.g. "a", "enter", "left", "f1")
+    pub key: String,
+    /// The character produced by the key, if any
+    pub key_char: Option<String>,
+    pub modifiers: KeyModifiers,
+}
+
+/// Convert a key event to terminal input bytes.
 ///
 /// `app_cursor_mode`: When true, arrow keys send SS3 sequences (\x1bOA) instead of CSI (\x1b[A).
 /// This should be true when the terminal is in application cursor keys mode (DECCKM),
 /// which is used by applications like less, vim, htop, etc.
-pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u8>> {
-    let keystroke = &event.keystroke;
-    let mods = &keystroke.modifiers;
+pub fn key_to_bytes(event: &KeyEvent, app_cursor_mode: bool) -> Option<Vec<u8>> {
+    let mods = &event.modifiers;
 
     // Handle Ctrl+key combinations for letters (produces control characters)
     if mods.control && !mods.shift && !mods.alt && !mods.platform {
-        let key = keystroke.key.as_str();
+        let key = event.key.as_str();
         if let Some(c) = key.chars().next() {
             if key.len() == 1 && c.is_ascii_alphabetic() {
                 let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
@@ -21,7 +39,7 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     }
 
     // Handle Tab with modifiers
-    if keystroke.key.as_str() == "tab" {
+    if event.key.as_str() == "tab" {
         if mods.shift {
             // Shift+Tab (backtab)
             return Some(b"\x1b[Z".to_vec());
@@ -32,7 +50,7 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     // Handle Enter/Return with modifiers
     // Shift+Enter sends literal newline (for multi-line input in apps like Claude Code)
     // Regular Enter sends carriage return (submit)
-    match keystroke.key.as_str() {
+    match event.key.as_str() {
         "enter" | "return" | "kp_enter" => {
             if mods.shift {
                 return Some(b"\n".to_vec());
@@ -46,7 +64,7 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     // Cmd+Left = Ctrl+A (start of line), Cmd+Right = Ctrl+E (end of line)
     #[cfg(target_os = "macos")]
     if mods.platform && !mods.alt && !mods.control {
-        match keystroke.key.as_str() {
+        match event.key.as_str() {
             "left" => return Some(vec![0x01]),
             "right" => return Some(vec![0x05]),
             "up" => return Some(b"\x1b[1;5A".to_vec()),
@@ -60,7 +78,7 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     // Option+Left = ESC b (word back), Option+Right = ESC f (word forward)
     #[cfg(target_os = "macos")]
     if mods.alt && !mods.platform && !mods.control {
-        match keystroke.key.as_str() {
+        match event.key.as_str() {
             "left" => return Some(b"\x1bb".to_vec()),
             "right" => return Some(b"\x1bf".to_vec()),
             "backspace" => return Some(vec![0x17]),
@@ -79,9 +97,9 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     // In application cursor mode (DECCKM): use SS3 sequences (\x1bOA)
     // In normal mode: use CSI sequences (\x1b[A)
     // With modifiers: always use CSI 1;mod X format
-    match keystroke.key.as_str() {
+    match event.key.as_str() {
         "up" | "down" | "right" | "left" => {
-            let arrow_char = match keystroke.key.as_str() {
+            let arrow_char = match event.key.as_str() {
                 "up" => 'A',
                 "down" => 'B',
                 "right" => 'C',
@@ -101,15 +119,15 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
         _ => {}
     }
 
-    // If the platform provides `key_char`, GPUI will also deliver it via the text-input
-    // (InputHandler) path. To avoid double-sending characters, let the InputHandler
+    // If the platform provides `key_char`, the UI framework will also deliver it via the
+    // text-input (InputHandler) path. To avoid double-sending characters, let the InputHandler
     // handle all text-producing keystrokes.
-    if keystroke.key_char.is_some() {
+    if event.key_char.is_some() {
         return None;
     }
 
     // Handle other special keys (with modifier support for some)
-    match keystroke.key.as_str() {
+    match event.key.as_str() {
         "backspace" => return Some(b"\x7f".to_vec()),
         "escape" => return Some(b"\x1b".to_vec()),
         "home" => {
@@ -143,12 +161,12 @@ pub fn key_to_bytes(event: &KeyDownEvent, app_cursor_mode: bool) -> Option<Vec<u
     }
 
     // Single character keys as fallback
-    let key = keystroke.key.as_str();
+    let key = event.key.as_str();
     if key.len() == 1 {
         log::info!("Using key string: {:?}", key);
         return Some(key.as_bytes().to_vec());
     }
 
-    log::warn!("No input generated for key: {:?}", keystroke.key);
+    log::warn!("No input generated for key: {:?}", event.key);
     None
 }

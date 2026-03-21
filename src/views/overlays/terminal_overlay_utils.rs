@@ -6,7 +6,7 @@
 //! - Key input handling
 //! - Focus management
 
-use crate::terminal::input::key_to_bytes;
+use crate::terminal::input::gpui_key_to_bytes as key_to_bytes;
 use crate::terminal::terminal::{Terminal, TerminalSize, TerminalTransport};
 use crate::views::layout::terminal_pane::TerminalContent;
 use crate::views::root::TerminalsRegistry;

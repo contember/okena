@@ -102,6 +102,7 @@ impl HeadlessApp {
         // Remote control setup
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
+        pty_manager.set_output_sink(pty_broadcaster.clone());
         let (state_version_tx, _) = tokio_watch::channel(0u64);
         let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();

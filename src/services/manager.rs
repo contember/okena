@@ -21,6 +21,16 @@ pub struct ServiceManager {
     terminals: TerminalsRegistry,
     /// Cancel tokens for Docker status pollers (project_id -> cancel flag)
     docker_pollers: HashMap<String, Arc<AtomicBool>>,
+    /// Services currently undergoing port detection.
+    port_detection_active: HashMap<(String, String), PortDetectionState>,
+    /// Whether the centralized port detection poller task is running.
+    port_detection_running: bool,
+}
+
+struct PortDetectionState {
+    polls_remaining: u32,
+    found_any: bool,
+    stable_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +85,8 @@ impl ServiceManager {
             backend,
             terminals,
             docker_pollers: HashMap::new(),
+            port_detection_active: HashMap::new(),
+            port_detection_running: false,
         }
     }
 
@@ -786,12 +798,11 @@ impl ServiceManager {
             .and_then(|i| i.terminal_id.as_ref())
     }
 
-    /// Start background port detection polling for a running service.
-    /// Waits 2s initial delay, then polls every 3s up to 10 times.
-    /// Keeps polling even after finding ports, since services like Vite
-    /// bind their real port later than internal/debug ports.
+    /// Register a service for centralized port detection polling.
+    /// The centralized poller calls `ss`/`lsof`/`netstat` once per cycle
+    /// and distributes results to all registered services.
     fn start_port_detection(
-        &self,
+        &mut self,
         project_id: &str,
         service_name: &str,
         cx: &mut Context<Self>,
@@ -800,62 +811,175 @@ impl ServiceManager {
         if self.instances.get(&key).and_then(|i| i.terminal_id.as_ref()).is_none() {
             return;
         }
+        self.port_detection_active.insert(
+            key,
+            PortDetectionState {
+                polls_remaining: 10,
+                found_any: false,
+                stable_count: 0,
+            },
+        );
+        self.ensure_port_detection_poller(cx);
+    }
+
+    /// Ensure the centralized port detection poller is running.
+    /// One poller handles all services: builds the process tree once,
+    /// calls the port scanner once, then distributes results.
+    fn ensure_port_detection_poller(&mut self, cx: &mut Context<Self>) {
+        if self.port_detection_running {
+            return;
+        }
+        self.port_detection_running = true;
         let backend = self.backend.clone();
 
         cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
-            // Initial delay — let the service bind its port
+            // Initial delay — let newly started services bind their ports
             cx.background_executor().timer(Duration::from_secs(2)).await;
 
-            let mut found_any = false;
-            // After first ports found, do 2 more polls to catch late-binding ports
-            let mut stable_count = 0u32;
+            loop {
+                // Collect all services that need port detection + their terminal IDs
+                let services: Vec<((String, String), String)> = this
+                    .update(cx, |this, _| {
+                        this.port_detection_active
+                            .keys()
+                            .filter_map(|key| {
+                                let inst = this.instances.get(key)?;
+                                if inst.status != ServiceStatus::Running {
+                                    return None;
+                                }
+                                let tid = inst.terminal_id.clone()?;
+                                Some((key.clone(), tid))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-            for _ in 0..10 {
-                // Check if service is still running (quick, main thread only)
-                let terminal_id = this.update(cx, |this, _cx| {
-                    let inst = this.instances.get(&key)?;
-                    if inst.status != ServiceStatus::Running {
-                        return None;
-                    }
-                    inst.terminal_id.clone()
-                }).ok().flatten();
+                if services.is_empty() {
+                    let _ = this.update(cx, |this, _| {
+                        this.port_detection_active.clear();
+                        this.port_detection_running = false;
+                    });
+                    return;
+                }
 
-                let Some(terminal_id) = terminal_id else { return };
-
-                // Run PID lookup + port scanning on background thread
-                // (get_service_pids may spawn lsof/tmux subprocesses)
+                // Background: get PIDs per service, build process tree ONCE,
+                // scan ports ONCE, distribute results.
                 let backend_ref = backend.clone();
-                let ports = cx.background_executor()
+                let results: Vec<((String, String), Vec<u16>)> = cx
+                    .background_executor()
                     .spawn(async move {
-                        let service_pids = backend_ref.get_service_pids(&terminal_id);
-                        if service_pids.is_empty() {
-                            return Vec::new();
+                        // Get root PIDs per service (may spawn lsof/tmux per terminal)
+                        let service_root_pids: Vec<((String, String), Vec<u32>)> = services
+                            .iter()
+                            .map(|(key, tid)| (key.clone(), backend_ref.get_service_pids(tid)))
+                            .collect();
+
+                        // Build process tree ONCE for all services
+                        let tree = port_detect::build_process_tree();
+
+                        // Expand to descendant PIDs per service
+                        let mut all_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                        let service_pid_sets: Vec<(
+                            (String, String),
+                            std::collections::HashSet<u32>,
+                        )> = service_root_pids
+                            .into_iter()
+                            .map(|(key, roots)| {
+                                let mut pids = std::collections::HashSet::new();
+                                for &pid in &roots {
+                                    pids.extend(port_detect::descendants_from_tree(&tree, pid));
+                                }
+                                all_pids.extend(&pids);
+                                (key, pids)
+                            })
+                            .collect();
+
+                        if all_pids.is_empty() {
+                            return service_pid_sets
+                                .into_iter()
+                                .map(|(k, _)| (k, Vec::new()))
+                                .collect();
                         }
-                        port_detect::detect_ports_for_pids(&service_pids)
+
+                        // ONE system call for port scanning
+                        let all_port_pairs = port_detect::get_listening_port_pairs();
+
+                        // Distribute ports to each service
+                        service_pid_sets
+                            .into_iter()
+                            .map(|(key, pids)| {
+                                let ports = port_detect::ports_for_pids(&all_port_pairs, &pids);
+                                (key, ports)
+                            })
+                            .collect()
                     })
                     .await;
 
-                if !ports.is_empty() {
-                    let changed = this.update(cx, |this, cx| {
-                        if let Some(inst) = this.instances.get_mut(&key) {
-                            if inst.status == ServiceStatus::Running && inst.detected_ports != ports {
-                                inst.detected_ports = ports;
-                                cx.notify();
-                                return true;
+                // Update instances and port detection state
+                let has_remaining = this
+                    .update(cx, |this, cx| {
+                        let mut changed = false;
+                        let mut keys_to_remove = Vec::new();
+
+                        for (key, ports) in results {
+                            let Some(state) = this.port_detection_active.get_mut(&key) else {
+                                continue;
+                            };
+
+                            state.polls_remaining = state.polls_remaining.saturating_sub(1);
+
+                            if !ports.is_empty() {
+                                let ports_changed =
+                                    if let Some(inst) = this.instances.get_mut(&key) {
+                                        if inst.status == ServiceStatus::Running
+                                            && inst.detected_ports != ports
+                                        {
+                                            inst.detected_ports = ports;
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    };
+
+                                if state.found_any && !ports_changed {
+                                    state.stable_count += 1;
+                                    if state.stable_count >= 2 {
+                                        keys_to_remove.push(key.clone());
+                                        continue;
+                                    }
+                                } else {
+                                    state.stable_count = 0;
+                                }
+                                state.found_any = true;
+                                if ports_changed {
+                                    changed = true;
+                                }
+                            }
+
+                            if state.polls_remaining == 0 {
+                                keys_to_remove.push(key.clone());
                             }
                         }
-                        false
-                    }).unwrap_or(false);
 
-                    if found_any && !changed {
-                        stable_count += 1;
-                        if stable_count >= 2 {
-                            return; // Ports stable for 2 consecutive polls, done
+                        for key in keys_to_remove {
+                            this.port_detection_active.remove(&key);
                         }
-                    } else {
-                        stable_count = 0;
-                    }
-                    found_any = true;
+
+                        if changed {
+                            cx.notify();
+                        }
+
+                        !this.port_detection_active.is_empty()
+                    })
+                    .unwrap_or(false);
+
+                if !has_remaining {
+                    let _ = this.update(cx, |this, _| {
+                        this.port_detection_running = false;
+                    });
+                    return;
                 }
 
                 cx.background_executor().timer(Duration::from_secs(3)).await;
@@ -1100,6 +1224,7 @@ impl ServiceManager {
                     Ok(statuses) => {
                         let should_stop = this.update(cx, |this, cx| {
                             let mut any_docker = false;
+                            let mut changed = false;
                             for ds in &statuses {
                                 let key = (pid.clone(), ds.name.clone());
                                 if let Some(inst) = this.instances.get_mut(&key) {
@@ -1108,14 +1233,18 @@ impl ServiceManager {
                                         let new_status = docker_compose::map_docker_state(&ds.state, ds.exit_code);
                                         if inst.status != new_status {
                                             inst.status = new_status;
+                                            changed = true;
                                         }
                                         if inst.detected_ports != ds.ports {
                                             inst.detected_ports = ds.ports.clone();
+                                            changed = true;
                                         }
                                     }
                                 }
                             }
-                            cx.notify();
+                            if changed {
+                                cx.notify();
+                            }
                             !any_docker
                         }).unwrap_or(true);
 
