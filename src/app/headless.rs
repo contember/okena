@@ -102,7 +102,6 @@ impl HeadlessApp {
         // Remote control setup
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
-        pty_manager.set_broadcaster(pty_broadcaster.clone());
         let (state_version_tx, _) = tokio_watch::channel(0u64);
         let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();
@@ -267,7 +266,7 @@ impl HeadlessApp {
         .detach();
 
         // Start remote server
-        app.start_remote_server(bridge_tx, listen_addr, &remote_info, cx);
+        app.start_remote_server(bridge_tx, listen_addr, &remote_info);
 
         app
     }
@@ -278,7 +277,6 @@ impl HeadlessApp {
         bridge_tx: bridge::BridgeSender,
         listen_addr: IpAddr,
         remote_info: &RemoteInfo,
-        _cx: &mut Context<Self>,
     ) {
         match RemoteServer::start(
             bridge_tx,
@@ -287,7 +285,6 @@ impl HeadlessApp {
             self.state_version.clone(),
             listen_addr,
             self.git_status_tx.clone(),
-            self.pty_manager.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();
@@ -317,6 +314,7 @@ impl HeadlessApp {
         cx: &mut Context<Self>,
     ) {
         let terminals = self.terminals.clone();
+        let broadcaster = self.pty_broadcaster.clone();
         let pty_manager = self.pty_manager.clone();
         let service_manager = self.service_manager.clone();
         let state_version = self.state_version.clone();
@@ -331,13 +329,14 @@ impl HeadlessApp {
                 // Collect exit events for service manager processing
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
 
-                // Process first event (broadcast already handled by reader thread)
+                // Process first event + broadcast to remote subscribers
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
                             terminal.process_output(data);
                         }
+                        broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
                         pty_manager.cleanup_exited(terminal_id);
@@ -353,6 +352,7 @@ impl HeadlessApp {
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
                                 terminal.process_output(data);
                             }
+                            broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
                             pty_manager.cleanup_exited(terminal_id);

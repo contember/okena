@@ -9,7 +9,6 @@ pub mod tokens;
 use crate::remote::auth::AuthStore;
 use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
-use crate::terminal::pty_manager::PtyManager;
 use axum::extract::DefaultBodyLimit;
 use axum::Router;
 use axum::extract::Request;
@@ -35,8 +34,6 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
-    /// Direct PTY access for low-latency input/resize (bypasses GPUI bridge)
-    pub pty_manager: Arc<PtyManager>,
 }
 
 /// Build the complete axum router.
@@ -47,7 +44,6 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
-    pty_manager: Arc<PtyManager>,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -56,7 +52,6 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
-        pty_manager,
     };
 
     // Routes that require auth

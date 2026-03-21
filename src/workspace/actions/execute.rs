@@ -148,7 +148,6 @@ pub fn execute_action(
             rows,
         } => match ensure_terminal(&terminal_id, terminals, backend, ws) {
             Some(term) => {
-                term.claim_resize_remote();
                 let size = TerminalSize {
                     cols,
                     rows,

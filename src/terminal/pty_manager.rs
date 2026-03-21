@@ -1,4 +1,3 @@
-use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::terminal::session_backend::{ResolvedBackend, SessionBackend};
 #[cfg(not(windows))]
 use crate::terminal::session_backend::get_extended_path;
@@ -87,9 +86,6 @@ pub struct PtyManager {
     /// Raw user preference (needed for WSL per-terminal resolution)
     #[cfg(windows)]
     session_backend_preference: SessionBackend,
-    /// Optional broadcaster for streaming PTY output to remote clients.
-    /// Publishing happens directly from reader threads to avoid GPUI event loop latency.
-    broadcaster: Arc<Mutex<Option<Arc<PtyBroadcaster>>>>,
 }
 
 impl PtyManager {
@@ -109,16 +105,9 @@ impl PtyManager {
                 session_backend,
                 #[cfg(windows)]
                 session_backend_preference: backend,
-                broadcaster: Arc::new(Mutex::new(None)),
             },
             rx,
         )
-    }
-
-    /// Set the broadcaster for streaming PTY output to remote clients.
-    /// Must be called after construction, before spawning terminals.
-    pub fn set_broadcaster(&self, broadcaster: Arc<PtyBroadcaster>) {
-        *self.broadcaster.lock() = Some(broadcaster);
     }
 
     /// Create a new terminal with a PTY process (uses system default shell)
@@ -197,7 +186,6 @@ impl PtyManager {
         let tx = self.event_tx.clone();
         let id = terminal_id.to_string();
         let reader_shutdown = Arc::clone(&shutdown);
-        let broadcaster = self.broadcaster.lock().clone();
         let reader_handle = std::thread::Builder::new()
             .name(format!("pty-reader-{}", &terminal_id[..8.min(terminal_id.len())]))
             .spawn(move || {
@@ -205,7 +193,7 @@ impl PtyManager {
                 let shutdown_panic = Arc::clone(&reader_shutdown);
                 let id_panic = id.clone();
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid, broadcaster);
+                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid);
                 })) {
                     log::error!("PTY reader thread panicked: {}", format_panic(&*panic));
                     shutdown_panic.mark_broken();
@@ -388,7 +376,6 @@ impl PtyManager {
         tx: Sender<PtyEvent>,
         shutdown: Arc<PtyShutdownState>,
         child_pid: Option<u32>,
-        broadcaster: Option<Arc<PtyBroadcaster>>,
     ) {
         // Use larger buffer like alacritty (they use 1MB, we use 64KB)
         let mut buf = [0u8; 65536];
@@ -411,16 +398,11 @@ impl PtyManager {
                     if shutdown.is_broken() {
                         break;
                     }
-                    let data = buf[..n].to_vec();
-                    log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&data[..n.min(100)]));
-                    // Broadcast to remote clients immediately (bypasses GPUI event loop)
-                    if let Some(ref bc) = broadcaster {
-                        bc.publish(terminal_id.clone(), data.clone());
-                    }
+                    log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&buf[..n.min(100)]));
                     // send_blocking will block when channel is full (backpressure)
                     if tx.send_blocking(PtyEvent::Data {
                         terminal_id: terminal_id.clone(),
-                        data,
+                        data: buf[..n].to_vec(),
                     }).is_err() {
                         // Receiver dropped - app is shutting down
                         break;
