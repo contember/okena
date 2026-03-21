@@ -343,9 +343,10 @@ impl RootView {
                                     if let Some((config, _, _)) = rm.connections().iter()
                                         .find(|(c, _, _)| c.id == *conn_id) {
                                         if let Some(token) = &config.saved_token {
+                                            let actual_id = okena_core::client::strip_prefix(&project_id, conn_id);
                                             std::sync::Arc::new(RemoteDiffProvider::new(
                                                 config.host.clone(), config.port,
-                                                token.clone(), project_id.clone(),
+                                                token.clone(), actual_id,
                                             ))
                                         } else { continue; }
                                     } else { continue; }
