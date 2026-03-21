@@ -104,7 +104,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         subscribed_ids.get(id).map(|sid| (id.clone(), *sid))
                                     })
                                     .collect();
-                                // Query terminal sizes so client can pre-resize before snapshot
+                                // Query terminal sizes with a short timeout to avoid blocking
+                                // the WebSocket loop when GPUI is unresponsive.
                                 let sizes = {
                                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                                     let ids = terminal_ids.clone();
@@ -112,8 +113,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         command: RemoteCommand::GetTerminalSizes { terminal_ids: ids },
                                         reply: Some(reply_tx),
                                     }).await.is_ok() {
-                                        match reply_rx.await {
-                                            Ok(CommandResult::Ok(Some(val))) => {
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_millis(200),
+                                            reply_rx,
+                                        ).await {
+                                            Ok(Ok(CommandResult::Ok(Some(val)))) => {
                                                 serde_json::from_value(val).unwrap_or_default()
                                             }
                                             _ => HashMap::new(),
@@ -127,10 +131,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                     break;
                                 }
 
-                                // Send initial snapshots for all subscribed terminals
-                                if send_snapshots(&out_tx, &state, &terminal_ids, &subscribed_ids).await.is_err() {
-                                    break;
-                                }
+                                // Send initial snapshots with timeout — if GPUI is slow,
+                                // skip snapshots; client will see incremental PTY data instead.
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_millis(500),
+                                    send_snapshots(&out_tx, &state, &terminal_ids, &subscribed_ids),
+                                ).await;
                                 // Drain PTY events that accumulated before/during snapshot generation.
                                 // The snapshot already contains their effects — replaying would garble the display.
                                 while pty_rx.try_recv().is_ok() {}
@@ -143,16 +149,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 }
                             }
                             Ok(WsInbound::SendText { terminal_id, text }) => {
-                                let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendText { terminal_id, text }),
-                                    reply: None,
-                                }).await;
+                                // Direct PTY write — bypasses GPUI bridge for low latency
+                                state.pty_manager.send_input(&terminal_id, text.as_bytes());
                             }
                             Ok(WsInbound::SendSpecialKey { terminal_id, key }) => {
-                                let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendSpecialKey { terminal_id, key }),
-                                    reply: None,
-                                }).await;
+                                // Direct PTY write — bypasses GPUI bridge for low latency
+                                state.pty_manager.send_input(&terminal_id, key.to_bytes());
                             }
                             Ok(WsInbound::Resize { terminal_id, cols, rows }) => {
                                 let _ = state.bridge_tx.send(BridgeMessage {
@@ -178,17 +180,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // Binary input frame from client — fire-and-forget
+                        // Binary input frame from client — direct PTY write for low latency
                         if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data) {
                             if let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
-                                let text = String::from_utf8_lossy(payload).to_string();
-                                let _ = state.bridge_tx.send(BridgeMessage {
-                                    command: RemoteCommand::Action(ActionRequest::SendText {
-                                        terminal_id: terminal_id.clone(),
-                                        text,
-                                    }),
-                                    reply: None,
-                                }).await;
+                                state.pty_manager.send_input(terminal_id, payload);
                             }
                         }
                     }
@@ -227,9 +222,14 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         break;
                                     }
                                     let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
-                                    if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
-                                        channel_closed = true;
-                                        break;
+                                    if let Ok(result) = tokio::time::timeout(
+                                        std::time::Duration::from_millis(500),
+                                        send_snapshots(&out_tx, &state, &ids, &subscribed_ids),
+                                    ).await {
+                                        if result.is_err() {
+                                            channel_closed = true;
+                                            break;
+                                        }
                                     }
                                     while pty_rx.try_recv().is_ok() {}
                                     break;
@@ -264,8 +264,13 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
 
                         // Auto-resync: send fresh snapshot for all subscribed terminals
                         let ids: Vec<String> = subscribed_ids.keys().cloned().collect();
-                        if send_snapshots(&out_tx, &state, &ids, &subscribed_ids).await.is_err() {
-                            break;
+                        if let Ok(result) = tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            send_snapshots(&out_tx, &state, &ids, &subscribed_ids),
+                        ).await {
+                            if result.is_err() {
+                                break;
+                            }
                         }
                         // Drain stale PTY events — snapshot already includes their effects.
                         while pty_rx.try_recv().is_ok() {}

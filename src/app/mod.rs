@@ -197,6 +197,8 @@ impl Okena {
         // ── Remote control setup ────────────────────────────────────────
         let auth_store = Arc::new(AuthStore::new());
         let pty_broadcaster = Arc::new(PtyBroadcaster::new());
+        // Publish PTY output directly from reader threads (bypasses GPUI event loop latency)
+        pty_manager.set_broadcaster(pty_broadcaster.clone());
         let (state_version_tx, _) = tokio_watch::channel(0u64);
         let state_version = Arc::new(state_version_tx);
         let remote_info = RemoteInfo::new();
@@ -342,7 +344,7 @@ impl Okena {
         // Auto-start remote server if enabled in settings or forced via --remote
         let settings = cx.global::<GlobalSettings>().0.clone();
         if settings.read(cx).get().remote_server_enabled || force_remote {
-            manager.start_remote_server(bridge_tx.clone());
+            manager.start_remote_server(bridge_tx.clone(), cx);
         }
 
         // Observe settings changes to start/stop server dynamically
@@ -359,7 +361,7 @@ impl Okena {
                         this.listen_addr = addr;
                     }
                 }
-                this.start_remote_server(bridge_tx_for_observer.clone());
+                this.start_remote_server(bridge_tx_for_observer.clone(), cx);
             } else if !enabled && running {
                 this.stop_remote_server();
             } else if enabled && running && !this.force_remote {
@@ -368,7 +370,7 @@ impl Okena {
                     if new_addr != this.listen_addr {
                         this.listen_addr = new_addr;
                         this.stop_remote_server();
-                        this.start_remote_server(bridge_tx_for_observer.clone());
+                        this.start_remote_server(bridge_tx_for_observer.clone(), cx);
                     }
                 }
             }
@@ -382,7 +384,7 @@ impl Okena {
     }
 
     /// Start the remote HTTP/WS server.
-    fn start_remote_server(&mut self, bridge_tx: bridge::BridgeSender) {
+    fn start_remote_server(&mut self, bridge_tx: bridge::BridgeSender, _cx: &mut Context<Self>) {
         match RemoteServer::start(
             bridge_tx,
             self.auth_store.clone(),
@@ -390,6 +392,7 @@ impl Okena {
             self.state_version.clone(),
             self.listen_addr,
             self.git_status_tx.clone(),
+            self.pty_manager.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();
@@ -424,7 +427,6 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         let terminals = self.terminals.clone();
-        let broadcaster = self.pty_broadcaster.clone();
         let pty_manager = self.pty_manager.clone();
 
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
@@ -446,7 +448,6 @@ impl Okena {
                             terminal.process_output(data);
                         }
                         dirty_terminal_ids.push(terminal_id.clone());
-                        broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
                         // Clean up the PtyHandle (reader/writer threads) but don't
@@ -466,7 +467,6 @@ impl Okena {
                                 terminal.process_output(data);
                             }
                             dirty_terminal_ids.push(terminal_id.clone());
-                            broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
                             pty_manager.cleanup_exited(terminal_id);
