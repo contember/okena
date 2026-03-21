@@ -1,5 +1,5 @@
 use crate::process::{command, safe_output};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Ports to exclude from detection results.
 /// 9229 = Node.js inspector/debugger
@@ -9,55 +9,69 @@ const IGNORED_PORTS: &[u16] = &[9229];
 /// Linux default ephemeral range starts at 32768.
 const EPHEMERAL_PORT_MIN: u16 = 32768;
 
-/// Detect TCP ports for multiple root PIDs (e.g. session backend daemon PIDs).
-/// Walks the process tree from each root and checks for listening TCP ports.
-pub fn detect_ports_for_pids(root_pids: &[u32]) -> Vec<u16> {
-    let mut all_pids = HashSet::new();
-    for &pid in root_pids {
-        all_pids.extend(get_descendant_pids(pid));
-    }
-    let mut ports = get_listening_ports(&all_pids);
-    ports.retain(|p| *p < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(p));
-    ports.sort();
-    ports.dedup();
-    ports
-}
+// ---------------------------------------------------------------------------
+// Process tree
+// ---------------------------------------------------------------------------
 
-/// Walk the process tree to find all descendant PIDs (children, grandchildren, etc.)
-/// including the root PID itself.
-pub fn get_descendant_pids(root_pid: u32) -> HashSet<u32> {
-    let mut result = HashSet::new();
-    result.insert(root_pid);
-
+/// Build the system-wide parent→children process tree.
+/// On Linux reads `/proc`, on macOS runs `ps -eo pid,ppid`,
+/// on Windows runs a single `wmic` call.
+pub fn build_process_tree() -> HashMap<u32, Vec<u32>> {
     #[cfg(target_os = "linux")]
     {
-        get_descendant_pids_linux(root_pid, &mut result);
+        build_process_tree_linux()
     }
 
     #[cfg(target_os = "macos")]
     {
-        get_descendant_pids_macos(root_pid, &mut result);
+        build_process_tree_macos()
     }
 
     #[cfg(windows)]
     {
-        get_descendant_pids_windows(root_pid, &mut result);
+        build_process_tree_windows()
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        HashMap::new()
+    }
+}
+
+/// BFS to find all descendants of `root_pid` in a pre-built process tree.
+pub fn descendants_from_tree(tree: &HashMap<u32, Vec<u32>>, root_pid: u32) -> HashSet<u32> {
+    let mut result = HashSet::new();
+    result.insert(root_pid);
+    let mut queue = VecDeque::new();
+    queue.push_back(root_pid);
+    while let Some(pid) = queue.pop_front() {
+        if let Some(children) = tree.get(&pid) {
+            for &child in children {
+                if result.insert(child) {
+                    queue.push_back(child);
+                }
+            }
+        }
+    }
     result
 }
 
+/// Walk the process tree to find all descendant PIDs (children, grandchildren, etc.)
+/// including the root PID itself. Convenience wrapper that builds the tree internally.
+pub fn get_descendant_pids(root_pid: u32) -> HashSet<u32> {
+    let tree = build_process_tree();
+    descendants_from_tree(&tree, root_pid)
+}
+
 #[cfg(target_os = "linux")]
-fn get_descendant_pids_linux(root_pid: u32, result: &mut HashSet<u32>) {
-    // Read /proc to build a parent→children map, then BFS from root_pid.
+fn build_process_tree_linux() -> HashMap<u32, Vec<u32>> {
     use std::fs;
 
-    let mut parent_to_children: std::collections::HashMap<u32, Vec<u32>> =
-        std::collections::HashMap::new();
+    let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
 
     let entries = match fs::read_dir("/proc") {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return tree,
     };
 
     for entry in entries.flatten() {
@@ -81,136 +95,171 @@ fn get_descendant_pids_linux(root_pid: u32, result: &mut HashSet<u32>) {
             // fields[0] = state, fields[1] = ppid
             if let Some(ppid_str) = fields.get(1) {
                 if let Ok(ppid) = ppid_str.parse::<u32>() {
-                    parent_to_children.entry(ppid).or_default().push(pid);
+                    tree.entry(ppid).or_default().push(pid);
                 }
             }
         }
     }
 
-    // BFS from root_pid
-    let mut queue = VecDeque::new();
-    queue.push_back(root_pid);
-    while let Some(pid) = queue.pop_front() {
-        if let Some(children) = parent_to_children.get(&pid) {
-            for &child in children {
-                if result.insert(child) {
-                    queue.push_back(child);
-                }
-            }
-        }
-    }
+    tree
 }
 
 #[cfg(target_os = "macos")]
-fn get_descendant_pids_macos(root_pid: u32, result: &mut HashSet<u32>) {
-    // Use pgrep -P recursively to find children.
-    let mut queue = VecDeque::new();
-    queue.push_back(root_pid);
+fn build_process_tree_macos() -> HashMap<u32, Vec<u32>> {
+    // Single `ps` call instead of recursive `pgrep -P` per PID.
+    let mut cmd = command("ps");
+    cmd.args(["-eo", "pid,ppid"]);
+    let output = match safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
 
-    while let Some(pid) = queue.pop_front() {
-        let mut cmd = command("pgrep");
-        cmd.args(["-P", &pid.to_string()]);
-        if let Ok(output) = safe_output(&mut cmd) {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    if let Ok(child_pid) = line.trim().parse::<u32>() {
-                        if result.insert(child_pid) {
-                            queue.push_back(child_pid);
-                        }
-                    }
-                }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in stdout.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 2 {
+            if let (Ok(pid), Ok(ppid)) = (fields[0].parse::<u32>(), fields[1].parse::<u32>()) {
+                tree.entry(ppid).or_default().push(pid);
             }
         }
     }
+    tree
 }
 
 #[cfg(windows)]
-fn get_descendant_pids_windows(root_pid: u32, result: &mut HashSet<u32>) {
-    // Use wmic to find children recursively.
-    let mut queue = VecDeque::new();
-    queue.push_back(root_pid);
+fn build_process_tree_windows() -> HashMap<u32, Vec<u32>> {
+    // Single `wmic` call instead of recursive per-PID queries.
+    // CSV output: Node,ParentProcessId,ProcessId (alphabetical column order).
+    let mut cmd = command("wmic");
+    cmd.args(["process", "get", "ProcessId,ParentProcessId", "/FORMAT:CSV"]);
+    let output = match safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
 
-    while let Some(pid) = queue.pop_front() {
-        let mut cmd = command("wmic");
-        cmd.args([
-            "process",
-            "where",
-            &format!("(ParentProcessId={})", pid),
-            "get",
-            "ProcessId",
-        ]);
-        if let Ok(output) = safe_output(&mut cmd) {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines().skip(1) {
-                    // Skip header
-                    if let Ok(child_pid) = line.trim().parse::<u32>() {
-                        if result.insert(child_pid) {
-                            queue.push_back(child_pid);
-                        }
-                    }
-                }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut tree: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = trimmed.split(',').collect();
+        // CSV: Node,ParentProcessId,ProcessId
+        if fields.len() >= 3 {
+            if let (Ok(ppid), Ok(pid)) = (
+                fields[1].trim().parse::<u32>(),
+                fields[2].trim().parse::<u32>(),
+            ) {
+                tree.entry(ppid).or_default().push(pid);
             }
         }
     }
+    tree
 }
 
-/// Get TCP ports in LISTEN state owned by any of the given PIDs.
-fn get_listening_ports(pids: &HashSet<u32>) -> Vec<u16> {
+// ---------------------------------------------------------------------------
+// Port detection
+// ---------------------------------------------------------------------------
+
+/// Get all listening TCP (pid, port) pairs from the system in a single command.
+pub fn get_listening_port_pairs() -> Vec<(u32, u16)> {
     #[cfg(target_os = "linux")]
     {
-        get_listening_ports_linux(pids)
+        get_listening_port_pairs_linux()
     }
 
     #[cfg(target_os = "macos")]
     {
-        get_listening_ports_macos(pids)
+        get_listening_port_pairs_macos()
     }
 
     #[cfg(windows)]
     {
-        get_listening_ports_windows(pids)
+        get_listening_port_pairs_windows()
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = pids;
         Vec::new()
     }
 }
 
+/// Filter (pid, port) pairs: keep only ports owned by `pids`,
+/// remove ephemeral/ignored ports, sort and deduplicate.
+pub fn ports_for_pids(pairs: &[(u32, u16)], pids: &HashSet<u32>) -> Vec<u16> {
+    let mut ports: Vec<u16> = pairs
+        .iter()
+        .filter(|(pid, port)| {
+            pids.contains(pid) && *port < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(port)
+        })
+        .map(|(_, port)| *port)
+        .collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
+// ---------------------------------------------------------------------------
+// Platform-specific port pair getters
+// ---------------------------------------------------------------------------
+
 #[cfg(target_os = "linux")]
-fn get_listening_ports_linux(pids: &HashSet<u32>) -> Vec<u16> {
-    // Parse `ss -tlnp` output.
-    // Lines like: LISTEN 0 511 0.0.0.0:5173 0.0.0.0:* users:(("node",pid=12345,fd=19))
+fn get_listening_port_pairs_linux() -> Vec<(u32, u16)> {
     let mut cmd = command("ss");
     cmd.args(["-tlnp"]);
     let output = match safe_output(&mut cmd) {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ss_output(&stdout, pids)
+    parse_ss_output(&stdout)
 }
 
-pub(crate) fn parse_ss_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
-    let mut ports = Vec::new();
+#[cfg(target_os = "macos")]
+fn get_listening_port_pairs_macos() -> Vec<(u32, u16)> {
+    let mut cmd = command("lsof");
+    cmd.args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"]);
+    let output = match safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_lsof_output(&stdout)
+}
+
+#[cfg(windows)]
+fn get_listening_port_pairs_windows() -> Vec<(u32, u16)> {
+    let mut cmd = command("netstat");
+    cmd.args(["-ano"]);
+    let output = match safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_netstat_output(&stdout)
+}
+
+// ---------------------------------------------------------------------------
+// Parsers — return all (pid, port) pairs found in the output
+// ---------------------------------------------------------------------------
+
+/// Parse `ss -tlnp` output into (pid, port) pairs.
+pub(crate) fn parse_ss_output(stdout: &str) -> Vec<(u32, u16)> {
+    let mut pairs = Vec::new();
     for line in stdout.lines() {
-        // Extract PIDs from users:((...,pid=NNNN,...)) section
-        let line_pids = extract_pids_from_ss_line(line);
-        if line_pids.iter().any(|p| pids.contains(p)) {
-            if let Some(port) = extract_port_from_ss_line(line) {
-                ports.push(port);
+        let pids = extract_pids_from_ss_line(line);
+        if let Some(port) = extract_port_from_ss_line(line) {
+            for pid in pids {
+                pairs.push((pid, port));
             }
         }
     }
-    ports
+    pairs
 }
 
 fn extract_pids_from_ss_line(line: &str) -> Vec<u32> {
-    // Look for pid=NNNN patterns in the line
     let mut pids = Vec::new();
     let mut search = line;
     while let Some(pos) = search.find("pid=") {
@@ -225,39 +274,20 @@ fn extract_pids_from_ss_line(line: &str) -> Vec<u32> {
 }
 
 fn extract_port_from_ss_line(line: &str) -> Option<u16> {
-    // Fields: State Recv-Q Send-Q Local_Address:Port Peer_Address:Port Process
-    // Local address field is typically the 4th whitespace-separated token.
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 5 {
         return None;
     }
-    // Local address is fields[3] (0-indexed) for lines starting with LISTEN
     let local_addr = fields[3];
-    // Port is after the last ':'
     let port_str = local_addr.rsplit(':').next()?;
     port_str.parse().ok()
 }
 
-#[cfg(target_os = "macos")]
-fn get_listening_ports_macos(pids: &HashSet<u32>) -> Vec<u16> {
-    // Parse `lsof -iTCP -sTCP:LISTEN -P -n` output.
-    // Columns: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-    let mut cmd = command("lsof");
-    cmd.args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"]);
-    let output = match safe_output(&mut cmd) {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_lsof_output(&stdout, pids)
-}
-
+/// Parse `lsof -iTCP -sTCP:LISTEN -P -n` output into (pid, port) pairs.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn parse_lsof_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
-    let mut ports = Vec::new();
+pub(crate) fn parse_lsof_output(stdout: &str) -> Vec<(u32, u16)> {
+    let mut pairs = Vec::new();
     for line in stdout.lines().skip(1) {
-        // Skip header
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 9 {
             continue;
@@ -266,38 +296,21 @@ pub(crate) fn parse_lsof_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if !pids.contains(&pid) {
-            continue;
-        }
         // NAME field like "*:5173" or "127.0.0.1:3000"
         let name = fields[8];
         if let Some(port_str) = name.rsplit(':').next() {
             if let Ok(port) = port_str.parse::<u16>() {
-                ports.push(port);
+                pairs.push((pid, port));
             }
         }
     }
-    ports
+    pairs
 }
 
-#[cfg(windows)]
-fn get_listening_ports_windows(pids: &HashSet<u32>) -> Vec<u16> {
-    // Parse `netstat -ano` output, filtering for LISTENING state.
-    // Columns: Proto LocalAddr ForeignAddr State PID
-    let mut cmd = command("netstat");
-    cmd.args(["-ano"]);
-    let output = match safe_output(&mut cmd) {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_netstat_output(&stdout, pids)
-}
-
+/// Parse `netstat -ano` output into (pid, port) pairs.
 #[cfg(any(windows, test))]
-pub(crate) fn parse_netstat_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16> {
-    let mut ports = Vec::new();
+pub(crate) fn parse_netstat_output(stdout: &str) -> Vec<(u32, u16)> {
+    let mut pairs = Vec::new();
     for line in stdout.lines() {
         let trimmed = line.trim();
         if !trimmed.contains("LISTENING") {
@@ -307,23 +320,18 @@ pub(crate) fn parse_netstat_output(stdout: &str, pids: &HashSet<u32>) -> Vec<u16
         if fields.len() < 5 {
             continue;
         }
-        // PID is the last field
         let pid: u32 = match fields[4].parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if !pids.contains(&pid) {
-            continue;
-        }
-        // Local address is fields[1], port after last ':'
         let local_addr = fields[1];
         if let Some(port_str) = local_addr.rsplit(':').next() {
             if let Ok(port) = port_str.parse::<u16>() {
-                ports.push(port);
+                pairs.push((pid, port));
             }
         }
     }
-    ports
+    pairs
 }
 
 #[cfg(test)]
@@ -339,8 +347,9 @@ LISTEN 0      128    127.0.0.1:3000      0.0.0.0:*         users:((\"cargo\",pid
 LISTEN 0      128    0.0.0.0:8080        0.0.0.0:*         users:((\"java\",pid=12345,fd=10))
 LISTEN 0      128    [::]:22             [::]:*             users:((\"sshd\",pid=1,fd=3))
 ";
+        let pairs = parse_ss_output(output);
         let pids: HashSet<u32> = [12345].into_iter().collect();
-        let ports = parse_ss_output(output, &pids);
+        let ports = ports_for_pids(&pairs, &pids);
         assert_eq!(ports, vec![5173, 8080]);
     }
 
@@ -350,20 +359,21 @@ LISTEN 0      128    [::]:22             [::]:*             users:((\"sshd\",pid
 State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
 LISTEN 0      128    0.0.0.0:22          0.0.0.0:*         users:((\"sshd\",pid=1,fd=3))
 ";
+        let pairs = parse_ss_output(output);
         let pids: HashSet<u32> = [9999].into_iter().collect();
-        let ports = parse_ss_output(output, &pids);
+        let ports = ports_for_pids(&pairs, &pids);
         assert!(ports.is_empty());
     }
 
     #[test]
     fn parse_ss_output_multiple_pids_in_users() {
-        // Some lines can have multiple pid= entries
         let output = "\
 State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
 LISTEN 0 511 0.0.0.0:8000 0.0.0.0:* users:((\"python3\",pid=500,fd=3),(\"python3\",pid=501,fd=3))
 ";
+        let pairs = parse_ss_output(output);
         let pids: HashSet<u32> = [501].into_iter().collect();
-        let ports = parse_ss_output(output, &pids);
+        let ports = ports_for_pids(&pairs, &pids);
         assert_eq!(ports, vec![8000]);
     }
 
@@ -375,9 +385,10 @@ node    12345 user   19u  IPv4  12345      0t0  TCP *:5173 (LISTEN)
 cargo   99999 user    5u  IPv4  99998      0t0  TCP 127.0.0.1:3000 (LISTEN)
 node    12345 user   20u  IPv6  12346      0t0  TCP *:5173 (LISTEN)
 ";
+        let pairs = parse_lsof_output(output);
         let pids: HashSet<u32> = [12345].into_iter().collect();
-        let ports = parse_lsof_output(output, &pids);
-        assert_eq!(ports, vec![5173, 5173]); // caller deduplicates
+        let ports = ports_for_pids(&pairs, &pids);
+        assert_eq!(ports, vec![5173]); // deduped by ports_for_pids
     }
 
     #[test]
@@ -391,8 +402,9 @@ Active Connections
   TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1
   TCP    127.0.0.1:8000         127.0.0.1:50000        ESTABLISHED     12345
 ";
+        let pairs = parse_netstat_output(output);
         let pids: HashSet<u32> = [12345].into_iter().collect();
-        let ports = parse_netstat_output(output, &pids);
+        let ports = ports_for_pids(&pairs, &pids);
         assert_eq!(ports, vec![8000]);
     }
 
@@ -402,18 +414,63 @@ Active Connections
   Proto  Local Address          Foreign Address        State           PID
   TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       1
 ";
+        let pairs = parse_netstat_output(output);
         let pids: HashSet<u32> = [9999].into_iter().collect();
-        let ports = parse_netstat_output(output, &pids);
+        let ports = ports_for_pids(&pairs, &pids);
         assert!(ports.is_empty());
     }
 
     #[test]
     fn filtering_removes_debug_and_ephemeral_ports() {
-        // Simulate what detect_ports_for_pid does after get_listening_ports
-        let mut ports = vec![5173, 9229, 36435, 37903, 3000];
-        ports.retain(|p| *p < EPHEMERAL_PORT_MIN && !IGNORED_PORTS.contains(p));
-        ports.sort();
-        ports.dedup();
+        let pairs = vec![
+            (1, 5173),
+            (1, 9229),
+            (1, 36435),
+            (1, 37903),
+            (1, 3000),
+        ];
+        let pids: HashSet<u32> = [1].into_iter().collect();
+        let ports = ports_for_pids(&pairs, &pids);
         assert_eq!(ports, vec![3000, 5173]);
+    }
+
+    #[test]
+    fn parse_ss_output_returns_all_pairs() {
+        let output = "\
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      511    0.0.0.0:5173        0.0.0.0:*         users:((\"node\",pid=100,fd=19))
+LISTEN 0      128    127.0.0.1:3000      0.0.0.0:*         users:((\"cargo\",pid=200,fd=5))
+";
+        let pairs = parse_ss_output(output);
+        assert_eq!(pairs, vec![(100, 5173), (200, 3000)]);
+    }
+
+    #[test]
+    fn ports_for_pids_shared_port_list() {
+        // Two services sharing the same port scan results
+        let pairs = vec![
+            (100, 5173),
+            (200, 3000),
+            (300, 8080),
+        ];
+        let pids_a: HashSet<u32> = [100].into_iter().collect();
+        let pids_b: HashSet<u32> = [200, 300].into_iter().collect();
+        assert_eq!(ports_for_pids(&pairs, &pids_a), vec![5173]);
+        assert_eq!(ports_for_pids(&pairs, &pids_b), vec![3000, 8080]);
+    }
+
+    #[test]
+    fn descendants_from_tree_basic() {
+        let mut tree = HashMap::new();
+        tree.insert(1, vec![2, 3]);
+        tree.insert(2, vec![4]);
+        tree.insert(5, vec![6]);
+
+        let desc = descendants_from_tree(&tree, 1);
+        assert_eq!(desc, [1, 2, 3, 4].into_iter().collect::<HashSet<_>>());
+
+        // Unrelated subtree not included
+        let desc5 = descendants_from_tree(&tree, 5);
+        assert_eq!(desc5, [5, 6].into_iter().collect::<HashSet<_>>());
     }
 }
