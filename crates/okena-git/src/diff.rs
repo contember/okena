@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::process::{command, safe_output};
+use okena_core::process::{command, safe_output};
 use serde::{Serialize, Deserialize};
 
 /// Type of a diff line.

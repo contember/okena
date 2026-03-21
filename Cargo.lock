@@ -4459,6 +4459,7 @@ dependencies = [
  "okena-ext-codex",
  "okena-ext-updater",
  "okena-extensions",
+ "okena-git",
  "okena-terminal",
  "okena-ui",
  "parking_lot",
@@ -4557,6 +4558,18 @@ dependencies = [
  "gpui",
  "okena-core",
  "serde_json",
+]
+
+[[package]]
+name = "okena-git"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
