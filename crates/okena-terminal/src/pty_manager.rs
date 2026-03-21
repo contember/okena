@@ -1,7 +1,7 @@
-use crate::terminal::session_backend::{ResolvedBackend, SessionBackend};
+use crate::session_backend::{ResolvedBackend, SessionBackend};
 #[cfg(not(windows))]
-use crate::terminal::session_backend::get_extended_path;
-use crate::terminal::shell_config::ShellType;
+use crate::session_backend::get_extended_path;
+use crate::shell_config::ShellType;
 use anyhow::Result;
 use async_channel::{Receiver, Sender};
 use parking_lot::Mutex;
@@ -13,6 +13,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
+
+/// Trait for broadcasting PTY output to external consumers (e.g. remote WebSocket clients).
+/// Implementations must be thread-safe as this is called from PTY reader threads.
+pub trait PtyOutputSink: Send + Sync {
+    fn publish(&self, terminal_id: String, data: Vec<u8>);
+}
 
 /// Events from PTY processes
 #[derive(Debug)]
@@ -86,6 +92,9 @@ pub struct PtyManager {
     /// Raw user preference (needed for WSL per-terminal resolution)
     #[cfg(windows)]
     session_backend_preference: SessionBackend,
+    /// Optional sink for streaming PTY output to external consumers (e.g. remote clients).
+    /// Publishing happens directly from reader threads to avoid UI event loop latency.
+    output_sink: Arc<Mutex<Option<Arc<dyn PtyOutputSink>>>>,
 }
 
 impl PtyManager {
@@ -105,9 +114,16 @@ impl PtyManager {
                 session_backend,
                 #[cfg(windows)]
                 session_backend_preference: backend,
+                output_sink: Arc::new(Mutex::new(None)),
             },
             rx,
         )
+    }
+
+    /// Set the output sink for streaming PTY output to external consumers.
+    /// Must be called after construction, before spawning terminals.
+    pub fn set_output_sink(&self, sink: Arc<dyn PtyOutputSink>) {
+        *self.output_sink.lock() = Some(sink);
     }
 
     /// Create a new terminal with a PTY process (uses system default shell)
@@ -186,6 +202,7 @@ impl PtyManager {
         let tx = self.event_tx.clone();
         let id = terminal_id.to_string();
         let reader_shutdown = Arc::clone(&shutdown);
+        let output_sink = self.output_sink.lock().clone();
         let reader_handle = std::thread::Builder::new()
             .name(format!("pty-reader-{}", &terminal_id[..8.min(terminal_id.len())]))
             .spawn(move || {
@@ -193,7 +210,7 @@ impl PtyManager {
                 let shutdown_panic = Arc::clone(&reader_shutdown);
                 let id_panic = id.clone();
                 if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid);
+                    Self::read_loop(id, reader, tx, reader_shutdown, child_pid, output_sink);
                 })) {
                     log::error!("PTY reader thread panicked: {}", format_panic(&*panic));
                     shutdown_panic.mark_broken();
@@ -299,8 +316,8 @@ impl PtyManager {
         cwd: &str,
         shell: Option<&ShellType>,
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
-        use crate::terminal::session_backend::resolve_for_wsl;
-        use crate::terminal::shell_config::windows_path_to_wsl;
+        use crate::session_backend::resolve_for_wsl;
+        use crate::shell_config::windows_path_to_wsl;
 
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         let custom_command = match shell {
@@ -376,6 +393,7 @@ impl PtyManager {
         tx: Sender<PtyEvent>,
         shutdown: Arc<PtyShutdownState>,
         child_pid: Option<u32>,
+        output_sink: Option<Arc<dyn PtyOutputSink>>,
     ) {
         // Use larger buffer like alacritty (they use 1MB, we use 64KB)
         let mut buf = [0u8; 65536];
@@ -398,11 +416,16 @@ impl PtyManager {
                     if shutdown.is_broken() {
                         break;
                     }
-                    log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&buf[..n.min(100)]));
+                    let data = buf[..n].to_vec();
+                    log::debug!("PTY {} received {} bytes: {:?}", terminal_id, n, String::from_utf8_lossy(&data[..n.min(100)]));
+                    // Broadcast to external consumers immediately (bypasses UI event loop)
+                    if let Some(ref sink) = output_sink {
+                        sink.publish(terminal_id.clone(), data.clone());
+                    }
                     // send_blocking will block when channel is full (backpressure)
                     if tx.send_blocking(PtyEvent::Data {
                         terminal_id: terminal_id.clone(),
-                        data: buf[..n].to_vec(),
+                        data,
                     }).is_err() {
                         // Receiver dropped - app is shutting down
                         break;
@@ -507,7 +530,7 @@ impl PtyManager {
                 #[cfg(windows)]
                 {
                     if let Some(backend) = wsl_backend {
-                        crate::terminal::session_backend::kill_wsl_session(
+                        crate::session_backend::kill_wsl_session(
                             backend,
                             wsl_distro.as_deref(),
                             &session_name,
@@ -769,7 +792,7 @@ impl PtyManager {
     }
 }
 
-impl crate::terminal::terminal::TerminalTransport for PtyManager {
+impl crate::terminal::TerminalTransport for PtyManager {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
         self.send_input(terminal_id, data)
     }
