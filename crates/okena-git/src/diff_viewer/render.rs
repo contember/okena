@@ -2,12 +2,12 @@
 
 use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
-use crate::theme::ThemeColors;
-use crate::views::components::segmented_toggle;
+use okena_core::theme::ThemeColors;
+use okena_ui::toggle::segmented_toggle;
+use crate::DiffMode;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
-use okena_core::types::DiffMode;
 use std::sync::Arc;
 
 impl DiffViewer {
@@ -78,7 +78,6 @@ impl DiffViewer {
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
                                     .on_click(move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
-                                        crate::views::panels::toast::ToastManager::success("Hash copied".to_string(), cx);
                                     })
                                     .tooltip(|_window, cx| gpui_component::tooltip::Tooltip::new("Copy commit hash").build(_window, cx))
                                     .child(short),
@@ -106,7 +105,7 @@ impl DiffViewer {
                                     div()
                                         .text_size(px(12.0))
                                         .text_color(rgb(t.text_muted))
-                                        .child("·"),
+                                        .child("\u{00B7}"),
                                 )
                                 .child(
                                     div()
@@ -209,7 +208,7 @@ impl DiffViewer {
                                 div()
                                     .text_size(px(16.0))
                                     .text_color(rgb(t.text_muted))
-                                    .child("×"),
+                                    .child("\u{00D7}"),
                             ),
                     ),
             )
@@ -287,7 +286,7 @@ impl DiffViewer {
             .when_some(commit.cloned(), |d, commit| {
                 let hash = commit.hash.clone();
                 let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
-                let time_str = crate::git::format_relative_time(commit.timestamp);
+                let time_str = crate::format_relative_time(commit.timestamp);
                 d
                     // Hash (clickable, copies to clipboard)
                     .child(
@@ -303,7 +302,6 @@ impl DiffViewer {
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
-                                crate::views::panels::toast::ToastManager::success("Hash copied".to_string(), cx);
                             })
                             .tooltip(|_window, cx| Tooltip::new("Copy hash").build(_window, cx))
                             .child(short),
@@ -656,7 +654,7 @@ impl DiffViewer {
                     let x = f32::from(event.position.x);
                     let delta_x = x - drag.start_x;
                     let max = this.max_scroll_x();
-                    // Scale mouse movement: track width ≈ viewport, content can be much wider
+                    // Scale mouse movement: track width ~ viewport, content can be much wider
                     let text_w = this.max_text_width();
                     let avail_w = this.available_text_width();
                     let scale = if avail_w > 0.0 { text_w / avail_w } else { 1.0 };
@@ -707,13 +705,13 @@ impl DiffViewer {
                         d.child(self.render_hint("Tab", "staged/unstaged", t))
                     })
                     .child(self.render_hint("S", "split", t))
-                    .child(self.render_hint("↑↓", "files", t))
+                    .child(self.render_hint("\u{2191}\u{2193}", "files", t))
                     .when(has_commits, |d| {
                         d.child(self.render_hint("[ ]", "commits", t))
                     })
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {
-                            "⌘C"
+                            "\u{2318}C"
                         } else {
                             "Ctrl+C"
                         },
@@ -758,7 +756,7 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        use crate::views::components::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
+        use okena_files::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
 
         let mut elements: Vec<AnyElement> = Vec::new();
         for item in flatten_file_tree(tree, 0) {

@@ -7,6 +7,24 @@ pub enum SplitDirection {
     Vertical,
 }
 
+/// Display mode for the diff viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffViewMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+impl DiffViewMode {
+    /// Toggle between view modes.
+    pub fn toggle(self) -> Self {
+        match self {
+            DiffViewMode::Unified => DiffViewMode::SideBySide,
+            DiffViewMode::SideBySide => DiffViewMode::Unified,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffMode {
