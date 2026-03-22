@@ -1,13 +1,10 @@
 //! Service list rendering for the sidebar
 
 use crate::process;
-use crate::services::manager::ServiceStatus;
 use crate::theme::theme;
 use gpui::*;
-use gpui::prelude::*;
-use gpui_component::tooltip::Tooltip;
 use okena_core::api::ActionRequest;
-use okena_ui::icon_action_button::icon_action_button_sized;
+use okena_views_services::types::ServiceSnapshot;
 
 use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
 use super::item_widgets::sidebar_group_header;
@@ -33,6 +30,7 @@ impl Sidebar {
     ) -> impl IntoElement {
         let t = theme(cx);
         let project_id = project.id.clone();
+        let entity = cx.entity().downgrade();
 
         sidebar_group_header(
             ElementId::Name(format!("svc-group-{}", project_id).into()),
@@ -49,52 +47,49 @@ impl Sidebar {
             div().flex_1(),
         )
         .child(
-            // Action buttons - visible on hover
-            div()
-                .flex()
-                .flex_shrink_0()
-                .gap(px(2.0))
-                .opacity(0.0)
-                .group_hover("services-header", |s| s.opacity(1.0))
-                .child(
-                    icon_action_button_sized(ElementId::Name(format!("svc-start-all-{}", project_id).into()), "▶", t.text_secondary, 18.0, &t)
-                        .on_click(cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, _, _window, cx| {
-                                cx.stop_propagation();
+            okena_views_services::sidebar::render_service_group_actions(
+                &project_id,
+                &t,
+                {
+                    let entity = entity.clone();
+                    let project_id = project_id.clone();
+                    move |_window, cx| {
+                        if let Some(entity) = entity.upgrade() {
+                            entity.update(cx, |this, cx| {
                                 this.dispatch_service_action(&project_id, ActionRequest::StartAllServices {
                                     project_id: project_id.clone(),
                                 }, cx);
-                            }
-                        }))
-                        .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
-                )
-                .child(
-                    icon_action_button_sized(ElementId::Name(format!("svc-stop-all-{}", project_id).into()), "■", t.text_secondary, 18.0, &t)
-                        .on_click(cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, _, _window, cx| {
-                                cx.stop_propagation();
+                            });
+                        }
+                    }
+                },
+                {
+                    let entity = entity.clone();
+                    let project_id = project_id.clone();
+                    move |_window, cx| {
+                        if let Some(entity) = entity.upgrade() {
+                            entity.update(cx, |this, cx| {
                                 this.dispatch_service_action(&project_id, ActionRequest::StopAllServices {
                                     project_id: project_id.clone(),
                                 }, cx);
-                            }
-                        }))
-                        .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
-                )
-                .child(
-                    icon_action_button_sized(ElementId::Name(format!("svc-reload-{}", project_id).into()), "⟳", t.text_secondary, 18.0, &t)
-                        .on_click(cx.listener({
-                            let project_id = project_id.clone();
-                            move |this, _, _window, cx| {
-                                cx.stop_propagation();
+                            });
+                        }
+                    }
+                },
+                {
+                    let entity = entity.clone();
+                    let project_id = project_id.clone();
+                    move |_window, cx| {
+                        if let Some(entity) = entity.upgrade() {
+                            entity.update(cx, |this, cx| {
                                 this.dispatch_service_action(&project_id, ActionRequest::ReloadServices {
                                     project_id: project_id.clone(),
                                 }, cx);
-                            }
-                        }))
-                        .tooltip(|_window, cx| Tooltip::new("Reload Services").build(_window, cx)),
-                ),
+                            });
+                        }
+                    }
+                },
+            ),
         )
         .on_click(cx.listener({
             let project_id = project_id.clone();
@@ -117,188 +112,106 @@ impl Sidebar {
         let t = theme(cx);
         let project_id = project.id.clone();
         let service_name = service.name.clone();
-        let status = service.status.clone();
+        let port_host = service.port_host.clone();
+        let entity = cx.entity().downgrade();
 
-        let is_running = matches!(status, ServiceStatus::Running);
-        let is_starting = matches!(status, ServiceStatus::Starting | ServiceStatus::Restarting);
-
-        let status_color = match &status {
-            ServiceStatus::Running => t.term_green,
-            ServiceStatus::Crashed { .. } => t.term_red,
-            ServiceStatus::Stopped => t.text_muted,
-            ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
+        let snapshot = ServiceSnapshot {
+            name: service.name.clone(),
+            status: service.status.clone(),
+            terminal_id: None,
+            ports: service.ports.clone(),
+            is_docker: service.is_docker,
+            is_extra: false,
         };
 
-        div()
-            .id(ElementId::Name(format!("svc-item-{}-{}", project_id, service_name).into()))
-            .group("service-item")
-            .h(px(22.0))
-            .pl(px(left_padding))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
-            .on_click(cx.listener({
+        okena_views_services::sidebar::render_service_item(
+            &snapshot,
+            &project_id,
+            is_cursor,
+            left_padding,
+            &port_host,
+            &t,
+            // on_start
+            {
+                let entity = entity.clone();
                 let project_id = project_id.clone();
                 let service_name = service_name.clone();
-                move |this, _, _window, cx| {
-                    this.cursor_index = None;
-                    // Focus the project when clicking a service
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                    });
-                    // Open/toggle the service log panel
-                    this.request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(
-                            crate::workspace::requests::OverlayRequest::ShowServiceLog {
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_service_action(&project_id, ActionRequest::StartService {
                                 project_id: project_id.clone(),
                                 service_name: service_name.clone(),
-                            },
-                            cx,
-                        );
-                    });
-                }
-            }))
-            .child({
-                // Status indicator (rounded square to distinguish from project's circle)
-                let dot = div()
-                    .id(ElementId::Name(format!("svc-dot-{}-{}", project_id, service_name).into()))
-                    .flex_shrink_0()
-                    .w(px(6.0))
-                    .h(px(6.0))
-                    .rounded(px(1.5))
-                    .bg(rgb(status_color));
-                if let ServiceStatus::Crashed { exit_code } = &status {
-                    let tip = match exit_code {
-                        Some(code) => format!("Exited with code {}", code),
-                        None => "Crashed".to_string(),
-                    };
-                    dot.tooltip(move |_window, cx| Tooltip::new(tip.clone()).build(_window, cx))
-                } else {
-                    dot
-                }
-            })
-            .when(service.is_docker, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .px(px(3.0))
-                        .h(px(14.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(2.0))
-                        .bg(rgb(t.bg_secondary))
-                        .text_size(px(9.0))
-                        .text_color(rgb(t.text_muted))
-                        .child("docker"),
-                )
-            })
-            .child(
-                // Service name
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_size(px(12.0))
-                    .text_color(rgb(t.text_primary))
-                    .text_ellipsis()
-                    .child(service_name.clone()),
-            )
-            .children(
-                // Port badges — host baked into SidebarServiceInfo
-                service.ports.iter().map({
-                    let project_id = project_id.clone();
-                    let service_name = service_name.clone();
-                    let port_host = service.port_host.clone();
-                    move |port| {
-                        let port = *port;
-                        let url = format!("http://{}:{}", port_host, port);
-                        let tooltip_url = url.clone();
-                        div()
-                            .id(ElementId::Name(format!("svc-port-{}-{}-{}", project_id, service_name, port).into()))
-                            .flex_shrink_0()
-                            .cursor_pointer()
-                            .px(px(4.0))
-                            .h(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(3.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(10.0))
-                            .text_color(rgb(t.text_muted))
-                            .child(format!(":{}", port))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, _cx| {
-                                process::open_url(&url);
-                            })
-                            .tooltip(move |_window, cx| {
-                                Tooltip::new(tooltip_url.clone()).build(_window, cx)
-                            })
+                            }, cx);
+                        });
                     }
-                })
-            )
-            .child(
-                // Action buttons - show on hover
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .gap(px(2.0))
-                    .opacity(0.0)
-                    .group_hover("service-item", |s| s.opacity(1.0))
-                    .when(!is_running && !is_starting, |d| {
-                        d.child(
-                            icon_action_button_sized(ElementId::Name(format!("svc-play-{}-{}", project_id, service_name).into()), "▶", t.term_green, 18.0, &t)
-                                .on_click(cx.listener({
-                                    let project_id = project_id.clone();
-                                    let service_name = service_name.clone();
-                                    move |this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.dispatch_service_action(&project_id, ActionRequest::StartService {
-                                            project_id: project_id.clone(),
-                                            service_name: service_name.clone(),
-                                        }, cx);
-                                    }
-                                }))
-                                .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
-                        )
-                    })
-                    .when(is_running, |d| {
-                        d
-                            .child(
-                                icon_action_button_sized(ElementId::Name(format!("svc-restart-{}-{}", project_id, service_name).into()), "⟳", t.text_secondary, 18.0, &t)
-                                    .on_click(cx.listener({
-                                        let project_id = project_id.clone();
-                                        let service_name = service_name.clone();
-                                        move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.dispatch_service_action(&project_id, ActionRequest::RestartService {
-                                                project_id: project_id.clone(),
-                                                service_name: service_name.clone(),
-                                            }, cx);
-                                        }
-                                    }))
-                                    .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
-                            )
-                            .child(
-                                icon_action_button_sized(ElementId::Name(format!("svc-stop-{}-{}", project_id, service_name).into()), "■", t.term_red, 18.0, &t)
-                                    .on_click(cx.listener({
-                                        let project_id = project_id.clone();
-                                        let service_name = service_name.clone();
-                                        move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.dispatch_service_action(&project_id, ActionRequest::StopService {
-                                                project_id: project_id.clone(),
-                                                service_name: service_name.clone(),
-                                            }, cx);
-                                        }
-                                    }))
-                                    .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
-                            )
-                    }),
-            )
+                }
+            },
+            // on_stop
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                let service_name = service_name.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_service_action(&project_id, ActionRequest::StopService {
+                                project_id: project_id.clone(),
+                                service_name: service_name.clone(),
+                            }, cx);
+                        });
+                    }
+                }
+            },
+            // on_restart
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                let service_name = service_name.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.dispatch_service_action(&project_id, ActionRequest::RestartService {
+                                project_id: project_id.clone(),
+                                service_name: service_name.clone(),
+                            }, cx);
+                        });
+                    }
+                }
+            },
+            // on_click
+            {
+                let entity = entity.clone();
+                let project_id = project_id.clone();
+                let service_name = service_name.clone();
+                move |_window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| {
+                            this.cursor_index = None;
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                            });
+                            this.request_broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    crate::workspace::requests::OverlayRequest::ShowServiceLog {
+                                        project_id: project_id.clone(),
+                                        service_name: service_name.clone(),
+                                    },
+                                    cx,
+                                );
+                            });
+                        });
+                    }
+                }
+            },
+            // on_port_click
+            {
+                let port_host = port_host.clone();
+                move |port: u16| {
+                    let url = format!("http://{}:{}", port_host, port);
+                    process::open_url(&url);
+                }
+            },
+        )
     }
 }

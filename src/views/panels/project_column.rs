@@ -23,22 +23,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use okena_core::api::ActionRequest;
-use okena_ui::icon_action_button::icon_action_button;
+use okena_views_services::types::ServiceSnapshot;
 
 /// Delay before showing diff summary popover (ms)
 const HOVER_DELAY_MS: u64 = 400;
 
-/// Unified snapshot of service state from either local ServiceManager or remote ProjectData.
-struct ServiceSnapshot {
-    name: String,
-    status: ServiceStatus,
-    #[allow(dead_code)]
-    terminal_id: Option<String>,
-    ports: Vec<u16>,
-    is_docker: bool,
-    /// Docker service not listed in okena.yaml — shown in "Other" section.
-    is_extra: bool,
-}
+// ServiceSnapshot is now imported from okena_views_services::types
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
@@ -1874,18 +1864,11 @@ impl ProjectColumn {
                 .find(|s| s.name == *name)
                 .map(|s| s.status.clone())
         });
-        let active_is_running = matches!(active_status, Some(ServiceStatus::Running));
-        let active_is_starting = matches!(active_status, Some(ServiceStatus::Starting | ServiceStatus::Restarting));
-        let active_is_stopped = !active_is_running && !active_is_starting;
-        let active_exit_code = match &active_status {
-            Some(ServiceStatus::Crashed { exit_code }) => *exit_code,
-            _ => None,
-        };
-        let active_is_crashed = matches!(active_status, Some(ServiceStatus::Crashed { .. }));
 
         let project_id = self.project_id.clone();
         let active_drag = self.active_drag.clone();
         let panel_height = self.service_panel_height;
+        let entity = cx.entity().downgrade();
 
         div()
             .id("service-panel")
@@ -1908,267 +1891,126 @@ impl ProjectColumn {
                 ),
             )
             .child(
-                // Tab header
-                div()
-                    .id("service-panel-header")
-                    .flex_shrink_0()
-                    .bg(rgb(t.bg_header))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .flex()
-                    .items_center()
-                    .child(
-                        // Tabs area (overview + service tabs)
-                        div()
-                            .id("service-tabs-scroll")
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .overflow_x_scroll()
-                            // Overview tab
-                            .child(
-                                div()
-                                    .id("svc-tab-overview")
-                                    .cursor_pointer()
-                                    .h(px(34.0))
-                                    .px(px(12.0))
-                                    .flex()
-                                    .items_center()
-                                    .flex_shrink_0()
-                                    .text_size(px(12.0))
-                                    .when(is_overview, |d| {
-                                        d.bg(rgb(t.bg_primary))
-                                            .text_color(rgb(t.text_primary))
-                                    })
-                                    .when(!is_overview, |d| {
-                                        d.text_color(rgb(t.text_secondary))
-                                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    })
-                                    .child("Overview")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.show_overview(cx);
-                                    }))
-                            )
-                            // Service tabs (exclude extra Docker services unless active)
-                            .children(
-                                services.iter().filter(|svc| !svc.is_extra || active_name.as_deref() == Some(&svc.name)).map(|svc| {
-                                    let name = svc.name.clone();
-                                    let is_active = active_name.as_deref() == Some(&name);
-                                    let status_color = match &svc.status {
-                                        ServiceStatus::Running => t.term_green,
-                                        ServiceStatus::Crashed { .. } => t.term_red,
-                                        ServiceStatus::Stopped => t.text_muted,
-                                        ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
-                                    };
-
-                                    div()
-                                        .id(ElementId::Name(format!("svc-tab-{}", name).into()))
-                                        .cursor_pointer()
-                                        .h(px(34.0))
-                                        .px(px(12.0))
-                                        .flex()
-                                        .items_center()
-                                        .flex_shrink_0()
-                                        .gap(px(6.0))
-                                        .text_size(px(12.0))
-                                        .when(is_active, |d| {
-                                            d.bg(rgb(t.bg_primary))
-                                                .text_color(rgb(t.text_primary))
-                                        })
-                                        .when(!is_active, |d| {
-                                            d.text_color(rgb(t.text_secondary))
-                                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        })
-                                        .child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .w(px(7.0))
-                                                .h(px(7.0))
-                                                .rounded(px(3.5))
-                                                .bg(rgb(status_color)),
-                                        )
-                                        .child(name.clone())
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            this.show_service(&name, cx);
-                                        }))
-                                })
-                            ),
-                    )
-                    // Contextual action buttons
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .h(px(34.0))
-                            .items_center()
-                            .gap(px(2.0))
-                            .mr(px(4.0))
-                            .border_l_1()
-                            .border_color(rgb(t.border))
-                            .pl(px(6.0))
-                            // --- Overview actions ---
-                            .when(is_overview, |d| {
-                                d
-                                    // Start All
-                                    .child(
-                                        icon_action_button(
-                                            "svc-panel-start-all",
-                                            "▶▶",
-                                            t.term_green,
-                                            &t,
-                                        )
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                cx.stop_propagation();
-                                                this.dispatch_service_action(ActionRequest::StartAllServices {
-                                                    project_id: this.project_id.clone(),
-                                                }, cx);
-                                            }))
-                                            .tooltip(|_window, cx| Tooltip::new("Start All").build(_window, cx)),
-                                    )
-                                    // Stop All
-                                    .child(
-                                        icon_action_button(
-                                            "svc-panel-stop-all",
-                                            "■■",
-                                            t.term_red,
-                                            &t,
-                                        )
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                cx.stop_propagation();
-                                                this.dispatch_service_action(ActionRequest::StopAllServices {
-                                                    project_id: this.project_id.clone(),
-                                                }, cx);
-                                            }))
-                                            .tooltip(|_window, cx| Tooltip::new("Stop All").build(_window, cx)),
-                                    )
-                                    // Reload
-                                    .child(
-                                        icon_action_button(
-                                            "svc-panel-reload",
-                                            "⟳",
-                                            t.text_secondary,
-                                            &t,
-                                        )
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                cx.stop_propagation();
-                                                this.dispatch_service_action(ActionRequest::ReloadServices {
-                                                    project_id: this.project_id.clone(),
-                                                }, cx);
-                                            }))
-                                            .tooltip(|_window, cx| Tooltip::new("Reload Services").build(_window, cx)),
-                                    )
-                            })
-                            // --- Detail tab actions ---
-                            .when(!is_overview, |d| {
-                                d
-                                    // Exit code label (when crashed)
-                                    .when(active_is_crashed, |d| {
-                                        let label = match active_exit_code {
-                                            Some(code) => format!("exit {}", code),
-                                            None => "crashed".to_string(),
-                                        };
-                                        d.child(
-                                            div()
-                                                .px(px(5.0))
-                                                .py(px(1.0))
-                                                .rounded(px(3.0))
-                                                .text_size(px(11.0))
-                                                .text_color(rgb(t.term_red))
-                                                .child(label),
-                                        )
-                                    })
-                                    // Start button (when stopped/crashed)
-                                    .when(active_is_stopped, |d| {
-                                        d.child(
-                                            icon_action_button(
-                                                "svc-panel-start",
-                                                "▶",
-                                                t.term_green,
-                                                &t,
-                                            )
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    if let Some(name) = this.active_service_name.clone() {
-                                                        this.dispatch_service_action(ActionRequest::StartService {
-                                                            project_id: this.project_id.clone(),
-                                                            service_name: name,
-                                                        }, cx);
-                                                    }
-                                                }))
-                                                .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
-                                        )
-                                    })
-                                    // Restart button (when running)
-                                    .when(active_is_running, |d| {
-                                        d.child(
-                                            icon_action_button(
-                                                "svc-panel-restart",
-                                                "⟳",
-                                                t.text_secondary,
-                                                &t,
-                                            )
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    if let Some(name) = this.active_service_name.clone() {
-                                                        this.dispatch_service_action(ActionRequest::RestartService {
-                                                            project_id: this.project_id.clone(),
-                                                            service_name: name,
-                                                        }, cx);
-                                                    }
-                                                }))
-                                                .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
-                                        )
-                                    })
-                                    // Stop button (when running)
-                                    .when(active_is_running, |d| {
-                                        d.child(
-                                            icon_action_button(
-                                                "svc-panel-stop",
-                                                "■",
-                                                t.term_red,
-                                                &t,
-                                            )
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    if let Some(name) = this.active_service_name.clone() {
-                                                        this.dispatch_service_action(ActionRequest::StopService {
-                                                            project_id: this.project_id.clone(),
-                                                            service_name: name,
-                                                        }, cx);
-                                                    }
-                                                }))
-                                                .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
-                                        )
-                                    })
-                            }),
-                    )
-                    .child(
-                        // Close button — wrap in a 34px-tall container to align with tabs
-                        div()
-                            .flex_shrink_0()
-                            .h(px(34.0))
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .id("service-panel-close")
-                                    .cursor_pointer()
-                                    .w(px(26.0))
-                                    .h(px(26.0))
-                                    .mx(px(4.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(3.0))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(t.text_secondary))
-                                    .child("✕")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.close_service_panel(cx);
-                                    })),
-                            ),
-                    ),
+                okena_views_services::panel::render_service_panel_header(
+                    &services,
+                    active_name.as_deref(),
+                    &t,
+                    // on_overview_click
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| this.show_overview(cx));
+                            }
+                        }
+                    },
+                    // on_tab_click
+                    {
+                        let entity = entity.clone();
+                        move |name: String, _window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| this.show_service(&name, cx));
+                            }
+                        }
+                    },
+                    // on_start_all
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    this.dispatch_service_action(ActionRequest::StartAllServices {
+                                        project_id: this.project_id.clone(),
+                                    }, cx);
+                                });
+                            }
+                        }
+                    },
+                    // on_stop_all
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    this.dispatch_service_action(ActionRequest::StopAllServices {
+                                        project_id: this.project_id.clone(),
+                                    }, cx);
+                                });
+                            }
+                        }
+                    },
+                    // on_reload
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    this.dispatch_service_action(ActionRequest::ReloadServices {
+                                        project_id: this.project_id.clone(),
+                                    }, cx);
+                                });
+                            }
+                        }
+                    },
+                    // on_start (active service)
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    if let Some(name) = this.active_service_name.clone() {
+                                        this.dispatch_service_action(ActionRequest::StartService {
+                                            project_id: this.project_id.clone(),
+                                            service_name: name,
+                                        }, cx);
+                                    }
+                                });
+                            }
+                        }
+                    },
+                    // on_stop (active service)
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    if let Some(name) = this.active_service_name.clone() {
+                                        this.dispatch_service_action(ActionRequest::StopService {
+                                            project_id: this.project_id.clone(),
+                                            service_name: name,
+                                        }, cx);
+                                    }
+                                });
+                            }
+                        }
+                    },
+                    // on_restart (active service)
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    if let Some(name) = this.active_service_name.clone() {
+                                        this.dispatch_service_action(ActionRequest::RestartService {
+                                            project_id: this.project_id.clone(),
+                                            service_name: name,
+                                        }, cx);
+                                    }
+                                });
+                            }
+                        }
+                    },
+                    // on_close
+                    {
+                        let entity = entity.clone();
+                        move |_window, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| this.close_service_panel(cx));
+                            }
+                        }
+                    },
+                    active_status.as_ref(),
+                ),
             )
             .child(
                 // Content area
@@ -2183,58 +2025,24 @@ impl ProjectColumn {
                         .children(self.service_terminal_pane.clone())
                         .into_any_element()
                 } else {
-                    // "not running" placeholder for detail tab
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(10.0))
-                        .bg(rgb(t.bg_primary))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(rgb(t.text_muted))
-                                .child("Service not running"),
-                        )
-                        .child(
-                            div()
-                                .id("svc-panel-start-placeholder")
-                                .cursor_pointer()
-                                .px(px(14.0))
-                                .py(px(6.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(t.bg_secondary))
-                                .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(t.term_green))
-                                        .child("▶"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(t.text_secondary))
-                                        .child("Start"),
-                                )
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    if let Some(name) = this.active_service_name.clone() {
-                                        this.dispatch_service_action(ActionRequest::StartService {
-                                            project_id: this.project_id.clone(),
-                                            service_name: name,
-                                        }, cx);
-                                    }
-                                })),
-                        )
-                        .into_any_element()
+                    okena_views_services::panel::render_not_running_placeholder(
+                        &t,
+                        {
+                            let entity = entity.clone();
+                            move |_window, cx| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(cx, |this, cx| {
+                                        if let Some(name) = this.active_service_name.clone() {
+                                            this.dispatch_service_action(ActionRequest::StartService {
+                                                project_id: this.project_id.clone(),
+                                                service_name: name,
+                                            }, cx);
+                                        }
+                                    });
+                                }
+                            }
+                        },
+                    ).into_any_element()
                 },
             )
             .into_any_element()
@@ -2243,422 +2051,98 @@ impl ProjectColumn {
     /// Render the overview content showing all services in a table layout.
     fn render_overview_content(&self, services: &[ServiceSnapshot], cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let has_docker = services.iter().any(|s| s.is_docker);
-        let has_ports = services.iter().any(|s| !s.ports.is_empty());
 
         // Determine host for port badge URLs
         let remote_host = self.workspace.read(cx).project(&self.project_id)
             .and_then(|p| p.remote_host.clone());
 
-        div()
-            .id("service-overview-content")
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scroll()
-            .bg(rgb(t.bg_primary))
-            .flex()
-            .flex_col()
-            // Column header
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .border_b_1()
-                    .border_color(rgb(t.border))
-                    .text_size(px(10.0))
-                    .text_color(rgb(t.text_muted))
-                    // Status column (dot width)
-                    .child(div().flex_shrink_0().w(px(7.0)))
-                    // Name column
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(80.0))
-                            .child("NAME")
-                    )
-                    // Status text column
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(70.0))
-                            .child("STATUS")
-                    )
-                    // Type column (only if any docker)
-                    .when(has_docker, |d| {
-                        d.child(
-                            div()
-                                .flex_shrink_0()
-                                .w(px(56.0))
-                                .child("TYPE")
-                        )
-                    })
-                    // Ports column (only if any ports)
-                    .when(has_ports, |d| {
-                        d.child(
-                            div()
-                                .flex_shrink_0()
-                                .w(px(100.0))
-                                .child("PORTS")
-                        )
-                    })
-                    // Actions column
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(52.0))
-                    ),
-            )
-            // Data rows
-            .child(
-                div()
-                    .id("service-overview-rows")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .children({
-                        let has_extras = services.iter().any(|s| s.is_extra);
-                        let mut rows: Vec<gpui::AnyElement> = Vec::new();
-                        let mut separator_added = false;
-
-                        for (idx, svc) in services.iter().enumerate() {
-                            // Insert separator before the first extra service
-                            if has_extras && svc.is_extra && !separator_added {
-                                separator_added = true;
-                                rows.push(
-                                    div()
-                                        .id("svc-overview-extra-separator")
-                                        .h(px(24.0))
-                                        .px(px(12.0))
-                                        .mt(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .h(px(1.0))
-                                                .bg(rgb(t.border))
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_size(px(9.0))
-                                                .text_color(rgb(t.text_muted))
-                                                .child("OTHER DOCKER SERVICES")
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .h(px(1.0))
-                                                .bg(rgb(t.border))
-                                        )
-                                        .into_any_element(),
-                                );
-                            }
-
-                            rows.push(self.render_overview_row(idx, svc, has_docker, has_ports, remote_host.as_deref(), &t, cx));
-                        }
-                        rows
-                    }),
-            )
-    }
-
-    /// Render a single service row in the overview table.
-    fn render_overview_row(
-        &self,
-        idx: usize,
-        svc: &ServiceSnapshot,
-        has_docker: bool,
-        has_ports: bool,
-        remote_host: Option<&str>,
-        t: &ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let name = svc.name.clone();
-        let status = svc.status.clone();
-        let is_docker = svc.is_docker;
-        let is_extra = svc.is_extra;
-        let ports = svc.ports.clone();
-        let remote_host = remote_host.map(|s| s.to_string());
-
-        let is_running = matches!(status, ServiceStatus::Running);
-        let is_starting = matches!(status, ServiceStatus::Starting | ServiceStatus::Restarting);
-
-        let status_color = match &status {
-            ServiceStatus::Running => t.term_green,
-            ServiceStatus::Crashed { .. } => t.term_red,
-            ServiceStatus::Stopped => t.text_muted,
-            ServiceStatus::Starting | ServiceStatus::Restarting => t.term_yellow,
-        };
-
-        let status_label = match &status {
-            ServiceStatus::Running => "running",
-            ServiceStatus::Crashed { exit_code } => {
-                if exit_code.is_some() { "exited" } else { "crashed" }
-            }
-            ServiceStatus::Stopped => "stopped",
-            ServiceStatus::Starting => "starting",
-            ServiceStatus::Restarting => "restarting",
-        };
-
         let project_id = self.project_id.clone();
-        let name_color = if is_extra { t.text_muted } else { t.text_primary };
+        let entity = cx.entity().downgrade();
 
-        div()
-            .id(ElementId::Name(format!("svc-overview-{}", idx).into()))
-            .group(SharedString::from(format!("svc-row-{}", idx)))
-            .h(px(32.0))
-            .px(px(12.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .when(is_extra, |d| d.opacity(0.55))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            // Status dot
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .rounded(px(3.5))
-                    .bg(rgb(status_color)),
-            )
-            // Service name (clickable)
-            .child(
-                div()
-                    .id(ElementId::Name(format!("svc-overview-name-{}", idx).into()))
-                    .cursor_pointer()
-                    .flex_1()
-                    .min_w(px(80.0))
-                    .text_size(px(12.0))
-                    .text_color(rgb(name_color))
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .hover(|s| s.text_color(rgb(t.border_active)))
-                    .child(name.clone())
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, _window, cx| {
-                            this.show_service(&name, cx);
-                        }
-                    })),
-            )
-            // Status text
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(70.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(status_color))
-                    .child(status_label),
-            )
-            // Type column
-            .when(has_docker, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(56.0))
-                        .when(is_docker, |d| {
-                            d.child(
-                                div()
-                                    .px(px(3.0))
-                                    .h(px(14.0))
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(2.0))
-                                    .bg(rgb(t.bg_secondary))
-                                    .text_size(px(9.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("docker"),
-                            )
-                        })
-                )
-            })
-            // Ports column
-            .when(has_ports, |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(100.0))
-                        .flex()
-                        .gap(px(4.0))
-                        .overflow_hidden()
-                        .children(
-                            ports.iter().map({
-                                let name = name.clone();
-                                let project_id = project_id.clone();
-                                let remote_host = remote_host.clone();
-                                move |port| {
-                                    let port = *port;
-                                    let host = remote_host.as_deref().unwrap_or("localhost");
-                                    let url = format!("http://{}:{}", host, port);
-                                    let tooltip_url = url.clone();
-                                    div()
-                                        .id(ElementId::Name(format!("svc-overview-port-{}-{}-{}", project_id, name, port).into()))
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .px(px(4.0))
-                                        .h(px(16.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(3.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .hover(|s| s.bg(rgb(t.bg_hover)).underline())
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(format!(":{}", port))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                        .on_click(move |_, _, _cx| {
-                                            crate::process::open_url(&url);
-                                        })
-                                        .tooltip(move |_window, cx| {
-                                            Tooltip::new(tooltip_url.clone()).build(_window, cx)
-                                        })
-                                }
-                            })
-                        ),
-                )
-            })
-            // Action buttons (show on hover)
-            .child({
-                let group_name = SharedString::from(format!("svc-row-{}", idx));
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .w(px(52.0))
-                    .justify_end()
-                    .gap(px(2.0))
-                    .opacity(0.0)
-                    .group_hover(group_name, |s| s.opacity(1.0))
-                    .when(!is_running && !is_starting, |d| {
-                        d.child(
-                            icon_action_button(
-                                ElementId::Name(format!("svc-overview-play-{}", idx).into()),
-                                "▶",
-                                t.term_green,
-                                &t,
-                            )
-                                .on_click(cx.listener({
-                                    let name = name.clone();
-                                    move |this, _, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.dispatch_service_action(ActionRequest::StartService {
-                                            project_id: this.project_id.clone(),
-                                            service_name: name.clone(),
-                                        }, cx);
-                                    }
-                                }))
-                                .tooltip(|_window, cx| Tooltip::new("Start").build(_window, cx)),
-                        )
-                    })
-                    .when(is_running, |d| {
-                        d
-                            .child(
-                                icon_action_button(
-                                    ElementId::Name(format!("svc-overview-restart-{}", idx).into()),
-                                    "⟳",
-                                    t.text_secondary,
-                                    &t,
-                                )
-                                    .on_click(cx.listener({
-                                        let name = name.clone();
-                                        move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.dispatch_service_action(ActionRequest::RestartService {
-                                                project_id: this.project_id.clone(),
-                                                service_name: name.clone(),
-                                            }, cx);
-                                        }
-                                    }))
-                                    .tooltip(|_window, cx| Tooltip::new("Restart").build(_window, cx)),
-                            )
-                            .child(
-                                icon_action_button(
-                                    ElementId::Name(format!("svc-overview-stop-{}", idx).into()),
-                                    "■",
-                                    t.term_red,
-                                    &t,
-                                )
-                                    .on_click(cx.listener({
-                                        let name = name.clone();
-                                        move |this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.dispatch_service_action(ActionRequest::StopService {
-                                                project_id: this.project_id.clone(),
-                                                service_name: name.clone(),
-                                            }, cx);
-                                        }
-                                    }))
-                                    .tooltip(|_window, cx| Tooltip::new("Stop").build(_window, cx)),
-                            )
-                    })
-            })
-            .into_any_element()
+        okena_views_services::panel::render_service_overview(
+            services,
+            &project_id,
+            remote_host.as_deref(),
+            &t,
+            // on_service_click
+            {
+                let entity = entity.clone();
+                move |name: String, _window, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(cx, |this, cx| this.show_service(&name, cx));
+                    }
+                }
+            },
+            // on_start
+            {
+                let entity = entity.clone();
+                move |name: String, _window, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(cx, |this, cx| {
+                            this.dispatch_service_action(ActionRequest::StartService {
+                                project_id: this.project_id.clone(),
+                                service_name: name.clone(),
+                            }, cx);
+                        });
+                    }
+                }
+            },
+            // on_stop
+            {
+                let entity = entity.clone();
+                move |name: String, _window, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(cx, |this, cx| {
+                            this.dispatch_service_action(ActionRequest::StopService {
+                                project_id: this.project_id.clone(),
+                                service_name: name.clone(),
+                            }, cx);
+                        });
+                    }
+                }
+            },
+            // on_restart
+            {
+                let entity = entity.clone();
+                move |name: String, _window, cx| {
+                    if let Some(e) = entity.upgrade() {
+                        e.update(cx, |this, cx| {
+                            this.dispatch_service_action(ActionRequest::RestartService {
+                                project_id: this.project_id.clone(),
+                                service_name: name.clone(),
+                            }, cx);
+                        });
+                    }
+                }
+            },
+            // on_port_click
+            |port: u16| {
+                let url = format!("http://localhost:{}", port);
+                crate::process::open_url(&url);
+            },
+        )
     }
 
     /// Render the service indicator button for the project header.
     fn render_service_indicator(&self, t: &ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
         let services = self.get_service_list(cx);
+        let entity = cx.entity().downgrade();
 
-        if services.is_empty() {
-            return div().into_any_element();
-        }
-
-        // Compute aggregate status color
-        let has_running = services.iter().any(|s| s.status == ServiceStatus::Running);
-        let has_crashed = services.iter().any(|s| matches!(s.status, ServiceStatus::Crashed { .. }));
-        let has_starting = services.iter().any(|s| matches!(s.status, ServiceStatus::Starting | ServiceStatus::Restarting));
-
-        let dot_color = if has_crashed {
-            t.term_red
-        } else if has_starting {
-            t.term_yellow
-        } else if has_running {
-            t.term_green
-        } else {
-            t.text_muted
-        };
-
-        let running_count = services.iter().filter(|s| s.status == ServiceStatus::Running).count();
-        let total_count = services.len();
-        let tooltip_text = format!("{}/{} services running", running_count, total_count);
-
-        div()
-            .id("service-indicator-btn")
-            .cursor_pointer()
-            .w(px(24.0))
-            .h(px(24.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .on_click(cx.listener(|this, _, _window, cx| {
-                cx.stop_propagation();
-                if this.service_panel_open {
-                    this.close_service_panel(cx);
-                } else {
-                    // Open panel to overview tab
-                    this.show_overview(cx);
+        okena_views_services::panel::render_service_indicator(
+            &services,
+            t,
+            move |_window, cx| {
+                if let Some(e) = entity.upgrade() {
+                    e.update(cx, |this, cx| {
+                        if this.service_panel_open {
+                            this.close_service_panel(cx);
+                        } else {
+                            this.show_overview(cx);
+                        }
+                    });
                 }
-            }))
-            .child(
-                div()
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(dot_color)),
-            )
-            .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
-            .into_any_element()
+            },
+        )
     }
 }
 
