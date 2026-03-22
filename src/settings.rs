@@ -235,14 +235,12 @@ impl SettingsState {
     }
 
     /// Set diff view mode (unified or side-by-side)
-    #[allow(dead_code)] // Will be wired via settings_saver callback
     pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
         self.settings.diff_view_mode = value;
         self.save_and_notify(cx);
     }
 
     /// Set diff ignore whitespace option
-    #[allow(dead_code)] // Will be wired via settings_saver callback
     pub fn set_diff_ignore_whitespace(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.diff_ignore_whitespace = value;
         self.save_and_notify(cx);
