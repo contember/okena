@@ -1,7 +1,7 @@
 use okena_core::client::RemoteConnectionConfig;
-use crate::terminal::session_backend::SessionBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::theme::ThemeMode;
+use okena_terminal::session_backend::SessionBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_core::theme::ThemeMode;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -542,7 +542,7 @@ pub fn load_settings() -> AppSettings {
 /// This extracts valid fields and uses defaults for invalid/missing ones
 fn recover_settings_from_json(content: &str) -> Result<AppSettings> {
     use anyhow::Context;
-    use crate::theme::ThemeMode;
+    use okena_core::theme::ThemeMode;
 
     let value: serde_json::Value = serde_json::from_str(content)
         .context("Settings file is not valid JSON")?;

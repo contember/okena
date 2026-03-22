@@ -2,8 +2,8 @@
 //!
 //! Actions for creating, modifying, and deleting sidebar folders.
 
-use crate::theme::FolderColor;
-use crate::workspace::state::{FolderData, Workspace};
+use okena_core::theme::FolderColor;
+use crate::state::{FolderData, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -140,9 +140,9 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use crate::workspace::state::*;
-    use crate::workspace::settings::HooksConfig;
-    use crate::theme::FolderColor;
+    use crate::state::*;
+    use crate::settings::HooksConfig;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -254,9 +254,9 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{FolderData, LayoutNode, ProjectData, Workspace, WorkspaceData};
-    use crate::workspace::settings::HooksConfig;
-    use crate::theme::FolderColor;
+    use crate::state::{FolderData, LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::settings::HooksConfig;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {

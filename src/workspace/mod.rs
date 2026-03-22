@@ -1,12 +1,8 @@
+pub use okena_workspace::{hook_monitor, hooks, persistence, request_broker, requests, settings, state, toast, worktree_sync};
+
+// focus is re-exported implicitly (no types used directly from main app)
+// sessions is re-exported implicitly (accessed through persistence re-exports)
+#[allow(unused_imports)]
+pub use okena_workspace::{focus, sessions};
+
 pub mod actions;
-pub mod focus;
-pub mod hook_monitor;
-pub mod hooks;
-pub mod persistence;
-pub mod request_broker;
-pub mod requests;
-pub mod sessions;
-pub mod settings;
-pub mod state;
-pub mod toast;
-pub mod worktree_sync;

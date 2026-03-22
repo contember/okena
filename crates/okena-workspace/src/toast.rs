@@ -65,3 +65,9 @@ impl Toast {
         self.created.elapsed() >= self.ttl
     }
 }
+
+impl PartialEq for Toast {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}

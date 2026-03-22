@@ -101,9 +101,9 @@ impl FocusManager {
     ///
     /// This is the primary method for checking which terminal is focused.
     /// Returns None if no terminal is focused.
-    pub fn focused_terminal_state(&self) -> Option<crate::workspace::state::FocusedTerminalState> {
+    pub fn focused_terminal_state(&self) -> Option<crate::state::FocusedTerminalState> {
         self.current_focus.as_ref().map(|target| {
-            crate::workspace::state::FocusedTerminalState {
+            crate::state::FocusedTerminalState {
                 project_id: target.project_id.clone(),
                 layout_path: target.layout_path.clone(),
             }

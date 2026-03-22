@@ -2,7 +2,7 @@
 //!
 //! Actions for splitting, tabs, and closing terminals within layouts.
 
-use crate::workspace::state::{DropZone, LayoutNode, SplitDirection, Workspace};
+use crate::state::{DropZone, LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -1014,8 +1014,8 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use crate::workspace::state::{LayoutNode, SplitDirection};
-    use crate::terminal::shell_config::ShellType;
+    use crate::state::{LayoutNode, SplitDirection};
+    use okena_terminal::shell_config::ShellType;
 
     fn terminal_node(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
@@ -1327,10 +1327,10 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
-    use crate::workspace::settings::HooksConfig;
-    use crate::terminal::shell_config::ShellType;
-    use crate::theme::FolderColor;
+    use crate::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+    use crate::settings::HooksConfig;
+    use okena_terminal::shell_config::ShellType;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {

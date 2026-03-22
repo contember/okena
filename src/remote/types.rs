@@ -9,119 +9,13 @@ pub use okena_core::ws::{
     parse_pty_frame, FRAME_TYPE_INPUT, FRAME_TYPE_PTY, FRAME_TYPE_SNAPSHOT, PROTO_VERSION,
 };
 
-use crate::workspace::state::LayoutNode;
-
-// ── Conversion helpers ──────────────────────────────────────────────────────
-
-impl LayoutNode {
-    #[allow(dead_code)]
-    pub fn from_api(api: &ApiLayoutNode) -> Self {
-        match api {
-            ApiLayoutNode::Terminal {
-                terminal_id,
-                minimized,
-                detached,
-            } => LayoutNode::Terminal {
-                terminal_id: terminal_id.clone(),
-                minimized: *minimized,
-                detached: *detached,
-                shell_type: Default::default(),
-                zoom_level: 1.0,
-            },
-            ApiLayoutNode::Split {
-                direction,
-                sizes,
-                children,
-            } => LayoutNode::Split {
-                direction: *direction,
-                sizes: sizes.clone(),
-                children: children.iter().map(LayoutNode::from_api).collect(),
-            },
-            ApiLayoutNode::Tabs {
-                children,
-                active_tab,
-            } => LayoutNode::Tabs {
-                children: children.iter().map(LayoutNode::from_api).collect(),
-                active_tab: *active_tab,
-            },
-        }
-    }
-
-    /// Convert from API, prefixing all terminal IDs with the given prefix.
-    /// Used for remote projects where terminals are registered with prefixed IDs.
-    pub fn from_api_prefixed(api: &ApiLayoutNode, prefix: &str) -> Self {
-        match api {
-            ApiLayoutNode::Terminal {
-                terminal_id,
-                minimized,
-                detached,
-            } => LayoutNode::Terminal {
-                terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
-                minimized: *minimized,
-                detached: *detached,
-                shell_type: Default::default(),
-                zoom_level: 1.0,
-            },
-            ApiLayoutNode::Split {
-                direction,
-                sizes,
-                children,
-            } => LayoutNode::Split {
-                direction: *direction,
-                sizes: sizes.clone(),
-                children: children
-                    .iter()
-                    .map(|c| LayoutNode::from_api_prefixed(c, prefix))
-                    .collect(),
-            },
-            ApiLayoutNode::Tabs {
-                children,
-                active_tab,
-            } => LayoutNode::Tabs {
-                children: children
-                    .iter()
-                    .map(|c| LayoutNode::from_api_prefixed(c, prefix))
-                    .collect(),
-                active_tab: *active_tab,
-            },
-        }
-    }
-
-    pub fn to_api(&self) -> ApiLayoutNode {
-        match self {
-            LayoutNode::Terminal {
-                terminal_id,
-                minimized,
-                detached,
-                ..
-            } => ApiLayoutNode::Terminal {
-                terminal_id: terminal_id.clone(),
-                minimized: *minimized,
-                detached: *detached,
-            },
-            LayoutNode::Split {
-                direction,
-                sizes,
-                children,
-            } => ApiLayoutNode::Split {
-                direction: *direction,
-                sizes: sizes.clone(),
-                children: children.iter().map(LayoutNode::to_api).collect(),
-            },
-            LayoutNode::Tabs {
-                children,
-                active_tab,
-            } => ApiLayoutNode::Tabs {
-                children: children.iter().map(LayoutNode::to_api).collect(),
-                active_tab: *active_tab,
-            },
-        }
-    }
-}
+// LayoutNode conversion helpers (from_api, from_api_prefixed, to_api) are now
+// defined in the okena-workspace crate (state.rs impl LayoutNode).
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::workspace::state::LayoutNode;
+    use okena_core::api::ApiLayoutNode;
     use okena_core::types::SplitDirection;
 
     #[test]

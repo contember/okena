@@ -1,5 +1,5 @@
-use crate::theme::FolderColor;
-use crate::workspace::focus::FocusManager;
+use okena_core::theme::FolderColor;
+use crate::focus::FocusManager;
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -158,7 +158,7 @@ pub struct ProjectData {
     pub folder_color: FolderColor,
     /// Per-project lifecycle hooks (overrides global settings)
     #[serde(default)]
-    pub hooks: crate::workspace::persistence::HooksConfig,
+    pub hooks: crate::persistence::HooksConfig,
     /// Whether this is a remote project (materialized from a remote connection)
     #[serde(default)]
     pub is_remote: bool,
@@ -180,7 +180,7 @@ pub struct ProjectData {
     pub remote_git_status: Option<okena_core::api::ApiGitStatus>,
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
-    pub default_shell: Option<crate::terminal::shell_config::ShellType>,
+    pub default_shell: Option<okena_terminal::shell_config::ShellType>,
     /// Hook terminals displayed in the service panel (persisted across restarts)
     #[serde(default)]
     pub hook_terminals: HashMap<String, HookTerminalEntry>,
@@ -236,7 +236,7 @@ fn is_bash_prompt_title(title: &str) -> bool {
     i > 1 && i < bytes.len() && bytes[i] == b':'
 }
 
-use crate::terminal::shell_config::ShellType;
+use okena_terminal::shell_config::ShellType;
 
 fn default_workspace_version() -> u32 {
     0 // pre-versioning workspace files
@@ -294,7 +294,7 @@ impl Global for GlobalWorkspace {}
 
 /// GPUI Entity for workspace state
 pub struct Workspace {
-    pub(crate) data: WorkspaceData,
+    pub data: WorkspaceData,
     /// Unified focus manager for the workspace
     pub focus_manager: FocusManager,
     /// Last access time for each project (for sorting in project switcher)
@@ -304,7 +304,7 @@ pub struct Workspace {
     data_version: u64,
     /// Transient folder filter — when set, only projects from this folder are shown.
     /// Not serialized; resets to None on restart.
-    pub(crate) active_folder_filter: Option<String>,
+    pub active_folder_filter: Option<String>,
     /// Remote project IDs awaiting focus on the next state sync.
     /// When a CreateTerminal action is dispatched for a remote project,
     /// the project ID is recorded here. On the next sync, we detect the
@@ -426,7 +426,7 @@ impl Workspace {
                 terminal_id: Some(terminal_id.to_string()),
                 minimized: false,
                 detached: false,
-                shell_type: crate::terminal::shell_config::ShellType::Default,
+                shell_type: okena_terminal::shell_config::ShellType::Default,
                 zoom_level: 1.0,
             };
             if let Some(ref mut existing) = project.layout {
@@ -486,7 +486,7 @@ impl Workspace {
     /// Convenience wrapper that converts `HookTerminalResult`s into `HookTerminalEntry`s.
     pub fn register_hook_results(
         &mut self,
-        results: Vec<crate::workspace::hooks::HookTerminalResult>,
+        results: Vec<crate::hooks::HookTerminalResult>,
         cx: &mut Context<Self>,
     ) {
         for result in results {
@@ -1566,12 +1566,118 @@ impl LayoutNode {
             _ => {}
         }
     }
+
+    /// Convert from API layout node.
+    #[allow(dead_code)]
+    pub fn from_api(api: &okena_core::api::ApiLayoutNode) -> Self {
+        match api {
+            okena_core::api::ApiLayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                detached,
+            } => LayoutNode::Terminal {
+                terminal_id: terminal_id.clone(),
+                minimized: *minimized,
+                detached: *detached,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            },
+            okena_core::api::ApiLayoutNode::Split {
+                direction,
+                sizes,
+                children,
+            } => LayoutNode::Split {
+                direction: *direction,
+                sizes: sizes.clone(),
+                children: children.iter().map(LayoutNode::from_api).collect(),
+            },
+            okena_core::api::ApiLayoutNode::Tabs {
+                children,
+                active_tab,
+            } => LayoutNode::Tabs {
+                children: children.iter().map(LayoutNode::from_api).collect(),
+                active_tab: *active_tab,
+            },
+        }
+    }
+
+    /// Convert from API, prefixing all terminal IDs with the given prefix.
+    /// Used for remote projects where terminals are registered with prefixed IDs.
+    pub fn from_api_prefixed(api: &okena_core::api::ApiLayoutNode, prefix: &str) -> Self {
+        match api {
+            okena_core::api::ApiLayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                detached,
+            } => LayoutNode::Terminal {
+                terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
+                minimized: *minimized,
+                detached: *detached,
+                shell_type: Default::default(),
+                zoom_level: 1.0,
+            },
+            okena_core::api::ApiLayoutNode::Split {
+                direction,
+                sizes,
+                children,
+            } => LayoutNode::Split {
+                direction: *direction,
+                sizes: sizes.clone(),
+                children: children
+                    .iter()
+                    .map(|c| LayoutNode::from_api_prefixed(c, prefix))
+                    .collect(),
+            },
+            okena_core::api::ApiLayoutNode::Tabs {
+                children,
+                active_tab,
+            } => LayoutNode::Tabs {
+                children: children
+                    .iter()
+                    .map(|c| LayoutNode::from_api_prefixed(c, prefix))
+                    .collect(),
+                active_tab: *active_tab,
+            },
+        }
+    }
+
+    /// Convert to API layout node.
+    pub fn to_api(&self) -> okena_core::api::ApiLayoutNode {
+        match self {
+            LayoutNode::Terminal {
+                terminal_id,
+                minimized,
+                detached,
+                ..
+            } => okena_core::api::ApiLayoutNode::Terminal {
+                terminal_id: terminal_id.clone(),
+                minimized: *minimized,
+                detached: *detached,
+            },
+            LayoutNode::Split {
+                direction,
+                sizes,
+                children,
+            } => okena_core::api::ApiLayoutNode::Split {
+                direction: *direction,
+                sizes: sizes.clone(),
+                children: children.iter().map(LayoutNode::to_api).collect(),
+            },
+            LayoutNode::Tabs {
+                children,
+                active_tab,
+            } => okena_core::api::ApiLayoutNode::Tabs {
+                children: children.iter().map(LayoutNode::to_api).collect(),
+                active_tab: *active_tab,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::workspace::state::{LayoutNode, SplitDirection};
-    use crate::terminal::shell_config::ShellType;
+    use crate::state::{LayoutNode, SplitDirection};
+    use okena_terminal::shell_config::ShellType;
     use std::collections::HashSet;
 
     // === Helper constructors ===
@@ -2510,13 +2616,13 @@ mod tests {
 
 #[cfg(test)]
 mod workspace_tests {
-    use crate::workspace::state::{
+    use crate::state::{
         FolderData, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData,
         WorktreeMetadata,
     };
-    use crate::terminal::shell_config::ShellType;
-    use crate::theme::FolderColor;
-    use crate::workspace::settings::HooksConfig;
+    use okena_terminal::shell_config::ShellType;
+    use okena_core::theme::FolderColor;
+    use crate::settings::HooksConfig;
     use std::collections::HashMap;
 
     fn make_project(id: &str, visible: bool) -> ProjectData {
@@ -3282,10 +3388,10 @@ mod workspace_tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
-    use crate::workspace::settings::HooksConfig;
-    use crate::terminal::shell_config::ShellType;
-    use crate::theme::FolderColor;
+    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+    use crate::settings::HooksConfig;
+    use okena_terminal::shell_config::ShellType;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -3455,7 +3561,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_remove_remote_projects(cx: &mut gpui::TestAppContext) {
-        use crate::workspace::state::FolderData;
+        use crate::state::FolderData;
 
         let local = make_project("local1");
         let remote1 = make_remote_project("remote:conn1:p1", "conn1");
@@ -3507,7 +3613,7 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_visible_projects_includes_remote_in_folders(cx: &mut gpui::TestAppContext) {
-        use crate::workspace::state::FolderData;
+        use crate::state::FolderData;
 
         let local = make_project("local1");
         let mut remote1 = make_remote_project("remote:conn1:p1", "conn1");

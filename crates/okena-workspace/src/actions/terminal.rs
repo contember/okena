@@ -2,8 +2,8 @@
 //!
 //! Actions for managing individual terminals within projects.
 
-use crate::terminal::shell_config::ShellType;
-use crate::workspace::state::{LayoutNode, Workspace};
+use okena_terminal::shell_config::ShellType;
+use crate::state::{LayoutNode, Workspace};
 use gpui::*;
 
 impl Workspace {

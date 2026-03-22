@@ -2,7 +2,7 @@
 //!
 //! Actions for managing terminal and project focus, including fullscreen mode.
 
-use crate::workspace::state::Workspace;
+use crate::state::Workspace;
 use gpui::*;
 
 impl Workspace {

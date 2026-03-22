@@ -23,7 +23,7 @@ pub struct FolderContextMenuRequest {
 pub enum OverlayRequest {
     ContextMenu { project_id: String, position: gpui::Point<gpui::Pixels> },
     FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
-    ShellSelector { project_id: String, terminal_id: String, current_shell: crate::terminal::shell_config::ShellType },
+    ShellSelector { project_id: String, terminal_id: String, current_shell: okena_terminal::shell_config::ShellType },
     AddProjectDialog,
     DiffViewer {
         project_id: String,
@@ -31,7 +31,7 @@ pub enum OverlayRequest {
         mode: Option<okena_core::types::DiffMode>,
         commit_message: Option<String>,
         /// Commit list for navigation (prev/next) in the diff viewer.
-        commits: Option<Vec<crate::git::CommitLogEntry>>,
+        commits: Option<Vec<okena_git::CommitLogEntry>>,
         /// Current index into the commits list.
         commit_index: Option<usize>,
     },

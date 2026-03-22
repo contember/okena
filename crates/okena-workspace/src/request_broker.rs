@@ -1,4 +1,4 @@
-use crate::workspace::requests::{OverlayRequest, SidebarRequest};
+use crate::requests::{OverlayRequest, SidebarRequest};
 use gpui::*;
 use std::collections::VecDeque;
 
