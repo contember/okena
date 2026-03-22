@@ -1,5 +1,5 @@
-use crate::terminal::session_backend::SessionBackend;
-use crate::workspace::state::WorkspaceData;
+use okena_terminal::session_backend::SessionBackend;
+use crate::state::WorkspaceData;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

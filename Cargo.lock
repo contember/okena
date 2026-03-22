@@ -4462,6 +4462,7 @@ dependencies = [
  "okena-git",
  "okena-terminal",
  "okena-ui",
+ "okena-workspace",
  "parking_lot",
  "portable-pty",
  "pulldown-cmark",
@@ -4597,6 +4598,26 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+]
+
+[[package]]
+name = "okena-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "gpui",
+ "libc",
+ "log",
+ "okena-core",
+ "okena-git",
+ "okena-terminal",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smol",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

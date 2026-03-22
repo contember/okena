@@ -2,10 +2,10 @@
 //!
 //! Actions for creating, modifying, and deleting projects.
 
-use crate::theme::FolderColor;
-use crate::workspace::hooks;
-use crate::workspace::persistence::HooksConfig;
-use crate::workspace::state::{LayoutNode, ProjectData, Workspace};
+use okena_core::theme::FolderColor;
+use crate::hooks;
+use crate::persistence::HooksConfig;
+use crate::state::{LayoutNode, ProjectData, Workspace};
 use gpui::*;
 use std::collections::HashMap;
 
@@ -48,12 +48,12 @@ impl Workspace {
 
         // Auto-detect WSL UNC paths and set default shell accordingly
         #[cfg(windows)]
-        let default_shell = crate::terminal::shell_config::parse_wsl_unc_path(&path)
-            .map(|(distro, _)| crate::terminal::shell_config::ShellType::Wsl {
+        let default_shell = okena_terminal::shell_config::parse_wsl_unc_path(&path)
+            .map(|(distro, _)| okena_terminal::shell_config::ShellType::Wsl {
                 distro: Some(distro),
             });
         #[cfg(not(windows))]
-        let default_shell: Option<crate::terminal::shell_config::ShellType> = None;
+        let default_shell: Option<okena_terminal::shell_config::ShellType> = None;
 
         let id = uuid::Uuid::new_v4().to_string();
         let project = ProjectData {
@@ -93,7 +93,7 @@ impl Workspace {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
                 project.layout = Some(LayoutNode::Split {
-                    direction: crate::workspace::state::SplitDirection::Vertical,
+                    direction: crate::state::SplitDirection::Vertical,
                     sizes: vec![50.0, 50.0],
                     children: vec![old_layout, LayoutNode::new_terminal()],
                 });
@@ -126,7 +126,7 @@ impl Workspace {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
                 project.layout = Some(LayoutNode::Split {
-                    direction: crate::workspace::state::SplitDirection::Vertical,
+                    direction: crate::state::SplitDirection::Vertical,
                     sizes: vec![50.0, 50.0],
                     children: vec![old_layout, new_node],
                 });
@@ -326,7 +326,7 @@ impl Workspace {
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
-        crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
+        okena_git::create_worktree(repo_path, branch, &target, create_branch)?;
 
         // Register in workspace state
         self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, global_hooks, cx)
@@ -402,7 +402,7 @@ impl Workspace {
             layout: if fire_hooks { new_layout } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
-            worktree_info: Some(crate::workspace::state::WorktreeMetadata {
+            worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
                 main_repo_path: String::new(),
                 worktree_path: String::new(),
@@ -456,7 +456,7 @@ impl Workspace {
         let name = project.name.clone();
         let path = project.path.clone();
         // Read branch from git at runtime, falling back to project name
-        let branch = crate::git::repository::get_current_branch(std::path::Path::new(&path))
+        let branch = okena_git::repository::get_current_branch(std::path::Path::new(&path))
             .unwrap_or_else(|| name.clone());
 
         // If layout is still None (deferred creation), clone it from the parent
@@ -465,7 +465,7 @@ impl Workspace {
                 .and_then(|wt| self.project(&wt.parent_project_id))
                 .and_then(|p| p.layout.as_ref())
                 .map(|l| l.clone_structure());
-            let layout = parent_layout.or_else(|| Some(crate::workspace::state::LayoutNode::new_terminal()));
+            let layout = parent_layout.or_else(|| Some(crate::state::LayoutNode::new_terminal()));
             if let Some(p) = self.data.projects.iter_mut().find(|p| p.id == project_id) {
                 p.layout = layout;
             }
@@ -512,7 +512,7 @@ impl Workspace {
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
-            worktree_info: Some(crate::workspace::state::WorktreeMetadata {
+            worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
                 main_repo_path: String::new(),
                 worktree_path: String::new(),
@@ -610,7 +610,7 @@ impl Workspace {
         let worktree_path = std::path::PathBuf::from(&project_path);
 
         // Remove the git worktree
-        crate::git::remove_worktree(&worktree_path, force)?;
+        okena_git::remove_worktree(&worktree_path, force)?;
 
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, global_hooks, cx);
@@ -625,9 +625,9 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::expand_tilde;
-    use crate::workspace::state::*;
-    use crate::workspace::settings::HooksConfig;
-    use crate::theme::FolderColor;
+    use crate::state::*;
+    use crate::settings::HooksConfig;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_project(id: &str) -> ProjectData {
@@ -743,9 +743,9 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
-    use crate::workspace::settings::HooksConfig;
-    use crate::theme::FolderColor;
+    use crate::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::settings::HooksConfig;
+    use okena_core::theme::FolderColor;
     use std::collections::HashMap;
 
     fn make_workspace_data() -> WorkspaceData {
@@ -850,7 +850,7 @@ mod gpui_tests {
 
     fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
         let mut p = make_project(id);
-        p.worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+        p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),

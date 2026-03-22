@@ -1,9 +1,9 @@
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::{Terminal, TerminalSize};
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
-use crate::workspace::hook_monitor::{HookMonitor, HookStatus};
-use crate::workspace::persistence::HooksConfig;
+use crate::hook_monitor::{HookMonitor, HookStatus};
+use crate::persistence::HooksConfig;
 use gpui::App;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,12 +164,12 @@ fn is_valid_env_key(key: &str) -> bool {
 /// Handles platform dispatch (sh -c / cmd /C), env vars, and cwd.
 fn build_headless_command(command: &str, env_vars: &HashMap<String, String>) -> std::process::Command {
     #[cfg(unix)]
-    let mut cmd = crate::process::command("sh");
+    let mut cmd = okena_core::process::command("sh");
     #[cfg(unix)]
     cmd.arg("-c").arg(command);
 
     #[cfg(windows)]
-    let mut cmd = crate::process::command("cmd");
+    let mut cmd = okena_core::process::command("cmd");
     #[cfg(windows)]
     cmd.arg("/C").arg(command);
 
@@ -830,7 +830,7 @@ pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str) -> ShellType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::settings::WorktreeHooks;
+    use crate::settings::WorktreeHooks;
 
     #[test]
     fn run_hook_sync_returns_ok_for_true() {
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn resolve_hook_with_parent_three_tier() {
-        use crate::workspace::settings::TerminalHooks;
+        use crate::settings::TerminalHooks;
 
         let project = HooksConfig::default();
         let parent = HooksConfig {

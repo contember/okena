@@ -1,8 +1,8 @@
-use crate::terminal::session_backend::SessionBackend;
-use crate::theme::FolderColor;
-use crate::workspace::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData};
+use okena_terminal::session_backend::SessionBackend;
+use okena_core::theme::FolderColor;
+use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData};
 #[cfg(test)]
-use crate::workspace::state::WorktreeMetadata;
+use crate::state::WorktreeMetadata;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -124,8 +124,8 @@ pub(crate) fn validate_workspace_data(
     #[cfg(windows)]
     for project in &mut data.projects {
         if project.default_shell.is_none() {
-            if let Some((distro, _)) = crate::terminal::shell_config::parse_wsl_unc_path(&project.path) {
-                project.default_shell = Some(crate::terminal::shell_config::ShellType::Wsl {
+            if let Some((distro, _)) = okena_terminal::shell_config::parse_wsl_unc_path(&project.path) {
+                project.default_shell = Some(okena_terminal::shell_config::ShellType::Wsl {
                     distro: Some(distro),
                 });
             }
@@ -140,9 +140,9 @@ pub(crate) fn validate_workspace_data(
         for project in &mut data.projects {
             #[cfg(windows)]
             {
-                use crate::terminal::shell_config::ShellType;
+                use okena_terminal::shell_config::ShellType;
                 if let Some(ShellType::Wsl { distro }) = &project.default_shell {
-                    let wsl_backend = crate::terminal::session_backend::resolve_for_wsl(
+                    let wsl_backend = okena_terminal::session_backend::resolve_for_wsl(
                         distro.as_deref(),
                         backend_preference,
                     );
@@ -471,7 +471,7 @@ pub fn default_workspace() -> WorkspaceData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::state::{FolderData, SplitDirection};
+    use crate::state::{FolderData, SplitDirection};
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
@@ -557,7 +557,7 @@ mod tests {
             terminal_id: Some("tid1".to_string()),
             minimized: true,
             detached: true,
-            shell_type: crate::terminal::shell_config::ShellType::Default,
+            shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
         });
         project.service_terminals.insert("web".to_string(), "svc-term-1".to_string());
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn validate_preserves_hook_terminal_ids() {
-        use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, SplitDirection};
+        use crate::state::{HookTerminalEntry, HookTerminalStatus, SplitDirection};
 
         let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Split {
@@ -589,14 +589,14 @@ mod tests {
                     terminal_id: Some("regular-term".to_string()),
                     minimized: false,
                     detached: false,
-                    shell_type: crate::terminal::shell_config::ShellType::Default,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
                     minimized: false,
                     detached: false,
-                    shell_type: crate::terminal::shell_config::ShellType::Default,
+                    shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
                 },
             ],
@@ -748,7 +748,7 @@ mod tests {
             terminal_id: Some("t1".to_string()),
             minimized: false,
             detached: false,
-            shell_type: crate::terminal::shell_config::ShellType::Default,
+            shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
         });
         // t1 is in layout, t2 and t3 are orphaned
@@ -823,7 +823,7 @@ mod tests {
 
     fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
         let mut p = make_project(id);
-        p.worktree_info = Some(crate::workspace::state::WorktreeMetadata {
+        p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),

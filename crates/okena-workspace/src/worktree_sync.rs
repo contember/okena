@@ -1,4 +1,4 @@
-use crate::workspace::state::Workspace;
+use crate::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use std::path::Path;

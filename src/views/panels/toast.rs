@@ -23,7 +23,12 @@ const TOAST_WIDTH: f32 = 320.0;
 /// Accent stripe width
 const ACCENT_WIDTH: f32 = 3.0;
 
-impl ToastLevel {
+trait ToastLevelExt {
+    fn icon_char(self) -> &'static str;
+    fn accent_color(self, t: &crate::theme::ThemeColors) -> u32;
+}
+
+impl ToastLevelExt for ToastLevel {
     fn icon_char(self) -> &'static str {
         match self {
             ToastLevel::Success => "✓",
@@ -181,11 +186,6 @@ impl ToastOverlay {
     }
 }
 
-impl PartialEq for Toast {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
 
 impl Render for ToastOverlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
