@@ -2,7 +2,7 @@ use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::views::root::TerminalsRegistry;
+use okena_terminal::TerminalsRegistry;
 use crate::workspace::hook_monitor::{HookMonitor, HookStatus};
 use crate::workspace::persistence::HooksConfig;
 use gpui::App;

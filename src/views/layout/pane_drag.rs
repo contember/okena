@@ -56,12 +56,5 @@ impl Render for PaneDragView {
     }
 }
 
-/// Which edge zone the user dropped onto.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DropZone {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    Center,
-}
+/// Re-export DropZone from workspace state (used by both layout actions and drag UI).
+pub use crate::workspace::state::DropZone;

@@ -2,8 +2,7 @@
 //!
 //! Actions for splitting, tabs, and closing terminals within layouts.
 
-use crate::views::layout::pane_drag::DropZone;
-use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
+use crate::workspace::state::{DropZone, LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -1328,8 +1327,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::views::layout::pane_drag::DropZone;
-    use crate::workspace::state::{LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+    use crate::workspace::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use crate::terminal::shell_config::ShellType;
     use crate::theme::FolderColor;

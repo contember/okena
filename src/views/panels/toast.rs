@@ -1,13 +1,12 @@
+// Re-export Toast and ToastLevel from workspace (shared data types)
+pub use crate::workspace::toast::{Toast, ToastLevel};
+
 use crate::theme::theme;
 use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MS, ICON_SM};
 use gpui::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use uuid::Uuid;
-
-/// Default time-to-live for toast notifications
-const DEFAULT_TTL: Duration = Duration::from_secs(5);
+use std::time::Duration;
 
 /// Maximum number of visible toasts
 const MAX_VISIBLE_TOASTS: usize = 5;
@@ -23,17 +22,6 @@ const TOAST_WIDTH: f32 = 320.0;
 
 /// Accent stripe width
 const ACCENT_WIDTH: f32 = 3.0;
-
-// ─── ToastLevel ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastLevel {
-    #[allow(dead_code)]
-    Success,
-    Error,
-    Warning,
-    Info,
-}
 
 impl ToastLevel {
     fn icon_char(self) -> &'static str {
@@ -55,63 +43,13 @@ impl ToastLevel {
     }
 }
 
-// ─── Toast ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct Toast {
-    pub id: String,
-    pub level: ToastLevel,
-    pub message: String,
-    pub created: Instant,
-    pub ttl: Duration,
-}
-
-impl Toast {
-    fn new(level: ToastLevel, message: impl Into<String>) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            level,
-            message: message.into(),
-            created: Instant::now(),
-            ttl: DEFAULT_TTL,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn success(message: impl Into<String>) -> Self {
-        Self::new(ToastLevel::Success, message)
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self::new(ToastLevel::Error, message)
-    }
-
-    pub fn warning(message: impl Into<String>) -> Self {
-        Self::new(ToastLevel::Warning, message)
-    }
-
-    pub fn info(message: impl Into<String>) -> Self {
-        Self::new(ToastLevel::Info, message)
-    }
-
-    #[allow(dead_code)]
-    pub fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = ttl;
-        self
-    }
-
-    pub fn is_expired(&self) -> bool {
-        self.created.elapsed() >= self.ttl
-    }
-
-    /// Opacity based on fade-in (0.0 → 1.0 over FADE_IN_DURATION)
-    fn opacity(&self) -> f32 {
-        let elapsed = self.created.elapsed();
-        if elapsed >= FADE_IN_DURATION {
-            1.0
-        } else {
-            elapsed.as_secs_f32() / FADE_IN_DURATION.as_secs_f32()
-        }
+/// Opacity based on fade-in (0.0 → 1.0 over FADE_IN_DURATION)
+fn toast_opacity(toast: &Toast) -> f32 {
+    let elapsed = toast.created.elapsed();
+    if elapsed >= FADE_IN_DURATION {
+        1.0
+    } else {
+        elapsed.as_secs_f32() / FADE_IN_DURATION.as_secs_f32()
     }
 }
 
@@ -227,7 +165,7 @@ impl ToastOverlay {
                         }
                     }
                     // Also re-render during fade-in animations
-                    if this.toasts.iter().any(|t| t.opacity() < 1.0) {
+                    if this.toasts.iter().any(|t| toast_opacity(t) < 1.0) {
                         cx.notify();
                     }
                 });
@@ -268,7 +206,7 @@ impl Render for ToastOverlay {
             .children(self.toasts.iter().map(|toast| {
                 let accent_color = toast.level.accent_color(&t);
                 let icon_char = toast.level.icon_char();
-                let opacity = toast.opacity();
+                let opacity = toast_opacity(toast);
                 let toast_id = toast.id.clone();
 
                 div()
