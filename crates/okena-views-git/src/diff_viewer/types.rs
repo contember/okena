@@ -1,6 +1,6 @@
 //! Data types for the diff viewer.
 
-use crate::{DiffLineType, FileDiff};
+use okena_git::{DiffLineType, FileDiff};
 pub use okena_files::syntax::HighlightedSpan;
 pub use okena_core::types::DiffViewMode;
 

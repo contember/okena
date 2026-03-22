@@ -5,7 +5,7 @@
 
 use super::types::{DisplayLine, HighlightedSpan};
 use super::DiffViewer;
-use crate::DiffLineType;
+use okena_git::DiffLineType;
 use okena_core::theme::ThemeColors;
 use okena_files::code_view::{build_styled_text_with_backgrounds, find_word_boundaries, selection_bg_ranges};
 use gpui::prelude::*;

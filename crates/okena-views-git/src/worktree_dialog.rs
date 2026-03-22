@@ -1,0 +1,711 @@
+use okena_git as git;
+use okena_git::repository::{normalize_path, compute_target_paths};
+use crate::Cancel;
+use okena_core::process::command;
+use okena_files::theme::theme;
+use okena_ui::button::{button, button_primary};
+use okena_ui::input::input_container;
+use crate::simple_input::{SimpleInput, SimpleInputState};
+use okena_workspace::settings::{HooksConfig, WorktreeConfig};
+use okena_workspace::state::Workspace;
+use gpui::prelude::*;
+use gpui::*;
+use gpui_component::h_flex;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug)]
+struct PrInfo {
+    number: u32,
+    title: String,
+    branch: String,
+}
+
+/// Events emitted by the worktree dialog
+#[derive(Clone)]
+pub enum WorktreeDialogEvent {
+    /// Dialog closed without creating a worktree (cancelled)
+    Close,
+    /// Worktree was successfully created, contains the new project ID
+    Created(String),
+}
+
+impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
+
+/// Dialog for creating a new worktree from a project
+pub struct WorktreeDialog {
+    workspace: Entity<Workspace>,
+    project_id: String,
+    project_path: String,
+    /// The git repository root (may differ from project_path in monorepos)
+    git_root: PathBuf,
+    /// Relative path from git root to project (empty if project is at repo root)
+    subdir: PathBuf,
+    branches: Vec<String>,
+    filtered_branches: Vec<usize>,
+    selected_branch_index: Option<usize>,
+    branch_search_input: Entity<SimpleInputState>,
+    error_message: Option<String>,
+    focus_handle: FocusHandle,
+    initialized: bool,
+    last_search_query: String,
+    pr_mode: bool,
+    pr_list: Vec<PrInfo>,
+    loading_prs: bool,
+    pr_error: Option<String>,
+    selected_pr_branch: Option<String>,
+    prs_loaded_once: bool,
+    path_template: String,
+    hooks_config: HooksConfig,
+}
+
+impl WorktreeDialog {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        project_id: String,
+        project_path: String,
+        worktree_config: WorktreeConfig,
+        hooks_config: HooksConfig,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Determine git repo root: if parent is already a worktree, use its
+        // stored main_repo_path; otherwise detect via `git rev-parse --show-toplevel`.
+        let project_pathbuf = PathBuf::from(&project_path);
+        let parent_main_repo = workspace.read(cx).worktree_parent_path(&project_id)
+            .map(PathBuf::from);
+        let git_root = parent_main_repo
+            .or_else(|| git::get_repo_root(&project_pathbuf))
+            .unwrap_or_else(|| project_pathbuf.clone());
+        // Normalize both paths before strip_prefix to handle relative paths,
+        // symlinks, or platform-specific path representations
+        let normalized_project = normalize_path(&project_pathbuf);
+        let normalized_root = normalize_path(&git_root);
+        let subdir = normalized_project.strip_prefix(&normalized_root)
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+
+        // Get available branches using the git root
+        let branches = git::get_available_branches_for_worktree(&git_root);
+
+        // Pre-generate a branch name suggestion
+        let generated_branch = okena_git::branch_names::generate_branch_name(&git_root);
+
+        let branch_search_input = cx.new(|cx| {
+            let mut input = SimpleInputState::new(cx)
+                .placeholder("Search or create branch...")
+                .icon("icons/search.svg");
+            input.set_value(&generated_branch, cx);
+            input
+        });
+
+        let filtered_branches: Vec<usize> = (0..branches.len()).collect();
+        let focus_handle = cx.focus_handle();
+        let path_template = worktree_config.path_template;
+
+        Self {
+            workspace,
+            project_id,
+            project_path,
+            git_root,
+            subdir,
+            branches,
+            filtered_branches,
+            selected_branch_index: None,
+            branch_search_input,
+            error_message: None,
+            focus_handle,
+            initialized: false,
+            last_search_query: String::new(),
+            pr_mode: false,
+            pr_list: vec![],
+            loading_prs: false,
+            pr_error: None,
+            selected_pr_branch: None,
+            prs_loaded_once: false,
+            path_template,
+            hooks_config,
+        }
+    }
+
+    fn filter_branches(&mut self, cx: &App) {
+        let query = self.branch_search_input.read(cx).value().to_lowercase();
+
+        // Only re-filter and reset selection if the query actually changed
+        if query == self.last_search_query {
+            return;
+        }
+        self.last_search_query = query.clone();
+
+        if query.is_empty() {
+            self.filtered_branches = (0..self.branches.len()).collect();
+        } else {
+            self.filtered_branches = self.branches
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.to_lowercase().contains(&query))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        // Reset selection when filter changes
+        self.selected_branch_index = None;
+    }
+
+    fn close(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorktreeDialogEvent::Close);
+    }
+
+    /// Returns (worktree_path, project_path).
+    /// `worktree_path` is where `git worktree add` creates the checkout (at the repo root level).
+    /// `project_path` is the subdirectory within that worktree where the project lives
+    /// (same as worktree_path when project is at repo root).
+    fn get_target_paths(&self, branch: &str) -> (String, String) {
+        compute_target_paths(&self.git_root, &self.subdir, &self.path_template, branch)
+    }
+
+    fn create_worktree(&mut self, cx: &mut Context<Self>) {
+        let (branch, create_branch) = if self.pr_mode {
+            // PR mode: use selected PR branch
+            if let Some(ref pr_branch) = self.selected_pr_branch {
+                (pr_branch.clone(), false)
+            } else {
+                self.error_message = Some("Please select a pull request".to_string());
+                cx.notify();
+                return;
+            }
+        } else if let Some(filtered_idx) = self.selected_branch_index {
+            // Use selected existing branch
+            if let Some(&branch_idx) = self.filtered_branches.get(filtered_idx) {
+                if let Some(branch) = self.branches.get(branch_idx) {
+                    (branch.clone(), false)
+                } else {
+                    self.error_message = Some("Invalid branch selection".to_string());
+                    cx.notify();
+                    return;
+                }
+            } else {
+                self.error_message = Some("Invalid branch selection".to_string());
+                cx.notify();
+                return;
+            }
+        } else {
+            // No branch selected — use input text as new branch name
+            let name = self.branch_search_input.read(cx).value().trim().to_string();
+            if name.is_empty() {
+                self.error_message = Some("Please select a branch or type a new branch name".to_string());
+                cx.notify();
+                return;
+            }
+            // If it exactly matches an existing branch, use it directly
+            if self.branches.iter().any(|b| b == &name) {
+                (name, false)
+            } else {
+                (name, true)
+            }
+        };
+
+        let (worktree_path, project_path) = self.get_target_paths(&branch);
+        let project_id = self.project_id.clone();
+        let git_root = self.git_root.clone();
+        let hooks_config = self.hooks_config.clone();
+
+        // Create the worktree project
+        let result = self.workspace.update(cx, |ws, cx| {
+            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, cx)
+        });
+
+        match result {
+            Ok(new_project_id) => {
+                cx.emit(WorktreeDialogEvent::Created(new_project_id));
+            }
+            Err(e) => {
+                self.error_message = Some(e);
+                cx.notify();
+            }
+        }
+    }
+
+    fn load_prs(&mut self, cx: &mut Context<Self>) {
+        self.loading_prs = true;
+        self.pr_error = None;
+        cx.notify();
+
+        let project_path = self.project_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                let output = command("gh")
+                    .args(["pr", "list", "--json", "number,title,headRefName", "--limit", "20"])
+                    .current_dir(&project_path)
+                    .output();
+
+                match output {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&stdout);
+                        match parsed {
+                            Ok(items) => {
+                                let prs: Vec<PrInfo> = items
+                                    .into_iter()
+                                    .filter_map(|v| {
+                                        Some(PrInfo {
+                                            number: v.get("number")?.as_u64()? as u32,
+                                            title: v.get("title")?.as_str()?.to_string(),
+                                            branch: v.get("headRefName")?.as_str()?.to_string(),
+                                        })
+                                    })
+                                    .collect();
+                                Ok(prs)
+                            }
+                            Err(e) => Err(format!("Failed to parse PR data: {}", e)),
+                        }
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        Err(stderr.trim().to_string())
+                    }
+                    Err(_) => Err("GitHub CLI not found. Install gh: https://cli.github.com".to_string()),
+                }
+            })
+            .await;
+
+            let _ = cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    match result {
+                        Ok(prs) => {
+                            this.pr_list = prs;
+                        }
+                        Err(e) => {
+                            this.pr_error = Some(e);
+                        }
+                    }
+                    this.loading_prs = false;
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn render_pr_list(&self, t: okena_core::theme::ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.loading_prs {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child("Loading PRs...")
+                .into_any_element();
+        }
+
+        if let Some(ref err) = self.pr_error {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child(err.clone())
+                .into_any_element();
+        }
+
+        if self.pr_list.is_empty() {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child("No open pull requests")
+                .into_any_element();
+        }
+
+        div()
+            .id("pr-list-scroll")
+            .flex()
+            .flex_col()
+            .max_h(px(200.0))
+            .overflow_y_scroll()
+            .children(
+                self.pr_list.iter().enumerate().map(|(idx, pr)| {
+                    let is_selected = self.selected_pr_branch.as_deref() == Some(&pr.branch);
+                    let branch = pr.branch.clone();
+
+                    div()
+                        .id(ElementId::Name(format!("pr-{}", idx).into()))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .cursor_pointer()
+                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.selected_pr_branch = Some(branch.clone());
+                            this.selected_branch_index = None;
+                            cx.notify();
+                        }))
+                        .child(
+                            h_flex()
+                                .gap(px(6.0))
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(t.text_muted))
+                                        .child(format!("#{}", pr.number))
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(t.text_primary))
+                                        .flex_1()
+                                        .overflow_x_hidden()
+                                        .whitespace_nowrap()
+                                        .child(pr.title.clone())
+                                )
+                        )
+                        .child(
+                            div()
+                                .pl(px(28.0))
+                                .text_size(px(11.0))
+                                .text_color(rgb(t.text_muted))
+                                .child(pr.branch.clone())
+                        )
+                })
+            )
+            .into_any_element()
+    }
+
+    fn render_branch_list(&self, t: okena_core::theme::ThemeColors, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_empty = self.branch_search_input.read(cx).value().is_empty();
+
+        if self.filtered_branches.is_empty() {
+            return div()
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(t.text_muted))
+                .child(if search_empty {
+                    "No available branches for worktree"
+                } else {
+                    "No branches match — will create new branch"
+                })
+                .into_any_element();
+        }
+
+        div()
+            .id("branch-list-scroll")
+            .flex()
+            .flex_col()
+            .max_h(px(200.0))
+            .overflow_y_scroll()
+            .children(
+                self.filtered_branches.iter().enumerate().map(|(filtered_idx, &branch_idx)| {
+                    let is_selected = self.selected_branch_index == Some(filtered_idx);
+                    let branch_name = self.branches[branch_idx].clone();
+
+                    div()
+                        .id(ElementId::Name(format!("branch-{}", filtered_idx).into()))
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .text_color(rgb(t.text_primary))
+                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .child(
+                            svg()
+                                .path("icons/git-branch.svg")
+                                .size(px(14.0))
+                                .text_color(rgb(t.text_secondary))
+                        )
+                        .child(branch_name)
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.selected_branch_index = Some(filtered_idx);
+                            cx.notify();
+                        }))
+                })
+            )
+            .into_any_element()
+    }
+}
+
+impl gpui::Focusable for WorktreeDialog {
+    fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for WorktreeDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let focus_handle = self.focus_handle.clone();
+
+        // Focus search input on first render
+        if !self.initialized {
+            self.initialized = true;
+            let search_input = self.branch_search_input.clone();
+            search_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+
+        // Filter branches based on search input
+        self.filter_branches(cx);
+
+        let branch_search_input = self.branch_search_input.clone();
+        let search_input_focused = self.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+        let pr_mode = self.pr_mode;
+
+        div()
+            .id("worktree-dialog-backdrop")
+            .track_focus(&focus_handle)
+            .key_context("WorktreeDialog")
+            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                this.close(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let search_focused = this.branch_search_input.read(cx).focus_handle(cx).is_focused(window);
+
+                match event.keystroke.key.as_str() {
+                    "up" => {
+                        if search_focused {
+                            if let Some(idx) = this.selected_branch_index {
+                                if idx > 0 {
+                                    this.selected_branch_index = Some(idx - 1);
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
+                    "down" => {
+                        if search_focused {
+                            let max = this.filtered_branches.len().saturating_sub(1);
+                            if let Some(idx) = this.selected_branch_index {
+                                if idx < max {
+                                    this.selected_branch_index = Some(idx + 1);
+                                    cx.notify();
+                                }
+                            } else if !this.filtered_branches.is_empty() {
+                                this.selected_branch_index = Some(0);
+                                cx.notify();
+                            }
+                        }
+                    }
+                    "enter" => {
+                        this.create_worktree(cx);
+                    }
+                    _ => {}
+                }
+            }))
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000080))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
+                this.close(cx);
+            }))
+            .child(
+                div()
+                    .id("worktree-dialog")
+                    .w(px(450.0))
+                    .max_h(px(550.0))
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    // Header
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgb(t.border))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .child(
+                                        svg()
+                                            .path("icons/git-branch.svg")
+                                            .size(px(16.0))
+                                            .text_color(rgb(t.border_active))
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(14.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(t.text_primary))
+                                            .child("Create Worktree")
+                                    )
+                            )
+                            .child(
+                                div()
+                                    .id("close-dialog-btn")
+                                    .cursor_pointer()
+                                    .w(px(24.0))
+                                    .h(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.0))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .child(
+                                        svg()
+                                            .path("icons/close.svg")
+                                            .size(px(14.0))
+                                            .text_color(rgb(t.text_secondary))
+                                    )
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.close(cx);
+                                    }))
+                            )
+                    )
+                    // Content
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    // Mode toggle tabs
+                                    .child(
+                                        h_flex()
+                                            .gap(px(0.0))
+                                            .border_1()
+                                            .border_color(rgb(t.border))
+                                            .rounded(px(4.0))
+                                            .overflow_hidden()
+                                            .child(
+                                                div()
+                                                    .id("tab-branches")
+                                                    .flex_1()
+                                                    .px(px(12.0))
+                                                    .py(px(6.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(12.0))
+                                                    .cursor_pointer()
+                                                    .when(!pr_mode, |d| {
+                                                        d.bg(rgb(t.bg_selection))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                    })
+                                                    .when(pr_mode, |d| {
+                                                        d.text_color(rgb(t.text_muted))
+                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    })
+                                                    .child("Branches")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.pr_mode = false;
+                                                        this.selected_pr_branch = None;
+                                                        cx.notify();
+                                                    }))
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(1.0))
+                                                    .h_full()
+                                                    .bg(rgb(t.border))
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("tab-from-pr")
+                                                    .flex_1()
+                                                    .px(px(12.0))
+                                                    .py(px(6.0))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .text_size(px(12.0))
+                                                    .cursor_pointer()
+                                                    .when(pr_mode, |d| {
+                                                        d.bg(rgb(t.bg_selection))
+                                                            .text_color(rgb(t.text_primary))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                    })
+                                                    .when(!pr_mode, |d| {
+                                                        d.text_color(rgb(t.text_muted))
+                                                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                                                    })
+                                                    .child("From PR")
+                                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                                        this.pr_mode = true;
+                                                        this.selected_branch_index = None;
+                                                        if !this.prs_loaded_once {
+                                                            this.prs_loaded_once = true;
+                                                            this.load_prs(cx);
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                            )
+                                    )
+                                    // Search input (only in branch mode)
+                                    .when(!pr_mode, |d| {
+                                        d.child(
+                                            input_container(&t, Some(search_input_focused))
+                                                .child(SimpleInput::new(&branch_search_input).text_size(px(12.0))),
+                                        )
+                                    })
+                                    // Branch list or PR list
+                                    .when(!pr_mode, |d| d.child(self.render_branch_list(t, cx)))
+                                    .when(pr_mode, |d| d.child(self.render_pr_list(t, cx)))
+                            )
+                    )
+                    // Error message
+                    .when_some(self.error_message.clone(), |d, msg| {
+                        d.child(
+                            div()
+                                .px(px(16.0))
+                                .py(px(8.0))
+                                .bg(rgba(0xff00001a))
+                                .text_size(px(12.0))
+                                .text_color(rgb(t.error))
+                                .child(msg)
+                        )
+                    })
+                    // Footer
+                    .child(
+                        div()
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.0))
+                            .border_t_1()
+                            .border_color(rgb(t.border))
+                            .child(
+                                button("cancel-btn", "Cancel", &t)
+                                    .px(px(16.0))
+                                    .py(px(8.0))
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.close(cx);
+                                    })),
+                            )
+                            .child(
+                                button_primary("create-btn", "Create Worktree", &t)
+                                    .px(px(16.0))
+                                    .py(px(8.0))
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.create_worktree(cx);
+                                    })),
+                            ),
+                    )
+            )
+    }
+}
+

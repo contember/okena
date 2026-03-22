@@ -609,8 +609,9 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let app_settings = crate::settings::settings(cx);
         let dialog = cx.new(|cx| {
-            WorktreeDialog::new(workspace, project_id, project_path, cx)
+            WorktreeDialog::new(workspace, project_id, project_path, app_settings.worktree, app_settings.hooks, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &WorktreeDialogEvent, cx| {
             match event {
@@ -639,8 +640,9 @@ impl OverlayManager {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let app_settings = crate::settings::settings(cx);
         let dialog = cx.new(|cx| {
-            CloseWorktreeDialog::new(workspace, project_id, cx)
+            CloseWorktreeDialog::new(workspace, project_id, app_settings.worktree, app_settings.hooks, cx)
         });
         cx.subscribe(&dialog, |this, _, event: &CloseWorktreeDialogEvent, cx| {
             if event.is_close() {

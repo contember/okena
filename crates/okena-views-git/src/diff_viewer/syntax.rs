@@ -1,7 +1,7 @@
 //! Syntax highlighting for the diff viewer.
 
 use super::types::{DiffDisplayFile, DisplayLine, HighlightedSpan};
-use crate::{DiffLineType, FileDiff};
+use okena_git::{DiffLineType, FileDiff};
 use okena_files::syntax::{
     default_text_color, get_syntax_for_path, highlight_line, load_syntax_theme,
 };

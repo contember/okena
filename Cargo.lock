@@ -4534,6 +4534,7 @@ dependencies = [
  "okena-markdown",
  "okena-terminal",
  "okena-ui",
+ "okena-views-git",
  "okena-workspace",
  "parking_lot",
  "portable-pty",
@@ -4650,18 +4651,11 @@ dependencies = [
 name = "okena-git"
 version = "0.1.0"
 dependencies = [
- "gpui",
- "gpui-component",
  "log",
  "okena-core",
- "okena-files",
- "okena-ui",
  "parking_lot",
- "reqwest",
  "serde",
  "serde_json",
- "smol",
- "syntect",
  "uuid",
 ]
 
@@ -4701,6 +4695,25 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+]
+
+[[package]]
+name = "okena-views-git"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-core",
+ "okena-files",
+ "okena-git",
+ "okena-ui",
+ "okena-workspace",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "smol",
+ "syntect",
 ]
 
 [[package]]
