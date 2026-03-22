@@ -8,6 +8,9 @@ license = "MIT"
 okena-core = { path = "../okena-core" }
 okena-services = { path = "../okena-services" }
 okena-ui = { path = "../okena-ui" }
+okena-workspace = { path = "../okena-workspace" }
+okena-terminal = { path = "../okena-terminal" }
+okena-views-terminal = { path = "../okena-views-terminal" }
 
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }

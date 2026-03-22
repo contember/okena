@@ -4743,7 +4743,10 @@ dependencies = [
  "log",
  "okena-core",
  "okena-services",
+ "okena-terminal",
  "okena-ui",
+ "okena-views-terminal",
+ "okena-workspace",
 ]
 
 [[package]]
