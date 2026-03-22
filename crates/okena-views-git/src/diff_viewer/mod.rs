@@ -163,6 +163,12 @@ impl DiffViewer {
         viewer
     }
 
+    /// Current diff view mode (for persisting on close).
+    pub fn view_mode(&self) -> DiffViewMode { self.view_mode }
+
+    /// Current ignore-whitespace setting (for persisting on close).
+    pub fn ignore_whitespace(&self) -> bool { self.ignore_whitespace }
+
     /// Update configuration (font size, theme) from outside.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
         self.file_font_size = font_size;

@@ -1152,10 +1152,21 @@ impl OverlayManager {
             viewer
         });
 
-        cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
-            match event {
-                DiffViewerEvent::Close => {
-                    this.close_modal(cx);
+        cx.subscribe(&viewer, {
+            let se = se.clone();
+            move |this, viewer, event: &DiffViewerEvent, cx| {
+                match event {
+                    DiffViewerEvent::Close => {
+                        // Persist diff viewer settings on close
+                        let viewer = viewer.read(cx);
+                        let view_mode = viewer.view_mode();
+                        let ignore_ws = viewer.ignore_whitespace();
+                        se.update(cx, |settings, cx| {
+                            settings.set_diff_view_mode(view_mode, cx);
+                            settings.set_diff_ignore_whitespace(ignore_ws, cx);
+                        });
+                        this.close_modal(cx);
+                    }
                 }
             }
         })
