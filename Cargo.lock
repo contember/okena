@@ -4536,6 +4536,7 @@ dependencies = [
  "okena-terminal",
  "okena-ui",
  "okena-views-git",
+ "okena-views-services",
  "okena-views-terminal",
  "okena-workspace",
  "parking_lot",
@@ -4731,6 +4732,18 @@ dependencies = [
  "serde_json",
  "smol",
  "syntect",
+]
+
+[[package]]
+name = "okena-views-services"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-core",
+ "okena-services",
+ "okena-ui",
 ]
 
 [[package]]

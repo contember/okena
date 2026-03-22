@@ -1,0 +1,15 @@
+[package]
+name = "okena-views-services"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+okena-services = { path = "../okena-services" }
+okena-ui = { path = "../okena-ui" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+
+log = "0.4"
