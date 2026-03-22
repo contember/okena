@@ -1,9 +1,7 @@
 //! Pane drag-and-drop types for terminal rearrangement.
-//!
-//! Defines the drag payload, ghost view, and drop zone enum used
-//! when dragging a terminal pane header onto another pane's edge zones.
 
-use crate::theme::theme;
+use okena_files::theme::theme;
+use okena_ui::theme::with_alpha;
 use gpui::*;
 use gpui_component::h_flex;
 
@@ -34,7 +32,7 @@ impl Render for PaneDragView {
         div()
             .px(px(12.0))
             .py(px(6.0))
-            .bg(crate::theme::with_alpha(t.bg_primary, 0.95))
+            .bg(with_alpha(t.bg_primary, 0.95))
             .border_1()
             .border_color(rgb(t.border_active))
             .rounded(px(6.0))
@@ -56,5 +54,5 @@ impl Render for PaneDragView {
     }
 }
 
-/// Re-export DropZone from workspace state (used by both layout actions and drag UI).
-pub use crate::workspace::state::DropZone;
+/// Re-export DropZone from workspace state.
+pub use okena_workspace::state::DropZone;

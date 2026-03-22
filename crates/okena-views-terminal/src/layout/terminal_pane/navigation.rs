@@ -1,17 +1,13 @@
 //! Terminal pane navigation, search, and key handling.
-//!
-//! Contains directional navigation between panes, sequential navigation,
-//! search open/close/next/prev, and keyboard input handling.
 
-use crate::terminal::input::gpui_key_to_bytes as key_to_bytes;
-use crate::views::layout::navigation::{get_pane_map, NavigationDirection};
+use crate::ActionDispatch;
+use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
+use crate::layout::navigation::{get_pane_map, NavigationDirection};
 use gpui::*;
 
 use super::TerminalPane;
 
-impl TerminalPane {
-    // === Navigation ===
-
+impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn handle_navigation(
         &mut self,
         direction: NavigationDirection,
@@ -58,8 +54,6 @@ impl TerminalPane {
         }
     }
 
-    // === Search ===
-
     pub(super) fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_bar.update(cx, |search_bar, cx| {
             search_bar.open(window, cx);
@@ -86,14 +80,21 @@ impl TerminalPane {
         });
     }
 
-    // === Key handling ===
-
     pub(super) fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
-            // Local keyboard input reclaims resize authority from remote clients
             terminal.claim_resize_local();
             let app_cursor_mode = terminal.is_app_cursor_mode();
-            if let Some(input) = key_to_bytes(event, app_cursor_mode) {
+            let key_event = KeyEvent {
+                key: event.keystroke.key.clone(),
+                key_char: event.keystroke.key_char.clone(),
+                modifiers: KeyModifiers {
+                    control: event.keystroke.modifiers.control,
+                    shift: event.keystroke.modifiers.shift,
+                    alt: event.keystroke.modifiers.alt,
+                    platform: event.keystroke.modifiers.platform,
+                },
+            };
+            if let Some(input) = key_to_bytes(&key_event, app_cursor_mode) {
                 terminal.send_bytes(&input);
             }
         }

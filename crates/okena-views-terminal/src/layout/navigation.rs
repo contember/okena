@@ -46,7 +46,6 @@ impl PaneMap {
 
     /// Register a pane's bounds
     pub fn register(&mut self, project_id: String, layout_path: Vec<usize>, bounds: Bounds<Pixels>) {
-        // Skip invalid bounds (zero or negative size)
         if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) {
             return;
         }
@@ -78,10 +77,8 @@ impl PaneMap {
     ) -> Option<&PaneBounds> {
         let source_center = source.center();
 
-        // Filter panes that are in the correct direction
         let candidates: Vec<_> = self.panes.iter()
             .filter(|p| {
-                // Don't consider the source pane itself
                 if p.project_id == source.project_id && p.layout_path == source.layout_path {
                     return false;
                 }
@@ -89,23 +86,10 @@ impl PaneMap {
                 let candidate_center = p.center();
 
                 match direction {
-                    NavigationDirection::Left => {
-                        // Candidate must be to the left (its right edge before source's left edge,
-                        // or center is to the left)
-                        candidate_center.x < source_center.x
-                    }
-                    NavigationDirection::Right => {
-                        // Candidate must be to the right
-                        candidate_center.x > source_center.x
-                    }
-                    NavigationDirection::Up => {
-                        // Candidate must be above
-                        candidate_center.y < source_center.y
-                    }
-                    NavigationDirection::Down => {
-                        // Candidate must be below
-                        candidate_center.y > source_center.y
-                    }
+                    NavigationDirection::Left => candidate_center.x < source_center.x,
+                    NavigationDirection::Right => candidate_center.x > source_center.x,
+                    NavigationDirection::Up => candidate_center.y < source_center.y,
+                    NavigationDirection::Down => candidate_center.y > source_center.y,
                 }
             })
             .collect();
@@ -114,9 +98,6 @@ impl PaneMap {
             return None;
         }
 
-        // Find the nearest candidate using weighted distance
-        // Weight the primary axis more heavily to prefer panes that are directly
-        // in the navigation direction rather than diagonally
         candidates.into_iter().min_by(|a, b| {
             let dist_a = weighted_distance(&source_center, &a.center(), direction);
             let dist_b = weighted_distance(&source_center, &b.center(), direction);
@@ -130,12 +111,10 @@ impl PaneMap {
             return None;
         }
 
-        // Find the current pane's index
         let current_idx = self.panes.iter().position(|p| {
             p.project_id == source.project_id && p.layout_path == source.layout_path
         })?;
 
-        // Get the next pane (wrapping around)
         let next_idx = (current_idx + 1) % self.panes.len();
         self.panes.get(next_idx)
     }
@@ -146,8 +125,6 @@ impl PaneMap {
     }
 
     /// Return panes sorted by reading order: top-to-bottom, then left-to-right.
-    ///
-    /// Sorts by Y center ascending, then X center ascending.
     #[allow(dead_code)]
     pub fn sorted_by_reading_order(&self) -> Vec<&PaneBounds> {
         let mut sorted: Vec<&PaneBounds> = self.panes.iter().collect();
@@ -169,12 +146,10 @@ impl PaneMap {
             return None;
         }
 
-        // Find the current pane's index
         let current_idx = self.panes.iter().position(|p| {
             p.project_id == source.project_id && p.layout_path == source.layout_path
         })?;
 
-        // Get the previous pane (wrapping around)
         let prev_idx = if current_idx == 0 {
             self.panes.len() - 1
         } else {
@@ -193,8 +168,6 @@ fn weighted_distance(
     let dx = f32::from(to.x) - f32::from(from.x);
     let dy = f32::from(to.y) - f32::from(from.y);
 
-    // For horizontal navigation, weight vertical distance more heavily (penalty for being off-axis)
-    // For vertical navigation, weight horizontal distance more heavily
     let (primary_weight, secondary_weight) = match direction {
         NavigationDirection::Left | NavigationDirection::Right => (1.0, 2.0),
         NavigationDirection::Up | NavigationDirection::Down => (2.0, 1.0),
@@ -203,7 +176,6 @@ fn weighted_distance(
     let weighted_dx = dx * primary_weight;
     let weighted_dy = dy * secondary_weight;
 
-    // Use squared distance to avoid sqrt (we only need relative comparison)
     (weighted_dx * weighted_dx) + (weighted_dy * weighted_dy)
 }
 
@@ -265,13 +237,9 @@ mod tests {
     #[test]
     fn sorted_by_reading_order_2x2_grid() {
         let mut map = PaneMap::new();
-        // Bottom-right
         map.register("d".into(), vec![0], make_pane("d", 400.0, 300.0, 400.0, 300.0).bounds);
-        // Top-left
         map.register("a".into(), vec![0], make_pane("a", 0.0, 0.0, 400.0, 300.0).bounds);
-        // Bottom-left
         map.register("c".into(), vec![0], make_pane("c", 0.0, 300.0, 400.0, 300.0).bounds);
-        // Top-right
         map.register("b".into(), vec![0], make_pane("b", 400.0, 0.0, 400.0, 300.0).bounds);
 
         let sorted = map.sorted_by_reading_order();

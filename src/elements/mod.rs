@@ -1,4 +1,2 @@
-pub mod resize_handle;
-pub mod terminal_element;
-mod terminal_input;
-mod terminal_rendering;
+pub use okena_views_terminal::elements::resize_handle;
+pub use okena_views_terminal::elements::terminal_element;

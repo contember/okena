@@ -1,32 +1,20 @@
 //! Scrollbar component for terminal pane.
-//!
-//! An Entity with Render that handles scrollbar display and drag interactions.
-//! Top and bottom zones (~24px) act as scroll up/down buttons.
 
-use crate::terminal::terminal::Terminal;
-use crate::theme::theme;
+use okena_terminal::terminal::Terminal;
+use okena_files::theme::theme;
 use gpui::*;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Height of the jump-to-start/end zones at top and bottom of the scrollbar.
 const BUTTON_ZONE_HEIGHT: f32 = 24.0;
 
-/// Scrollbar view that handles display and drag interactions.
 pub struct Scrollbar {
-    /// Reference to the terminal for scroll info
     terminal: Option<Arc<Terminal>>,
-    /// Whether currently dragging
     dragging: bool,
-    /// Y position where drag started
     drag_start_y: Option<f32>,
-    /// Scroll offset when drag started
     drag_start_offset: Option<usize>,
-    /// Last scroll activity time for auto-hide
     last_activity: Instant,
-    /// Element bounds for calculations
     element_bounds: Option<Bounds<Pixels>>,
-    /// Whether the mouse is hovering over the scrollbar area
     hovered: bool,
 }
 
@@ -43,22 +31,18 @@ impl Scrollbar {
         }
     }
 
-    /// Set the terminal reference.
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>) {
         self.terminal = terminal;
     }
 
-    /// Check if currently dragging.
     pub fn is_dragging(&self) -> bool {
         self.dragging
     }
 
-    /// Mark scroll activity (for auto-hide timer).
     pub fn mark_activity(&mut self) {
         self.last_activity = Instant::now();
     }
 
-    /// Check if scrollbar should be visible.
     fn should_show(&self) -> bool {
         if self.dragging || self.hovered {
             return true;
@@ -66,7 +50,6 @@ impl Scrollbar {
         self.last_activity.elapsed().as_millis() < 1500
     }
 
-    /// Check if there's scrollable content.
     fn has_scroll_content(&self) -> bool {
         self.terminal
             .as_ref()
@@ -77,7 +60,6 @@ impl Scrollbar {
             .unwrap_or(false)
     }
 
-    /// Calculate scrollbar thumb geometry.
     fn calculate_geometry(&self, content_height: f32) -> Option<(f32, f32)> {
         let track_height = content_height;
         let terminal = self.terminal.as_ref()?;
@@ -96,7 +78,6 @@ impl Scrollbar {
         Some((thumb_y, thumb_height))
     }
 
-    /// Start scrollbar drag.
     pub fn start_drag(&mut self, y: f32, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
             self.dragging = true;
@@ -107,7 +88,6 @@ impl Scrollbar {
         }
     }
 
-    /// Update scrollbar during drag.
     pub fn update_drag(&mut self, y: f32, content_height: f32, cx: &mut Context<Self>) {
         if !self.dragging {
             return;
@@ -135,7 +115,6 @@ impl Scrollbar {
         }
     }
 
-    /// End scrollbar drag.
     pub fn end_drag(&mut self, cx: &mut Context<Self>) {
         self.dragging = false;
         self.drag_start_y = None;
@@ -143,7 +122,6 @@ impl Scrollbar {
         cx.notify();
     }
 
-    /// Handle scrollbar track click (jump to position).
     pub fn handle_click(&mut self, y: f32, content_height: f32, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
             let (total_lines, visible_lines, _) = terminal.scroll_info();
@@ -161,8 +139,6 @@ impl Scrollbar {
         }
     }
 
-    /// Handle mouse down — thumb drag or track click.
-    /// Zone jump is deferred to mouse_up so thumb drag still works in zones.
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         cx.stop_propagation();
         self.last_activity = Instant::now();
@@ -177,12 +153,10 @@ impl Scrollbar {
                 } else if !Self::is_in_zone(relative_y, content_height) {
                     self.handle_click(relative_y, content_height, cx);
                 }
-                // In zone but not on thumb — do nothing, mouse_up will handle jump
             }
         }
     }
 
-    /// Handle mouse up — jump to start/end if released in a zone without dragging.
     pub fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
         let was_dragging = self.dragging;
         self.end_drag(cx);
@@ -319,8 +293,6 @@ impl Render for Scrollbar {
                                 }
                             }
 
-                            // Register window-level handlers so scrollbar drag
-                            // continues even when the mouse leaves the terminal area.
                             if dragging {
                                 let entity = entity.clone();
                                 let content_height = f32::from(bounds.size.height);

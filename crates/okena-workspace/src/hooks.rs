@@ -765,6 +765,16 @@ pub fn resolve_terminal_on_create(
     resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
 }
 
+/// Resolve the `terminal.on_create` hook command (without GPUI context).
+/// Returns the command string if configured at any level (project/parent/global).
+pub fn resolve_terminal_on_create_simple(
+    project_hooks: &HooksConfig,
+    parent_hooks: Option<&HooksConfig>,
+    global_hooks: &HooksConfig,
+) -> Option<String> {
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
+}
+
 /// Apply the `terminal.on_create` command by wrapping the shell to run
 /// the command first, then `exec` into the original shell.
 /// Produces: `sh -c '<on_create_cmd>; exec <shell_cmd>'`

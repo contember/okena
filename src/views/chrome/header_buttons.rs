@@ -1,125 +1,15 @@
 //! Shared header action buttons for terminal panes and tab groups.
 //!
-//! This module provides reusable button definitions to ensure consistency
-//! between regular terminal mode and tab group mode.
+//! Re-exports from okena-ui and provides a keybinding-aware wrapper.
+
+pub use okena_ui::header_buttons::{ButtonSize, HeaderAction};
 
 use crate::keybindings;
 use crate::theme::ThemeColors;
 use gpui::*;
-use gpui_component::tooltip::Tooltip;
 
-/// All available header actions for terminal panes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeaderAction {
-    SplitVertical,
-    SplitHorizontal,
-    AddTab,
-    Minimize,
-    ExportBuffer,
-    Fullscreen,
-    Detach,
-    Close,
-    ZoomPrev,
-    ZoomNext,
-    ExitZoom,
-}
-
-impl HeaderAction {
-    /// Returns the icon path for this action.
-    pub fn icon(&self) -> &'static str {
-        match self {
-            HeaderAction::SplitVertical => "icons/split-vertical.svg",
-            HeaderAction::SplitHorizontal => "icons/split-horizontal.svg",
-            HeaderAction::AddTab => "icons/tabs.svg",
-            HeaderAction::Minimize => "icons/minimize.svg",
-            HeaderAction::ExportBuffer => "icons/copy.svg",
-            HeaderAction::Fullscreen => "icons/fullscreen.svg",
-            HeaderAction::Detach => "icons/detach.svg",
-            HeaderAction::Close => "icons/close.svg",
-            HeaderAction::ZoomPrev => "icons/chevron-left.svg",
-            HeaderAction::ZoomNext => "icons/chevron-right.svg",
-            HeaderAction::ExitZoom => "icons/close.svg",
-        }
-    }
-
-    /// Returns the default tooltip text for this action.
-    pub fn tooltip(&self) -> &'static str {
-        match self {
-            HeaderAction::SplitVertical => "Split Vertical",
-            HeaderAction::SplitHorizontal => "Split Horizontal",
-            HeaderAction::AddTab => "Add Tab",
-            HeaderAction::Minimize => "Minimize",
-            HeaderAction::ExportBuffer => "Export Buffer to File",
-            HeaderAction::Fullscreen => "Fullscreen",
-            HeaderAction::Detach => "Detach to Window",
-            HeaderAction::Close => "Close",
-            HeaderAction::ZoomPrev => "Previous Terminal",
-            HeaderAction::ZoomNext => "Next Terminal",
-            HeaderAction::ExitZoom => "Exit Zoom",
-        }
-    }
-
-    /// Returns the corresponding GPUI action for keybinding display in tooltips.
-    pub fn gpui_action(&self) -> Option<Box<dyn Action>> {
-        match self {
-            HeaderAction::SplitVertical => Some(Box::new(keybindings::SplitVertical)),
-            HeaderAction::SplitHorizontal => Some(Box::new(keybindings::SplitHorizontal)),
-            HeaderAction::AddTab => Some(Box::new(keybindings::AddTab)),
-            HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
-            HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
-            HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
-            HeaderAction::ExportBuffer | HeaderAction::Detach
-            | HeaderAction::ZoomPrev | HeaderAction::ZoomNext | HeaderAction::ExitZoom => None,
-        }
-    }
-
-    /// Returns true if this is a close/exit action (for red hover styling).
-    pub fn is_close(&self) -> bool {
-        matches!(self, HeaderAction::Close | HeaderAction::ExitZoom)
-    }
-
-    /// Returns the element ID prefix for this action.
-    pub fn id_prefix(&self) -> &'static str {
-        match self {
-            HeaderAction::SplitVertical => "split-vertical-btn",
-            HeaderAction::SplitHorizontal => "split-horizontal-btn",
-            HeaderAction::AddTab => "add-tab-btn",
-            HeaderAction::Minimize => "minimize-btn",
-            HeaderAction::ExportBuffer => "export-buffer-btn",
-            HeaderAction::Fullscreen => "fullscreen-btn",
-            HeaderAction::Detach => "detach-btn",
-            HeaderAction::Close => "close-btn",
-            HeaderAction::ZoomPrev => "zoom-prev-btn",
-            HeaderAction::ZoomNext => "zoom-next-btn",
-            HeaderAction::ExitZoom => "zoom-exit-btn",
-        }
-    }
-}
-
-/// Button size configuration.
-#[derive(Clone, Copy)]
-pub struct ButtonSize {
-    pub button: f32,
-    pub icon: f32,
-}
-
-impl ButtonSize {
-    /// Compact size for tab group headers (20px button, 12px icon).
-    pub const COMPACT: Self = Self {
-        button: 20.0,
-        icon: 12.0,
-    };
-}
-
-/// Renders a header button base element without click handler.
+/// Renders a header button base element with keybinding-aware tooltips.
 /// The caller should attach `.on_click()` to handle the action.
-///
-/// # Arguments
-/// * `action` - The action this button represents
-/// * `id_suffix` - Unique suffix for the element ID
-/// * `size` - Button and icon size configuration
-/// * `t` - Theme reference
-/// * `tooltip_override` - Optional tooltip text override (e.g., "Close Tab" instead of "Close")
 pub fn header_button_base(
     action: HeaderAction,
     id_suffix: &str,
@@ -127,39 +17,20 @@ pub fn header_button_base(
     t: &ThemeColors,
     tooltip_override: Option<&'static str>,
 ) -> Stateful<Div> {
-    let tooltip_text = tooltip_override.unwrap_or_else(|| action.tooltip());
-    let bg_hover = t.bg_hover;
+    let gpui_action = gpui_action_for(action);
+    okena_ui::header_buttons::header_button_base(action, id_suffix, size, t, tooltip_override, gpui_action)
+}
 
-    let base = div()
-        .id(format!("{}-{}", action.id_prefix(), id_suffix))
-        .cursor_pointer()
-        .w(px(size.button))
-        .h(px(size.button))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-            cx.stop_propagation();
-        })
-        .child(
-            svg()
-                .path(action.icon())
-                .size(px(size.icon))
-                .text_color(rgb(t.text_secondary)),
-        )
-        .tooltip(move |_window, cx| {
-            let mut tooltip = Tooltip::new(tooltip_text);
-            if let Some(action) = action.gpui_action() {
-                tooltip = tooltip.action(action.as_ref(), None);
-            }
-            tooltip.build(_window, cx)
-        });
-
-    // Apply hover style - red for close, normal for others
-    if action.is_close() {
-        base.hover(|s| s.bg(rgba(0xf14c4c99)))
-    } else {
-        base.hover(move |s| s.bg(rgb(bg_hover)))
+/// Returns the corresponding GPUI action for keybinding display in tooltips.
+fn gpui_action_for(action: HeaderAction) -> Option<Box<dyn Action>> {
+    match action {
+        HeaderAction::SplitVertical => Some(Box::new(keybindings::SplitVertical)),
+        HeaderAction::SplitHorizontal => Some(Box::new(keybindings::SplitHorizontal)),
+        HeaderAction::AddTab => Some(Box::new(keybindings::AddTab)),
+        HeaderAction::Minimize => Some(Box::new(keybindings::MinimizeTerminal)),
+        HeaderAction::Fullscreen => Some(Box::new(keybindings::ToggleFullscreen)),
+        HeaderAction::Close => Some(Box::new(keybindings::CloseTerminal)),
+        HeaderAction::ExportBuffer | HeaderAction::Detach
+        | HeaderAction::ZoomPrev | HeaderAction::ZoomNext | HeaderAction::ExitZoom => None,
     }
 }

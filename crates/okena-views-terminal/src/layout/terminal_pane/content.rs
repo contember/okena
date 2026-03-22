@@ -1,13 +1,12 @@
 //! Terminal content component.
-//!
-//! An Entity with Render that handles terminal display, mouse interactions, and selection.
 
 use crate::elements::terminal_element::{LinkKind, SearchMatch, TerminalElement};
-use crate::settings::settings_entity;
-use crate::terminal::terminal::Terminal;
-use crate::theme::theme;
-use crate::views::layout::navigation::register_pane_bounds;
-use crate::workspace::state::Workspace;
+use crate::terminal_view_settings_entity;
+use okena_terminal::terminal::Terminal;
+use okena_files::theme::theme;
+use okena_ui::color_utils::tint_color;
+use crate::layout::navigation::register_pane_bounds;
+use okena_workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,46 +16,29 @@ use super::url_detector::UrlDetector;
 
 /// Events emitted by terminal content.
 pub enum TerminalContentEvent {
-    /// Request to show context menu at a position.
     RequestContextMenu {
         position: Point<Pixels>,
         has_selection: bool,
-        /// URL at the click position (if any), for "Open in Browser" / "Copy Link".
         link_url: Option<String>,
     },
 }
 
 /// Terminal content view handling display and mouse interactions.
 pub struct TerminalContent {
-    /// Terminal reference
     terminal: Option<Arc<Terminal>>,
-    /// Focus handle from parent
     focus_handle: FocusHandle,
-    /// URL detector
     url_detector: UrlDetector,
-    /// Scrollbar child entity
     scrollbar: Entity<Scrollbar>,
-    /// Whether currently selecting
     is_selecting: bool,
-    /// Element bounds
     element_bounds: Option<Bounds<Pixels>>,
-    /// Last click info for multi-click detection
     last_click: Option<(Instant, usize, i32)>,
-    /// Click count
     click_count: u8,
-    /// Cursor visibility for blink
     cursor_visible: bool,
-    /// Search matches for highlighting
     search_matches: Arc<Vec<SearchMatch>>,
-    /// Current search match index
     search_current_index: Option<usize>,
-    /// Project ID for pane registration
     project_id: String,
-    /// Layout path for pane registration
     layout_path: Vec<usize>,
-    /// Workspace entity for accessing per-terminal zoom
     workspace: Entity<Workspace>,
-    /// Accumulated scroll delta for smooth trackpad scrolling
     scroll_accumulator: f32,
 }
 
@@ -89,7 +71,6 @@ impl TerminalContent {
         }
     }
 
-    /// Set terminal reference.
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
         self.terminal = terminal.clone();
         self.scrollbar.update(cx, |scrollbar, _| {
@@ -97,12 +78,10 @@ impl TerminalContent {
         });
     }
 
-    /// Set cursor visibility.
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.cursor_visible = visible;
     }
 
-    /// Set search highlights.
     pub fn set_search_highlights(
         &mut self,
         matches: Arc<Vec<SearchMatch>>,
@@ -112,14 +91,12 @@ impl TerminalContent {
         self.search_current_index = current_index;
     }
 
-    /// Mark scroll activity.
     pub fn mark_scroll_activity(&mut self, cx: &mut Context<Self>) {
         self.scrollbar.update(cx, |scrollbar, _| {
             scrollbar.mark_activity();
         });
     }
 
-    /// Handle scroll.
     pub fn handle_scroll(
         &mut self,
         delta: f32,
@@ -130,7 +107,6 @@ impl TerminalContent {
             let (cell_width, cell_height) = terminal.cell_dimensions();
 
             if terminal.is_mouse_mode() {
-                // Forward scroll to PTY as mouse wheel events
                 self.scroll_accumulator += delta;
                 let lines = (self.scroll_accumulator / cell_height) as i32;
                 if lines != 0 {
@@ -140,7 +116,6 @@ impl TerminalContent {
                     terminal.send_mouse_scroll(button, col, row, lines.unsigned_abs() as usize);
                 }
             } else {
-                // Normal scrollback scrolling
                 self.scroll_accumulator += delta;
                 let lines = (self.scroll_accumulator / cell_height) as i32;
                 if lines != 0 {
@@ -157,7 +132,6 @@ impl TerminalContent {
         }
     }
 
-    /// Update scrollbar drag.
     pub fn update_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
         if let Some(bounds) = self.element_bounds {
             let content_height = f32::from(bounds.size.height);
@@ -167,17 +141,14 @@ impl TerminalContent {
         }
     }
 
-    /// End scrollbar drag.
     pub fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
         self.scrollbar.update(cx, |scrollbar, cx| {
             scrollbar.end_drag(cx);
         });
     }
 
-    /// Padding between the outer element bounds and the terminal grid.
     const TERMINAL_PADDING: f32 = 4.0;
 
-    /// Convert pixel position to cell coordinates and which side of the cell the cursor is on.
     fn pixel_to_cell(&self, pos: Point<Pixels>) -> Option<(usize, i32, alacritty_terminal::index::Side)> {
         let bounds = self.element_bounds?;
         let terminal = self.terminal.as_ref()?;
@@ -203,7 +174,6 @@ impl TerminalContent {
         Some((col, row, side))
     }
 
-    /// Convert pixel to cell without bounds check.
     fn pixel_to_cell_raw(&self, pos: Point<Pixels>, cell_width: f32, cell_height: f32) -> (usize, usize) {
         if let Some(bounds) = self.element_bounds {
             let x = (f32::from(pos.x) - f32::from(bounds.origin.x)).max(0.0);
@@ -214,7 +184,6 @@ impl TerminalContent {
         }
     }
 
-    /// Handle mouse down.
     fn handle_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -225,7 +194,6 @@ impl TerminalContent {
 
         if let Some(ref terminal) = self.terminal {
             if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
-                // Check for Cmd+Click (macOS) / Ctrl+Click (Linux/Windows) on URL or file path
                 if event.modifiers.platform || event.modifiers.control {
                     if let Some(url_match) = self.url_detector.find_at(col, row) {
                         match &url_match.kind {
@@ -233,7 +201,7 @@ impl TerminalContent {
                                 UrlDetector::open_url(&url_match.url);
                             }
                             LinkKind::FilePath { line, col } => {
-                                let file_opener = settings_entity(cx).read(cx).settings.file_opener.clone();
+                                let file_opener = terminal_view_settings_entity(cx).read(cx).settings.file_opener.clone();
                                 UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
                             }
                         }
@@ -243,17 +211,12 @@ impl TerminalContent {
 
                 let now = Instant::now();
 
-                // Detect click count
                 let click_count = if let Some((last_time, last_col, last_row)) = self.last_click {
                     let elapsed = now.duration_since(last_time).as_millis();
                     let same_position =
                         (col as i32 - last_col as i32).abs() <= 1 && (row - last_row).abs() <= 0;
                     if elapsed < 400 && same_position {
-                        if self.click_count >= 3 {
-                            1
-                        } else {
-                            self.click_count + 1
-                        }
+                        if self.click_count >= 3 { 1 } else { self.click_count + 1 }
                     } else {
                         1
                     }
@@ -285,9 +248,7 @@ impl TerminalContent {
         }
     }
 
-    /// Handle mouse move.
     fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        // Update URL hover state
         if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
             if self.url_detector.update_hover(col, row) {
                 cx.notify();
@@ -301,10 +262,7 @@ impl TerminalContent {
                 if let Some(ref terminal) = self.terminal {
                     terminal.end_selection();
                     if !terminal.has_selection()
-                        || terminal
-                            .get_selected_text()
-                            .map(|s| s.is_empty())
-                            .unwrap_or(true)
+                        || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true)
                     {
                         terminal.clear_selection();
                     }
@@ -323,7 +281,6 @@ impl TerminalContent {
         }
     }
 
-    /// Handle mouse up.
     fn handle_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
         if self.is_selecting {
             if let Some(ref terminal) = self.terminal {
@@ -331,10 +288,7 @@ impl TerminalContent {
                 self.is_selecting = false;
 
                 if !terminal.has_selection()
-                    || terminal
-                        .get_selected_text()
-                        .map(|s| s.is_empty())
-                        .unwrap_or(true)
+                    || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true)
                 {
                     terminal.clear_selection();
                 }
@@ -342,7 +296,6 @@ impl TerminalContent {
             }
         }
     }
-
 }
 
 impl Render for TerminalContent {
@@ -354,12 +307,12 @@ impl Render for TerminalContent {
             t.term_background_unfocused
         };
 
-        // Resolve folder color tint for this project (when enabled)
-        let bg_tint = if crate::settings::settings(cx).color_tinted_background {
+        let settings = crate::terminal_view_settings(cx);
+        let bg_tint = if settings.color_tinted_background {
             let ws = self.workspace.read(cx);
             ws.project(&self.project_id).and_then(|p| {
                 let color = ws.effective_folder_color(p);
-                if color != crate::theme::FolderColor::Default {
+                if color != okena_core::theme::FolderColor::Default {
                     Some(t.get_folder_color(color))
                 } else {
                     None
@@ -369,11 +322,10 @@ impl Render for TerminalContent {
             None
         };
         let term_bg = match bg_tint {
-            Some(tint) => crate::ui::tint_color(base_bg, tint, 0.025),
+            Some(tint) => tint_color(base_bg, tint, 0.025),
             None => base_bg,
         };
 
-        // Update URL matches
         self.url_detector.update_matches(&self.terminal);
 
         let Some(ref terminal) = self.terminal else {
@@ -406,6 +358,8 @@ impl Render for TerminalContent {
                 }
             }
         };
+
+        let settings_entity = terminal_view_settings_entity(cx);
 
         div()
             .id("terminal-content")
@@ -442,13 +396,11 @@ impl Render for TerminalContent {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                // Shift+scroll is reserved for horizontal project column scrolling
                 if event.modifiers.shift {
                     return;
                 }
                 let delta = event.delta.pixel_delta(px(17.0));
                 if event.modifiers.control {
-                    // Ctrl+scroll = per-terminal zoom (Linux/Windows)
                     let current_zoom = this.workspace.read(cx).get_terminal_zoom(&this.project_id, &this.layout_path);
                     let zoom_delta = if f32::from(delta.y) > 0.0 { 0.1 } else { -0.1 };
                     let new_zoom = (current_zoom + zoom_delta).clamp(0.5, 3.0);
@@ -465,7 +417,6 @@ impl Render for TerminalContent {
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
-                    // Detect URL at click position for context menu link actions
                     let link_url = this.pixel_to_cell(event.position).and_then(|(col, row, _side)| {
                         this.url_detector.find_at(col, row)
                             .filter(|m| m.kind == LinkKind::Url)
@@ -494,7 +445,7 @@ impl Render for TerminalContent {
                                 self.url_detector.hovered_group(),
                             )
                             .with_cursor_visible(self.cursor_visible)
-                            .with_cursor_style(settings_entity(cx).read(cx).settings.cursor_style),
+                            .with_cursor_style(settings_entity.read(cx).settings.cursor_style),
                     ),
             )
             .child(self.scrollbar.clone())

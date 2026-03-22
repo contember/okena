@@ -302,6 +302,36 @@ impl ActionDispatcher {
     }
 }
 
+impl okena_views_terminal::ActionDispatch for ActionDispatcher {
+    fn dispatch(&self, action: ActionRequest, cx: &mut gpui::App) {
+        self.dispatch(action, cx);
+    }
+
+    fn is_remote(&self) -> bool {
+        self.is_remote()
+    }
+
+    fn split_terminal(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        direction: crate::workspace::state::SplitDirection,
+        cx: &mut gpui::App,
+    ) {
+        self.split_terminal(project_id, layout_path, direction, cx);
+    }
+
+    fn add_tab(
+        &self,
+        project_id: &str,
+        layout_path: &[usize],
+        in_group: bool,
+        cx: &mut gpui::App,
+    ) {
+        self.add_tab(project_id, layout_path, in_group, cx);
+    }
+}
+
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
 fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest {
     let s = |id: &str| strip_prefix(id, connection_id);

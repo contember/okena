@@ -1,64 +1,50 @@
 //! Tab bar rendering and management
-//!
-//! This module contains tab-related functionality for LayoutContainer:
-//! - Tab bar rendering with drag support and animations
-//! - TabActionContext: Helper for action button closures
-//! - Uses PaneDrag for unified drag-and-drop (tabs + terminal panes)
 
 mod shell_selector;
 
-use crate::keybindings::Cancel;
-use crate::action_dispatch::ActionDispatcher;
-use crate::settings::settings;
-use crate::theme::{theme, with_alpha};
-use crate::views::chrome::header_buttons::{header_button_base, ButtonSize, HeaderAction};
-use crate::views::components::{is_renaming, rename_input, SimpleInput};
-use crate::views::layout::layout_container::LayoutContainer;
-use crate::views::layout::pane_drag::{PaneDrag, PaneDragView};
-use crate::workspace::state::{LayoutNode, SplitDirection};
+use crate::actions::Cancel;
+use crate::ActionDispatch;
+use crate::terminal_view_settings;
+use okena_files::theme::theme;
+use okena_ui::theme::with_alpha;
+use okena_ui::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use crate::layout::layout_container::{LayoutContainer, is_renaming, rename_input};
+use crate::layout::pane_drag::{PaneDrag, PaneDragView};
+use crate::simple_input::SimpleInput;
+use okena_workspace::state::{LayoutNode, SplitDirection};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
 use std::collections::HashSet;
 
 /// Context for tab action button closures.
-///
-/// This struct consolidates the common values needed by tab action buttons,
-/// reducing the number of clones needed in render_tabs().
 #[derive(Clone)]
-pub(super) struct TabActionContext {
-    pub workspace: Entity<crate::workspace::state::Workspace>,
+pub(super) struct TabActionContext<D: ActionDispatch> {
+    pub workspace: Entity<okena_workspace::state::Workspace>,
     pub project_id: String,
     pub layout_path: Vec<usize>,
     pub active_tab: usize,
-    /// When true, this is a standalone terminal (not in a Tabs container).
-    /// Actions use layout_path directly instead of layout_path + [active_tab].
     pub standalone: bool,
-    /// Action dispatcher for routing terminal actions (local or remote).
-    pub action_dispatcher: Option<ActionDispatcher>,
+    pub action_dispatcher: Option<D>,
 }
 
 
-impl LayoutContainer {
-    /// Start drop animation for a tab at the given index
-    /// Uses fewer steps with easing for smoother visual feedback
+impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub(super) fn start_drop_animation(&mut self, tab_index: usize, cx: &mut Context<Self>) {
         self.drop_animation = Some((tab_index, 1.0));
         cx.notify();
 
-        // Animate the drop effect with eased fade-out
-        cx.spawn(async move |this: WeakEntity<LayoutContainer>, cx| {
+        cx.spawn(async move |this: WeakEntity<LayoutContainer<D>>, cx| {
             let duration_ms = 200;
-            let frame_time_ms = 33; // ~30fps for subtle effect (doesn't need 60fps)
+            let frame_time_ms = 33;
             let steps = duration_ms / frame_time_ms;
             let step_duration = std::time::Duration::from_millis(frame_time_ms as u64);
 
             for i in 1..=steps {
                 smol::Timer::after(step_duration).await;
 
-                // Ease-out for smooth fade
                 let t = i as f32 / steps as f32;
-                let progress = 1.0 - t * t; // quadratic ease-out
+                let progress = 1.0 - t * t;
 
                 let result = this.update(cx, |this, cx| {
                     if let Some((idx, _)) = this.drop_animation {
@@ -71,7 +57,6 @@ impl LayoutContainer {
                 }
             }
 
-            // Clear the animation
             let _ = this.update(cx, |this, cx| {
                 this.drop_animation = None;
                 cx.notify();
@@ -79,26 +64,21 @@ impl LayoutContainer {
         }).detach();
     }
 
-    /// Render action buttons for the tab bar.
-    ///
-    /// This helper method extracts the action buttons from render_tabs() for better readability.
     pub(super) fn render_tab_action_buttons(
         &self,
-        ctx: TabActionContext,
+        ctx: TabActionContext<D>,
         terminal_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = theme(cx);
         let id_suffix = format!("tabs-{:?}", ctx.layout_path);
 
-        // Check if buffer capture is supported
         let supports_buffer_capture = self.backend.supports_buffer_capture();
         let backend_for_export = self.backend.clone();
         let terminal_id_for_export = terminal_id.clone();
         let terminal_id_for_close = terminal_id.clone();
         let terminal_id_for_fullscreen = terminal_id.clone();
 
-        // Clone context for each action - much cleaner than individual clones
         let ctx_split_v = ctx.clone();
         let ctx_split_h = ctx.clone();
         let ctx_add_tab = ctx.clone();
@@ -115,9 +95,8 @@ impl LayoutContainer {
             .items_center()
             .gap(px(2.0))
             .px(px(4.0))
-            // Split Vertical
             .child(
-                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
                         let child_path = if ctx_split_v.standalone {
                             ctx_split_v.layout_path.clone()
@@ -135,9 +114,8 @@ impl LayoutContainer {
                         }
                     }),
             )
-            // Split Horizontal
             .child(
-                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
                         let child_path = if ctx_split_h.standalone {
                             ctx_split_h.layout_path.clone()
@@ -155,9 +133,8 @@ impl LayoutContainer {
                         }
                     }),
             )
-            // Add Tab
             .child(
-                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::AddTab, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
                         if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
                             dispatcher.add_tab(
@@ -169,9 +146,8 @@ impl LayoutContainer {
                         }
                     }),
             )
-            // Minimize
             .child(
-                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::Minimize, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click({
                         let terminal_id_for_minimize = terminal_id.clone();
                         move |_, _window, cx| {
@@ -186,10 +162,9 @@ impl LayoutContainer {
                         }
                     }),
             )
-            // Export Buffer (conditional)
             .when(supports_buffer_capture, |el| {
                 el.child(
-                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None)
+                    header_button_base(HeaderAction::ExportBuffer, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                         .on_click(move |_, _window, cx| {
                             if let Some(ref tid) = terminal_id_for_export {
                                 if let Some(path) = backend_for_export.capture_buffer(tid) {
@@ -200,9 +175,8 @@ impl LayoutContainer {
                         }),
                 )
             })
-            // Fullscreen
             .child(
-                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::Fullscreen, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
                         if let Some(ref tid) = terminal_id_for_fullscreen {
                             if let Some(ref dispatcher) = ctx_fullscreen.action_dispatcher {
@@ -214,9 +188,8 @@ impl LayoutContainer {
                         }
                     }),
             )
-            // Detach
             .child(
-                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None)
+                header_button_base(HeaderAction::Detach, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
                         let full_path = if ctx_detach.standalone {
                             ctx_detach.layout_path.clone()
@@ -230,9 +203,8 @@ impl LayoutContainer {
                         });
                     }),
             )
-            // Close Tab
             .child({
-                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }))
+                header_button_base(HeaderAction::Close, &id_suffix, ButtonSize::COMPACT, &t, Some(if standalone { "Close" } else { "Close Tab" }), None)
                     .on_click(move |_, _window, cx| {
                         if let Some(ref tid) = terminal_id_for_close {
                             if let Some(ref dispatcher) = ctx_close.action_dispatcher {
@@ -253,7 +225,6 @@ impl LayoutContainer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // If a zoomed terminal exists in one of our children, render only that child at full size
         if let Some(zoomed_idx) = self.find_zoomed_child_index(children, cx) {
             let mut child_path = self.layout_path.clone();
             child_path.push(zoomed_idx);
@@ -283,7 +254,6 @@ impl LayoutContainer {
                 .child(container);
         }
 
-        // Clean up stale child containers (e.g., when a tab was removed)
         let num_children = children.len();
         let valid_paths: HashSet<Vec<usize>> = (0..num_children)
             .map(|i| {
@@ -294,13 +264,11 @@ impl LayoutContainer {
             .collect();
         self.child_containers.retain(|path, _| valid_paths.contains(path));
 
-        // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
 
         v_flex()
             .size_full()
             .relative()
-            // Use a canvas to capture the container bounds during prepaint
             .child(canvas(
                 {
                     let container_bounds_ref = container_bounds_ref.clone();
@@ -312,7 +280,6 @@ impl LayoutContainer {
             ).absolute().size_full())
             .child(self.render_tab_bar(children, active_tab, false, cx))
             .child(
-                // Active tab content
                 div().flex_1().child({
                     let mut child_path = self.layout_path.clone();
                     child_path.push(active_tab);
@@ -341,8 +308,6 @@ impl LayoutContainer {
             )
     }
 
-    /// Render a tab bar for a standalone terminal (not inside a Tabs container).
-    /// Delegates to the shared `render_tab_bar` with the current terminal node.
     pub(super) fn render_standalone_tab_bar(
         &mut self,
         _window: &mut Window,
@@ -361,7 +326,6 @@ impl LayoutContainer {
         self.render_tab_bar(children, 0, true, cx)
     }
 
-    /// Shared tab bar rendering used by both multi-tab and standalone modes.
     fn render_tab_bar(
         &mut self,
         children: &[LayoutNode],
@@ -375,16 +339,13 @@ impl LayoutContainer {
         let layout_path = self.layout_path.clone();
         let num_children = children.len();
 
-        // Check for active drop animation
         let drop_animation = self.drop_animation;
 
-        // Get terminal names for tabs from the terminals registry
         let terminals = self.terminals.clone();
         let workspace_reader = self.workspace.read(cx);
         let project = workspace_reader.project(&self.project_id);
         let project_for_names = project.cloned();
 
-        // Check if the focused terminal is within this tab group
         let is_pane_focused = workspace_reader.focus_manager
             .focused_terminal_state()
             .map_or(false, |f| {
@@ -392,7 +353,6 @@ impl LayoutContainer {
                     && f.layout_path.starts_with(&self.layout_path)
             });
 
-        // Build tab elements
         let tab_elements: Vec<_> = children.iter().enumerate().map(|(i, child)| {
             let is_active = i == active_tab;
             let workspace = workspace.clone();
@@ -403,13 +363,11 @@ impl LayoutContainer {
             let layout_path_for_drag = layout_path.clone();
             let layout_path_for_drop = layout_path.clone();
 
-            // Get terminal ID from the child node if it's a terminal
             let terminal_id = match child {
                 LayoutNode::Terminal { terminal_id: Some(id), .. } => Some(id.clone()),
                 _ => None,
             };
 
-            // Check cached waiting state and idle duration (cheap atomic read, no subprocess)
             let (is_waiting, idle_label) = terminal_id.as_ref().map_or((false, None), |tid| {
                 let guard = terminals.lock();
                 guard.get(tid).map_or((false, None), |t| {
@@ -421,12 +379,10 @@ impl LayoutContainer {
                 })
             });
 
-            // Check if this terminal is a hook terminal
             let is_hook = terminal_id.as_ref().map_or(false, |tid| {
                 project_for_names.as_ref().map_or(false, |p| p.hook_terminals.contains_key(tid))
             });
 
-            // Get tab label: user-set custom name > non-prompt OSC title > "Tab N"
             let tab_label = if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
                     let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
@@ -438,7 +394,6 @@ impl LayoutContainer {
                 format!("Tab {}", i + 1)
             };
 
-            // Check if this tab has an active drop animation
             let has_drop_animation = drop_animation.map(|(idx, _)| idx == i).unwrap_or(false);
             let animation_progress = drop_animation
                 .filter(|(idx, _)| *idx == i)
@@ -474,7 +429,6 @@ impl LayoutContainer {
                         .text_color(rgb(t.text_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                 })
-                // Drop animation effect - glow highlight
                 .when(has_drop_animation, |d| {
                     let glow_alpha = animation_progress * 0.5;
                     d.bg(with_alpha(t.border_active, glow_alpha))
@@ -482,7 +436,6 @@ impl LayoutContainer {
                         .border_color(with_alpha(t.border_active, animation_progress * 0.9))
                         .rounded(px(4.0))
                 })
-                // Tab content with icon and label (or rename input)
                 .child({
                     let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
                         is_renaming(&self.tab_rename_state, tid)
@@ -526,14 +479,13 @@ impl LayoutContainer {
                             .into_any_element()
                     }
                 })
-                // Right-click for context menu
                 .on_mouse_down(MouseButton::Right, {
                     let project_id = project_id.clone();
                     let layout_path = layout_path.clone();
                     cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_overlay_request(
-                                crate::workspace::requests::OverlayRequest::TabContextMenu {
+                                okena_workspace::requests::OverlayRequest::TabContextMenu {
                                     tab_index: i,
                                     num_tabs: num_children,
                                     project_id: project_id.clone(),
@@ -546,7 +498,6 @@ impl LayoutContainer {
                         cx.stop_propagation();
                     })
                 })
-                // Middle-click to close tab
                 .on_mouse_down(MouseButton::Middle, {
                     let project_id = project_id.clone();
                     let terminal_id = terminal_id.clone();
@@ -563,7 +514,6 @@ impl LayoutContainer {
                         cx.stop_propagation();
                     })
                 })
-                // Drag source
                 .when_some(terminal_id.clone(), |el, tid| {
                     let terminal_path = if standalone {
                         layout_path_for_drag.clone()
@@ -584,7 +534,6 @@ impl LayoutContainer {
                         },
                     )
                 })
-                // Drop target indicator
                 .when(!standalone, |el| {
                     el.drag_over::<PaneDrag>({
                         let active_drag = self.active_drag.clone();
@@ -609,7 +558,6 @@ impl LayoutContainer {
                             let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
                             let drag_tab_index = drag.layout_path.last().copied();
 
-                            // Same project + same tab group → reorder
                             if drag.project_id == project_id_for_drop
                                 && drag_parent == layout_path_for_drop.as_slice()
                             {
@@ -651,7 +599,6 @@ impl LayoutContainer {
                     cx.listener(move |this, _, window, cx| {
                         let is_double_click = this.tab_click_detector.check(i);
 
-                        // Cancel any active rename if clicking a different tab
                         if this.tab_rename_state.is_some() && !is_double_click {
                             let is_renaming_this = terminal_id.as_ref().map_or(false, |tid| {
                                 is_renaming(&this.tab_rename_state, tid)
@@ -662,7 +609,6 @@ impl LayoutContainer {
                         }
 
                         if !standalone {
-                            // Switch to clicked tab
                             if let Some(ref dispatcher) = dispatcher_for_click {
                                 dispatcher.dispatch(okena_core::api::ActionRequest::SetActiveTab {
                                     project_id: project_id.clone(),
@@ -672,7 +618,6 @@ impl LayoutContainer {
                             }
                         }
 
-                        // Focus the terminal in the clicked tab
                         if terminal_id.is_some() {
                             let terminal_path = if standalone {
                                 layout_path.clone()
@@ -686,7 +631,6 @@ impl LayoutContainer {
                             });
                         }
 
-                        // Double-click → start rename
                         if is_double_click {
                             if let Some(ref tid) = terminal_id {
                                 this.start_tab_rename(tid.clone(), tab_label.clone(), window, cx);
@@ -696,7 +640,6 @@ impl LayoutContainer {
                 })
         }).collect();
 
-        // End drop zone / empty area
         let project_id_for_new = self.project_id.clone();
         let layout_path_for_new = self.layout_path.clone();
         let dispatcher_for_new = self.action_dispatcher.clone();
@@ -744,7 +687,6 @@ impl LayoutContainer {
                     let drag_parent = &drag.layout_path[..drag.layout_path.len().saturating_sub(1)];
                     let drag_tab_index = drag.layout_path.last().copied();
 
-                    // Same project + same tab group → reorder
                     if drag.project_id == project_id_for_end
                         && drag_parent == layout_path_for_end.as_slice()
                     {
@@ -776,7 +718,6 @@ impl LayoutContainer {
                 }));
         }
 
-        // Build action context for tab buttons
         let action_ctx = TabActionContext {
             workspace: self.workspace.clone(),
             project_id: self.project_id.clone(),
@@ -786,7 +727,6 @@ impl LayoutContainer {
             action_dispatcher: self.action_dispatcher.clone(),
         };
 
-        // Get terminal_id for actions
         let terminal_id_for_actions = if standalone {
             match children.first() {
                 Some(LayoutNode::Terminal { terminal_id, .. }) => terminal_id.clone(),
@@ -798,10 +738,8 @@ impl LayoutContainer {
 
         let action_buttons = self.render_tab_action_buttons(action_ctx, terminal_id_for_actions.clone(), cx);
 
-        // Check shell selector visibility
-        let show_shell = settings(cx).show_shell_selector && !self.backend.is_remote();
+        let show_shell = terminal_view_settings(cx).show_shell_selector && !self.backend.is_remote();
 
-        // Tab bar
         div()
             .group("tab-bar-row")
             .h(px(28.0))

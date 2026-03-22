@@ -1,15 +1,13 @@
 //! Terminal pane action handlers.
-//!
-//! Contains handlers for split, close, minimize, fullscreen,
-//! copy, paste, and file drop.
 
+use crate::ActionDispatch;
 use okena_core::api::ActionRequest;
-use crate::workspace::state::SplitDirection;
+use okena_workspace::state::SplitDirection;
 use gpui::*;
 
 use super::TerminalPane;
 
-impl TerminalPane {
+impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn handle_split(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
         if let Some(ref dispatcher) = self.action_dispatcher {
             dispatcher.split_terminal(&self.project_id, &self.layout_path, direction, cx);

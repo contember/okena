@@ -1,15 +1,6 @@
 //! Terminal pane view - composition of child entity views.
-//!
-//! This is the main TerminalPane that composes:
-//! - TerminalContent: terminal display with scrollbar
-//! - SearchBar: search functionality
-//!
-//! The tab bar (name, shell selector, action buttons) is rendered by
-//! LayoutContainer, not by TerminalPane.
-//!
-//! Each component is a proper GPUI Entity implementing Render.
 
-pub(crate) mod url_detector;
+pub mod url_detector;
 mod scrollbar;
 mod search_bar;
 mod content;
@@ -18,29 +9,26 @@ mod zoom;
 mod navigation;
 mod render;
 
-// Internal imports
 use content::TerminalContentEvent;
 use search_bar::{SearchBar, SearchBarEvent};
 
-// Re-export TerminalContent (used by tests/internal consumers)
 pub use content::TerminalContent;
 
-use crate::action_dispatch::ActionDispatcher;
-use crate::settings::settings;
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::views::panels::toast::ToastManager;
-use crate::views::root::TerminalsRegistry;
-use crate::workspace::hooks;
-use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::Workspace;
+use crate::ActionDispatch;
+use crate::terminal_view_settings;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_terminal::TerminalsRegistry;
+use okena_workspace::hooks;
+use okena_workspace::request_broker::RequestBroker;
+use okena_workspace::state::Workspace;
 use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// A terminal pane view composed of child entity views.
-pub struct TerminalPane {
+pub struct TerminalPane<D: ActionDispatch> {
     // Identity
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
@@ -70,10 +58,10 @@ pub struct TerminalPane {
     was_focused: bool,
 
     // Action dispatcher (local or remote)
-    pub(super) action_dispatcher: Option<ActionDispatcher>,
+    pub(super) action_dispatcher: Option<D>,
 }
 
-impl TerminalPane {
+impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub fn new(
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
@@ -85,18 +73,16 @@ impl TerminalPane {
         detached: bool,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
-        action_dispatcher: Option<ActionDispatcher>,
+        action_dispatcher: Option<D>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Read shell_type from workspace state
         let shell_type = workspace
             .read(cx)
             .get_terminal_shell(&project_id, &layout_path)
             .unwrap_or(ShellType::Default);
 
-        // Create child entities
         let content = cx.new(|cx| {
             TerminalContent::new(
                 focus_handle.clone(),
@@ -109,10 +95,7 @@ impl TerminalPane {
 
         let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), cx));
 
-        // Subscribe to search bar events
         cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
-
-        // Subscribe to content events (context menu request)
         cx.subscribe(&content, Self::handle_content_event).detach();
 
         let mut pane = Self {
@@ -137,18 +120,12 @@ impl TerminalPane {
             action_dispatcher,
         };
 
-        // Create terminal: either reconnect to existing PTY or create new one
         if let Some(ref id) = pane.terminal_id {
             pane.create_terminal_for_existing_pty(id.clone(), cx);
         } else {
-            // No terminal ID - create a new terminal immediately
             pane.create_new_terminal(cx);
         }
 
-        // Start background loops
-        // Note: dirty check for local terminals is handled centrally by PTY event loop
-        // (see app/mod.rs). Remote terminals receive data on a tokio thread without
-        // GPUI notification, so they need their own dirty-check loop.
         if pane.terminal_id.as_deref().is_some_and(|id| id.starts_with("remote:")) {
             pane.start_remote_dirty_check_loop(cx);
         }
@@ -158,9 +135,6 @@ impl TerminalPane {
         pane
     }
 
-    // === Event handlers ===
-
-    /// Handle events from search bar.
     fn handle_search_bar_event(
         &mut self,
         _: Entity<SearchBar>,
@@ -169,7 +143,6 @@ impl TerminalPane {
     ) {
         match event {
             SearchBarEvent::Closed => {
-                // Focus will be handled in next render cycle
                 self.pending_focus = true;
                 cx.notify();
             }
@@ -182,7 +155,6 @@ impl TerminalPane {
         }
     }
 
-    /// Handle events from content (context menu request).
     fn handle_content_event(
         &mut self,
         _: Entity<TerminalContent>,
@@ -194,7 +166,7 @@ impl TerminalPane {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            crate::workspace::requests::OverlayRequest::TerminalContextMenu {
+                            okena_workspace::requests::OverlayRequest::TerminalContextMenu {
                                 terminal_id: terminal_id.clone(),
                                 project_id: self.project_id.clone(),
                                 layout_path: self.layout_path.clone(),
@@ -210,16 +182,8 @@ impl TerminalPane {
         }
     }
 
-    // === Background loops ===
-
-    /// Dirty-check loop for remote terminals.
-    ///
-    /// Remote terminal data arrives on a tokio thread via `ConnectionHandler::on_terminal_output`,
-    /// which calls `terminal.process_output()` and sets the dirty flag — but has no access to
-    /// GPUI context to call `cx.notify()`. This loop polls the dirty flag and triggers a repaint.
-    /// Local terminals don't need this because the PTY event loop notifies content panes directly.
     fn start_remote_dirty_check_loop(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+        cx.spawn(async move |this: WeakEntity<TerminalPane<D>>, cx| {
             let interval = Duration::from_millis(8);
             loop {
                 smol::Timer::after(interval).await;
@@ -229,27 +193,22 @@ impl TerminalPane {
                     }
                 });
                 if result.is_err() {
-                    break; // Pane dropped
+                    break;
                 }
             }
         })
         .detach();
     }
 
-    /// Start cursor blink loop.
     fn start_cursor_blink_loop(&self, cx: &mut Context<Self>) {
-        use std::time::Duration;
-
-        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+        cx.spawn(async move |this: WeakEntity<TerminalPane<D>>, cx| {
             let interval = Duration::from_millis(500);
             loop {
                 smol::Timer::after(interval).await;
 
                 let result = this.update(cx, |pane, cx| {
-                    if settings(cx).cursor_blink {
-                        // Only blink cursor on the focused pane
+                    if crate::terminal_view_settings(cx).cursor_blink {
                         if !pane.was_focused {
-                            // Ensure cursor is visible when not focused
                             if !pane.cursor_visible {
                                 pane.cursor_visible = true;
                                 pane.content.update(cx, |content, _| {
@@ -280,19 +239,15 @@ impl TerminalPane {
         .detach();
     }
 
-    /// Start idle check loop — polls terminal idle state every 2 seconds.
-    /// Runs the pgrep check on a background thread via smol::unblock to avoid
-    /// blocking the GPUI thread. Only triggers re-render on state transitions.
     fn start_idle_check_loop(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this: WeakEntity<TerminalPane>, cx| {
+        cx.spawn(async move |this: WeakEntity<TerminalPane<D>>, cx| {
             let interval = Duration::from_secs(2);
             let mut was_waiting = false;
             loop {
                 smol::Timer::after(interval).await;
 
-                // Step 1: gather data from the main thread (cheap, no subprocess)
                 let check_info = this.update(cx, |pane, cx| {
-                    let idle_timeout = settings(cx).idle_timeout_secs;
+                    let idle_timeout = crate::terminal_view_settings(cx).idle_timeout_secs;
                     if idle_timeout == 0 {
                         return None;
                     }
@@ -309,7 +264,6 @@ impl TerminalPane {
                 let check_info = match check_info {
                     Ok(Some(info)) => info,
                     Ok(None) => {
-                        // Feature disabled or no terminal — clear waiting state
                         if was_waiting {
                             was_waiting = false;
                             let _ = this.update(cx, |pane, cx| {
@@ -321,13 +275,11 @@ impl TerminalPane {
                         }
                         continue;
                     }
-                    Err(_) => break, // Entity dropped
+                    Err(_) => break,
                 };
 
                 let (terminal, is_idle, pid, had_input, has_unseen) = check_info;
 
-                // Skip terminals the user has never interacted with (fresh/untouched)
-                // or terminals where the user already saw the last output
                 if !had_input || !has_unseen {
                     if was_waiting {
                         was_waiting = false;
@@ -337,18 +289,14 @@ impl TerminalPane {
                     continue;
                 }
 
-                // Step 2: run pgrep on a background thread (expensive, off main thread)
                 let has_children = if let Some(pid) = pid {
-                    smol::unblock(move || crate::terminal::terminal::has_child_processes(pid)).await
+                    smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await
                 } else {
                     false
                 };
 
-                // Step 3: compute waiting state
-                // Flag as waiting if: idle + no child processes running
                 let is_waiting = is_idle && !has_children;
 
-                // Step 4: update cache and notify only on state transitions
                 terminal.set_waiting_for_input(is_waiting);
                 if is_waiting != was_waiting {
                     was_waiting = is_waiting;
@@ -361,9 +309,6 @@ impl TerminalPane {
         .detach();
     }
 
-    // === Terminal creation ===
-
-    /// Create terminal for existing PTY.
     fn create_terminal_for_existing_pty(&mut self, terminal_id: String, cx: &mut Context<Self>) {
         let existing = self.terminals.lock().get(&terminal_id).cloned();
         if let Some(terminal) = existing {
@@ -375,10 +320,13 @@ impl TerminalPane {
             return;
         }
 
+        let settings = terminal_view_settings(cx);
+        let ws = self.workspace.read(cx);
         let shell = self.shell_type.clone().resolve_default(
-            self.workspace.read(cx).project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
-            &settings(cx).default_shell,
+            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings.default_shell,
         );
+        drop(ws);
 
         match self
             .backend
@@ -400,22 +348,19 @@ impl TerminalPane {
         self.update_child_terminals(terminal, cx);
     }
 
-    /// Create new terminal.
     fn create_new_terminal(&mut self, cx: &mut Context<Self>) {
-        // Remote terminals arrive via state sync with terminal_id already set.
-        // Local PTY creation would fail for remote backends, so bail out early.
         if self.backend.is_remote() {
             return;
         }
 
+        let settings = terminal_view_settings(cx);
+        let ws = self.workspace.read(cx);
         let mut shell = self.shell_type.clone().resolve_default(
-            self.workspace.read(cx).project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
-            &settings(cx).default_shell,
+            ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
+            &settings.default_shell,
         );
 
-        // Read fresh path and project info from workspace state
         let (project_path, _project_name, project_hooks, parent_hooks) = {
-            let ws = self.workspace.read(cx);
             let project = ws.project(&self.project_id);
             let path = project.map(|p| p.path.clone())
                 .unwrap_or_else(|| self.project_path.clone());
@@ -427,15 +372,17 @@ impl TerminalPane {
                 .map(|p| p.hooks.clone());
             (path, name, hooks_cfg, parent)
         };
+        drop(ws);
 
-        // Apply shell_wrapper if configured
-        let global_hooks = settings(cx).hooks;
+        // Apply shell_wrapper if configured - need global hooks from settings
+        // This requires accessing the main app's settings which we don't have directly.
+        // The hooks are resolved through okena_workspace which reads from workspace state.
+        let global_hooks = settings.hooks;
         if let Some(wrapper) = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
             shell = hooks::apply_shell_wrapper(&shell, &wrapper);
         }
 
-        // Apply on_create: wrap shell to run command first, then exec into shell
-        if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &settings(cx).hooks, cx) {
+        if let Some(cmd) = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
             shell = hooks::apply_on_create(&shell, &cmd);
         }
 
@@ -458,7 +405,6 @@ impl TerminalPane {
                 self.terminals.lock().insert(terminal_id.clone(), terminal.clone());
                 self.terminal = Some(terminal.clone());
 
-                // Update child entities
                 self.update_child_terminals(terminal, cx);
 
                 self.pending_focus = true;
@@ -466,15 +412,13 @@ impl TerminalPane {
             }
             Err(e) => {
                 log::error!("Failed to create terminal: {}", e);
-                ToastManager::error(format!("Failed to create terminal: {}", e), cx);
+                crate::toast_error(format!("Failed to create terminal: {}", e), cx);
             }
         }
     }
 
-    /// Update terminal reference in child entities.
     fn update_child_terminals(&mut self, terminal: Arc<Terminal>, cx: &mut Context<Self>) {
-        // Register content pane for direct dirty notification from PTY event loop
-        crate::views::root::register_content_pane(
+        crate::register_content_pane(
             terminal.terminal_id.clone(),
             self.content.downgrade(),
         );
@@ -487,14 +431,10 @@ impl TerminalPane {
         });
     }
 
-    // === Public accessors ===
-
-    /// Get terminal ID.
     pub fn terminal_id(&self) -> Option<String> {
         self.terminal_id.clone()
     }
 
-    /// Set detached state.
     pub fn set_detached(&mut self, detached: bool, cx: &mut Context<Self>) {
         if self.detached != detached {
             self.detached = detached;
@@ -502,7 +442,6 @@ impl TerminalPane {
         }
     }
 
-    /// Set minimized state.
     pub fn set_minimized(&mut self, minimized: bool, cx: &mut Context<Self>) {
         if self.minimized != minimized {
             self.minimized = minimized;
@@ -510,9 +449,6 @@ impl TerminalPane {
         }
     }
 
-    // === Helpers ===
-
-    /// Get ID suffix for element IDs.
     fn id_suffix(&self) -> String {
         self.terminal_id.clone().unwrap_or_else(|| {
             format!(
@@ -529,18 +465,15 @@ impl TerminalPane {
 
 }
 
-impl Drop for TerminalPane {
+impl<D: ActionDispatch> Drop for TerminalPane<D> {
     fn drop(&mut self) {
         // Don't unregister from ContentPaneRegistry here.
-        // A new TerminalPane for the same terminal_id may have already
-        // registered its content pane before this Drop runs (old entity is
-        // dropped after the replacement is assigned). Unconditional removal
-        // would delete the NEW pane's registration, causing it to miss
-        // dirty notifications (visible as ~500ms input lag, relying on
-        // cursor blink to trigger repaints).
-        // Instead, stale WeakEntity entries expire naturally — the PTY
-        // event loop's weak_content.update() returns Err and is ignored.
+        // See original code comments for explanation.
     }
 }
 
-impl_focusable!(TerminalPane);
+impl<D: ActionDispatch + Send + Sync> gpui::Focusable for TerminalPane<D> {
+    fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
+        self.focus_handle.clone()
+    }
+}
