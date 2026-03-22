@@ -1,10 +1,10 @@
 //! Data types for the diff viewer.
 
-use crate::git::{DiffLineType, FileDiff};
-pub use crate::views::components::syntax::HighlightedSpan;
-pub use crate::workspace::persistence::DiffViewMode;
+use crate::{DiffLineType, FileDiff};
+pub use okena_files::syntax::HighlightedSpan;
+pub use okena_core::types::DiffViewMode;
 
-pub use crate::views::components::file_tree::FileTreeNode;
+pub use okena_files::file_tree::FileTreeNode;
 
 /// Which side of the side-by-side diff view a selection belongs to.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -8,4 +8,3 @@ pub use okena_ui::menu::{
     context_menu_panel, menu_item, menu_item_conditional, menu_item_disabled, menu_item_with_color,
     menu_separator,
 };
-pub use okena_ui::toggle::segmented_toggle;

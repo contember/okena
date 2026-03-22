@@ -1125,7 +1125,30 @@ impl OverlayManager {
         commit_index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let viewer = cx.new(|cx| DiffViewer::new(provider, select_file, mode, commit_message, commits, commit_index, cx));
+        let settings = crate::settings::settings_entity(cx).read(cx);
+        let font_size = settings.settings.file_font_size;
+        let view_mode = settings.settings.diff_view_mode;
+        let ignore_whitespace = settings.settings.diff_ignore_whitespace;
+        let is_dark = crate::theme::theme(cx).is_dark();
+
+        // Observe theme changes and forward to DiffViewer
+        let te = crate::theme::theme_entity(cx);
+        let se = crate::settings::settings_entity(cx);
+
+        let viewer = cx.new(|cx| {
+            let viewer = DiffViewer::new(provider, select_file, mode, commit_message, commits, commit_index, font_size, view_mode, ignore_whitespace, is_dark, None, cx);
+            // Observe theme entity for dark/light changes
+            cx.observe(&te, {
+                let se = se.clone();
+                move |this: &mut DiffViewer, _, cx| {
+                    let new_is_dark = crate::theme::theme(cx).is_dark();
+                    let font_size = se.read(cx).settings.file_font_size;
+                    this.update_config(font_size, new_is_dark);
+                    cx.notify();
+                }
+            }).detach();
+            viewer
+        });
 
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {

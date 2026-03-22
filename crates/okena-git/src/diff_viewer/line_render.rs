@@ -5,9 +5,9 @@
 
 use super::types::{DisplayLine, HighlightedSpan};
 use super::DiffViewer;
-use crate::git::DiffLineType;
-use crate::theme::ThemeColors;
-use crate::views::components::{build_styled_text_with_backgrounds, find_word_boundaries, selection_bg_ranges};
+use crate::DiffLineType;
+use okena_core::theme::ThemeColors;
+use okena_files::code_view::{build_styled_text_with_backgrounds, find_word_boundaries, selection_bg_ranges};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;

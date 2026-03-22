@@ -2,6 +2,7 @@ use okena_core::client::RemoteConnectionConfig;
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_core::theme::ThemeMode;
+pub use okena_core::types::DiffViewMode;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -31,24 +32,6 @@ impl CursorShape {
 
     pub fn all_variants() -> &'static [CursorShape] {
         &[CursorShape::Block, CursorShape::Bar, CursorShape::Underline]
-    }
-}
-
-/// Display mode for the diff viewer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DiffViewMode {
-    #[default]
-    Unified,
-    SideBySide,
-}
-
-impl DiffViewMode {
-    /// Toggle between view modes.
-    pub fn toggle(self) -> Self {
-        match self {
-            DiffViewMode::Unified => DiffViewMode::SideBySide,
-            DiffViewMode::SideBySide => DiffViewMode::Unified,
-        }
     }
 }
 

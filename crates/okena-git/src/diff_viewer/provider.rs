@@ -1,6 +1,6 @@
 //! DiffProvider trait and implementations for local and remote git diffs.
 
-use crate::git::{DiffMode, DiffResult};
+use crate::{DiffMode, DiffResult};
 
 /// Provides git diff data from either local git commands or a remote server.
 pub trait DiffProvider: Send + Sync + 'static {
@@ -22,15 +22,15 @@ impl LocalDiffProvider {
 
 impl DiffProvider for LocalDiffProvider {
     fn is_git_repo(&self) -> bool {
-        crate::git::is_git_repo(std::path::Path::new(&self.path))
+        crate::is_git_repo(std::path::Path::new(&self.path))
     }
 
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {
-        crate::git::get_diff_with_options(std::path::Path::new(&self.path), mode, ignore_whitespace)
+        crate::get_diff_with_options(std::path::Path::new(&self.path), mode, ignore_whitespace)
     }
 
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>) {
-        crate::git::get_file_contents_for_diff(std::path::Path::new(&self.path), file_path, mode)
+        crate::get_file_contents_for_diff(std::path::Path::new(&self.path), file_path, mode)
     }
 }
 

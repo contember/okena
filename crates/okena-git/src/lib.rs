@@ -1,5 +1,6 @@
 pub mod branch_names;
 pub mod diff;
+pub mod diff_viewer;
 pub mod repository;
 
 pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};

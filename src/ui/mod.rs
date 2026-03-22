@@ -7,7 +7,6 @@ mod click_detector;
 pub mod tokens;
 
 pub use click_detector::ClickDetector;
-pub use okena_files::selection::*;
 
 /// Blend `tint` into `base` RGB color at the given ratio (0.0 = pure base, 1.0 = pure tint).
 pub fn tint_color(base: u32, tint: u32, amount: f32) -> u32 {
