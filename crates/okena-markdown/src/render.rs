@@ -1,7 +1,7 @@
 //! Rendering logic for markdown nodes and inline elements.
 
-use crate::theme::ThemeColors;
-use crate::views::components::code_block_container;
+use okena_core::theme::ThemeColors;
+use okena_ui::code_block::code_block_container;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::{h_flex, v_flex};
@@ -235,9 +235,9 @@ impl MarkdownDocument {
 
 
     /// Calculate the text length of a node (for selection offset tracking, in characters).
-    pub(super) fn node_text_length(node: &Node) -> usize {
+    pub(crate) fn node_text_length(node: &Node) -> usize {
         match node {
-            Node::Heading { children, .. } |
+            Node::Heading { level: _, children } |
             Node::Paragraph { children } |
             Node::Blockquote { children } => {
                 Self::inlines_text_length(children) + 1 // +1 for newline
@@ -265,7 +265,7 @@ impl MarkdownDocument {
     }
 
     /// Calculate the text length of inline elements (in characters, not bytes).
-    pub(super) fn inlines_text_length(inlines: &[Inline]) -> usize {
+    pub(crate) fn inlines_text_length(inlines: &[Inline]) -> usize {
         inlines.iter().map(|inline| {
             match inline {
                 Inline::Text(t) => char_len(t),
@@ -435,7 +435,7 @@ impl MarkdownDocument {
     }
 
     /// Render inline elements with selection highlighting.
-    pub(super) fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
+    pub(crate) fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         let mut offset = 0usize;
 
@@ -708,7 +708,7 @@ impl MarkdownDocument {
     }
 
     /// Render inlines as plain text (for measuring, headings, etc.).
-    pub(super) fn render_inlines_as_text(inlines: &[Inline]) -> String {
+    pub(crate) fn render_inlines_as_text(inlines: &[Inline]) -> String {
         let mut result = String::new();
         for inline in inlines {
             Self::inline_to_text(inline, &mut result);

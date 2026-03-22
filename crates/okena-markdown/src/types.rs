@@ -2,7 +2,7 @@
 
 /// A node in the markdown AST.
 #[derive(Clone)]
-pub(super) enum Node {
+pub(crate) enum Node {
     Heading { level: u8, children: Vec<Inline> },
     Paragraph { children: Vec<Inline> },
     CodeBlock { language: Option<String>, code: String },
@@ -14,7 +14,7 @@ pub(super) enum Node {
 
 /// Inline content within a block.
 #[derive(Clone)]
-pub(super) enum Inline {
+pub(crate) enum Inline {
     Text(String),
     Code(String),
     Bold(Vec<Inline>),
@@ -24,7 +24,7 @@ pub(super) enum Inline {
 
 /// Slice a string by character indices (not byte indices).
 /// Returns (before, selected, after) parts.
-pub(super) fn slice_by_chars(s: &str, start: usize, end: usize) -> (String, String, String) {
+pub(crate) fn slice_by_chars(s: &str, start: usize, end: usize) -> (String, String, String) {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     let start = start.min(len);
@@ -38,6 +38,6 @@ pub(super) fn slice_by_chars(s: &str, start: usize, end: usize) -> (String, Stri
 }
 
 /// Get character count of a string (not byte count).
-pub(super) fn char_len(s: &str) -> usize {
+pub(crate) fn char_len(s: &str) -> usize {
     s.chars().count()
 }

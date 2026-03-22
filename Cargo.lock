@@ -4461,6 +4461,7 @@ dependencies = [
  "okena-extensions",
  "okena-files",
  "okena-git",
+ "okena-markdown",
  "okena-terminal",
  "okena-ui",
  "okena-workspace",
@@ -4584,6 +4585,18 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "okena-markdown"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "okena-core",
+ "okena-files",
+ "okena-ui",
+ "pulldown-cmark",
 ]
 
 [[package]]

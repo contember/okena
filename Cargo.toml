@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mobile/native", "crates/okena-core", "crates/okena-git", "crates/okena-terminal", "crates/okena-workspace", "crates/okena-ui", "crates/okena-files", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater"]
+members = [".", "mobile/native", "crates/okena-core", "crates/okena-git", "crates/okena-terminal", "crates/okena-workspace", "crates/okena-ui", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater"]
 resolver = "2"
 
 [package]
@@ -16,6 +16,7 @@ okena-terminal = { path = "crates/okena-terminal" }
 okena-workspace = { path = "crates/okena-workspace" }
 okena-ui = { path = "crates/okena-ui" }
 okena-files = { path = "crates/okena-files" }
+okena-markdown = { path = "crates/okena-markdown" }
 
 # Extension system
 okena-extensions = { path = "crates/okena-extensions" }
