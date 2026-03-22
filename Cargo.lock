@@ -4535,6 +4535,7 @@ dependencies = [
  "okena-terminal",
  "okena-ui",
  "okena-views-git",
+ "okena-views-terminal",
  "okena-workspace",
  "parking_lot",
  "portable-pty",
@@ -4714,6 +4715,24 @@ dependencies = [
  "serde_json",
  "smol",
  "syntect",
+]
+
+[[package]]
+name = "okena-views-terminal"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-core",
+ "okena-files",
+ "okena-terminal",
+ "okena-ui",
+ "okena-workspace",
+ "parking_lot",
+ "serde",
+ "smol",
 ]
 
 [[package]]

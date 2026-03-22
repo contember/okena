@@ -1,4 +1,4 @@
-use crate::terminal::terminal::Terminal;
+use okena_terminal::terminal::Terminal;
 use gpui::*;
 use std::ops::Range;
 use std::sync::Arc;

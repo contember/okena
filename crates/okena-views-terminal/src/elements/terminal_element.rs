@@ -1,7 +1,9 @@
-use crate::settings::settings;
-use crate::terminal::terminal::Terminal;
-use crate::theme::{theme, ansi_to_hsla};
-use crate::workspace::settings::CursorShape;
+use crate::terminal_view_settings;
+use okena_terminal::terminal::Terminal;
+use okena_files::theme::theme;
+use okena_ui::theme::ansi_to_hsla;
+use okena_ui::color_utils::tint_color;
+use okena_workspace::settings::CursorShape;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use alacritty_terminal::index::{Column, Line};
@@ -156,7 +158,7 @@ impl Element for TerminalElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         // Get font settings from global settings, apply per-terminal zoom
-        let app_settings = settings(cx);
+        let app_settings = terminal_view_settings(cx);
         let font_size = px(app_settings.font_size * self.zoom_level);
         let line_height_multiplier = app_settings.line_height;
         let font_family = app_settings.font_family.clone();
@@ -279,15 +281,9 @@ impl Element for TerminalElement {
         let line_height_f = f32::from(line_height);
 
         // Calculate terminal size and resize if needed
-        // Use floor() for consistent sizing - this ensures we don't overflow the available space
-        // We subtract a small epsilon (0.5px) before floor to handle floating point precision issues
-        // and ensure partial cells don't cause rendering artifacts
         let available_width = f32::from(bounds.size.width);
         let available_height = f32::from(bounds.size.height);
 
-
-        // Calculate columns and rows, ensuring we have at least 1 of each
-        // Use floor to ensure we never overflow the container bounds
         let new_cols = ((available_width - 0.5) / cell_width_f).floor().max(1.0) as u16;
         let new_rows = ((available_height - 0.5) / line_height_f).floor().max(1.0) as u16;
 
@@ -297,10 +293,7 @@ impl Element for TerminalElement {
             || (line_height_f - current_size.cell_height).abs() > 0.001;
 
         if cols_rows_changed && self.terminal.is_resize_owner_local() {
-            // Full resize: grid dimensions changed, need to resize terminal and PTY.
-            // Only resize if we (server UI) are the resize authority.
-            // When a remote client is actively typing, they control the terminal size.
-            let new_size = crate::terminal::terminal::TerminalSize {
+            let new_size = okena_terminal::terminal::TerminalSize {
                 cols: new_cols,
                 rows: new_rows,
                 cell_width: cell_width_f,
@@ -308,9 +301,6 @@ impl Element for TerminalElement {
             };
             self.terminal.resize(new_size);
         } else if cell_size_changed {
-            // Only cell dimensions changed (e.g., zoom) - just update the size struct
-            // This ensures hover detection uses the same cell_width as rendering
-            // without triggering unnecessary grid/PTY resizes
             let mut rs = self.terminal.resize_state.lock();
             rs.size.cell_width = cell_width_f;
             rs.size.cell_height = line_height_f;
@@ -324,7 +314,7 @@ impl Element for TerminalElement {
             t.term_background_unfocused
         };
         let bg_color = match self.bg_tint {
-            Some(tint) => crate::ui::tint_color(base_bg, tint, 0.025),
+            Some(tint) => tint_color(base_bg, tint, 0.025),
             None => base_bg,
         };
         window.paint_quad(fill(bounds, rgb(bg_color)));
@@ -344,24 +334,19 @@ impl Element for TerminalElement {
 
             let origin = bounds.origin;
 
-            // Phase 1: Layout grid - collect batched runs and background rects (like Zed)
+            // Phase 1: Layout grid - collect batched runs and background rects
             let mut batched_runs: Vec<BatchedTextRun> = Vec::new();
             let mut rects: Vec<LayoutRect> = Vec::new();
             let mut current_batch: Option<BatchedTextRun> = None;
             let mut current_rect: Option<LayoutRect> = None;
 
             for row in 0..screen_lines {
-                // visual_line is the row position on screen for rendering
                 let visual_line = row as i32;
-                // buffer_line is the actual grid line to fetch (accounts for scroll)
-                // When display_offset > 0, we're scrolled up into history (negative lines)
                 let buffer_line = visual_line - display_offset;
 
-                // Flush batch at line boundaries
                 if let Some(batch) = current_batch.take() {
                     batched_runs.push(batch);
                 }
-                // Flush rect at line boundaries
                 if let Some(rect) = current_rect.take() {
                     rects.push(rect);
                 }
@@ -374,11 +359,9 @@ impl Element for TerminalElement {
                     let cell = &grid[cell_point];
                     let col_i32 = col as i32;
 
-                    // Handle colors with BOLD→bright promotion and DIM
                     let mut fg = cell.fg.clone();
                     let mut bg = cell.bg.clone();
 
-                    // BOLD promotes basic ANSI colors (0-7) to their bright variants
                     if cell.flags.contains(Flags::BOLD) {
                         fg = match fg {
                             Color::Named(NamedColor::Black) => Color::Named(NamedColor::BrightBlack),
@@ -398,16 +381,12 @@ impl Element for TerminalElement {
                         std::mem::swap(&mut fg, &mut bg);
                     }
 
-                    // Check if selected
-                    // Use buffer_line (not visual row) to compare against selection bounds
-                    // since selection is stored in buffer coordinates
                     let is_selected = if let Some(((start_col, start_row), (end_col, end_row))) = selection {
                         let (start_row, start_col, end_row, end_col) = if start_row < end_row || (start_row == end_row && start_col <= end_col) {
                             (start_row, start_col, end_row, end_col)
                         } else {
                             (end_row, end_col, start_row, start_col)
                         };
-                        // Compare buffer_line (which accounts for scroll) against selection bounds
                         if buffer_line >= start_row && buffer_line <= end_row {
                             if start_row == end_row {
                                 col >= start_col && col <= end_col
@@ -425,11 +404,10 @@ impl Element for TerminalElement {
                         false
                     };
 
-                    // Background rect batching
                     let bg_color = if is_selected {
                         Some(rgb(t.selection_bg).into())
                     } else if !is_default_bg(&bg, &t) {
-                        Some(ansi_to_hsla(&t,&bg))
+                        Some(ansi_to_hsla(&t, &bg))
                     } else {
                         None
                     };
@@ -449,7 +427,6 @@ impl Element for TerminalElement {
                         rects.push(rect);
                     }
 
-                    // Skip spacers and blanks
                     if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                         continue;
                     }
@@ -457,19 +434,16 @@ impl Element for TerminalElement {
                         continue;
                     }
 
-                    // Create text style
                     let mut fg_color = if is_selected {
                         rgb(t.selection_fg).into()
                     } else {
-                        ansi_to_hsla(&t,&fg)
+                        ansi_to_hsla(&t, &fg)
                     };
 
-                    // DIM (SGR 2) reduces foreground brightness by ~33%
                     if cell.flags.contains(Flags::DIM) && !cell.flags.contains(Flags::BOLD) {
                         fg_color.l = (fg_color.l * 0.66).clamp(0.0, 1.0);
                     }
 
-                    // Use pre-computed font variants to avoid repeated cloning
                     let is_bold = cell.flags.contains(Flags::BOLD);
                     let is_italic = cell.flags.contains(Flags::ITALIC);
                     let font = match (is_bold, is_italic) {
@@ -503,7 +477,6 @@ impl Element for TerminalElement {
                         },
                     };
 
-                    // Batch text runs
                     if let Some(ref mut batch) = current_batch {
                         if batch.can_append(&text_style, visual_line, col_i32) {
                             batch.append_char(cell.c);
@@ -517,7 +490,6 @@ impl Element for TerminalElement {
                 }
             }
 
-            // Flush remaining batches
             if let Some(batch) = current_batch {
                 batched_runs.push(batch);
             }
@@ -535,20 +507,10 @@ impl Element for TerminalElement {
                 let is_current = self.current_match_index == Some(idx);
                 let highlight_color = if is_current {
                     let c = rgb(t.search_current_bg);
-                    Hsla::from(Rgba {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
-                        a: 0.7,
-                    })
+                    Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: 0.7 })
                 } else {
                     let c = rgb(t.search_match_bg);
-                    Hsla::from(Rgba {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
-                        a: 0.5,
-                    })
+                    Hsla::from(Rgba { r: c.r, g: c.g, b: c.b, a: 0.5 })
                 };
 
                 let position = point(
@@ -565,10 +527,8 @@ impl Element for TerminalElement {
 
             // Phase 2.6: Paint URL underlines
             for url_match in self.url_matches.iter() {
-                // Highlight all segments of the hovered URL group (handles wrapped URLs)
                 let is_hovered = self.hovered_url_group == Some(url_match.link_group);
 
-                // Only draw visible URLs (within screen bounds)
                 if url_match.line < 0 || url_match.line >= screen_lines as i32 {
                     continue;
                 }
@@ -578,20 +538,13 @@ impl Element for TerminalElement {
                 let url_width = px((cell_width_f * url_match.len as f32).ceil());
 
                 if is_hovered {
-                    // Hovered URL: background highlight + solid underline
-                    let hover_bg = Hsla::from(Rgba {
-                        r: 0.0,
-                        g: 0.48,
-                        b: 0.8,
-                        a: 0.2,
-                    });
+                    let hover_bg = Hsla::from(Rgba { r: 0.0, g: 0.48, b: 0.8, a: 0.2 });
                     let hover_bounds = Bounds {
                         origin: point(url_x, url_y),
                         size: size(url_width, line_height),
                     };
                     window.paint_quad(fill(hover_bounds, hover_bg));
 
-                    // Solid underline for hovered URL
                     let underline_color = rgb(t.border_active);
                     let underline_y = url_y + line_height - px(2.0);
                     let underline_bounds = Bounds {
@@ -600,13 +553,7 @@ impl Element for TerminalElement {
                     };
                     window.paint_quad(fill(underline_bounds, underline_color));
                 } else {
-                    // Non-hovered URL: subtle dotted underline (rendered as dashed)
-                    let underline_color = Hsla::from(Rgba {
-                        r: 0.5,
-                        g: 0.5,
-                        b: 0.5,
-                        a: 0.5,
-                    });
+                    let underline_color = Hsla::from(Rgba { r: 0.5, g: 0.5, b: 0.5, a: 0.5 });
                     let underline_y = url_y + line_height - px(2.0);
                     let underline_bounds = Bounds {
                         origin: point(url_x, underline_y),
@@ -621,24 +568,18 @@ impl Element for TerminalElement {
                 batch.paint(origin, cell_width, line_height, font_size, window, cx);
             }
 
-            // Phase 4: Paint cursor (only if visible within current viewport and cursor_visible is true)
-            // When scrolled into history (display_offset > 0), the cursor is at the bottom
-            // of the active area and may be outside the visible viewport
+            // Phase 4: Paint cursor
             if cursor_visible {
                 let cursor_point = term.grid().cursor.point;
                 let cursor_visual_line = cursor_point.line.0 + display_offset;
 
-                // Only paint cursor if it's within the visible viewport
                 if cursor_visual_line >= 0 && cursor_visual_line < screen_lines as i32 {
                     let cursor_x = px((f32::from(origin.x) + cursor_point.column.0 as f32 * cell_width_f).floor());
                     let cursor_y = px((f32::from(origin.y) + cursor_visual_line as f32 * line_height_f).floor());
 
                     let cursor_rgba = rgb(t.cursor);
                     let cursor_color = Hsla::from(Rgba {
-                        r: cursor_rgba.r,
-                        g: cursor_rgba.g,
-                        b: cursor_rgba.b,
-                        a: 0.8,
+                        r: cursor_rgba.r, g: cursor_rgba.g, b: cursor_rgba.b, a: 0.8,
                     });
 
                     let cursor_bounds = match cursor_style {
@@ -661,16 +602,10 @@ impl Element for TerminalElement {
         });
 
         // Phase 5: Paint fog overlay for unfocused terminals
-        // Uses the unfocused bg color at partial opacity to wash out text,
-        // creating a subtle "in the fog" effect. Alpha-blending the same color
-        // over the background is a no-op, so only text/content gets dimmed.
         if !is_focused {
             let bg_rgba = rgb(bg_color);
             let fog = Hsla::from(Rgba {
-                r: bg_rgba.r,
-                g: bg_rgba.g,
-                b: bg_rgba.b,
-                a: 0.2,
+                r: bg_rgba.r, g: bg_rgba.g, b: bg_rgba.b, a: 0.2,
             });
             window.paint_quad(fill(bounds, fog));
         }

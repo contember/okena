@@ -1,8 +1,7 @@
-use crate::action_dispatch::ActionDispatcher;
+use crate::ActionDispatch;
 use crate::elements::resize_handle::ResizeHandle;
-use crate::settings::settings_entity;
-use crate::theme::theme;
-use crate::workspace::state::{SplitDirection, Workspace};
+use okena_files::theme::theme;
+use okena_workspace::state::{SplitDirection, Workspace};
 use gpui::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,32 +14,22 @@ pub enum DragState {
     Split {
         project_id: String,
         layout_path: Vec<usize>,
-        /// Original index of the child to the left of the divider
         left_child: usize,
-        /// Original index of the child to the right of the divider
         right_child: usize,
         direction: SplitDirection,
         container_bounds: Bounds<Pixels>,
-        /// Mouse position at drag start (for delta-based resize)
         initial_mouse_pos: Point<Pixels>,
-        /// Sizes snapshot at drag start (all children, including hidden)
         initial_sizes: Vec<f32>,
-        /// Sum of visible children's sizes (for correct delta scaling)
         visible_sizes_sum: f32,
-        /// Action dispatcher for routing resize to local or remote
-        action_dispatcher: Option<ActionDispatcher>,
+        action_dispatcher: Option<Box<dyn ActionDispatchClone>>,
     },
     /// Resizing project columns
     ProjectColumn {
         divider_index: usize,
         project_ids: Vec<String>,
-        /// Available width for columns (viewport minus dividers) — same base used in render
         available_width: f32,
-        /// Mouse position at drag start (for delta-based resize)
         initial_mouse_pos: Point<Pixels>,
-        /// Width snapshots at drag start (project_id -> width %)
         initial_widths: HashMap<String, f32>,
-        /// Minimum column width in pixels (from settings)
         min_col_width: f32,
     },
     /// Resizing sidebar width
@@ -51,6 +40,27 @@ pub enum DragState {
         initial_mouse_y: f32,
         initial_height: f32,
     },
+}
+
+/// Trait object wrapper for ActionDispatch in DragState (needs Clone).
+pub trait ActionDispatchClone: Send + Sync {
+    fn dispatch_action(&self, action: okena_core::api::ActionRequest, cx: &mut gpui::App);
+    fn clone_box(&self) -> Box<dyn ActionDispatchClone>;
+}
+
+impl<T: ActionDispatch + Send + Sync> ActionDispatchClone for T {
+    fn dispatch_action(&self, action: okena_core::api::ActionRequest, cx: &mut gpui::App) {
+        self.dispatch(action, cx);
+    }
+    fn clone_box(&self) -> Box<dyn ActionDispatchClone> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn ActionDispatchClone> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 pub type ActiveDrag = Rc<RefCell<Option<DragState>>>;
@@ -88,12 +98,8 @@ pub fn compute_resize(
                 return;
             }
 
-            // Combined size of the two children being resized
             let combined_size = initial_sizes[left_child] + initial_sizes[right_child];
 
-            // Delta-based resize: compute mouse movement since drag start
-            // Scale by visible_sizes_sum so 1px of mouse movement = correct proportion
-            // (when hidden children exist, visible sizes don't sum to 100)
             let delta = if is_horizontal {
                 f32::from(mouse_pos.y) - f32::from(initial_mouse_pos.y)
             } else {
@@ -102,15 +108,12 @@ pub fn compute_resize(
             let scale = if *visible_sizes_sum > 0.0 { *visible_sizes_sum } else { 100.0 };
             let delta_percent = delta / container_size * scale;
 
-            // Sizes are relative weights — min is 5% of total visible sum
             let min_size = scale * 0.05;
-            // Ensure combined size is at least 2*min so both sides stay positive
             let combined_size = combined_size.max(2.0 * min_size);
             let max_size = combined_size - min_size;
             let left_size = (initial_sizes[left_child] + delta_percent).clamp(min_size, max_size);
             let right_size = combined_size - left_size;
 
-            // Build new sizes: keep all others unchanged, update only the two children
             let mut new_sizes = initial_sizes.clone();
             new_sizes[left_child] = left_size;
             new_sizes[right_child] = right_size;
@@ -119,7 +122,7 @@ pub fn compute_resize(
             let layout_path = layout_path.clone();
 
             if let Some(dispatcher) = action_dispatcher {
-                dispatcher.dispatch(okena_core::api::ActionRequest::UpdateSplitSizes {
+                dispatcher.dispatch_action(okena_core::api::ActionRequest::UpdateSplitSizes {
                     project_id,
                     path: layout_path,
                     sizes: new_sizes,
@@ -145,15 +148,11 @@ pub fn compute_resize(
             let left_initial = initial_widths.get(left_id).copied().unwrap_or(default_width);
             let right_initial = initial_widths.get(right_id).copied().unwrap_or(default_width);
 
-            // Delta-based: only adjust the two adjacent projects
             let delta_px = f32::from(mouse_pos.x) - f32::from(initial_mouse_pos.x);
             let delta_percent = delta_px / container_width * 100.0;
 
-            // Min width as percentage, derived from the pixel minimum
             let min_width = (*min_col_width / container_width * 100.0).max(5.0);
 
-            // Left and right resize independently — when one hits min, the other
-            // can still grow, causing total > 100% (overflow + scrollbar)
             let left_new = (left_initial + delta_percent).max(min_width);
             let right_new = (right_initial - delta_percent).max(min_width);
 
@@ -172,7 +171,7 @@ pub fn compute_resize(
 }
 
 /// Render an inline split divider handle element
-pub fn render_split_divider(
+pub fn render_split_divider<D: ActionDispatch + Send + Sync>(
     workspace: Entity<Workspace>,
     project_id: String,
     left_child_idx: usize,
@@ -181,7 +180,7 @@ pub fn render_split_divider(
     layout_path: Vec<usize>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
     active_drag: &ActiveDrag,
-    action_dispatcher: Option<ActionDispatcher>,
+    action_dispatcher: Option<D>,
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
@@ -197,7 +196,7 @@ pub fn render_split_divider(
             let (initial_sizes, visible_sizes_sum) = workspace.read(cx).project(&project_id).and_then(|p| {
                 p.layout.as_ref()?.get_at_path(&layout_path)
             }).and_then(|node| {
-                if let crate::workspace::state::LayoutNode::Split { sizes, children, .. } = node {
+                if let okena_workspace::state::LayoutNode::Split { sizes, children, .. } = node {
                     let visible_sum: f32 = children.iter().enumerate()
                         .filter(|(_, c)| !c.is_all_hidden())
                         .map(|(i, _)| sizes.get(i).copied().unwrap_or(0.0))
@@ -207,6 +206,10 @@ pub fn render_split_divider(
                     None
                 }
             }).unwrap_or((vec![], 100.0));
+
+            let boxed_dispatcher: Option<Box<dyn ActionDispatchClone>> = action_dispatcher.as_ref().map(|d| {
+                Box::new(d.clone()) as Box<dyn ActionDispatchClone>
+            });
 
             *active_drag.borrow_mut() = Some(DragState::Split {
                 project_id: project_id.clone(),
@@ -218,7 +221,7 @@ pub fn render_split_divider(
                 initial_mouse_pos: mouse_pos,
                 initial_sizes,
                 visible_sizes_sum,
-                action_dispatcher: action_dispatcher.clone(),
+                action_dispatcher: boxed_dispatcher,
             });
         },
     )
@@ -231,6 +234,7 @@ pub fn render_project_divider(
     project_ids: Vec<String>,
     container_bounds: Rc<RefCell<Bounds<Pixels>>>,
     active_drag: &ActiveDrag,
+    min_col_width: f32,
     cx: &App,
 ) -> impl IntoElement {
     let t = theme(cx);
@@ -245,16 +249,13 @@ pub fn render_project_divider(
             let num_projects = project_ids.len();
             let num_dividers = num_projects.saturating_sub(1) as f32;
 
-            // Available width = viewport minus dividers (same base as render uses)
             let viewport_width = f32::from(bounds.size.width);
             let available_width = (viewport_width - num_dividers * 1.0).max(0.0);
 
-            // Snapshot current widths and min column width at drag start
             let ws = workspace.read(cx);
             let initial_widths: HashMap<String, f32> = project_ids.iter()
                 .map(|id| (id.clone(), ws.get_project_width(id, num_projects)))
                 .collect();
-            let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
 
             *active_drag.borrow_mut() = Some(DragState::ProjectColumn {
                 divider_index,

@@ -1,25 +1,17 @@
 //! Recursive layout container that renders terminal/split/tabs nodes
-//!
-//! The LayoutContainer is the core component for rendering terminal layouts.
-//! It handles:
-//! - Terminal panes (single terminals)
-//! - Split panes (horizontal/vertical splits)
-//! - Tab groups (via the `tabs` submodule)
 
-use crate::action_dispatch::ActionDispatcher;
+use crate::ActionDispatch;
 use okena_core::api::ActionRequest;
-use crate::terminal::backend::TerminalBackend;
-use crate::theme::{theme, with_alpha};
-use crate::ui::ClickDetector;
-use crate::views::components::{
-    cancel_rename, finish_rename, start_rename_with_blur, RenameState,
-};
-use crate::views::root::TerminalsRegistry;
-use crate::views::layout::pane_drag::{PaneDrag, DropZone};
-use crate::views::layout::split_pane::{ActiveDrag, render_split_divider};
-use crate::views::layout::terminal_pane::TerminalPane;
-use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{LayoutNode, SplitDirection, Workspace};
+use okena_terminal::backend::TerminalBackend;
+use okena_files::theme::theme;
+use okena_ui::theme::with_alpha;
+use okena_ui::click_detector::ClickDetector;
+use crate::layout::pane_drag::{PaneDrag, DropZone};
+use crate::layout::split_pane::{ActiveDrag, render_split_divider};
+use crate::layout::terminal_pane::TerminalPane;
+use okena_terminal::TerminalsRegistry;
+use okena_workspace::request_broker::RequestBroker;
+use okena_workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 use gpui::prelude::*;
 use std::cell::RefCell;
@@ -27,8 +19,76 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+// Rename state imports
+use crate::simple_input::SimpleInputState;
+
+/// State for an active rename operation.
+pub struct RenameState<Id> {
+    pub target: Id,
+    pub input: Entity<SimpleInputState>,
+    _blur_subscription: Option<Subscription>,
+}
+
+impl<Id> RenameState<Id> {
+    pub fn value(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+}
+
+pub fn start_rename_with_blur<Id, V, F>(
+    target: Id,
+    current_name: &str,
+    placeholder: &str,
+    on_blur: F,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> RenameState<Id>
+where
+    Id: Clone + 'static,
+    V: 'static,
+    F: Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
+{
+    let input = cx.new(|cx| {
+        SimpleInputState::new(cx)
+            .placeholder(placeholder)
+            .default_value(current_name)
+    });
+
+    let focus_handle = input.read(cx).focus_handle(cx);
+    let subscription = cx.on_blur(&focus_handle, window, on_blur);
+    window.focus(&focus_handle, cx);
+
+    RenameState { target, input, _blur_subscription: Some(subscription) }
+}
+
+pub fn finish_rename<Id>(
+    state: &mut Option<RenameState<Id>>,
+    cx: &App,
+) -> Option<(Id, String)> {
+    let rename_state = state.take()?;
+    let new_name = rename_state.value(cx);
+
+    if new_name.is_empty() {
+        None
+    } else {
+        Some((rename_state.target, new_name))
+    }
+}
+
+pub fn cancel_rename<Id>(state: &mut Option<RenameState<Id>>) {
+    *state = None;
+}
+
+pub fn is_renaming<Id: PartialEq>(state: &Option<RenameState<Id>>, target: &Id) -> bool {
+    state.as_ref().map_or(false, |s| &s.target == target)
+}
+
+pub fn rename_input<Id>(state: &Option<RenameState<Id>>) -> Option<&Entity<SimpleInputState>> {
+    state.as_ref().map(|s| &s.input)
+}
+
 /// Recursive layout container that renders terminal/split/tabs nodes
-pub struct LayoutContainer {
+pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) workspace: Entity<Workspace>,
     pub(super) request_broker: Entity<RequestBroker>,
     pub(super) project_id: String,
@@ -36,29 +96,18 @@ pub struct LayoutContainer {
     pub(super) layout_path: Vec<usize>,
     pub(super) backend: Arc<dyn TerminalBackend>,
     pub(super) terminals: TerminalsRegistry,
-    /// Stored terminal pane entity (for single terminal case)
-    terminal_pane: Option<Entity<TerminalPane>>,
-    /// Cached child layout containers keyed by their layout path.
-    /// Without this, split/tabs would recreate entities every render, which breaks focus.
-    pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer>>,
-    /// Shared bounds of this container (updated during prepaint via canvas)
+    terminal_pane: Option<Entity<TerminalPane<D>>>,
+    pub(super) child_containers: HashMap<Vec<usize>, Entity<LayoutContainer<D>>>,
     pub(super) container_bounds_ref: Rc<RefCell<Bounds<Pixels>>>,
-    /// Animation state for recently dropped tab (tab_index, animation_progress)
-    /// progress goes from 1.0 (just dropped) to 0.0 (animation complete)
     pub(super) drop_animation: Option<(usize, f32)>,
-    /// Shared drag state for resize operations
     pub(super) active_drag: ActiveDrag,
-    /// Double-click detector for tab rename (keyed by tab index)
     pub(super) tab_click_detector: ClickDetector<usize>,
-    /// Double-click detector for empty tab bar area (new tab)
     pub(super) empty_area_click_detector: ClickDetector<()>,
-    /// Rename state for tab bar (keyed by terminal_id)
     pub(super) tab_rename_state: Option<RenameState<String>>,
-    /// Action dispatcher for routing terminal actions (local or remote)
-    pub(super) action_dispatcher: Option<ActionDispatcher>,
+    pub(super) action_dispatcher: Option<D>,
 }
 
-impl LayoutContainer {
+impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub fn new(
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
@@ -68,7 +117,7 @@ impl LayoutContainer {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
-        action_dispatcher: Option<ActionDispatcher>,
+        action_dispatcher: Option<D>,
     ) -> Self {
         Self {
             workspace,
@@ -93,7 +142,6 @@ impl LayoutContainer {
         }
     }
 
-    /// Update the project path (e.g. after tilde expansion).
     pub fn set_project_path(&mut self, path: String) {
         self.project_path = path;
     }
@@ -105,11 +153,9 @@ impl LayoutContainer {
         detached: bool,
         cx: &mut Context<Self>,
     ) {
-        // Check if we need to create a new pane or update existing one
         let needs_new_pane = match &self.terminal_pane {
             None => true,
             Some(pane) => {
-                // Check if terminal_id matches - if not, we need a new pane
                 let current_id = pane.read(cx).terminal_id();
                 current_id != terminal_id
             }
@@ -142,7 +188,6 @@ impl LayoutContainer {
                 )
             }));
         } else if let Some(pane) = &self.terminal_pane {
-            // Update minimized and detached states if they changed
             pane.update(cx, |pane, cx| {
                 pane.set_minimized(minimized, cx);
                 pane.set_detached(detached, cx);
@@ -155,8 +200,6 @@ impl LayoutContainer {
         project.layout.as_ref()?.get_at_path(&self.layout_path)
     }
 
-    /// Check if a layout node subtree contains the zoomed terminal.
-    /// Returns the child index that contains the zoomed terminal, if any.
     pub(super) fn find_zoomed_child_index(
         &self,
         children: &[LayoutNode],
@@ -177,7 +220,6 @@ impl LayoutContainer {
         None
     }
 
-    /// Check if this layout container is a terminal inside a Tabs container.
     fn is_in_tab_group(&self, cx: &Context<Self>) -> bool {
         if self.layout_path.is_empty() {
             return false;
@@ -192,7 +234,6 @@ impl LayoutContainer {
         false
     }
 
-    /// Start renaming a tab.
     pub(super) fn start_tab_rename(
         &mut self,
         terminal_id: String,
@@ -204,7 +245,7 @@ impl LayoutContainer {
             terminal_id,
             &current_name,
             "Tab name...",
-            |this: &mut LayoutContainer, _window, cx| {
+            |this: &mut LayoutContainer<D>, _window, cx| {
                 this.finish_tab_rename(cx);
             },
             window,
@@ -214,7 +255,6 @@ impl LayoutContainer {
         cx.notify();
     }
 
-    /// Finish renaming a tab.
     pub(super) fn finish_tab_rename(&mut self, cx: &mut Context<Self>) {
         if let Some((terminal_id, new_name)) = finish_rename(&mut self.tab_rename_state, cx) {
             if let Some(ref dispatcher) = self.action_dispatcher {
@@ -232,7 +272,6 @@ impl LayoutContainer {
         cx.notify();
     }
 
-    /// Cancel renaming a tab.
     pub(super) fn cancel_tab_rename(&mut self, cx: &mut Context<Self>) {
         cancel_rename(&mut self.tab_rename_state);
         self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
@@ -247,7 +286,6 @@ impl LayoutContainer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Ensure terminal pane exists (created once, not every render)
         self.ensure_terminal_pane(terminal_id.clone(), minimized, detached, cx);
 
         let in_tab_group = self.is_in_tab_group(cx);
@@ -263,8 +301,6 @@ impl LayoutContainer {
             .flex_col()
             .relative();
 
-        // Show standalone tab bar if not already inside a Tabs container and not zoomed
-        // (zoomed terminals show their own zoom header instead)
         if !in_tab_group && !is_zoomed {
             container = container.child(self.render_standalone_tab_bar(window, cx));
         }
@@ -280,7 +316,6 @@ impl LayoutContainer {
             )
     }
 
-    /// Render the 5-zone drop overlay for pane drag-and-drop.
     fn render_drop_zones(
         &self,
         terminal_id: Option<String>,
@@ -313,7 +348,6 @@ impl LayoutContainer {
             div()
                 .id(ElementId::Name(zone_id.into()))
                 .drag_over::<PaneDrag>(move |style, _, _, _| {
-                    // Don't show drop highlight when a resize is in progress
                     if active_drag_for_hover.borrow().is_some() {
                         return style;
                     }
@@ -323,11 +357,9 @@ impl LayoutContainer {
                     let pid = pid.clone();
                     let this_tid = this_tid.clone();
                     move |_this, drag: &PaneDrag, _window, cx| {
-                        // Ignore drop when a resize is/was in progress
                         if active_drag_for_drop.borrow().is_some() {
                             return;
                         }
-                        // Self-drop check
                         if Some(drag.terminal_id.as_str()) == this_tid.as_deref() {
                             return;
                         }
@@ -346,8 +378,6 @@ impl LayoutContainer {
                 }))
         };
 
-        // 3-column layout: Left | Middle(Top/Center/Bottom) | Right
-        // Zero overlap, full coverage
         div()
             .absolute()
             .top_0()
@@ -356,39 +386,33 @@ impl LayoutContainer {
             .flex()
             .flex_row()
             .child(
-                // Left zone: 25% width, 100% height
                 make_zone(DropZone::Left, &id_suffix, active_drag)
                     .w(relative(0.25))
                     .h_full(),
             )
             .child(
-                // Middle column: 50% width, contains Top/Center/Bottom
                 div()
                     .w(relative(0.50))
                     .h_full()
                     .flex()
                     .flex_col()
                     .child(
-                        // Top zone: 25% height
                         make_zone(DropZone::Top, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.25)),
                     )
                     .child(
-                        // Center zone: 50% height
                         make_zone(DropZone::Center, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.50)),
                     )
                     .child(
-                        // Bottom zone: 25% height
                         make_zone(DropZone::Bottom, &id_suffix, active_drag)
                             .w_full()
                             .h(relative(0.25)),
                     ),
             )
             .child(
-                // Right zone: 25% width, 100% height
                 make_zone(DropZone::Right, &id_suffix, active_drag)
                     .w(relative(0.25))
                     .h_full(),
@@ -407,7 +431,6 @@ impl LayoutContainer {
         let project_id = self.project_id.clone();
         let layout_path = self.layout_path.clone();
 
-        // If a zoomed terminal exists in one of our children, render only that child at full size
         if let Some(zoomed_idx) = self.find_zoomed_child_index(children, cx) {
             let mut child_path = self.layout_path.clone();
             child_path.push(zoomed_idx);
@@ -442,7 +465,6 @@ impl LayoutContainer {
 
         let is_horizontal = direction == SplitDirection::Horizontal;
 
-        // Clean up stale child containers (e.g., when a child was removed)
         let valid_paths: std::collections::HashSet<Vec<usize>> = (0..num_children)
             .map(|i| {
                 let mut path = self.layout_path.clone();
@@ -452,10 +474,8 @@ impl LayoutContainer {
             .collect();
         self.child_containers.retain(|path, _| valid_paths.contains(path));
 
-        // Shared reference to container bounds (updated by canvas during prepaint)
         let container_bounds_ref = self.container_bounds_ref.clone();
 
-        // Check which children are hidden (minimized or detached) and collect sizes for visible ones
         let mut visible_children_info: Vec<(usize, f32)> = Vec::new();
         for (i, child) in children.iter().enumerate() {
             if !child.is_all_hidden() {
@@ -464,7 +484,6 @@ impl LayoutContainer {
             }
         }
 
-        // Normalize visible sizes to sum to 100%
         let total_visible_size: f32 = visible_children_info.iter().map(|(_, s)| s).sum();
         let normalized_sizes: Vec<f32> = if total_visible_size > 0.0 {
             visible_children_info.iter().map(|(_, s)| s / total_visible_size * 100.0).collect()
@@ -472,7 +491,6 @@ impl LayoutContainer {
             vec![100.0 / visible_children_info.len().max(1) as f32; visible_children_info.len()]
         };
 
-        // Build interleaved children and dividers
         let mut elements: Vec<AnyElement> = Vec::new();
 
         for (visible_idx, (original_idx, _)) in visible_children_info.iter().enumerate() {
@@ -499,7 +517,6 @@ impl LayoutContainer {
                 })
                 .clone();
 
-            // Add divider before this child (if not first visible child)
             if visible_idx > 0 {
                 let left_original_idx = visible_children_info[visible_idx - 1].0;
                 let divider = render_split_divider(
@@ -530,7 +547,6 @@ impl LayoutContainer {
 
         div()
             .id(ElementId::Name(format!("split-container-{}-{:?}", project_id, layout_path).into()))
-            // Use a canvas to capture the container bounds during prepaint
             .child(canvas(
                 {
                     let container_bounds_ref = container_bounds_ref.clone();
@@ -540,7 +556,6 @@ impl LayoutContainer {
                 },
                 |_bounds, _prepaint, _window, _cx| {},
             ).absolute().size_full())
-            // Mouse handlers are on RootView - no need to duplicate here
             .flex()
             .when(is_horizontal, |d| d.flex_col())
             .flex_nowrap()
@@ -551,28 +566,24 @@ impl LayoutContainer {
     }
 }
 
-impl Render for LayoutContainer {
+impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
         let layout = self.get_layout(workspace).cloned();
 
-        // Clean up stale entities when layout type changes
         match &layout {
             Some(LayoutNode::Terminal { .. }) => {
-                // When rendering a terminal, clear any cached child containers from previous split/tabs
                 if !self.child_containers.is_empty() {
                     self.child_containers.clear();
                 }
             }
             Some(LayoutNode::Split { .. }) | Some(LayoutNode::Tabs { .. }) => {
-                // When rendering split/tabs, clear any cached terminal_pane from previous terminal
                 if self.terminal_pane.is_some() {
                     self.terminal_pane = None;
                 }
             }
             None => {
-                // Clear everything when no layout
                 self.terminal_pane = None;
                 self.child_containers.clear();
             }

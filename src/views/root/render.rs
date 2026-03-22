@@ -188,12 +188,14 @@ impl RootView {
 
                 // Add divider after each column except the last
                 if i < num_projects - 1 {
+                    let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
                     let divider = render_project_divider(
                         self.workspace.clone(),
                         i,
                         visible_projects.clone(),
                         container_bounds.clone(),
                         &self.active_drag,
+                        min_col_width,
                         cx,
                     );
                     elements.push(divider.into_any_element());

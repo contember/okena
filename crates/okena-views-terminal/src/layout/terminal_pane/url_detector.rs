@@ -3,7 +3,7 @@
 //! Pure logic component - no UI, no Entity.
 
 use crate::elements::terminal_element::{LinkKind, URLMatch};
-use crate::terminal::terminal::Terminal;
+use okena_terminal::terminal::Terminal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -176,15 +176,15 @@ impl UrlDetector {
         log::info!("Opening URL: {}", url);
         #[cfg(target_os = "linux")]
         {
-            let _ = crate::process::command("xdg-open").arg(url).spawn();
+            let _ = okena_core::process::command("xdg-open").arg(url).spawn();
         }
         #[cfg(target_os = "macos")]
         {
-            let _ = crate::process::command("open").arg(url).spawn();
+            let _ = okena_core::process::command("open").arg(url).spawn();
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = crate::process::command("cmd")
+            let _ = okena_core::process::command("cmd")
                 .args(["/C", "start", "", url])
                 .spawn();
         }
@@ -219,15 +219,15 @@ impl UrlDetector {
             // Use system default
             #[cfg(target_os = "linux")]
             {
-                let _ = crate::process::command("xdg-open").arg(clean_path).spawn();
+                let _ = okena_core::process::command("xdg-open").arg(clean_path).spawn();
             }
             #[cfg(target_os = "macos")]
             {
-                let _ = crate::process::command("open").arg(clean_path).spawn();
+                let _ = okena_core::process::command("open").arg(clean_path).spawn();
             }
             #[cfg(target_os = "windows")]
             {
-                let _ = crate::process::command("cmd")
+                let _ = okena_core::process::command("cmd")
                     .args(["/C", "start", "", clean_path])
                     .spawn();
             }
@@ -247,7 +247,7 @@ impl UrlDetector {
                     }
                 }
                 args.push(loc);
-                let _ = crate::process::command(opener).args(&args).spawn();
+                let _ = okena_core::process::command(opener).args(&args).spawn();
             }
             "zed" => {
                 // Zed: file:line
@@ -258,7 +258,7 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = crate::process::command("zed").arg(&loc).spawn();
+                let _ = okena_core::process::command("zed").arg(&loc).spawn();
             }
             "subl" | "sublime" => {
                 // Sublime Text: file:line:col
@@ -269,7 +269,7 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = crate::process::command("subl").arg(&loc).spawn();
+                let _ = okena_core::process::command("subl").arg(&loc).spawn();
             }
             "vim" | "nvim" => {
                 // vim/nvim: +line file
@@ -278,7 +278,7 @@ impl UrlDetector {
                     args.push(format!("+{}", line));
                 }
                 args.push(clean_path.to_string());
-                let _ = crate::process::command(opener).args(&args).spawn();
+                let _ = okena_core::process::command(opener).args(&args).spawn();
             }
             _ => {
                 // Generic: try editor file:line:col pattern
@@ -289,7 +289,7 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = crate::process::command(opener).arg(&loc).spawn();
+                let _ = okena_core::process::command(opener).arg(&loc).spawn();
             }
         }
     }

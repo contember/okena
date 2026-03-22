@@ -1,4 +1,4 @@
-use crate::theme::ThemeColors;
+use okena_core::theme::ThemeColors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use gpui::*;
 
@@ -66,7 +66,6 @@ impl BatchedTextRun {
         };
 
         // Shape and paint entire run at once, passing cell_width for fixed-width spacing
-        // This is how Zed does it - allows proper glyph caching while maintaining grid alignment
         let _ = window
             .text_system()
             .shape_line(

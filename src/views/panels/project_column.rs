@@ -50,7 +50,7 @@ pub struct ProjectColumn {
     #[allow(dead_code)]
     terminals: TerminalsRegistry,
     /// Stored layout container entity (must be created in new(), not render())
-    layout_container: Option<Entity<LayoutContainer>>,
+    layout_container: Option<Entity<LayoutContainer<ActionDispatcher>>>,
     /// Whether the diff summary popover is visible
     diff_popover_visible: bool,
     /// Cached file summaries for popover
@@ -72,7 +72,7 @@ pub struct ProjectColumn {
     /// Currently active service name in the service panel
     active_service_name: Option<String>,
     /// Terminal pane showing the active service's log output
-    service_terminal_pane: Option<Entity<TerminalPane>>,
+    service_terminal_pane: Option<Entity<TerminalPane<ActionDispatcher>>>,
     /// Height of the service panel in pixels
     service_panel_height: f32,
     /// Bounds of the git diff stats badge (for popover positioning)
