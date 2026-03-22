@@ -497,6 +497,32 @@ fn main() {
             crate::theme::theme(cx)
         }));
 
+        // Register git view settings global
+        {
+            let se = crate::settings::settings_entity(cx);
+            let app_s = se.read(cx);
+            cx.set_global(okena_views_git::settings::GlobalGitViewSettings::new(
+                okena_views_git::settings::GitViewSettings {
+                    diff_view_mode: app_s.settings.diff_view_mode,
+                    diff_ignore_whitespace: app_s.settings.diff_ignore_whitespace,
+                    file_font_size: app_s.settings.file_font_size,
+                    is_dark: crate::theme::theme(cx).is_dark(),
+                },
+            ));
+
+            // Sync app settings → git view settings global
+            cx.observe(&se, |_, cx| {
+                let s = crate::settings::settings_entity(cx).read(cx);
+                let is_dark = crate::theme::theme(cx).is_dark();
+                cx.global_mut::<okena_views_git::settings::GlobalGitViewSettings>().current = okena_views_git::settings::GitViewSettings {
+                    diff_view_mode: s.settings.diff_view_mode,
+                    diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
+                    file_font_size: s.settings.file_font_size,
+                    is_dark,
+                };
+            }).detach();
+        }
+
         // Create PTY manager with session backend from settings
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);

@@ -40,8 +40,7 @@ type Selection = SelectionState<(usize, usize)>;
 /// Width of file tree sidebar.
 const SIDEBAR_WIDTH: f32 = 240.0;
 
-/// Callback type for saving settings changes back to the main app.
-pub type SettingsSaver = Arc<dyn Fn(DiffViewMode, Option<bool>) + Send + Sync>;
+use crate::settings::GlobalGitViewSettings;
 
 /// Git diff viewer overlay.
 pub struct DiffViewer {
@@ -96,8 +95,6 @@ pub struct DiffViewer {
     commits: Vec<CommitLogEntry>,
     /// Current index in the commits list.
     commit_index: usize,
-    /// Callback for persisting settings changes.
-    settings_saver: Option<SettingsSaver>,
 }
 
 impl DiffViewer {
@@ -109,14 +106,14 @@ impl DiffViewer {
         commit_message: Option<String>,
         commits: Option<Vec<CommitLogEntry>>,
         commit_index: Option<usize>,
-        font_size: f32,
-        view_mode: DiffViewMode,
-        ignore_whitespace: bool,
-        is_dark: bool,
-        settings_saver: Option<SettingsSaver>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let gs = cx.global::<GlobalGitViewSettings>();
+        let font_size = gs.current.file_font_size;
+        let view_mode = gs.current.diff_view_mode;
+        let ignore_whitespace = gs.current.diff_ignore_whitespace;
+        let is_dark = gs.current.is_dark;
 
         let mut viewer = Self {
             focus_handle,
@@ -151,7 +148,6 @@ impl DiffViewer {
             commit_message,
             commits: commits.unwrap_or_default(),
             commit_index: commit_index.unwrap_or(0),
-            settings_saver,
         };
 
         if !provider.is_git_repo() {
@@ -337,10 +333,9 @@ impl DiffViewer {
         self.selection.clear();
         self.selection_side = None;
         self.update_side_by_side_cache();
-        // Save to global settings via callback
-        if let Some(saver) = &self.settings_saver {
-            saver(self.view_mode, None);
-        }
+        // Persist to global settings
+        let vm = self.view_mode;
+        cx.global_mut::<GlobalGitViewSettings>().update(|s| s.diff_view_mode = vm);
         cx.notify();
     }
 
@@ -348,10 +343,9 @@ impl DiffViewer {
         self.ignore_whitespace = !self.ignore_whitespace;
         let mode = self.diff_mode.clone();
         self.load_diff_async(mode, None, cx);
-        // Save to global settings via callback
-        if let Some(saver) = &self.settings_saver {
-            saver(self.view_mode, Some(self.ignore_whitespace));
-        }
+        // Persist to global settings
+        let iw = self.ignore_whitespace;
+        cx.global_mut::<GlobalGitViewSettings>().update(|s| s.diff_ignore_whitespace = iw);
     }
 
     fn update_side_by_side_cache(&mut self) {
