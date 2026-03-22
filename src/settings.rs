@@ -234,17 +234,9 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Set diff view mode (unified or side-by-side)
-    pub fn set_diff_view_mode(&mut self, value: crate::workspace::persistence::DiffViewMode, cx: &mut Context<Self>) {
-        self.settings.diff_view_mode = value;
-        self.save_and_notify(cx);
-    }
-
-    /// Set diff ignore whitespace option
-    pub fn set_diff_ignore_whitespace(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.diff_ignore_whitespace = value;
-        self.save_and_notify(cx);
-    }
+    // Note: diff_view_mode and diff_ignore_whitespace are managed by
+    // okena_views_git::settings::GlobalGitViewSettings. Changes are synced
+    // back to AppSettings via the observer registered in main.rs.
 
     /// Set worktree path template.
     /// Shows a migration suggestion toast when the template changes from its baseline value.
