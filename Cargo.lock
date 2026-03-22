@@ -4459,6 +4459,7 @@ dependencies = [
  "okena-ext-codex",
  "okena-ext-updater",
  "okena-extensions",
+ "okena-files",
  "okena-git",
  "okena-terminal",
  "okena-ui",
@@ -4559,6 +4560,18 @@ dependencies = [
  "gpui",
  "okena-core",
  "serde_json",
+]
+
+[[package]]
+name = "okena-files"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "okena-core",
+ "okena-ui",
+ "syntect",
+ "two-face",
 ]
 
 [[package]]
