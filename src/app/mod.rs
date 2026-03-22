@@ -11,7 +11,7 @@ use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
-use crate::settings::GlobalSettings;
+use crate::settings::{GlobalSettings, settings};
 use crate::views::panels::toast::ToastManager;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use crate::views::root::{RootView, TerminalsRegistry};
@@ -531,7 +531,7 @@ impl Okena {
                         for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, exit_code) in terminal_close_infos {
                             crate::workspace::hooks::fire_terminal_on_close(
                                 &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
-                                &project_path, &terminal_id, exit_code, cx,
+                                &project_path, &terminal_id, exit_code, &crate::settings::settings(cx).hooks, cx,
                             );
                         }
 
@@ -629,7 +629,7 @@ impl Okena {
                     ws.remove_hook_terminal(&tid, cx);
                     // Collect remaining hook terminal IDs before deleting the project
                     let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                    ws.delete_project(&pending.project_id, cx);
+                    ws.delete_project(&pending.project_id, &settings(cx).hooks, cx);
                     Some((pending, project_path_for_git, hook_info, remaining_hook_tids))
                 } else {
                     ws.closing_projects.remove(&pending.project_id);
@@ -677,6 +677,7 @@ impl Okena {
                 &pending.project_id,
                 &project_name,
                 &project_path,
+                &global_hooks,
                 cx,
             );
             let _ = crate::workspace::hooks::fire_worktree_removed(

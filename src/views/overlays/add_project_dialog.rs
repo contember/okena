@@ -2,6 +2,7 @@
 
 use crate::keybindings::Cancel;
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::settings::settings;
 use crate::theme::theme;
 use crate::views::components::{
     button, input_container, labeled_input, modal_backdrop, modal_content,
@@ -101,7 +102,7 @@ impl AddProjectDialog {
         match self.targets.get(self.selected_target) {
             Some(AddProjectTarget::Local) | None => {
                 self.workspace.update(cx, |ws, cx| {
-                    ws.add_project(name, path, true, cx);
+                    ws.add_project(name, path, true, &settings(cx).hooks, cx);
                 });
             }
             Some(AddProjectTarget::Remote {

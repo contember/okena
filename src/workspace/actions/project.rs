@@ -43,7 +43,7 @@ impl Workspace {
 
     /// Add a new project
     /// If `with_terminal` is false, creates a bookmark project without a terminal layout.
-    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, cx: &mut Context<Self>) -> String {
+    pub fn add_project(&mut self, name: String, path: String, with_terminal: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> String {
         let path = expand_tilde(&path);
 
         // Auto-detect WSL UNC paths and set default shell accordingly
@@ -82,7 +82,7 @@ impl Workspace {
         self.data.project_order.push(id.clone());
         self.notify_data(cx);
 
-        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, cx);
+        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, global_hooks, cx);
         self.register_hook_results(hook_results, cx);
         id
     }
@@ -170,7 +170,7 @@ impl Workspace {
     }
 
     /// Delete a project
-    pub fn delete_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_project(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         // Capture project info before removal for the hook
         let hook_info = self.project(project_id).map(|p| {
             (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
@@ -217,7 +217,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, cx);
+            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, global_hooks, cx);
         }
     }
 
@@ -321,6 +321,7 @@ impl Workspace {
         worktree_path: &str,
         project_path: &str,
         create_branch: bool,
+        global_hooks: &HooksConfig,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
@@ -328,7 +329,7 @@ impl Workspace {
         crate::git::create_worktree(repo_path, branch, &target, create_branch)?;
 
         // Register in workspace state
-        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, cx)
+        self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, global_hooks, cx)
     }
 
     /// Register a worktree project in workspace state.
@@ -343,9 +344,10 @@ impl Workspace {
         repo_path: &std::path::Path,
         worktree_path: &str,
         project_path: &str,
+        global_hooks: &HooksConfig,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, cx)
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, true, global_hooks, cx)
     }
 
     /// Same as `register_worktree_project` but defers on_worktree_create hooks.
@@ -357,9 +359,10 @@ impl Workspace {
         repo_path: &std::path::Path,
         worktree_path: &str,
         project_path: &str,
+        global_hooks: &HooksConfig,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, cx)
+        self.register_worktree_project_inner(parent_project_id, branch, repo_path, worktree_path, project_path, false, global_hooks, cx)
     }
 
     fn register_worktree_project_inner(
@@ -370,6 +373,7 @@ impl Workspace {
         _worktree_path: &str,
         project_path: &str,
         fire_hooks: bool,
+        global_hooks: &HooksConfig,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
         // Get parent project info
@@ -435,6 +439,7 @@ impl Workspace {
                 &new_project_name,
                 project_path,
                 branch,
+                global_hooks,
                 cx,
             );
             self.register_hook_results(hook_results, cx);
@@ -445,7 +450,7 @@ impl Workspace {
 
     /// Finalize a deferred worktree: set the layout from the parent and fire hooks.
     /// Called once the worktree directory exists on disk.
-    pub fn fire_worktree_hooks(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn fire_worktree_hooks(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         let Some(project) = self.project(project_id) else { return };
         let hooks_config = project.hooks.clone();
         let name = project.name.clone();
@@ -472,6 +477,7 @@ impl Workspace {
             &name,
             &path,
             &branch,
+            global_hooks,
             cx,
         );
         self.register_hook_results(hook_results, cx);
@@ -586,7 +592,7 @@ impl Workspace {
 
     /// Remove a worktree project and its git worktree
 
-    pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
 
@@ -607,10 +613,10 @@ impl Workspace {
         crate::git::remove_worktree(&worktree_path, force)?;
 
         // Delete the project from workspace (this also fires on_project_close)
-        self.delete_project(project_id, cx);
+        self.delete_project(project_id, global_hooks, cx);
 
         // Fire worktree-specific hook (runs headlessly since project is deleted)
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, cx);
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, global_hooks, cx);
 
         Ok(())
     }
@@ -739,7 +745,6 @@ mod gpui_tests {
     use gpui::AppContext as _;
     use crate::workspace::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
-    use crate::settings::{GlobalSettings, SettingsState};
     use crate::theme::FolderColor;
     use std::collections::HashMap;
 
@@ -778,21 +783,12 @@ mod gpui_tests {
         }
     }
 
-    /// Initialize GlobalSettings for tests that call hooks (add_project, delete_project)
-    fn init_test_settings(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            let entity = cx.new(|_cx| SettingsState::new(Default::default()));
-            cx.set_global(GlobalSettings(entity));
-        });
-    }
-
     #[gpui::test]
     fn test_add_project_gpui(cx: &mut gpui::TestAppContext) {
-        init_test_settings(cx);
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, cx);
+            ws.add_project("Test".to_string(), "/tmp/test".to_string(), true, &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -807,11 +803,10 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_add_bookmark_project_gpui(cx: &mut gpui::TestAppContext) {
-        init_test_settings(cx);
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, cx);
+            ws.add_project("Bookmark".to_string(), "/tmp/bm".to_string(), false, &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -821,14 +816,13 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_delete_project_gpui(cx: &mut gpui::TestAppContext) {
-        init_test_settings(cx);
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", cx);
+            ws.delete_project("p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -867,7 +861,6 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_delete_worktree_removes_from_parent_worktree_ids(cx: &mut gpui::TestAppContext) {
-        init_test_settings(cx);
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
@@ -876,7 +869,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("wt1", cx);
+            ws.delete_project("wt1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -888,7 +881,6 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_delete_parent_rehomes_orphaned_worktrees(cx: &mut gpui::TestAppContext) {
-        init_test_settings(cx);
         let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
         let mut data = make_workspace_data();
@@ -897,7 +889,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("parent", cx);
+            ws.delete_project("parent", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {

@@ -1,5 +1,6 @@
 //! Worktree list popover for showing/hiding worktrees in the sidebar
 
+use crate::settings::settings;
 use crate::theme::theme;
 use gpui::*;
 use gpui::prelude::*;
@@ -88,7 +89,7 @@ impl Sidebar {
                                 .map(|p| p.id.clone());
                             if let Some(id) = wt_project_id {
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.delete_project(&id, cx);
+                                    ws.delete_project(&id, &settings(cx).hooks, cx);
                                 });
                             }
                         } else {
