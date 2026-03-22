@@ -10,7 +10,7 @@ mod scrollbar;
 mod syntax;
 mod types;
 
-use crate::{DiffMode, DiffResult, FileDiff, CommitLogEntry};
+use okena_git::{DiffMode, DiffResult, FileDiff, CommitLogEntry};
 use okena_core::selection::SelectionState;
 use okena_core::types::DiffViewMode;
 use okena_files::selection::{copy_to_clipboard, Selection2DNonEmpty};

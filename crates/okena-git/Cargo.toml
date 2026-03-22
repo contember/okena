@@ -6,15 +6,6 @@ license = "MIT"
 
 [dependencies]
 okena-core = { path = "../okena-core" }
-okena-files = { path = "../okena-files" }
-okena-ui = { path = "../okena-ui" }
-
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
-
-syntect = { version = "5", features = ["default-fancy"] }
-smol = "2"
-reqwest = { version = "0.12", features = ["blocking", "json"] }
 
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }

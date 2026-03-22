@@ -4,7 +4,7 @@ use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use okena_core::theme::ThemeColors;
 use okena_ui::toggle::segmented_toggle;
-use crate::DiffMode;
+use okena_git::DiffMode;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -286,7 +286,7 @@ impl DiffViewer {
             .when_some(commit.cloned(), |d, commit| {
                 let hash = commit.hash.clone();
                 let short = if hash.len() > 7 { hash[..7].to_string() } else { hash.clone() };
-                let time_str = crate::format_relative_time(commit.timestamp);
+                let time_str = okena_git::format_relative_time(commit.timestamp);
                 d
                     // Hash (clickable, copies to clipboard)
                     .child(

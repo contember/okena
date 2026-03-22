@@ -3,7 +3,7 @@
 use super::line_render::{rgba, ACCENT_WIDTH};
 use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideBySideSide, SideContent};
 use super::DiffViewer;
-use crate::DiffLineType;
+use okena_git::DiffLineType;
 use okena_core::theme::ThemeColors;
 use okena_files::selection::Selection2DExtension;
 use okena_files::code_view::{find_word_boundaries, selection_bg_ranges};
