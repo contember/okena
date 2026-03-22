@@ -1,4 +1,4 @@
-use crate::process::{command, safe_output};
+use okena_core::process::{command, safe_output};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Ports to exclude from detection results.

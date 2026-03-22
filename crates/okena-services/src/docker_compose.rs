@@ -1,5 +1,5 @@
-use crate::process;
-use crate::services::manager::ServiceStatus;
+use okena_core::process;
+use crate::manager::ServiceStatus;
 use serde::Deserialize;
 use std::sync::OnceLock;
 

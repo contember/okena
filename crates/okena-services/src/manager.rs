@@ -1,10 +1,10 @@
-use crate::services::config::{load_project_config, ServiceDefinition};
-use crate::services::docker_compose;
-use crate::services::port_detect;
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::views::root::TerminalsRegistry;
+use crate::config::{load_project_config, ServiceDefinition};
+use crate::docker_compose;
+use crate::port_detect;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_terminal::TerminalsRegistry;
 use gpui::{Context, WeakEntity};
 use std::collections::HashMap;
 use std::path::Path;
@@ -394,10 +394,10 @@ impl ServiceManager {
                 cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
                     let result = cx.background_executor()
                         .spawn(async move {
-                            let mut cmd = crate::process::command("docker");
+                            let mut cmd = okena_core::process::command("docker");
                             cmd.args(["compose", "-f", &compose_file, "start", &name])
                                 .current_dir(&path);
-                            crate::process::safe_output(&mut cmd)
+                            okena_core::process::safe_output(&mut cmd)
                         })
                         .await;
                     if let Ok(output) = result {
@@ -517,10 +517,10 @@ impl ServiceManager {
                 cx.spawn(async move |_this: WeakEntity<ServiceManager>, cx| {
                     cx.background_executor()
                         .spawn(async move {
-                            let mut cmd = crate::process::command("docker");
+                            let mut cmd = okena_core::process::command("docker");
                             cmd.args(["compose", "-f", &compose_file, "stop", &name])
                                 .current_dir(&path);
-                            let _ = crate::process::safe_output(&mut cmd);
+                            let _ = okena_core::process::safe_output(&mut cmd);
                         })
                         .await;
                 }).detach();
@@ -568,10 +568,10 @@ impl ServiceManager {
                 cx.spawn(async move |this: WeakEntity<ServiceManager>, cx| {
                     cx.background_executor()
                         .spawn(async move {
-                            let mut cmd = crate::process::command("docker");
+                            let mut cmd = okena_core::process::command("docker");
                             cmd.args(["compose", "-f", &compose_file, "restart", &name])
                                 .current_dir(&path);
-                            let _ = crate::process::safe_output(&mut cmd);
+                            let _ = okena_core::process::safe_output(&mut cmd);
                         })
                         .await;
                     let _ = this.update(cx, |_this, cx| cx.notify());
@@ -995,7 +995,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         project_path: &str,
-        docker_config: Option<&crate::services::config::DockerComposeConfig>,
+        docker_config: Option<&crate::config::DockerComposeConfig>,
         cx: &mut Context<Self>,
     ) {
         // Check if explicitly disabled
@@ -1083,7 +1083,7 @@ impl ServiceManager {
         &mut self,
         project_id: &str,
         project_path: &str,
-        docker_config: Option<&crate::services::config::DockerComposeConfig>,
+        docker_config: Option<&crate::config::DockerComposeConfig>,
         cx: &mut Context<Self>,
     ) {
         // Stop existing poller

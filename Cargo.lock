@@ -4532,6 +4532,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-markdown",
+ "okena-services",
  "okena-terminal",
  "okena-ui",
  "okena-views-git",
@@ -4669,6 +4670,21 @@ dependencies = [
  "okena-core",
  "okena-ui",
  "pulldown-cmark",
+]
+
+[[package]]
+name = "okena-services"
+version = "0.1.0"
+dependencies = [
+ "async-channel 2.5.0",
+ "gpui",
+ "libc",
+ "log",
+ "okena-core",
+ "okena-terminal",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
