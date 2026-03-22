@@ -9,16 +9,16 @@
 //! - Syntax highlighting utilities
 //! - Virtualized code view
 
-pub mod code_view;
+pub use okena_files::code_view;
+pub use okena_files::file_tree;
+pub use okena_files::syntax;
 pub mod dropdown;
 pub mod file_icon;
-pub mod file_tree;
 pub mod list_overlay;
 pub mod modal_backdrop;
 pub mod path_autocomplete;
 pub mod rename_state;
 pub mod simple_input;
-pub mod syntax;
 pub mod ui_helpers;
 
 pub use dropdown::{dropdown_anchored_below, dropdown_button, dropdown_option, dropdown_overlay};

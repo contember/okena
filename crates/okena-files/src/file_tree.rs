@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use super::file_icon::file_icon;
-use crate::theme::ThemeColors;
+use okena_core::theme::ThemeColors;
+use okena_ui::file_icon::file_icon;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
