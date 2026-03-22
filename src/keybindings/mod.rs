@@ -145,6 +145,8 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
         KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
         KeyBinding::new("escape", Cancel, Some("TerminalRename")),
+        // okena-files crate Cancel action for file search dialog
+        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileSearchDialog")),
     ]);
 }
 
