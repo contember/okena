@@ -247,7 +247,7 @@ impl MarkdownDocument {
     }
 
     /// Convert a node to flat text (in characters, not bytes).
-    pub(super) fn node_to_flat_text(node: &Node, text: &mut String) {
+    pub(crate) fn node_to_flat_text(node: &Node, text: &mut String) {
         match node {
             Node::Heading { children, .. } |
             Node::Paragraph { children } |
@@ -288,7 +288,7 @@ impl MarkdownDocument {
     }
 
     /// Convert inline elements to flat text.
-    pub(super) fn inlines_to_flat_text(inlines: &[Inline], text: &mut String) {
+    pub(crate) fn inlines_to_flat_text(inlines: &[Inline], text: &mut String) {
         for inline in inlines {
             match inline {
                 Inline::Text(t) => text.push_str(t),
