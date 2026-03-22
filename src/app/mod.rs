@@ -426,7 +426,6 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         let terminals = self.terminals.clone();
-        let broadcaster = self.pty_broadcaster.clone();
         let pty_manager = self.pty_manager.clone();
 
         cx.spawn(async move |this: WeakEntity<Okena>, cx| {
@@ -440,7 +439,7 @@ impl Okena {
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
                 let mut dirty_terminal_ids: Vec<String> = Vec::new();
 
-                // Process first event + broadcast to remote subscribers
+                // Process first event (broadcasting handled by PtyOutputSink in reader threads)
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
@@ -448,7 +447,6 @@ impl Okena {
                             terminal.process_output(data);
                         }
                         dirty_terminal_ids.push(terminal_id.clone());
-                        broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
                         // Clean up the PtyHandle (reader/writer threads) but don't
@@ -468,7 +466,6 @@ impl Okena {
                                 terminal.process_output(data);
                             }
                             dirty_terminal_ids.push(terminal_id.clone());
-                            broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
                             pty_manager.cleanup_exited(terminal_id);
