@@ -1,6 +1,6 @@
 //! Shared UI helper functions — re-exported from okena-ui.
 
-pub use okena_ui::badge::{badge, keyboard_hint, keyboard_hints_footer};
+pub use okena_ui::badge::{badge, keyboard_hints_footer};
 pub use okena_ui::button::{button, button_primary};
 pub use okena_ui::chip::shell_indicator_chip;
 pub use okena_ui::code_block::code_block_container;

@@ -492,6 +492,11 @@ fn main() {
         });
         cx.set_global(GlobalTheme(theme_entity.clone()));
 
+        // Register theme provider for okena-files crate
+        cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
+            crate::theme::theme(cx)
+        }));
+
         // Create PTY manager with session backend from settings
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
