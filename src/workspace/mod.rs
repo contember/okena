@@ -8,4 +8,5 @@ pub mod requests;
 pub mod sessions;
 pub mod settings;
 pub mod state;
+pub mod toast;
 pub mod worktree_sync;

@@ -9,7 +9,6 @@ use crate::remote_client::manager::RemoteConnectionManager;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::{TerminalBackend, LocalBackend};
 use crate::terminal::pty_manager::PtyManager;
-use crate::terminal::terminal::Terminal;
 use crate::views::overlay_manager::OverlayManager;
 use crate::views::panels::project_column::ProjectColumn;
 use crate::views::sidebar_controller::SidebarController;
@@ -28,8 +27,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Shared terminals registry for PTY event routing
-pub type TerminalsRegistry = Arc<Mutex<HashMap<String, Arc<Terminal>>>>;
+/// Shared terminals registry for PTY event routing (re-exported from okena-terminal)
+pub use okena_terminal::TerminalsRegistry;
 
 /// Registry mapping terminal_id → WeakEntity<TerminalContent> for direct
 /// dirty notification from PTY event loop (avoids per-pane polling).

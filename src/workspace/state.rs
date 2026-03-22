@@ -4,6 +4,16 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Which edge zone the user dropped onto during pane drag-and-drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropZone {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Center,
+}
+
 /// A folder that groups projects in the sidebar
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FolderData {

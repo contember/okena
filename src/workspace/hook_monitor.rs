@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::views::panels::toast::Toast;
+use crate::workspace::toast::Toast;
 
 /// Maximum number of hook executions to keep in history.
 const MAX_HISTORY: usize = 50;
