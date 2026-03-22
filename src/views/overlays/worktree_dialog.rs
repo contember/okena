@@ -203,7 +203,7 @@ impl WorktreeDialog {
 
         // Create the worktree project
         let result = self.workspace.update(cx, |ws, cx| {
-            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, cx)
+            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &settings(cx).hooks, cx)
         });
 
         match result {

@@ -22,6 +22,7 @@ use crate::keybindings::{
     SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp,
 };
 use crate::remote_client::manager::RemoteConnectionManager;
+use crate::settings::settings;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::{theme, FolderColor};
@@ -311,7 +312,7 @@ impl Sidebar {
                 workspace.update(cx, |ws, cx| {
                     let id = ws.register_worktree_project_deferred_hooks(
                         &parent_id, &branch, &git_root,
-                        &worktree_path, &project_path, cx,
+                        &worktree_path, &project_path, &settings(cx).hooks, cx,
                     );
                     if let Ok(ref id) = id {
                         ws.creating_projects.insert(id.clone());
@@ -361,7 +362,7 @@ impl Sidebar {
                     let _ = cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
                             ws.creating_projects.remove(&project_id);
-                            ws.fire_worktree_hooks(&project_id, cx);
+                            ws.fire_worktree_hooks(&project_id, &settings(cx).hooks, cx);
                             ws.notify_data(cx);
                         });
                     });
@@ -372,7 +373,7 @@ impl Sidebar {
                     let _ = cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
                             ws.creating_projects.remove(&project_id);
-                            ws.delete_project(&project_id, cx);
+                            ws.delete_project(&project_id, &settings(cx).hooks, cx);
                         });
                     });
                 }

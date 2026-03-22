@@ -1,4 +1,3 @@
-use crate::settings::settings;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::shell_config::ShellType;
 use crate::terminal::terminal::{Terminal, TerminalSize};
@@ -496,10 +495,10 @@ pub fn fire_on_project_open(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    global_hooks: &HooksConfig,
     cx: &App,
 ) -> Vec<HookTerminalResult> {
-    let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.project.on_open) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_open) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_open hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -518,10 +517,10 @@ pub fn fire_on_project_close(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    global_hooks: &HooksConfig,
     cx: &App,
 ) {
-    let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.project.on_close) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_project_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -536,10 +535,10 @@ pub fn fire_on_worktree_create(
     project_name: &str,
     project_path: &str,
     branch: &str,
+    global_hooks: &HooksConfig,
     cx: &App,
 ) -> Vec<HookTerminalResult> {
-    let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.worktree.on_create) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_create) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
@@ -559,10 +558,10 @@ pub fn fire_on_worktree_close(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    global_hooks: &HooksConfig,
     cx: &App,
 ) {
-    let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook(project_hooks, &global_hooks, |h| &h.worktree.on_close) {
+    if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
         let env = project_env(project_id, project_name, project_path);
         log::info!("Running on_worktree_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
@@ -760,10 +759,10 @@ pub fn fire_worktree_removed(
 pub fn resolve_terminal_on_create(
     project_hooks: &HooksConfig,
     parent_hooks: Option<&HooksConfig>,
-    cx: &App,
+    global_hooks: &HooksConfig,
+    _cx: &App,
 ) -> Option<String> {
-    let global_hooks = settings(cx).hooks;
-    resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_create)
+    resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
 }
 
 /// Apply the `terminal.on_create` command by wrapping the shell to run
@@ -785,10 +784,10 @@ pub fn fire_terminal_on_close(
     project_path: &str,
     terminal_id: &str,
     exit_code: Option<u32>,
+    global_hooks: &HooksConfig,
     cx: &App,
 ) {
-    let global_hooks = settings(cx).hooks;
-    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, &global_hooks, |h| &h.terminal.on_close) {
+    if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_close) {
         let mut env = project_env(project_id, project_name, project_path);
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
         if let Some(code) = exit_code {

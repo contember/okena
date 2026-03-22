@@ -1,4 +1,5 @@
 use crate::action_dispatch::ActionDispatcher;
+use crate::settings::settings;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
 use crate::workspace::requests::OverlayRequest;
 use crate::workspace::requests::SidebarRequest;
@@ -83,7 +84,7 @@ impl RootView {
                 // Collect hook terminal IDs before deleting so we can clean them from the registry
                 let hook_tids = self.workspace.read(cx).hook_terminal_ids_for_project(project_id);
                 self.workspace.update(cx, |ws, cx| {
-                    ws.delete_project(project_id, cx);
+                    ws.delete_project(project_id, &settings(cx).hooks, cx);
                 });
                 for tid in hook_tids {
                     self.terminals.lock().remove(&tid);

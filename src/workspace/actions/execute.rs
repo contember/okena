@@ -310,7 +310,7 @@ pub fn execute_action(
             }
         }
         ActionRequest::AddProject { name, path } => {
-            let project_id = ws.add_project(name, path, true, cx);
+            let project_id = ws.add_project(name, path, true, &settings(cx).hooks, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::ReorderProjectInFolder {
@@ -456,7 +456,7 @@ pub fn spawn_uninitialized_terminals(
 
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
-    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), cx);
+    let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &global_hooks, cx);
 
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {
