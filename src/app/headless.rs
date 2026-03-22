@@ -315,7 +315,6 @@ impl HeadlessApp {
         cx: &mut Context<Self>,
     ) {
         let terminals = self.terminals.clone();
-        let broadcaster = self.pty_broadcaster.clone();
         let pty_manager = self.pty_manager.clone();
         let service_manager = self.service_manager.clone();
         let state_version = self.state_version.clone();
@@ -330,14 +329,13 @@ impl HeadlessApp {
                 // Collect exit events for service manager processing
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();
 
-                // Process first event + broadcast to remote subscribers
+                // Process first event (broadcasting handled by PtyOutputSink in reader threads)
                 match &event {
                     PtyEvent::Data { terminal_id, data } => {
                         let terminals_guard = terminals.lock();
                         if let Some(terminal) = terminals_guard.get(terminal_id) {
                             terminal.process_output(data);
                         }
-                        broadcaster.publish(terminal_id.clone(), data.clone());
                     }
                     PtyEvent::Exit { terminal_id, exit_code } => {
                         pty_manager.cleanup_exited(terminal_id);
@@ -353,7 +351,6 @@ impl HeadlessApp {
                             if let Some(terminal) = terminals_guard.get(terminal_id) {
                                 terminal.process_output(data);
                             }
-                            broadcaster.publish(terminal_id.clone(), data.clone());
                         }
                         PtyEvent::Exit { terminal_id, exit_code } => {
                             pty_manager.cleanup_exited(terminal_id);
