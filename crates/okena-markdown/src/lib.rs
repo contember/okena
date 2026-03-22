@@ -8,7 +8,7 @@ mod types;
 
 use gpui::*;
 
-use okena_files::selection::SelectionState;
+use okena_core::selection::SelectionState;
 use types::Node;
 
 /// Type alias for markdown selection (1D character offset).

@@ -1,8 +1,8 @@
 //! File loading and syntax highlighting for the file viewer.
 
 use super::{FileViewer, MAX_FILE_SIZE, MAX_LINES};
-use crate::views::components::highlight_content;
-use super::MarkdownDocument;
+use crate::syntax::highlight_content;
+use okena_markdown::MarkdownDocument;
 use std::path::PathBuf;
 
 impl FileViewer {

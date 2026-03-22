@@ -1,17 +1,21 @@
 //! Rendering logic for the file viewer overlay.
 
-use crate::keybindings::Cancel;
-use crate::theme::{theme, ThemeColors};
-use crate::ui::{Selection1DExtension, Selection2DNonEmpty};
-use crate::views::components::{
-    build_styled_text_with_backgrounds, code_block_container, find_word_boundaries,
-    fullscreen_overlay, get_scrollbar_geometry, segmented_toggle, selection_bg_ranges,
-    HighlightedLine,
+use crate::file_search::Cancel;
+use crate::theme::theme;
+use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
+use crate::code_view::{
+    build_styled_text_with_backgrounds, find_word_boundaries,
+    get_scrollbar_geometry, selection_bg_ranges,
 };
-use super::markdown_renderer::RenderedNode;
+use crate::syntax::HighlightedLine;
+use crate::file_tree::FileTreeNode;
+use okena_core::theme::ThemeColors;
+use okena_ui::code_block::code_block_container;
+use okena_ui::modal::fullscreen_overlay;
+use okena_ui::toggle::segmented_toggle;
+use okena_ui::file_icon::file_icon;
+use okena_markdown::RenderedNode;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
-use crate::views::components::file_icon::file_icon;
-use crate::views::components::FileTreeNode;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;

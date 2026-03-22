@@ -4570,6 +4570,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+ "okena-markdown",
  "okena-ui",
  "syntect",
  "two-face",
@@ -4594,7 +4595,6 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
- "okena-files",
  "okena-ui",
  "pulldown-cmark",
 ]

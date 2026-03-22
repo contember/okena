@@ -1093,7 +1093,9 @@ impl OverlayManager {
 
     /// Show file viewer for a file.
     pub fn show_file_viewer(&mut self, file_path: PathBuf, project_path: PathBuf, cx: &mut Context<Self>) {
-        let viewer = cx.new(|cx| FileViewer::new(file_path, project_path, cx));
+        let font_size = crate::settings::settings_entity(cx).read(cx).settings.file_font_size;
+        let is_dark = crate::theme::theme(cx).is_dark();
+        let viewer = cx.new(|cx| FileViewer::new(file_path, project_path, font_size, is_dark, cx));
 
         cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {
