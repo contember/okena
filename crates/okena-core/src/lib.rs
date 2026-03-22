@@ -3,6 +3,7 @@ pub mod api;
 pub mod client;
 pub mod keys;
 pub mod process;
+pub mod selection;
 pub mod theme;
 pub mod types;
 pub mod ws;

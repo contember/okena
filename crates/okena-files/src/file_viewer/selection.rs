@@ -1,7 +1,7 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
-use crate::ui::{copy_to_clipboard, Selection1DExtension};
-use crate::views::components::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
+use crate::selection::{copy_to_clipboard, Selection1DExtension};
+use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
 use gpui::*;
 use super::{DisplayMode, FileViewer, FileViewerEvent};
 

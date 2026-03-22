@@ -1,3 +1,2 @@
 //! Re-export file icon from okena-ui.
-
-pub use okena_ui::file_icon::file_icon;
+//! NOTE: Most consumers now import directly from okena_ui::file_icon.

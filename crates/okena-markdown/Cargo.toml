@@ -7,7 +7,6 @@ license = "MIT"
 [dependencies]
 okena-core = { path = "../okena-core" }
 okena-ui = { path = "../okena-ui" }
-okena-files = { path = "../okena-files" }
 
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
