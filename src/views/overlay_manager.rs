@@ -1134,13 +1134,8 @@ impl OverlayManager {
         cx.subscribe(&viewer, |this, _, event: &DiffViewerEvent, cx| {
             match event {
                 DiffViewerEvent::Close => {
-                    // Sync git view settings back to app settings for disk persistence
-                    let gs = cx.global::<okena_views_git::settings::GlobalGitViewSettings>().current.clone();
-                    crate::settings::settings_entity(cx).update(cx, |s, cx| {
-                        s.settings.diff_view_mode = gs.diff_view_mode;
-                        s.settings.diff_ignore_whitespace = gs.diff_ignore_whitespace;
-                        cx.notify(); // triggers debounced auto-save
-                    });
+                    // Settings are now persisted through ExtensionSettingsStore
+                    // when toggled — no manual sync needed on close.
                     this.close_modal(cx);
                 }
             }

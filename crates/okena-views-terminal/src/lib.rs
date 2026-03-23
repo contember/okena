@@ -43,11 +43,14 @@ pub trait ActionDispatch: Clone + 'static {
     );
 }
 
+/// Settings namespace used in ExtensionSettingsStore.
+const SETTINGS_ID: &str = "terminal";
+
 /// Settings needed by terminal views.
 ///
-/// Extracted from the main app's global settings to avoid a direct dependency.
-/// Callers should populate this from their settings system.
-#[derive(Clone, Debug)]
+/// Read/written through `ExtensionSettingsStore` so that changes flow through
+/// the host app's persistence system automatically.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TerminalViewSettings {
     pub font_size: f32,
     pub line_height: f32,
@@ -63,29 +66,33 @@ pub struct TerminalViewSettings {
     pub hooks: okena_workspace::settings::HooksConfig,
 }
 
-/// Global settings wrapper for crate-wide access.
-#[derive(Clone)]
-pub struct GlobalTerminalViewSettings(pub gpui::Entity<TerminalViewSettingsState>);
-
-impl gpui::Global for GlobalTerminalViewSettings {}
-
-/// Settings state entity that can be observed.
-pub struct TerminalViewSettingsState {
-    pub settings: TerminalViewSettings,
-}
-
-/// Get the current terminal view settings from the global entity.
+/// Read current terminal view settings from ExtensionSettingsStore.
 pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
-    cx.global::<GlobalTerminalViewSettings>()
-        .0
-        .read(cx)
-        .settings
-        .clone()
+    let store = cx.global::<okena_extensions::ExtensionSettingsStore>();
+    store
+        .get(SETTINGS_ID, cx)
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_else(|| TerminalViewSettings {
+            font_size: 13.0,
+            line_height: 1.3,
+            font_family: "JetBrains Mono".to_string(),
+            cursor_style: Default::default(),
+            cursor_blink: false,
+            show_focused_border: false,
+            show_shell_selector: false,
+            idle_timeout_secs: 0,
+            color_tinted_background: false,
+            file_opener: String::new(),
+            default_shell: okena_terminal::shell_config::ShellType::Default,
+            hooks: Default::default(),
+        })
 }
 
-/// Get the terminal view settings entity.
-pub fn terminal_view_settings_entity(cx: &gpui::App) -> gpui::Entity<TerminalViewSettingsState> {
-    cx.global::<GlobalTerminalViewSettings>().0.clone()
+/// Write terminal view settings to ExtensionSettingsStore.
+pub fn set_terminal_view_settings(settings: &TerminalViewSettings, cx: &mut gpui::App) {
+    if let Ok(value) = serde_json::to_value(settings) {
+        okena_extensions::ExtensionSettingsStore::update(SETTINGS_ID, value, cx);
+    }
 }
 
 /// Callback type for registering content panes for dirty notification.

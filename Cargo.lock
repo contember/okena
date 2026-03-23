@@ -4723,6 +4723,7 @@ dependencies = [
  "gpui-component",
  "log",
  "okena-core",
+ "okena-extensions",
  "okena-files",
  "okena-git",
  "okena-ui",
@@ -4758,12 +4759,14 @@ dependencies = [
  "gpui-component",
  "log",
  "okena-core",
+ "okena-extensions",
  "okena-files",
  "okena-terminal",
  "okena-ui",
  "okena-workspace",
  "parking_lot",
  "serde",
+ "serde_json",
  "smol",
 ]
 
