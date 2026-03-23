@@ -13,41 +13,20 @@ pub use descriptions::get_action_descriptions;
 #[allow(unused_imports)]
 pub use types::{ActionDescription, KeybindingConflict, KeybindingEntry};
 
-// Define actions
+// App-level actions (handled by root view, overlay manager, sidebar)
 actions!(
     okena,
     [
         Quit,
         About,
         Cancel,
-        SendEscape,
         ToggleSidebar,
         ToggleSidebarAutoHide,
-        ToggleFullscreen,
-        FullscreenNextTerminal,
-        FullscreenPrevTerminal,
-        SplitVertical,
-        SplitHorizontal,
-        AddTab,
-        CloseTerminal,
-        MinimizeTerminal,
-        FocusNextTerminal,
-        FocusPrevTerminal,
-        FocusLeft,
-        FocusRight,
-        FocusUp,
-        FocusDown,
         NewProject,
         CreateWorktree,
         ClearFocus,
-        Copy,
-        Paste,
         ScrollUp,
         ScrollDown,
-        Search,
-        SearchNext,
-        SearchPrev,
-        CloseSearch,
         ShowKeybindings,
         ShowSessionManager,
         ShowThemeSelector,
@@ -57,11 +36,6 @@ actions!(
         ShowFileSearch,
         ShowProjectSwitcher,
         ShowDiffViewer,
-        SendTab,
-        SendBacktab,
-        ZoomIn,
-        ZoomOut,
-        ResetZoom,
         CheckForUpdates,
         InstallUpdate,
         FocusSidebar,
@@ -78,6 +52,16 @@ actions!(
         EqualizeLayout,
     ]
 );
+
+// Terminal-specific actions (defined in okena-views-terminal crate)
+pub use okena_views_terminal::actions::{
+    SendEscape, SplitVertical, SplitHorizontal, AddTab, CloseTerminal,
+    MinimizeTerminal, FocusNextTerminal, FocusPrevTerminal,
+    FocusLeft, FocusRight, FocusUp, FocusDown,
+    Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch,
+    SendTab, SendBacktab, ZoomIn, ZoomOut, ResetZoom,
+    ToggleFullscreen, FullscreenNextTerminal, FullscreenPrevTerminal,
+};
 
 /// Global keybinding configuration (thread-safe)
 static KEYBINDING_CONFIG: RwLock<Option<KeybindingConfig>> = RwLock::new(None);
