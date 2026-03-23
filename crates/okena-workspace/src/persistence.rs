@@ -825,6 +825,7 @@ mod tests {
         let mut p = make_project(id);
         p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
             branch_name: String::new(),
@@ -840,6 +841,7 @@ mod tests {
         wt_project.path = "/nonexistent/path/that/does/not/exist".to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -865,6 +867,7 @@ mod tests {
         wt_project.path = "/nonexistent/path".to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
@@ -895,6 +898,7 @@ mod tests {
         wt_project.path = tmp.to_string_lossy().to_string();
         wt_project.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/test".to_string(),
             worktree_path: String::new(),
             branch_name: "some-branch".to_string(),
