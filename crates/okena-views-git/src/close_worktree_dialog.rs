@@ -147,6 +147,9 @@ impl CloseWorktreeDialog {
             .map(|p| p.hooks.clone())
             .unwrap_or_default();
         let global_hooks = self.hooks_config.clone();
+        let folder = ws.folder_for_project_or_parent(&project_id);
+        let folder_id = folder.map(|f| f.id.clone());
+        let folder_name = folder.map(|f| f.name.clone());
         let monitor = hooks::try_monitor(cx);
         let runner = hooks::try_runner(cx);
 
@@ -223,6 +226,8 @@ impl CloseWorktreeDialog {
                     let branch = branch.clone();
                     let default_branch = default_branch.clone();
                     let main_repo_path = main_repo_path.clone();
+                    let folder_id = folder_id.clone();
+                    let folder_name = folder_name.clone();
                     let monitor = monitor.clone();
                     move || {
                         // Sync hooks run headlessly (no PTY) — they block the flow
@@ -236,6 +241,8 @@ impl CloseWorktreeDialog {
                             &branch,
                             &default_branch,
                             &main_repo_path,
+                            folder_id.as_deref(),
+                            folder_name.as_deref(),
                             monitor.as_ref(),
                             None,
                         )
@@ -285,6 +292,8 @@ impl CloseWorktreeDialog {
                         &default_branch,
                         &main_repo_path,
                         &e,
+                        folder_id.as_deref(),
+                        folder_name.as_deref(),
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
@@ -351,6 +360,8 @@ impl CloseWorktreeDialog {
                     &branch,
                     &default_branch,
                     &main_repo_path,
+                    folder_id.as_deref(),
+                    folder_name.as_deref(),
                     monitor.as_ref(),
                     runner.as_ref(),
                 );
@@ -429,6 +440,8 @@ impl CloseWorktreeDialog {
                         &project_path,
                         &branch,
                         &main_repo_path,
+                        folder_id.as_deref(),
+                        folder_name.as_deref(),
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
@@ -465,6 +478,8 @@ impl CloseWorktreeDialog {
                         let project_path = project_path.clone();
                         let branch = branch.clone();
                         let main_repo_path = main_repo_path.clone();
+                        let folder_id = folder_id.clone();
+                        let folder_name = folder_name.clone();
                         let monitor = monitor.clone();
                         move || {
                             hooks::fire_before_worktree_remove(
@@ -475,6 +490,8 @@ impl CloseWorktreeDialog {
                                 &project_path,
                                 &branch,
                                 &main_repo_path,
+                                folder_id.as_deref(),
+                                folder_name.as_deref(),
                                 monitor.as_ref(),
                                 None,
                             )
@@ -504,6 +521,8 @@ impl CloseWorktreeDialog {
                         &project_name,
                         &project_path,
                         &branch,
+                        folder_id.as_deref(),
+                        folder_name.as_deref(),
                         monitor.as_ref(),
                         runner.as_ref(),
                     );
@@ -539,6 +558,8 @@ impl CloseWorktreeDialog {
                                 &project_path,
                                 &branch,
                                 &main_repo_path,
+                                folder_id.as_deref(),
+                                folder_name.as_deref(),
                                 monitor.as_ref(),
                                 runner.as_ref(),
                             );

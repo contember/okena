@@ -459,7 +459,10 @@ pub fn spawn_uninitialized_terminals(
     // Resolve shell_wrapper and on_create once for all terminals in this project
     let shell_wrapper = hooks::resolve_shell_wrapper(&project_hooks, parent_hooks.as_ref(), &global_hooks);
     let on_create_cmd = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &global_hooks, cx);
-    let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree);
+    let folder = ws.folder_for_project_or_parent(project_id);
+    let folder_id = folder.map(|f| f.id.as_str());
+    let folder_name = folder.map(|f| f.name.as_str());
+    let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree, folder_id, folder_name);
 
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {

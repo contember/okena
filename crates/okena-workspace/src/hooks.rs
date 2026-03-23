@@ -207,8 +207,10 @@ pub fn terminal_hook_env(
     project_name: &str,
     project_path: &str,
     is_worktree: bool,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
 ) -> HashMap<String, String> {
-    let mut env = project_env(project_id, project_name, project_path);
+    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
     if is_worktree {
         let path = std::path::Path::new(project_path);
         let branch = okena_git::get_git_status(path)
@@ -542,11 +544,23 @@ fn run_hook_sync(
 }
 
 /// Build standard environment variables for a project hook.
-fn project_env(project_id: &str, project_name: &str, project_path: &str) -> HashMap<String, String> {
+fn project_env(
+    project_id: &str,
+    project_name: &str,
+    project_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
+) -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert("OKENA_PROJECT_ID".into(), project_id.into());
     env.insert("OKENA_PROJECT_NAME".into(), project_name.into());
     env.insert("OKENA_PROJECT_PATH".into(), project_path.into());
+    if let Some(id) = folder_id {
+        env.insert("OKENA_FOLDER_ID".into(), id.into());
+    }
+    if let Some(name) = folder_name {
+        env.insert("OKENA_FOLDER_NAME".into(), name.into());
+    }
     env
 }
 
@@ -556,11 +570,13 @@ pub fn fire_on_project_open(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     global_hooks: &HooksConfig,
     cx: &App,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_open) {
-        let env = project_env(project_id, project_name, project_path);
+        let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_open hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
         let runner = try_runner(cx);
@@ -578,11 +594,13 @@ pub fn fire_on_project_close(
     project_id: &str,
     project_name: &str,
     project_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     global_hooks: &HooksConfig,
     cx: &App,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.project.on_close) {
-        let env = project_env(project_id, project_name, project_path);
+        let env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         log::info!("Running on_project_close hook for project '{}'", project_name);
         let monitor = try_monitor(cx);
         run_hook(cmd, env, monitor.as_ref(), "on_project_close", project_name, None, project_id, true);
@@ -596,11 +614,13 @@ pub fn fire_on_worktree_create(
     project_name: &str,
     project_path: &str,
     branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     global_hooks: &HooksConfig,
     cx: &App,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_create) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_create hook for branch '{}'", branch);
         let monitor = try_monitor(cx);
@@ -620,11 +640,13 @@ pub fn fire_on_worktree_close(
     project_name: &str,
     project_path: &str,
     branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     global_hooks: &HooksConfig,
     cx: &App,
 ) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_close) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_worktree_close hook for project '{}' (branch: {})", project_name, branch);
         let monitor = try_monitor(cx);
@@ -646,8 +668,10 @@ fn merge_env(
     branch: &str,
     target_branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
 ) -> HashMap<String, String> {
-    let mut env = project_env(project_id, project_name, project_path);
+    let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
     env.insert("OKENA_BRANCH".into(), branch.into());
     env.insert("OKENA_TARGET_BRANCH".into(), target_branch.into());
     env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
@@ -664,11 +688,13 @@ pub fn fire_pre_merge(
     branch: &str,
     target_branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.pre_merge) {
-        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
+        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
         log::info!("Running pre_merge hook for project '{}'", project_name);
         return run_hook_sync(&cmd, env, monitor, "pre_merge", project_name, runner, project_id);
     }
@@ -685,11 +711,13 @@ pub fn fire_post_merge(
     branch: &str,
     target_branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.post_merge) {
-        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
+        let env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
         log::info!("Running post_merge hook for project '{}'", project_name);
         if let Some(result) = run_hook(cmd, env, monitor, "post_merge", project_name, runner, project_id, true) {
             return vec![result];
@@ -707,11 +735,13 @@ pub fn fire_before_worktree_remove(
     project_path: &str,
     branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Result<Option<HookTerminalResult>, String> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
         log::info!("Running before_worktree_remove hook for project '{}'", project_name);
@@ -731,11 +761,13 @@ pub fn fire_before_worktree_remove_async(
     project_path: &str,
     branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.before_remove) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
         log::info!("Running before_worktree_remove hook (async) for project '{}'", project_name);
@@ -759,11 +791,13 @@ pub fn fire_on_rebase_conflict(
     target_branch: &str,
     main_repo_path: &str,
     rebase_error: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_rebase_conflict) {
-        let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path);
+        let mut env = merge_env(project_id, project_name, project_path, branch, target_branch, main_repo_path, folder_id, folder_name);
         env.insert("OKENA_REBASE_ERROR".into(), rebase_error.into());
         log::info!("Running on_rebase_conflict hook for project '{}'", project_name);
         return run_hook_actions(&cmd, env, monitor, "on_rebase_conflict", project_name, runner, project_id, true);
@@ -781,11 +815,13 @@ pub fn fire_on_dirty_worktree_close(
     project_name: &str,
     project_path: &str,
     branch: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> (Vec<(String, HashMap<String, String>)>, Vec<HookTerminalResult>) {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.on_dirty_close) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         log::info!("Running on_dirty_worktree_close hook for project '{}'", project_name);
         return run_hook_actions(&cmd, env, monitor, "on_dirty_worktree_close", project_name, runner, project_id, true);
@@ -802,11 +838,13 @@ pub fn fire_worktree_removed(
     project_path: &str,
     branch: &str,
     main_repo_path: &str,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     monitor: Option<&HookMonitor>,
     runner: Option<&HookRunner>,
 ) -> Vec<HookTerminalResult> {
     if let Some(cmd) = resolve_hook(project_hooks, global_hooks, |h| &h.worktree.after_remove) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_BRANCH".into(), branch.into());
         env.insert("OKENA_MAIN_REPO_PATH".into(), main_repo_path.into());
         log::info!("Running worktree_removed hook for project '{}'", project_name);
@@ -861,11 +899,13 @@ pub fn fire_terminal_on_close(
     terminal_name: Option<&str>,
     is_worktree: bool,
     exit_code: Option<u32>,
+    folder_id: Option<&str>,
+    folder_name: Option<&str>,
     global_hooks: &HooksConfig,
     cx: &App,
 ) {
     if let Some(cmd) = resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_close) {
-        let mut env = project_env(project_id, project_name, project_path);
+        let mut env = project_env(project_id, project_name, project_path, folder_id, folder_name);
         env.insert("OKENA_TERMINAL_ID".into(), terminal_id.into());
         if let Some(name) = terminal_name {
             env.insert("OKENA_TERMINAL_NAME".into(), name.into());

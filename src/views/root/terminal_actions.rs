@@ -72,7 +72,7 @@ impl RootView {
         );
 
         // Get project info for hooks
-        let (project_name, project_hooks, parent_hooks, is_worktree) = {
+        let (project_name, project_hooks, parent_hooks, is_worktree, folder_id, folder_name) = {
             let ws = self.workspace.read(cx);
             let project = ws.project(project_id);
             let name = project.map(|p| p.name.clone()).unwrap_or_default();
@@ -82,10 +82,13 @@ impl RootView {
                 .and_then(|wt| ws.project(&wt.parent_project_id))
                 .map(|p| p.hooks.clone());
             let is_wt = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
-            (name, hooks_cfg, parent, is_wt)
+            let folder = ws.folder_for_project_or_parent(project_id);
+            let fid = folder.map(|f| f.id.clone());
+            let fname = folder.map(|f| f.name.clone());
+            (name, hooks_cfg, parent, is_wt, fid, fname)
         };
 
-        let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree);
+        let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree, folder_id.as_deref(), folder_name.as_deref());
 
         // Apply shell_wrapper if configured
         let global_hooks = settings(cx).hooks;
