@@ -669,6 +669,94 @@ impl PtyManager {
         }
     }
 
+    /// Batch version of `get_service_pids` for multiple terminals at once.
+    /// On Linux with dtach, reads `/proc` once instead of spawning `lsof` per terminal.
+    pub fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        #[cfg(unix)]
+        {
+            match self.session_backend {
+                ResolvedBackend::Dtach => {
+                    return self.get_batch_dtach_service_pids(terminal_ids);
+                }
+                _ => {}
+            }
+        }
+        // Fallback: call per-terminal method
+        terminal_ids
+            .iter()
+            .map(|tid| (tid.to_string(), self.get_service_pids(tid)))
+            .collect()
+    }
+
+    /// Batch dtach PID lookup. On Linux, reads `/proc/net/unix` + `/proc/*/fd/`
+    /// once for all sockets. On other Unix, falls back to lsof per terminal.
+    #[cfg(unix)]
+    fn get_batch_dtach_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        // Collect socket paths for all terminals
+        let mut socket_to_terminal: HashMap<std::path::PathBuf, &str> = HashMap::new();
+        let mut attach_pids: HashMap<&str, Option<u32>> = HashMap::new();
+
+        for &tid in terminal_ids {
+            let session_name = self.session_backend.session_name(tid);
+            if let Some(p) = self.session_backend.socket_path(&session_name) {
+                if p.exists() {
+                    socket_to_terminal.insert(p, tid);
+                    attach_pids.insert(tid, self.get_shell_pid(tid));
+                }
+            }
+        }
+
+        // Resolve PIDs for all sockets at once
+        let socket_pids = find_pids_for_unix_sockets(
+            &socket_to_terminal.keys().cloned().collect::<Vec<_>>(),
+        );
+
+        // Build result map
+        let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+        for (&tid, _) in &attach_pids {
+            let session_name = self.session_backend.session_name(tid);
+            let socket_path = match self.session_backend.socket_path(&session_name) {
+                Some(p) => p,
+                None => {
+                    result.insert(
+                        tid.to_string(),
+                        self.get_shell_pid(tid).into_iter().collect(),
+                    );
+                    continue;
+                }
+            };
+
+            let attach_pid = attach_pids.get(tid).copied().flatten();
+            let pids: Vec<u32> = socket_pids
+                .get(&socket_path)
+                .map(|pids| {
+                    pids.iter()
+                        .copied()
+                        .filter(|pid| Some(*pid) != attach_pid)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if pids.is_empty() {
+                result.insert(
+                    tid.to_string(),
+                    self.get_shell_pid(tid).into_iter().collect(),
+                );
+            } else {
+                result.insert(tid.to_string(), pids);
+            }
+        }
+
+        // Terminals without a valid socket path
+        for &tid in terminal_ids {
+            result
+                .entry(tid.to_string())
+                .or_insert_with(|| self.get_shell_pid(tid).into_iter().collect());
+        }
+
+        result
+    }
+
     /// Check if the session backend handles mouse events (tmux with mouse on)
     pub fn uses_mouse_backend(&self) -> bool {
         matches!(self.session_backend, ResolvedBackend::Tmux)
@@ -845,5 +933,181 @@ fn wait_for_exit_code(pid: u32) -> Option<u32> {
         let _ = pid;
         None
     }
+}
+
+/// Find which PIDs have the given Unix sockets open.
+///
+/// On Linux, reads `/proc/net/unix` to map socket paths to inode numbers,
+/// then scans `/proc/*/fd/` to find PIDs holding those inodes.
+/// On other Unix systems, falls back to a single `lsof` invocation.
+#[cfg(unix)]
+fn find_pids_for_unix_sockets(
+    socket_paths: &[std::path::PathBuf],
+) -> HashMap<std::path::PathBuf, Vec<u32>> {
+    if socket_paths.is_empty() {
+        return HashMap::new();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        find_pids_for_unix_sockets_linux(socket_paths)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        find_pids_for_unix_sockets_lsof(socket_paths)
+    }
+}
+
+/// Linux implementation: read `/proc/net/unix` and `/proc/*/fd/` — no subprocess spawning.
+#[cfg(target_os = "linux")]
+fn find_pids_for_unix_sockets_linux(
+    socket_paths: &[std::path::PathBuf],
+) -> HashMap<std::path::PathBuf, Vec<u32>> {
+    // Step 1: Read /proc/net/unix to find inodes for our socket paths.
+    // Format: "Num RefCount Protocol Flags Type St Inode Path"
+    let proc_net = match std::fs::read_to_string("/proc/net/unix") {
+        Ok(s) => s,
+        Err(_) => return HashMap::new(),
+    };
+
+    // Build a set of canonical socket paths for fast lookup
+    let canonical_paths: HashMap<std::path::PathBuf, &std::path::PathBuf> = socket_paths
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok().map(|c| (c, p)))
+        .collect();
+
+    // Map inode -> original socket path
+    let mut inode_to_path: HashMap<u64, &std::path::PathBuf> = HashMap::new();
+    for line in proc_net.lines().skip(1) {
+        // Fields are space-separated; path is the last field (may be absent)
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 8 {
+            continue;
+        }
+        let inode: u64 = match fields[6].parse() {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let path_str = fields[7];
+        let path = std::path::Path::new(path_str);
+
+        // Check against canonical paths
+        if let Some(&orig) = canonical_paths.get(path) {
+            inode_to_path.insert(inode, orig);
+        } else if let Ok(canon) = std::fs::canonicalize(path) {
+            if let Some(&orig) = canonical_paths.get(&canon) {
+                inode_to_path.insert(inode, orig);
+            }
+        }
+    }
+
+    if inode_to_path.is_empty() {
+        return HashMap::new();
+    }
+
+    // Step 2: Scan /proc/*/fd/ to find PIDs that hold these inodes.
+    let mut result: HashMap<std::path::PathBuf, Vec<u32>> = HashMap::new();
+
+    let proc_dir = match std::fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+
+    for entry in proc_dir.flatten() {
+        let pid: u32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let fd_dir = entry.path().join("fd");
+        let fd_entries = match std::fs::read_dir(&fd_dir) {
+            Ok(d) => d,
+            Err(_) => continue, // permission denied or process gone
+        };
+
+        for fd_entry in fd_entries.flatten() {
+            // readlink on /proc/<pid>/fd/<n> gives "socket:[<inode>]"
+            let link = match std::fs::read_link(fd_entry.path()) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let link_str = match link.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            // Parse "socket:[12345]"
+            if let Some(inode_str) = link_str
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                if let Ok(inode) = inode_str.parse::<u64>() {
+                    if let Some(&socket_path) = inode_to_path.get(&inode) {
+                        result
+                            .entry(socket_path.clone())
+                            .or_default()
+                            .push(pid);
+                    }
+                    // Early exit if we found all inodes
+                    // (not worth the bookkeeping for a small set)
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Fallback for non-Linux Unix: single `lsof` call for all sockets.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn find_pids_for_unix_sockets_lsof(
+    socket_paths: &[std::path::PathBuf],
+) -> HashMap<std::path::PathBuf, Vec<u32>> {
+    // lsof can take multiple file arguments at once
+    let mut cmd = crate::process::command("lsof");
+    cmd.arg("-t");
+    for path in socket_paths {
+        cmd.arg(path);
+    }
+
+    let output = match crate::process::safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
+
+    // lsof -t with multiple files just lists PIDs (no file association).
+    // We need per-file results, so use full output instead.
+    drop(output);
+
+    let mut cmd = crate::process::command("lsof");
+    cmd.arg("-F").arg("pn"); // machine-readable: p=PID, n=name fields
+    for path in socket_paths {
+        cmd.arg(path);
+    }
+
+    let output = match crate::process::safe_output(&mut cmd) {
+        Ok(o) if o.status.success() => o,
+        _ => return HashMap::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result: HashMap<std::path::PathBuf, Vec<u32>> = HashMap::new();
+    let mut current_pid: Option<u32> = None;
+
+    // lsof -F output: lines starting with 'p' = PID, 'n' = name (path)
+    for line in stdout.lines() {
+        if let Some(pid_str) = line.strip_prefix('p') {
+            current_pid = pid_str.parse().ok();
+        } else if let Some(name) = line.strip_prefix('n') {
+            if let Some(pid) = current_pid {
+                let path = std::path::PathBuf::from(name);
+                if socket_paths.contains(&path) {
+                    result.entry(path).or_default().push(pid);
+                }
+            }
+        }
+    }
+
+    result
 }
 

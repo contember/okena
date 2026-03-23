@@ -868,10 +868,20 @@ impl ServiceManager {
                 let results: Vec<((String, String), Vec<u16>)> = cx
                     .background_executor()
                     .spawn(async move {
-                        // Get root PIDs per service (may spawn lsof/tmux per terminal)
+                        // Get root PIDs for all services in one batch.
+                        // On Linux+dtach this reads /proc once instead of spawning lsof per terminal.
+                        let terminal_ids: Vec<&str> =
+                            services.iter().map(|(_, tid)| tid.as_str()).collect();
+                        let batch_pids = backend_ref.get_batch_service_pids(&terminal_ids);
                         let service_root_pids: Vec<((String, String), Vec<u32>)> = services
                             .iter()
-                            .map(|(key, tid)| (key.clone(), backend_ref.get_service_pids(tid)))
+                            .map(|(key, tid)| {
+                                let pids = batch_pids
+                                    .get(tid.as_str())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                (key.clone(), pids)
+                            })
                             .collect();
 
                         // Build process tree ONCE for all services

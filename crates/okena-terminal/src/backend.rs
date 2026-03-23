@@ -2,6 +2,7 @@ use crate::terminal::TerminalTransport;
 use crate::pty_manager::PtyManager;
 use crate::shell_config::ShellType;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,6 +20,14 @@ pub trait TerminalBackend: Send + Sync {
     /// Get root PIDs for port detection. With session backends (dtach/tmux),
     /// this returns the daemon/pane PID instead of the attach client PID.
     fn get_service_pids(&self, terminal_id: &str) -> Vec<u32>;
+    /// Batch version of `get_service_pids` — returns root PIDs for multiple terminals at once.
+    /// On Linux with dtach, this reads `/proc` once instead of spawning `lsof` per terminal.
+    fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        terminal_ids
+            .iter()
+            .map(|tid| (tid.to_string(), self.get_service_pids(tid)))
+            .collect()
+    }
 }
 
 /// Local backend wrapping PtyManager for local terminal processes.
@@ -67,5 +76,9 @@ impl TerminalBackend for LocalBackend {
 
     fn get_service_pids(&self, terminal_id: &str) -> Vec<u32> {
         self.pty_manager.get_service_pids(terminal_id)
+    }
+
+    fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        self.pty_manager.get_batch_service_pids(terminal_ids)
     }
 }
