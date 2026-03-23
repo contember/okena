@@ -522,7 +522,10 @@ impl Okena {
                                                 .map(|pp| pp.hooks.clone());
                                             let terminal_name = p.terminal_names.get(tid).cloned();
                                             let is_worktree = p.worktree_info.is_some();
-                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), terminal_name, is_worktree, *exit_code))
+                                            let folder = ws.folder_for_project_or_parent(&p.id);
+                                            let fid = folder.map(|f| f.id.clone());
+                                            let fname = folder.map(|f| f.name.clone());
+                                            Some((p.hooks.clone(), parent_hooks, p.id.clone(), p.name.clone(), p.path.clone(), tid.clone(), terminal_name, is_worktree, *exit_code, fid, fname))
                                         } else {
                                             None
                                         }
@@ -530,18 +533,23 @@ impl Okena {
                                 })
                                 .collect()
                         };
-                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, terminal_name, is_worktree, exit_code) in terminal_close_infos {
+                        for (project_hooks, parent_hooks, project_id, project_name, project_path, terminal_id, terminal_name, is_worktree, exit_code, folder_id, folder_name) in terminal_close_infos {
                             crate::workspace::hooks::fire_terminal_on_close(
                                 &project_hooks, parent_hooks.as_ref(), &project_id, &project_name,
-                                &project_path, &terminal_id, terminal_name.as_deref(), is_worktree, exit_code, &crate::settings::settings(cx).hooks, cx,
+                                &project_path, &terminal_id, terminal_name.as_deref(), is_worktree, exit_code,
+                                folder_id.as_deref(), folder_name.as_deref(), &crate::settings::settings(cx).hooks, cx,
                             );
                         }
 
-                        // Remove UI Terminals for non-service, non-hook terminals
+                        // Kill session backends and remove UI Terminals for non-service, non-hook terminals.
+                        // This is critical for dtach: the PTY exit only means the client disconnected,
+                        // but the dtach daemon keeps running. kill() ensures kill_session() is called
+                        // to SIGTERM the daemon and remove the socket file.
                         {
                             let mut reg = this.terminals.lock();
                             for (terminal_id, _) in &exit_events {
                                 if !service_tids.contains(terminal_id) && !hook_tids.contains(terminal_id) {
+                                    this.pty_manager.kill(terminal_id);
                                     reg.remove(terminal_id);
                                 }
                             }
@@ -624,6 +632,9 @@ impl Okena {
 
                 // Check for pending worktree close tied to this hook terminal
                 let pending = ws.take_pending_worktree_close(&tid)?;
+                let folder = ws.folder_for_project_or_parent(&pending.project_id);
+                let hook_folder_id = folder.map(|f| f.id.clone());
+                let hook_folder_name = folder.map(|f| f.name.clone());
                 let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
                     .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
                     .unwrap_or((None, None));
@@ -632,15 +643,15 @@ impl Okena {
                     // Collect remaining hook terminal IDs before deleting the project
                     let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
                     ws.delete_project(&pending.project_id, &settings(cx).hooks, cx);
-                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids))
+                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
                 } else {
                     ws.closing_projects.remove(&pending.project_id);
                     None
                 }
             });
 
-            if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids)) = pending_data {
-                self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, cx);
+            if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
+                self.handle_pending_close_result(&tid, pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name, cx);
             }
             // Hook terminal persists — no auto-cleanup. User can dismiss manually or rerun.
         }
@@ -656,6 +667,8 @@ impl Okena {
         project_path_for_git: Option<String>,
         hook_info: Option<(crate::workspace::persistence::HooksConfig, String, String)>,
         remaining_hook_tids: Vec<String>,
+        folder_id: Option<String>,
+        folder_name: Option<String>,
         cx: &mut Context<Self>,
     ) {
         log::info!("Pending worktree close: hook succeeded, removing project {}", pending.project_id);
@@ -680,6 +693,8 @@ impl Okena {
                 &project_name,
                 &project_path,
                 &pending.branch,
+                folder_id.as_deref(),
+                folder_name.as_deref(),
                 &global_hooks,
                 cx,
             );
@@ -691,6 +706,8 @@ impl Okena {
                 &project_path,
                 &pending.branch,
                 &pending.main_repo_path,
+                folder_id.as_deref(),
+                folder_name.as_deref(),
                 monitor.as_ref(),
                 runner.as_ref(),
             );

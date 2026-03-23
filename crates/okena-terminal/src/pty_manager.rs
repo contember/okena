@@ -113,7 +113,7 @@ impl PtyManager {
             std::thread::Builder::new()
                 .name("dtach-socket-gc".into())
                 .spawn(|| {
-                    crate::terminal::session_backend::cleanup_stale_dtach_sockets();
+                    crate::session_backend::cleanup_stale_dtach_sockets();
                 })
                 .ok();
         }

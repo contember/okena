@@ -360,7 +360,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         );
 
         // Read fresh path and project info from workspace state
-        let (project_path, project_name, project_hooks, parent_hooks, is_worktree) = {
+        let (project_path, project_name, project_hooks, parent_hooks, is_worktree, folder_id, folder_name) = {
             let project = ws.project(&self.project_id);
             let path = project.map(|p| p.path.clone())
                 .unwrap_or_else(|| self.project_path.clone());
@@ -371,10 +371,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 .and_then(|wt| ws.project(&wt.parent_project_id))
                 .map(|p| p.hooks.clone());
             let is_wt = project.map(|p| p.worktree_info.is_some()).unwrap_or(false);
-            (path, name, hooks_cfg, parent, is_wt)
+            let folder = ws.folder_for_project_or_parent(&self.project_id);
+            let fid = folder.map(|f| f.id.clone());
+            let fname = folder.map(|f| f.name.clone());
+            (path, name, hooks_cfg, parent, is_wt, fid, fname)
         };
 
-        let env = hooks::terminal_hook_env(&self.project_id, &project_name, &project_path, is_worktree);
+        let env = hooks::terminal_hook_env(&self.project_id, &project_name, &project_path, is_worktree, folder_id.as_deref(), folder_name.as_deref());
 
         // Apply shell_wrapper if configured
         let global_hooks = settings.hooks;

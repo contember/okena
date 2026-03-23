@@ -853,9 +853,18 @@ impl Workspace {
     }
 
     /// Find which folder (if any) contains a given project
-    #[allow(dead_code)]
     pub fn folder_for_project(&self, project_id: &str) -> Option<&FolderData> {
         self.data.folders.iter().find(|f| f.project_ids.contains(&project_id.to_string()))
+    }
+
+    /// Find folder for a project, falling back to the parent project's folder for worktrees.
+    pub fn folder_for_project_or_parent(&self, project_id: &str) -> Option<&FolderData> {
+        self.folder_for_project(project_id)
+            .or_else(|| {
+                self.project(project_id)
+                    .and_then(|p| p.worktree_info.as_ref())
+                    .and_then(|wt| self.folder_for_project(&wt.parent_project_id))
+            })
     }
 
     /// Collect all detached terminals across all projects by traversing layout trees.

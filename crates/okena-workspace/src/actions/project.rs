@@ -82,7 +82,10 @@ impl Workspace {
         self.data.project_order.push(id.clone());
         self.notify_data(cx);
 
-        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, global_hooks, cx);
+        let folder = self.folder_for_project_or_parent(&id);
+        let folder_id = folder.map(|f| f.id.as_str());
+        let folder_name = folder.map(|f| f.name.as_str());
+        let hook_results = hooks::fire_on_project_open(&project_hooks, &id, &name, &path, folder_id, folder_name, global_hooks, cx);
         self.register_hook_results(hook_results, cx);
         id
     }
@@ -205,6 +208,9 @@ impl Workspace {
     /// Delete a project
     pub fn delete_project(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         // Capture project info before removal for the hook
+        let folder = self.folder_for_project_or_parent(project_id);
+        let hook_folder_id = folder.map(|f| f.id.clone());
+        let hook_folder_name = folder.map(|f| f.name.clone());
         let hook_info = self.project(project_id).map(|p| {
             (p.hooks.clone(), p.id.clone(), p.name.clone(), p.path.clone())
         });
@@ -250,7 +256,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some((project_hooks, id, name, path)) = hook_info {
-            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, global_hooks, cx);
+            hooks::fire_on_project_close(&project_hooks, &id, &name, &path, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
         }
     }
 
@@ -467,12 +473,17 @@ impl Workspace {
         self.notify_data(cx);
 
         if fire_hooks {
+            let folder = self.folder_for_project_or_parent(&id);
+            let folder_id = folder.map(|f| f.id.as_str());
+            let folder_name = folder.map(|f| f.name.as_str());
             let hook_results = hooks::fire_on_worktree_create(
                 &new_project_hooks,
                 &id,
                 &new_project_name,
                 project_path,
                 branch,
+                folder_id,
+                folder_name,
                 global_hooks,
                 cx,
             );
@@ -505,12 +516,17 @@ impl Workspace {
             }
         }
 
+        let folder = self.folder_for_project_or_parent(project_id);
+        let folder_id = folder.map(|f| f.id.as_str());
+        let folder_name = folder.map(|f| f.name.as_str());
         let hook_results = hooks::fire_on_worktree_create(
             &hooks_config,
             project_id,
             &name,
             &path,
             &branch,
+            folder_id,
+            folder_name,
             global_hooks,
             cx,
         );
@@ -637,6 +653,9 @@ impl Workspace {
         }
 
         // Capture info before removal for the hook
+        let folder = self.folder_for_project_or_parent(project_id);
+        let hook_folder_id = folder.map(|f| f.id.clone());
+        let hook_folder_name = folder.map(|f| f.name.clone());
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
@@ -654,7 +673,7 @@ impl Workspace {
         self.delete_project(project_id, global_hooks, cx);
 
         // Fire worktree-specific hook (runs headlessly since project is deleted)
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, global_hooks, cx);
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
 
         Ok(())
     }

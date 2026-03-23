@@ -80,6 +80,8 @@ Hooks receive context through environment variables. The working directory is se
 | `OKENA_PROJECT_ID` | Unique ID of the project |
 | `OKENA_PROJECT_NAME` | Display name of the project |
 | `OKENA_PROJECT_PATH` | Filesystem path to the project |
+| `OKENA_FOLDER_ID` | ID of the folder containing the project (if any) |
+| `OKENA_FOLDER_NAME` | Display name of the folder (if any) |
 
 ### Worktree and branch variables
 
@@ -107,21 +109,21 @@ Available on worktree and merge hooks.
 
 ### Variable availability by hook
 
-| Hook | `PROJECT_*` | `BRANCH` | `TARGET_BRANCH` | `MAIN_REPO_PATH` | `REBASE_ERROR` | `TERMINAL_ID` | `TERMINAL_NAME` | `EXIT_CODE` |
-|------|-------------|----------|-----------------|-------------------|----------------|---------------|-----------------|-------------|
-| `on_project_open` | yes | | | | | | | |
-| `on_project_close` | yes | | | | | | | |
-| `on_worktree_create` | yes | yes | | | | | | |
-| `on_worktree_close` | yes | yes | | | | | | |
-| `pre_merge` | yes | yes | yes | yes | | | | |
-| `post_merge` | yes | yes | yes | yes | | | | |
-| `before_worktree_remove` | yes | yes | | yes | | | | |
-| `worktree_removed` | yes | yes | | yes | | | | |
-| `on_rebase_conflict` | yes | yes | yes | yes | yes | | | |
-| `on_dirty_worktree_close` | yes | yes | | | | | | |
-| `terminal.on_create` | yes | worktree | | | | | | |
-| `terminal.shell_wrapper` | yes | worktree | | | | | | |
-| `terminal.on_close` | yes | worktree | | | | yes | if set | yes |
+| Hook | `PROJECT_*` | `FOLDER_*` | `BRANCH` | `TARGET_BRANCH` | `MAIN_REPO_PATH` | `REBASE_ERROR` | `TERMINAL_ID` | `TERMINAL_NAME` | `EXIT_CODE` |
+|------|-------------|------------|----------|-----------------|-------------------|----------------|---------------|-----------------|-------------|
+| `on_project_open` | yes | if in folder | | | | | | | |
+| `on_project_close` | yes | if in folder | | | | | | | |
+| `on_worktree_create` | yes | if in folder | yes | | | | | | |
+| `on_worktree_close` | yes | if in folder | yes | | | | | | |
+| `pre_merge` | yes | if in folder | yes | yes | yes | | | | |
+| `post_merge` | yes | if in folder | yes | yes | yes | | | | |
+| `before_worktree_remove` | yes | if in folder | yes | | yes | | | | |
+| `worktree_removed` | yes | if in folder | yes | | yes | | | | |
+| `on_rebase_conflict` | yes | if in folder | yes | yes | yes | yes | | | |
+| `on_dirty_worktree_close` | yes | if in folder | yes | | | | | | |
+| `terminal.on_create` | yes | if in folder | worktree | | | | | | |
+| `terminal.shell_wrapper` | yes | if in folder | worktree | | | | | | |
+| `terminal.on_close` | yes | if in folder | worktree | | | | yes | if set | yes |
 
 For `terminal.on_create` and `terminal.shell_wrapper`, environment variables are exported into the shell session so they persist after the hook command runs. For worktree projects, `OKENA_BRANCH` is included automatically.
 
