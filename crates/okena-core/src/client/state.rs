@@ -124,6 +124,8 @@ mod tests {
             projects,
             focused_project_id: None,
             fullscreen_terminal: None,
+            project_order: vec![],
+            folders: vec![],
         }
     }
 
@@ -158,6 +160,8 @@ mod tests {
             layout,
             terminal_names: Default::default(),
             git_status: None,
+            folder_color: Default::default(),
+            services: vec![],
         }
     }
 
