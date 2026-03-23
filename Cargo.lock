@@ -4535,6 +4535,7 @@ dependencies = [
  "okena-remote-client",
  "okena-services",
  "okena-terminal",
+ "okena-theme",
  "okena-ui",
  "okena-views-git",
  "okena-views-services",
@@ -4725,6 +4726,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-theme"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "dirs 5.0.1",
+ "gpui",
+ "log",
+ "okena-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "okena-ui"
 version = "0.1.0"
 dependencies = [
@@ -4732,6 +4746,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+ "okena-theme",
  "smol",
 ]
 

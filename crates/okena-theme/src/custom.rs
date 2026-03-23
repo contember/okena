@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use super::{ThemeColors, ThemeInfo};
+use okena_core::theme::{ThemeColors, ThemeInfo};
 
 /// Custom theme configuration file format
 #[derive(Clone, Debug, Serialize, Deserialize)]
