@@ -9,3 +9,4 @@ okena-core = { path = "../okena-core" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 alacritty_terminal = "0.25"
+smol = "2.0"

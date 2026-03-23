@@ -9,10 +9,6 @@ use crate::selection::SelectionState;
 use crate::syntax::{HighlightedLine, HighlightedSpan};
 use gpui::*;
 
-/// Check if a character is a "word" character (alphanumeric or underscore).
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
 
 /// Type alias for code selection (line index, column).
 pub type CodeSelection = SelectionState<(usize, usize)>;
@@ -249,35 +245,7 @@ pub fn get_selected_text(lines: &[HighlightedLine], selection: &CodeSelection) -
     extract_selected_text(selection, lines.len(), |i| &lines[i].plain_text)
 }
 
-/// Find word boundaries around a column position in a text string.
-///
-/// Word characters are alphanumeric or underscore. Returns (start, end) byte
-/// offsets bounding the word at `col` (character offset).
-pub fn find_word_boundaries(text: &str, col: usize) -> (usize, usize) {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return (0, 0);
-    }
-    let col = col.min(chars.len().saturating_sub(1));
-
-    // Scan backwards for start
-    let mut start = col;
-    while start > 0 && is_word_char(chars[start - 1]) {
-        start -= 1;
-    }
-    // If cursor is on a non-word char, don't extend backwards
-    if !is_word_char(chars[col]) {
-        start = col;
-    }
-
-    // Scan forwards for end
-    let mut end = col;
-    while end < chars.len() && is_word_char(chars[end]) {
-        end += 1;
-    }
-
-    (start, end)
-}
+pub use okena_ui::text_utils::find_word_boundaries;
 
 #[cfg(test)]
 mod tests {

@@ -4713,12 +4713,14 @@ dependencies = [
  "gpui",
  "gpui-component",
  "okena-core",
+ "smol",
 ]
 
 [[package]]
 name = "okena-views-git"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
  "gpui-component",
  "log",
@@ -4733,6 +4735,7 @@ dependencies = [
  "serde_json",
  "smol",
  "syntect",
+ "tokio",
 ]
 
 [[package]]

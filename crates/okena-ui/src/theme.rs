@@ -17,6 +17,18 @@ pub fn with_alpha(hex: u32, alpha: f32) -> Hsla {
     Hsla::from(Rgba { a: alpha, ..rgba })
 }
 
+/// Global theme provider -- a function pointer that reads the current theme colors.
+/// The host app registers this at startup; crate views call `theme()` to read colors.
+pub struct GlobalThemeProvider(pub fn(&App) -> ThemeColors);
+
+impl Global for GlobalThemeProvider {}
+
+/// Get current theme colors.
+/// Panics if `GlobalThemeProvider` has not been set by the host app.
+pub fn theme(cx: &App) -> ThemeColors {
+    (cx.global::<GlobalThemeProvider>().0)(cx)
+}
+
 /// Convert ANSI color to GPUI Hsla using theme colors.
 /// GPUI-specific wrapper around `ThemeColors::ansi_to_argb`.
 pub fn ansi_to_hsla(theme: &ThemeColors, color: &alacritty_terminal::vte::ansi::Color) -> Hsla {

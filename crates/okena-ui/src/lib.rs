@@ -5,6 +5,8 @@
 pub mod badge;
 pub mod button;
 pub mod chip;
+pub mod simple_input;
+pub mod text_utils;
 pub mod click_detector;
 pub mod color_utils;
 pub mod header_buttons;

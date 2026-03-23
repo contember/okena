@@ -28,7 +28,7 @@ pub mod project_switcher;
 pub mod session_manager;
 pub mod settings_panel;
 pub mod shell_selector_overlay;
-mod terminal_overlay_utils;
+pub mod terminal_overlay_utils;
 pub mod theme_selector;
 pub mod remote_connect_dialog;
 pub mod remote_context_menu;

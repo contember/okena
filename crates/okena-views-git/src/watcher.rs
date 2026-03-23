@@ -1,5 +1,5 @@
-use crate::git;
-use crate::workspace::state::Workspace;
+use okena_git::{self as git, GitStatus};
+use okena_workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-
-use super::GitStatus;
 
 /// How often to poll git status (seconds)
 const GIT_POLL_INTERVAL: u64 = 5;
@@ -30,9 +28,9 @@ pub struct GitStatusWatcher {
     workspace: Entity<Workspace>,
     statuses: HashMap<String, Option<GitStatus>>,
     /// Cached PR info keyed by project ID
-    pr_infos: HashMap<String, Option<super::PrInfo>>,
+    pr_infos: HashMap<String, Option<okena_git::PrInfo>>,
     /// Cached CI check status keyed by project ID
-    ci_checks: HashMap<String, Option<super::CiCheckSummary>>,
+    ci_checks: HashMap<String, Option<okena_git::CiCheckSummary>>,
     /// Whether any project has pending CI checks (drives adaptive polling)
     any_pending_ci: bool,
     /// Watch channel sender for remote WS push
@@ -103,7 +101,7 @@ impl GitStatusWatcher {
 
                 // Phase 2: Fetch PR info in parallel (slower, network calls) — only on PR poll cycles.
                 // Runs after all statuses are updated so git status isn't delayed by PR checks.
-                let new_pr_infos: HashMap<String, Option<super::PrInfo>> = if check_prs {
+                let new_pr_infos: HashMap<String, Option<okena_git::PrInfo>> = if check_prs {
                     let pr_futures: Vec<_> = projects.iter().map(|(id, path)| {
                         let id = id.clone();
                         let path = path.clone();
@@ -121,8 +119,8 @@ impl GitStatusWatcher {
 
                 // Phase 3: Fetch CI check status — adaptive interval based on pending state.
                 // Only for projects that have a known PR.
-                let new_ci_checks: HashMap<String, Option<super::CiCheckSummary>> = if check_ci {
-                    let pr_infos_snapshot: HashMap<String, Option<super::PrInfo>> = if check_prs {
+                let new_ci_checks: HashMap<String, Option<okena_git::CiCheckSummary>> = if check_ci {
+                    let pr_infos_snapshot: HashMap<String, Option<okena_git::PrInfo>> = if check_prs {
                         // Use freshly fetched PR info
                         new_pr_infos.clone()
                     } else {
