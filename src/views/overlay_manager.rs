@@ -58,9 +58,6 @@ impl CloseEvent for CommandPaletteEvent {
 impl CloseEvent for SettingsPanelEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Close) }
 }
-impl CloseEvent for RemoteConnectDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
-}
 impl CloseEvent for PairingDialogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Close) }
 }

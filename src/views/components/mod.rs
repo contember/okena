@@ -23,6 +23,6 @@ pub use list_overlay::{
     ListOverlayState,
 };
 pub use modal_backdrop::{modal_backdrop, modal_content, modal_header};
-pub use ui_helpers::{badge, button, button_primary, context_menu_panel, input_container, keyboard_hints_footer, labeled_input, menu_item, menu_item_with_color, menu_separator, search_input_area, search_input_area_selected};
+pub use ui_helpers::{badge, button, input_container, keyboard_hints_footer, labeled_input, menu_item, search_input_area, search_input_area_selected};
 pub use path_autocomplete::PathAutoCompleteState;
 pub use simple_input::{SimpleInput, SimpleInputState};

@@ -143,6 +143,10 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("RenameDirectoryDialog")),
         // okena-views-terminal crate Cancel for shell selector
         KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("ShellSelectorOverlay")),
+        // okena-views-remote crate Cancel actions
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteConnectDialog")),
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemotePairDialog")),
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteContextMenu")),
     ]);
 }
 

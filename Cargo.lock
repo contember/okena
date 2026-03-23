@@ -4538,6 +4538,7 @@ dependencies = [
  "okena-theme",
  "okena-ui",
  "okena-views-git",
+ "okena-views-remote",
  "okena-views-services",
  "okena-views-sidebar",
  "okena-views-terminal",
@@ -4770,6 +4771,23 @@ dependencies = [
  "smol",
  "syntect",
  "tokio",
+]
+
+[[package]]
+name = "okena-views-remote"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-core",
+ "okena-remote-client",
+ "okena-ui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
