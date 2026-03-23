@@ -523,6 +523,38 @@ fn main() {
             }).detach();
         }
 
+        // Register terminal view settings global
+        {
+            fn build_tvs(s: &okena_workspace::settings::AppSettings) -> okena_views_terminal::TerminalViewSettings {
+                okena_views_terminal::TerminalViewSettings {
+                    font_size: s.font_size,
+                    line_height: s.line_height,
+                    font_family: s.font_family.clone(),
+                    cursor_style: s.cursor_style,
+                    cursor_blink: s.cursor_blink,
+                    show_focused_border: s.show_focused_border,
+                    show_shell_selector: s.show_shell_selector,
+                    idle_timeout_secs: s.idle_timeout_secs,
+                    color_tinted_background: s.color_tinted_background,
+                    file_opener: s.file_opener.clone(),
+                    default_shell: s.default_shell.clone(),
+                    hooks: s.hooks.clone(),
+                }
+            }
+            let tvs = build_tvs(&app_settings);
+            let tvs_entity = cx.new(|_| okena_views_terminal::TerminalViewSettingsState { settings: tvs });
+            cx.set_global(okena_views_terminal::GlobalTerminalViewSettings(tvs_entity.clone()));
+
+            let se = crate::settings::settings_entity(cx);
+            cx.observe(&se, move |_, cx| {
+                let s = crate::settings::settings_entity(cx).read(cx).settings.clone();
+                tvs_entity.update(cx, |state, cx| {
+                    state.settings = build_tvs(&s);
+                    cx.notify();
+                });
+            }).detach();
+        }
+
         // Create PTY manager with session backend from settings
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
         let pty_manager = Arc::new(pty_manager);
