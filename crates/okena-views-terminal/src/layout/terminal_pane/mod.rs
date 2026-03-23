@@ -326,7 +326,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             ws.project(&self.project_id).and_then(|p| p.default_shell.as_ref()),
             &settings.default_shell,
         );
-        drop(ws);
 
         match self
             .backend
@@ -372,7 +371,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 .map(|p| p.hooks.clone());
             (path, name, hooks_cfg, parent)
         };
-        drop(ws);
 
         // Apply shell_wrapper if configured - need global hooks from settings
         // This requires accessing the main app's settings which we don't have directly.

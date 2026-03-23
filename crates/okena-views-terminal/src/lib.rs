@@ -137,16 +137,3 @@ pub fn toast_error(msg: String, cx: &mut gpui::App) {
         log::error!("{}", msg);
     }
 }
-
-/// Implement the `Focusable` trait for a type that has a `focus_handle` field.
-macro_rules! impl_focusable {
-    ($type:ty) => {
-        impl gpui::Focusable for $type {
-            fn focus_handle(&self, _cx: &gpui::App) -> gpui::FocusHandle {
-                self.focus_handle.clone()
-            }
-        }
-    };
-}
-#[allow(unused_macros)]
-pub(crate) use impl_focusable;

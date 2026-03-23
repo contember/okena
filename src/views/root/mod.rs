@@ -42,11 +42,6 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
     CONTENT_PANE_REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Register a terminal content pane for direct dirty notification.
-pub fn register_content_pane(terminal_id: String, content: WeakEntity<super::layout::terminal_pane::TerminalContent>) {
-    content_pane_registry().lock().insert(terminal_id, content);
-}
-
 /// Root view of the application
 pub struct RootView {
     workspace: Entity<Workspace>,
