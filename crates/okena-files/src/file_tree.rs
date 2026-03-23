@@ -68,7 +68,7 @@ pub fn render_folder_row(name: &str, depth: usize, t: &ThemeColors) -> AnyElemen
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(t.text_muted))
+                .text_color(rgb(t.text_secondary))
                 .child(format!("{}/", name)),
         )
         .into_any_element()
