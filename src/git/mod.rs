@@ -4,8 +4,8 @@ pub use okena_git::*;
 pub use okena_git::branch_names;
 pub use okena_git::repository;
 
-// Watcher stays in main app (depends on GPUI + Workspace)
-pub mod watcher;
+// Watcher re-exported from okena-views-git crate
+pub use okena_views_git::watcher;
 
 // Re-export color extension traits from the views-git crate so existing
 // `use crate::git::{PrStateColor, CiStatusColor}` imports keep working.
