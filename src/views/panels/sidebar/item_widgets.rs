@@ -250,6 +250,8 @@ pub fn sidebar_name_or_badge(
             .gap(px(2.0))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
