@@ -40,7 +40,7 @@ type Selection = SelectionState<(usize, usize)>;
 /// Width of file tree sidebar.
 const SIDEBAR_WIDTH: f32 = 240.0;
 
-use crate::settings::GlobalGitViewSettings;
+use crate::settings::{git_settings, set_git_settings};
 
 /// Git diff viewer overlay.
 pub struct DiffViewer {
@@ -109,11 +109,11 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let gs = cx.global::<GlobalGitViewSettings>();
-        let font_size = gs.current.file_font_size;
-        let view_mode = gs.current.diff_view_mode;
-        let ignore_whitespace = gs.current.diff_ignore_whitespace;
-        let is_dark = gs.current.is_dark;
+        let gs = git_settings(cx);
+        let font_size = gs.file_font_size;
+        let view_mode = gs.diff_view_mode;
+        let ignore_whitespace = gs.diff_ignore_whitespace;
+        let is_dark = gs.is_dark;
 
         let mut viewer = Self {
             focus_handle,
@@ -333,9 +333,10 @@ impl DiffViewer {
         self.selection.clear();
         self.selection_side = None;
         self.update_side_by_side_cache();
-        // Persist to global settings
-        let vm = self.view_mode;
-        cx.global_mut::<GlobalGitViewSettings>().update(|s| s.diff_view_mode = vm);
+        // Persist through ExtensionSettingsStore
+        let mut gs = git_settings(cx);
+        gs.diff_view_mode = self.view_mode;
+        set_git_settings(&gs, cx);
         cx.notify();
     }
 
@@ -343,9 +344,10 @@ impl DiffViewer {
         self.ignore_whitespace = !self.ignore_whitespace;
         let mode = self.diff_mode.clone();
         self.load_diff_async(mode, None, cx);
-        // Persist to global settings
-        let iw = self.ignore_whitespace;
-        cx.global_mut::<GlobalGitViewSettings>().update(|s| s.diff_ignore_whitespace = iw);
+        // Persist through ExtensionSettingsStore
+        let mut gs = git_settings(cx);
+        gs.diff_ignore_whitespace = self.ignore_whitespace;
+        set_git_settings(&gs, cx);
     }
 
     fn update_side_by_side_cache(&mut self) {

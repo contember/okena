@@ -92,8 +92,8 @@ pub trait ExtensionSettings {
 /// Global bridge for extensions to read/write their persisted settings.
 /// The host app registers an implementation at startup via `cx.set_global()`.
 pub struct ExtensionSettingsStore {
-    getter: Box<dyn Fn(&str, &App) -> Option<serde_json::Value>>,
-    setter: Box<dyn Fn(&str, serde_json::Value, &mut App)>,
+    getter: Arc<dyn Fn(&str, &App) -> Option<serde_json::Value>>,
+    setter: Arc<dyn Fn(&str, serde_json::Value, &mut App)>,
 }
 
 impl Global for ExtensionSettingsStore {}
@@ -104,8 +104,8 @@ impl ExtensionSettingsStore {
         setter: impl Fn(&str, serde_json::Value, &mut App) + 'static,
     ) -> Self {
         Self {
-            getter: Box::new(getter),
-            setter: Box::new(setter),
+            getter: Arc::new(getter),
+            setter: Arc::new(setter),
         }
     }
 
@@ -117,6 +117,18 @@ impl ExtensionSettingsStore {
     /// Write the extension's settings blob (triggers auto-save via the host).
     pub fn set(&self, extension_id: &str, value: serde_json::Value, cx: &mut App) {
         (self.setter)(extension_id, value, cx)
+    }
+
+    /// Write settings without holding a borrow on the store.
+    ///
+    /// This avoids the borrow-conflict that arises when calling
+    /// `cx.global::<Self>().set(...)` — the immutable borrow of the global
+    /// overlaps with the `&mut App` required by the setter closure.
+    pub fn update(extension_id: &str, value: serde_json::Value, cx: &mut App) {
+        // Clone the Arc to release the immutable borrow on the global
+        // before invoking the closure with `&mut App`.
+        let setter = cx.global::<Self>().setter.clone();
+        setter(extension_id, value, cx);
     }
 }
 

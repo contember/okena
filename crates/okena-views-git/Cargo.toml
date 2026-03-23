@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 okena-core = { path = "../okena-core" }
+okena-extensions = { path = "../okena-extensions" }
 okena-git = { path = "../okena-git" }
 okena-files = { path = "../okena-files" }
 okena-ui = { path = "../okena-ui" }

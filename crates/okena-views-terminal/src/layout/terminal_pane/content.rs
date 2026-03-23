@@ -1,7 +1,7 @@
 //! Terminal content component.
 
 use crate::elements::terminal_element::{LinkKind, SearchMatch, TerminalElement};
-use crate::terminal_view_settings_entity;
+use crate::terminal_view_settings;
 use okena_terminal::terminal::Terminal;
 use okena_files::theme::theme;
 use okena_ui::color_utils::tint_color;
@@ -201,7 +201,7 @@ impl TerminalContent {
                                 UrlDetector::open_url(&url_match.url);
                             }
                             LinkKind::FilePath { line, col } => {
-                                let file_opener = terminal_view_settings_entity(cx).read(cx).settings.file_opener.clone();
+                                let file_opener = terminal_view_settings(cx).file_opener.clone();
                                 UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
                             }
                         }
@@ -359,7 +359,7 @@ impl Render for TerminalContent {
             }
         };
 
-        let settings_entity = terminal_view_settings_entity(cx);
+        let render_settings = crate::terminal_view_settings(cx);
 
         div()
             .id("terminal-content")
@@ -445,7 +445,7 @@ impl Render for TerminalContent {
                                 self.url_detector.hovered_group(),
                             )
                             .with_cursor_visible(self.cursor_visible)
-                            .with_cursor_style(settings_entity.read(cx).settings.cursor_style),
+                            .with_cursor_style(render_settings.cursor_style),
                     ),
             )
             .child(self.scrollbar.clone())

@@ -234,9 +234,9 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    // Note: diff_view_mode and diff_ignore_whitespace are managed by
-    // okena_views_git::settings::GlobalGitViewSettings. Changes are synced
-    // back to AppSettings via the observer registered in main.rs.
+    // Note: diff_view_mode and diff_ignore_whitespace are managed via
+    // ExtensionSettingsStore ("git" namespace). Changes are written back
+    // to AppSettings fields by the store's setter callback in main.rs.
 
     /// Set worktree path template.
     /// Shows a migration suggestion toast when the template changes from its baseline value.
@@ -300,8 +300,9 @@ impl SettingsState {
         }
     }
 
-    /// Save and notify - common logic for all setters
-    fn save_and_notify(&mut self, cx: &mut Context<Self>) {
+    /// Save and notify - common logic for all setters.
+    /// Public so that the ExtensionSettingsStore setter callback can trigger persistence.
+    pub fn save_and_notify(&mut self, cx: &mut Context<Self>) {
         self.save_debounced(cx);
         cx.notify();
     }

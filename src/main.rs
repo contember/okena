@@ -434,20 +434,80 @@ fn main() {
             crate::theme::theme(cx)
         }));
 
-        // Register extension settings store (bridge for extensions to read/write settings)
+        // Register extension settings store (bridge for extensions and view crates to read/write settings).
+        // Known namespaces ("terminal", "git") map to/from individual AppSettings fields.
+        // Unknown namespaces fall back to the generic extension_settings map.
         cx.set_global(okena_extensions::ExtensionSettingsStore::new(
-            |ext_id, cx| {
-                settings::settings_entity(cx)
-                    .read(cx)
-                    .settings
-                    .extension_settings
-                    .get(ext_id)
-                    .cloned()
+            |namespace, cx| {
+                let s = settings::settings_entity(cx).read(cx);
+                match namespace {
+                    "terminal" => {
+                        serde_json::to_value(&okena_views_terminal::TerminalViewSettings {
+                            font_size: s.settings.font_size,
+                            line_height: s.settings.line_height,
+                            font_family: s.settings.font_family.clone(),
+                            cursor_style: s.settings.cursor_style,
+                            cursor_blink: s.settings.cursor_blink,
+                            show_focused_border: s.settings.show_focused_border,
+                            show_shell_selector: s.settings.show_shell_selector,
+                            idle_timeout_secs: s.settings.idle_timeout_secs,
+                            color_tinted_background: s.settings.color_tinted_background,
+                            file_opener: s.settings.file_opener.clone(),
+                            default_shell: s.settings.default_shell.clone(),
+                            hooks: s.settings.hooks.clone(),
+                        }).ok()
+                    }
+                    "git" => {
+                        let is_dark = crate::theme::theme(cx).is_dark();
+                        serde_json::to_value(&okena_views_git::settings::GitViewSettings {
+                            diff_view_mode: s.settings.diff_view_mode,
+                            diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
+                            file_font_size: s.settings.file_font_size,
+                            is_dark,
+                        }).ok()
+                    }
+                    _ => {
+                        s.settings.extension_settings.get(namespace).cloned()
+                    }
+                }
             },
-            |ext_id, value, cx| {
-                settings::settings_entity(cx).update(cx, |state, cx| {
-                    state.set_extension_setting(ext_id, value, cx);
-                });
+            |namespace, value, cx| {
+                match namespace {
+                    "terminal" => {
+                        if let Ok(tvs) = serde_json::from_value::<okena_views_terminal::TerminalViewSettings>(value) {
+                            settings::settings_entity(cx).update(cx, |state, cx| {
+                                state.settings.font_size = tvs.font_size;
+                                state.settings.line_height = tvs.line_height;
+                                state.settings.font_family = tvs.font_family;
+                                state.settings.cursor_style = tvs.cursor_style;
+                                state.settings.cursor_blink = tvs.cursor_blink;
+                                state.settings.show_focused_border = tvs.show_focused_border;
+                                state.settings.show_shell_selector = tvs.show_shell_selector;
+                                state.settings.idle_timeout_secs = tvs.idle_timeout_secs;
+                                state.settings.color_tinted_background = tvs.color_tinted_background;
+                                state.settings.file_opener = tvs.file_opener;
+                                state.settings.default_shell = tvs.default_shell;
+                                state.settings.hooks = tvs.hooks;
+                                state.save_and_notify(cx);
+                            });
+                        }
+                    }
+                    "git" => {
+                        if let Ok(gs) = serde_json::from_value::<okena_views_git::settings::GitViewSettings>(value) {
+                            settings::settings_entity(cx).update(cx, |state, cx| {
+                                state.settings.diff_view_mode = gs.diff_view_mode;
+                                state.settings.diff_ignore_whitespace = gs.diff_ignore_whitespace;
+                                state.settings.file_font_size = gs.file_font_size;
+                                state.save_and_notify(cx);
+                            });
+                        }
+                    }
+                    _ => {
+                        settings::settings_entity(cx).update(cx, |state, cx| {
+                            state.set_extension_setting(namespace, value, cx);
+                        });
+                    }
+                }
             },
         ));
 
@@ -497,63 +557,8 @@ fn main() {
             crate::theme::theme(cx)
         }));
 
-        // Register git view settings global
-        {
-            let se = crate::settings::settings_entity(cx);
-            let app_s = se.read(cx);
-            cx.set_global(okena_views_git::settings::GlobalGitViewSettings::new(
-                okena_views_git::settings::GitViewSettings {
-                    diff_view_mode: app_s.settings.diff_view_mode,
-                    diff_ignore_whitespace: app_s.settings.diff_ignore_whitespace,
-                    file_font_size: app_s.settings.file_font_size,
-                    is_dark: crate::theme::theme(cx).is_dark(),
-                },
-            ));
-
-            // Sync app settings → git view settings global
-            cx.observe(&se, |_, cx| {
-                let s = crate::settings::settings_entity(cx).read(cx);
-                let is_dark = crate::theme::theme(cx).is_dark();
-                cx.global_mut::<okena_views_git::settings::GlobalGitViewSettings>().current = okena_views_git::settings::GitViewSettings {
-                    diff_view_mode: s.settings.diff_view_mode,
-                    diff_ignore_whitespace: s.settings.diff_ignore_whitespace,
-                    file_font_size: s.settings.file_font_size,
-                    is_dark,
-                };
-            }).detach();
-        }
-
-        // Register terminal view settings global
-        {
-            fn build_tvs(s: &okena_workspace::settings::AppSettings) -> okena_views_terminal::TerminalViewSettings {
-                okena_views_terminal::TerminalViewSettings {
-                    font_size: s.font_size,
-                    line_height: s.line_height,
-                    font_family: s.font_family.clone(),
-                    cursor_style: s.cursor_style,
-                    cursor_blink: s.cursor_blink,
-                    show_focused_border: s.show_focused_border,
-                    show_shell_selector: s.show_shell_selector,
-                    idle_timeout_secs: s.idle_timeout_secs,
-                    color_tinted_background: s.color_tinted_background,
-                    file_opener: s.file_opener.clone(),
-                    default_shell: s.default_shell.clone(),
-                    hooks: s.hooks.clone(),
-                }
-            }
-            let tvs = build_tvs(&app_settings);
-            let tvs_entity = cx.new(|_| okena_views_terminal::TerminalViewSettingsState { settings: tvs });
-            cx.set_global(okena_views_terminal::GlobalTerminalViewSettings(tvs_entity.clone()));
-
-            let se = crate::settings::settings_entity(cx);
-            cx.observe(&se, move |_, cx| {
-                let s = crate::settings::settings_entity(cx).read(cx).settings.clone();
-                tvs_entity.update(cx, |state, cx| {
-                    state.settings = build_tvs(&s);
-                    cx.notify();
-                });
-            }).detach();
-        }
+        // NOTE: Terminal and git view settings are now served through
+        // ExtensionSettingsStore (registered above) — no separate globals needed.
 
         // Create PTY manager with session backend from settings
         let (pty_manager, pty_events) = PtyManager::new(app_settings.session_backend);
