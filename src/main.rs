@@ -20,6 +20,8 @@ mod theme;
 mod ui;
 mod views;
 mod workspace;
+#[cfg(test)]
+mod smoke_tests;
 
 use gpui::*;
 use gpui_component::theme::{Theme as GpuiComponentTheme, ThemeMode as GpuiThemeMode};
