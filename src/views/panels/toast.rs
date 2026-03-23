@@ -1,15 +1,10 @@
-// Re-export Toast and ToastLevel from workspace (shared data types)
-pub use crate::workspace::toast::{Toast, ToastLevel};
+// Re-export Toast, ToastLevel, and ToastManager from workspace (shared data types)
+pub use crate::workspace::toast::{Toast, ToastLevel, ToastManager};
 
 use crate::theme::theme;
 use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MS, ICON_SM};
 use gpui::*;
-use parking_lot::Mutex;
-use std::sync::Arc;
 use std::time::Duration;
-
-/// Maximum number of visible toasts
-const MAX_VISIBLE_TOASTS: usize = 5;
 
 /// Tick interval for the overlay's animation/prune loop
 const TICK_INTERVAL: Duration = Duration::from_millis(50);
@@ -55,90 +50,6 @@ fn toast_opacity(toast: &Toast) -> f32 {
         1.0
     } else {
         elapsed.as_secs_f32() / FADE_IN_DURATION.as_secs_f32()
-    }
-}
-
-// ─── ToastManager (Global) ─────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct ToastManager(pub Arc<Mutex<Vec<Toast>>>);
-
-impl Global for ToastManager {}
-
-impl ToastManager {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
-    }
-
-    /// Post a toast, capping the queue at MAX_VISIBLE_TOASTS (oldest dropped).
-    pub fn post(toast: Toast, cx: &App) {
-        match toast.level {
-            ToastLevel::Error => {
-                log::error!("[toast] {}", toast.message);
-                eprintln!("[ERROR] {}", toast.message);
-            }
-            ToastLevel::Warning => {
-                log::warn!("[toast] {}", toast.message);
-                eprintln!("[WARN] {}", toast.message);
-            }
-            _ => {}
-        }
-        if let Some(tm) = cx.try_global::<ToastManager>() {
-            let mut queue = tm.0.lock();
-            queue.push(toast);
-            // Drop oldest if over cap
-            while queue.len() > MAX_VISIBLE_TOASTS {
-                queue.remove(0);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn success(message: impl Into<String>, cx: &App) {
-        Self::post(Toast::success(message), cx);
-    }
-
-    pub fn error(message: impl Into<String>, cx: &App) {
-        Self::post(Toast::error(message), cx);
-    }
-
-    pub fn warning(message: impl Into<String>, cx: &App) {
-        Self::post(Toast::warning(message), cx);
-    }
-
-    pub fn info(message: impl Into<String>, cx: &App) {
-        Self::post(Toast::info(message), cx);
-    }
-
-    /// Post multiple toasts at once, capping the queue at MAX_VISIBLE_TOASTS.
-    pub fn post_batch(toasts: Vec<Toast>, cx: &App) {
-        if toasts.is_empty() {
-            return;
-        }
-        if let Some(tm) = cx.try_global::<ToastManager>() {
-            let mut queue = tm.0.lock();
-            for toast in toasts {
-                log::debug!("[hook toast] {}", toast.message);
-                queue.push(toast);
-            }
-            while queue.len() > MAX_VISIBLE_TOASTS {
-                queue.remove(0);
-            }
-        }
-    }
-
-    /// Remove a toast by ID.
-    pub fn dismiss(id: &str, cx: &App) {
-        if let Some(tm) = cx.try_global::<ToastManager>() {
-            tm.0.lock().retain(|t| t.id != id);
-        }
-    }
-
-    /// Return non-expired toasts and prune expired ones from the queue.
-    pub fn drain_snapshot(&self) -> Vec<Toast> {
-        let mut queue = self.0.lock();
-        queue.retain(|t| !t.is_expired());
-        queue.clone()
     }
 }
 
@@ -285,7 +196,7 @@ impl Render for ToastOverlay {
 
 #[cfg(test)]
 mod tests {
-    use super::{Toast, ToastLevel, ToastManager, MAX_VISIBLE_TOASTS};
+    use super::{Toast, ToastLevel, ToastManager};
     use std::thread;
     use std::time::Duration;
 
@@ -322,13 +233,12 @@ mod tests {
             for i in 0..7 {
                 q.push(Toast::info(format!("msg-{}", i)));
             }
-            // Simulate the cap logic from post()
-            while q.len() > MAX_VISIBLE_TOASTS {
+            while q.len() > 5 {
                 q.remove(0);
             }
         }
         let q = tm.0.lock();
-        assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
+        assert_eq!(q.len(), 5);
         // Oldest (0, 1) should be dropped, first remaining is msg-2
         assert_eq!(q[0].message, "msg-2");
     }
