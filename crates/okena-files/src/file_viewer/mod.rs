@@ -179,6 +179,10 @@ pub enum FileViewerEvent {
 
 impl EventEmitter<FileViewerEvent> for FileViewer {}
 
+impl okena_ui::overlay::CloseEvent for FileViewerEvent {
+    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+}
+
 impl Focusable for FileViewer {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()

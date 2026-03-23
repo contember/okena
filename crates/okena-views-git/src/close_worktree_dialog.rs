@@ -20,6 +20,10 @@ pub enum CloseWorktreeDialogEvent {
 
 impl EventEmitter<CloseWorktreeDialogEvent> for CloseWorktreeDialog {}
 
+impl okena_ui::overlay::CloseEvent for CloseWorktreeDialogEvent {
+    fn is_close(&self) -> bool { matches!(self, Self::Closed) }
+}
+
 /// Processing state for async operations
 #[derive(Clone, Debug, PartialEq)]
 enum ProcessingState {

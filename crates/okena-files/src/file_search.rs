@@ -550,6 +550,10 @@ pub enum FileSearchDialogEvent {
 
 impl EventEmitter<FileSearchDialogEvent> for FileSearchDialog {}
 
+impl okena_ui::overlay::CloseEvent for FileSearchDialogEvent {
+    fn is_close(&self) -> bool { matches!(self, Self::Close) }
+}
+
 impl Render for FileSearchDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
