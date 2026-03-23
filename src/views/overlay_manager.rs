@@ -64,9 +64,6 @@ impl CloseEvent for RemoteConnectDialogEvent {
 impl CloseEvent for PairingDialogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Close) }
 }
-impl CloseEvent for RenameDirectoryDialogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close | Self::Renamed) }
-}
 impl CloseEvent for HookLogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Close) }
 }

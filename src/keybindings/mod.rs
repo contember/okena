@@ -140,6 +140,7 @@ pub fn register_keybindings(cx: &mut App) {
         // okena-views-sidebar crate Cancel actions for context menus
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
         KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("FolderContextMenu")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("RenameDirectoryDialog")),
         // okena-views-terminal crate Cancel for shell selector
         KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("ShellSelectorOverlay")),
     ]);
