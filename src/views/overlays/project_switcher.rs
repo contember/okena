@@ -40,8 +40,12 @@ pub struct ProjectSwitcher {
 
 impl ProjectSwitcher {
     pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        // Get all projects from workspace, sorted by recency
-        let projects: Vec<ProjectData> = workspace.read(cx).projects_by_recency().into_iter().cloned().collect();
+        // Get all projects from workspace, sorted by recency, with effective colors resolved
+        let ws = workspace.read(cx);
+        let projects: Vec<ProjectData> = ws.projects_by_recency().into_iter().cloned().map(|mut p| {
+            p.folder_color = ws.effective_folder_color(&p);
+            p
+        }).collect();
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")

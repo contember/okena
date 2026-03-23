@@ -88,6 +88,9 @@ impl WorkspaceData {
 pub struct WorktreeMetadata {
     /// ID of the main repo project
     pub parent_project_id: String,
+    /// Optional color override for this worktree (when None, inherits parent's color)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_override: Option<FolderColor>,
     /// Deprecated: resolved dynamically from parent project path.
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
@@ -813,11 +816,16 @@ impl Workspace {
     }
 
     /// Get the effective folder color for a project, resolving through worktree parent if needed.
+    /// Worktrees with a `color_override` use that; otherwise they inherit the parent's color.
     pub fn effective_folder_color(&self, project: &ProjectData) -> FolderColor {
         if let Some(ref wt) = project.worktree_info {
-            self.project(&wt.parent_project_id)
-                .map(|p| p.folder_color)
-                .unwrap_or(project.folder_color)
+            if let Some(override_color) = wt.color_override {
+                override_color
+            } else {
+                self.project(&wt.parent_project_id)
+                    .map(|p| p.folder_color)
+                    .unwrap_or(project.folder_color)
+            }
         } else {
             project.folder_color
         }
@@ -2871,6 +2879,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -2878,6 +2887,7 @@ mod workspace_tests {
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: "branch-w2".to_string(),
@@ -2917,6 +2927,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -2924,6 +2935,7 @@ mod workspace_tests {
         let mut w2 = make_project("w2", true);
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: "branch-w2".to_string(),
@@ -2963,6 +2975,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3001,6 +3014,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3050,6 +3064,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p2".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3099,6 +3114,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3145,6 +3161,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3190,6 +3207,7 @@ mod workspace_tests {
         let mut w1 = make_project("w1", true);
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
@@ -3244,6 +3262,7 @@ mod workspace_tests {
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -3251,6 +3270,7 @@ mod workspace_tests {
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -3272,6 +3292,7 @@ mod workspace_tests {
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -3302,6 +3323,7 @@ mod workspace_tests {
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -3309,6 +3331,7 @@ mod workspace_tests {
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -3331,6 +3354,7 @@ mod workspace_tests {
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -3338,6 +3362,7 @@ mod workspace_tests {
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),
@@ -3358,6 +3383,7 @@ mod workspace_tests {
         let mut wt1 = make_project("wt1", true);
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
@@ -3365,6 +3391,7 @@ mod workspace_tests {
         let mut wt2 = make_project("wt2", true);
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
+                color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: "/tmp/wt2".to_string(),
             branch_name: String::new(),

@@ -154,19 +154,52 @@ impl Workspace {
         });
     }
 
-    /// Set the folder color for a project (also propagates to worktree children)
+    /// Set the folder color for a project (also propagates to worktree children without overrides)
     pub fn set_folder_color(&mut self, project_id: &str, color: FolderColor, cx: &mut Context<Self>) {
-        self.with_project(project_id, cx, |project| {
-            project.folder_color = color;
-            true
-        });
-        // Propagate color to worktree children
-        for child_id in self.worktree_child_ids(project_id) {
-            self.with_project(&child_id, cx, |project| {
+        let is_worktree = self.project(project_id)
+            .and_then(|p| p.worktree_info.as_ref())
+            .is_some();
+
+        if is_worktree {
+            self.set_worktree_color_override(project_id, Some(color), cx);
+        } else {
+            // Collect child IDs from the parent's worktree_ids to avoid a full scan
+            let child_ids: Vec<String> = self.project(project_id)
+                .map(|p| p.worktree_ids.clone())
+                .unwrap_or_default();
+
+            // Batch all mutations with a single notify
+            let mut changed = false;
+            if let Some(project) = self.project_mut(project_id) {
                 project.folder_color = color;
-                true
-            });
+                changed = true;
+            }
+            for child_id in &child_ids {
+                if let Some(child) = self.project_mut(child_id) {
+                    let has_override = child.worktree_info.as_ref()
+                        .and_then(|wt| wt.color_override)
+                        .is_some();
+                    if !has_override {
+                        child.folder_color = color;
+                    }
+                }
+            }
+            if changed {
+                self.notify_data(cx);
+            }
         }
+    }
+
+    /// Set or clear the color override for a worktree project
+    pub fn set_worktree_color_override(&mut self, project_id: &str, color: Option<FolderColor>, cx: &mut Context<Self>) {
+        self.with_project(project_id, cx, |project| {
+            if let Some(ref mut wt) = project.worktree_info {
+                wt.color_override = color;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// Delete a project
@@ -404,6 +437,7 @@ impl Workspace {
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_project_id.to_string(),
+                color_override: None,
                 main_repo_path: String::new(),
                 worktree_path: String::new(),
                 branch_name: String::new(),
@@ -514,6 +548,7 @@ impl Workspace {
             hidden_terminals: HashMap::new(),
             worktree_info: Some(crate::state::WorktreeMetadata {
                 parent_project_id: parent_id.to_string(),
+                color_override: None,
                 main_repo_path: String::new(),
                 worktree_path: String::new(),
                 branch_name: String::new(),
@@ -852,6 +887,7 @@ mod gpui_tests {
         let mut p = make_project(id);
         p.worktree_info = Some(crate::state::WorktreeMetadata {
             parent_project_id: parent_id.to_string(),
+            color_override: None,
             main_repo_path: "/tmp/repo".to_string(),
             worktree_path: format!("/tmp/worktrees/{}", id),
             branch_name: String::new(),
