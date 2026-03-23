@@ -137,6 +137,9 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
         KeyBinding::new("escape", okena_views_git::Cancel, Some("CloseWorktreeDialog")),
         KeyBinding::new("escape", okena_views_git::diff_viewer::Cancel, Some("DiffViewer")),
+        // okena-views-sidebar crate Cancel actions for context menus
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("FolderContextMenu")),
     ]);
 }
 
