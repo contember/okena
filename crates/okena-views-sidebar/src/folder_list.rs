@@ -377,18 +377,7 @@ impl Sidebar {
                             cx.stop_propagation();
                         }
                     }));
-                    if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                        div().min_w_0().flex().items_center().gap(px(2.0))
-                            .child(
-                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
-                                    .child(project_name.clone())
-                            )
-                            .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-                            .into_any_element()
-                    } else {
-                        name_label.into_any_element()
-                    }
+                    sidebar_name_or_badge(name_label, &project_name, is_expanded || project.show_in_overview, project.terminal_ids.len(), &t)
                 },
             )
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))

@@ -62,8 +62,8 @@ impl Sidebar {
 
         let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
 
-        // Hide the terminal count badge when expanded (terminals are visible) or busy
-        let hide_terminal_badge = is_expanded || is_busy;
+        // Hide the terminal count badge when expanded (terminals are visible), busy, or shown in overview
+        let hide_terminal_badge = is_expanded || is_busy || project.show_in_overview;
 
         let (vis_tooltip_show, vis_tooltip_hide): (&'static str, &'static str) = if is_worktree_style {
             ("Show Worktree", "Hide Worktree")

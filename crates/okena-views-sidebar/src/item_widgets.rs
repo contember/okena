@@ -230,18 +230,18 @@ pub fn sidebar_visibility_button(
         .tooltip(move |_window, cx| Tooltip::new(tooltip_text).build(_window, cx))
 }
 
-/// Project/worktree name with optional terminal count badge for hidden projects.
+/// Project/worktree name with optional terminal count badge.
 ///
-/// When the project is hidden and has terminals, renders the name alongside
-/// a count badge. Otherwise returns the name_label as-is.
+/// When `hide_badge` is false and the project has terminals, renders the name
+/// alongside a count badge. Otherwise returns the name_label as-is.
 pub fn sidebar_name_or_badge(
     name_label: Stateful<Div>,
     name: &str,
-    show_in_overview: bool,
+    hide_badge: bool,
     terminal_count: usize,
     t: &ThemeColors,
 ) -> AnyElement {
-    if !show_in_overview && terminal_count > 0 {
+    if !hide_badge && terminal_count > 0 {
         div()
             .flex_1()
             .min_w_0()
@@ -250,7 +250,6 @@ pub fn sidebar_name_or_badge(
             .gap(px(2.0))
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
