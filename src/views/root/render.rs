@@ -181,7 +181,9 @@ impl RootView {
                     .w(px(pixel_width))
                     .flex_shrink_0()
                     .h_full()
-                    .child(col)
+                    .child(AnyView::from(col).cached(
+                        StyleRefinement::default().size_full()
+                    ))
                     .into_any_element();
 
                 elements.push(col_element);
@@ -832,7 +834,9 @@ impl Render for RootView {
                                         div()
                                             .w(px(configured_width))
                                             .h_full()
-                                            .child(self.sidebar.clone())
+                                            .child(AnyView::from(self.sidebar.clone()).cached(
+                                                StyleRefinement::default().size_full()
+                                            ))
                                     )
                                 })
                         }

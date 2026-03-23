@@ -314,7 +314,9 @@ impl Render for DetachedTerminalView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(self.content.clone()),
+                    .child(AnyView::from(self.content.clone()).cached(
+                        StyleRefinement::default().size_full()
+                    )),
             )
             .id("detached-terminal-main")
             .on_click(cx.listener(|this, _, window, cx| {

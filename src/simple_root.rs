@@ -4,7 +4,7 @@
 use gpui::{
     AnyView, Bounds, Context, CursorStyle, Decorations, DispatchPhase, Hitbox, HitboxBehavior,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point,
-    Render, ResizeEdge, Size, Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
+    Render, ResizeEdge, Size, StyleRefinement, Styled, Window, canvas, div, point, prelude::FluentBuilder, px,
 };
 
 /// Edge detection zone size (pixels) for CSD resize handles.
@@ -94,7 +94,7 @@ impl Render for SimpleRoot {
                     .absolute(),
                 )
             })
-            .child(self.view.clone())
+            .child(self.view.clone().cached(StyleRefinement::default().size_full()))
     }
 }
 

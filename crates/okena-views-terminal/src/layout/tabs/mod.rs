@@ -251,7 +251,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
             return v_flex()
                 .size_full()
-                .child(container);
+                .child(AnyView::from(container).cached(
+                    StyleRefinement::default().size_full()
+                ));
         }
 
         let num_children = children.len();
@@ -303,7 +305,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         })
                         .clone();
 
-                    container
+                    AnyView::from(container).cached(StyleRefinement::default().size_full())
                 }),
             )
     }

@@ -189,7 +189,9 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
                         .min_w_0()
                         .overflow_hidden()
                         .relative()
-                        .child(self.content.clone())
+                        .child(AnyView::from(self.content.clone()).cached(
+                            StyleRefinement::default().size_full()
+                        ))
                         .when(show_border, |el| {
                             el.child(div().absolute().inset_0().border_1().border_color(border_color))
                         }),
