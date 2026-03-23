@@ -634,6 +634,13 @@ impl Sidebar {
         self.hide_color_picker(cx);
     }
 
+    pub(super) fn reset_worktree_color(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_worktree_color_override(project_id, None, cx);
+        });
+        self.hide_color_picker(cx);
+    }
+
     pub(super) fn set_folder_item_color(&mut self, folder_id: &str, color: FolderColor, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
             ws.set_folder_item_color(folder_id, color, cx);
@@ -1359,13 +1366,13 @@ pub(super) struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
-    fn from_project(project: &ProjectData) -> Self {
+    fn from_project(project: &ProjectData, effective_color: FolderColor) -> Self {
         let layout = project.layout.as_ref();
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
             show_in_overview: project.show_in_overview,
-            folder_color: project.folder_color,
+            folder_color: effective_color,
             has_layout: layout.is_some(),
             terminal_ids: layout
                 .map(|l| {
@@ -1454,7 +1461,6 @@ impl Render for Sidebar {
             .collect();
 
         // Build worktree children map using parent's worktree_ids for deterministic ordering
-        // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
         let all_project_ids: HashSet<&str> = workspace.data().projects.iter().map(|p| p.id.as_str()).collect();
         for parent in &workspace.data().projects {
@@ -1462,11 +1468,10 @@ impl Render for Sidebar {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let effective_color = workspace.effective_folder_color(p);
+                        let mut info = SidebarProjectInfo::from_project(p, effective_color);
                         info.is_closing = workspace.closing_projects.contains(&p.id);
                         info.is_creating = workspace.creating_projects.contains(&p.id);
-                        // Inherit parent project's color for visual association
-                        info.folder_color = parent.folder_color;
                         children.push(info);
                     }
                 }
@@ -1530,7 +1535,8 @@ impl Render for Sidebar {
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
                     .map(|p| {
-                        let mut info = SidebarProjectInfo::from_project(p);
+                        let effective_color = workspace.effective_folder_color(p);
+                        let mut info = SidebarProjectInfo::from_project(p, effective_color);
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
@@ -1572,7 +1578,8 @@ impl Render for Sidebar {
                     }
                 }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
-                let mut project_info = SidebarProjectInfo::from_project(project);
+                let effective_color = workspace.effective_folder_color(project);
+                let mut project_info = SidebarProjectInfo::from_project(project, effective_color);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });

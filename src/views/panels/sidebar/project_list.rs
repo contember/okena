@@ -284,7 +284,15 @@ impl Sidebar {
             .child({
                 let folder_color = t.get_folder_color(project.folder_color);
                 let dot_color = if project.is_orphan { t.warning } else { folder_color };
-                sidebar_plain_color_dot(dot_color, true)
+                let project_id = project_id.clone();
+                sidebar_color_indicator(
+                    ElementId::Name(format!("wt-icon-{}", project.id).into()),
+                    color_dot(dot_color, true),
+                )
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.show_color_picker(project_id.clone(), event.position, cx);
+                    cx.stop_propagation();
+                }))
             })
             .child(
                 if is_renaming {
@@ -808,7 +816,15 @@ impl Sidebar {
             })
             .child({
                 let folder_color = t.get_folder_color(project.folder_color);
-                sidebar_plain_color_dot(folder_color, false)
+                let project_id = project_id.clone();
+                sidebar_color_indicator(
+                    ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
+                    color_dot(folder_color, false),
+                )
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    this.show_color_picker(project_id.clone(), event.position, cx);
+                    cx.stop_propagation();
+                }))
             })
             .child({
                 let name_label = sidebar_name_label(ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()), project.name.clone(), &t)

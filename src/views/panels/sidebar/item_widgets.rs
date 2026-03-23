@@ -8,7 +8,6 @@ use crate::views::components::{rename_input, SimpleInput, RenameState};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
-use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 
 /// Expand/collapse arrow (chevron-down/right, 16×16).
@@ -264,20 +263,6 @@ pub fn sidebar_name_or_badge(
     } else {
         name_label.into_any_element()
     }
-}
-
-/// Non-interactive color dot container (14×16).
-///
-/// Used for worktree and group-child items that don't need a click handler.
-pub fn sidebar_plain_color_dot(folder_color: u32, is_worktree: bool) -> Div {
-    div()
-        .flex_shrink_0()
-        .w(px(14.0))
-        .h(px(16.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(color_dot(folder_color, is_worktree))
 }
 
 /// Empty spacer matching expand arrow dimensions (12×16).
