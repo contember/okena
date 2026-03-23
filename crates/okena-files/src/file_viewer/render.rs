@@ -165,7 +165,7 @@ impl FileViewer {
                     .border_color(rgb(t.border))
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text_muted))
+                    .text_color(rgb(t.text_secondary))
                     .line_height(px(11.0))
                     .child("Files"),
             )
@@ -229,14 +229,14 @@ impl FileViewer {
                         svg()
                             .path("icons/folder.svg")
                             .size(px(14.0))
-                            .text_color(rgb(t.text_muted))
+                            .text_color(rgb(t.text_secondary))
                             .mr(px(4.0))
                             .flex_shrink_0(),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(t.text_muted))
+                            .text_color(rgb(t.text_secondary))
                             .child(format!("{}/", name)),
                     )
                     .into_any_element(),
