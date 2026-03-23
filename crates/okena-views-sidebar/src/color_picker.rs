@@ -1,16 +1,17 @@
 //! Color picker component for folder colors
 
-use crate::theme::{theme, FolderColor};
+use okena_core::theme::FolderColor;
+use okena_ui::theme::theme;
 use gpui::*;
 use gpui::prelude::*;
 
-use super::Sidebar;
+use crate::sidebar::Sidebar;
 
 /// Render the color swatch grid shared by project and folder color pickers.
 fn color_swatch_grid(
     id_prefix: &str,
     current_color: FolderColor,
-    t: &crate::theme::ThemeColors,
+    t: &okena_core::theme::ThemeColors,
     cx: &mut Context<Sidebar>,
     on_select: impl Fn(&mut Sidebar, FolderColor, &mut Window, &mut Context<Sidebar>) + 'static,
 ) -> Div {
@@ -54,7 +55,7 @@ fn color_swatch_grid(
 }
 
 impl Sidebar {
-    pub(super) fn render_color_picker(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_color_picker(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let ws = self.workspace.read(cx);
 
@@ -107,7 +108,7 @@ impl Sidebar {
             })
     }
 
-    pub(super) fn render_folder_color_picker(&self, folder_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_folder_color_picker(&self, folder_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
         let current_color = self.workspace.read(cx)

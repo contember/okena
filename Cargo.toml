@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mobile/native", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-workspace", "crates/okena-ui", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client"]
+members = [".", "mobile/native", "crates/okena-core", "crates/okena-git", "crates/okena-views-git", "crates/okena-views-services", "crates/okena-views-sidebar", "crates/okena-views-terminal", "crates/okena-terminal", "crates/okena-workspace", "crates/okena-ui", "crates/okena-files", "crates/okena-markdown", "crates/okena-extensions", "crates/okena-ext-claude", "crates/okena-ext-codex", "crates/okena-ext-updater", "crates/okena-services", "crates/okena-remote-client"]
 resolver = "2"
 
 [package]
@@ -17,6 +17,7 @@ okena-views-terminal = { path = "crates/okena-views-terminal" }
 okena-terminal = { path = "crates/okena-terminal" }
 okena-services = { path = "crates/okena-services" }
 okena-views-services = { path = "crates/okena-views-services" }
+okena-views-sidebar = { path = "crates/okena-views-sidebar" }
 okena-remote-client = { path = "crates/okena-remote-client" }
 okena-workspace = { path = "crates/okena-workspace" }
 okena-ui = { path = "crates/okena-ui" }

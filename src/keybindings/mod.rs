@@ -39,11 +39,6 @@ actions!(
         CheckForUpdates,
         InstallUpdate,
         FocusSidebar,
-        SidebarUp,
-        SidebarDown,
-        SidebarConfirm,
-        SidebarToggleExpand,
-        SidebarEscape,
         ShowPairingDialog,
         TogglePaneSwitcher,
         StartAllServices,
@@ -61,6 +56,11 @@ pub use okena_views_terminal::actions::{
     Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch,
     SendTab, SendBacktab, ZoomIn, ZoomOut, ResetZoom,
     ToggleFullscreen, FullscreenNextTerminal, FullscreenPrevTerminal,
+};
+
+// Sidebar-specific actions (defined in okena-views-sidebar crate)
+pub use okena_views_sidebar::{
+    SidebarUp, SidebarDown, SidebarConfirm, SidebarToggleExpand, SidebarEscape,
 };
 
 /// Global keybinding configuration (thread-safe)

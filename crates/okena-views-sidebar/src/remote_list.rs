@@ -1,9 +1,9 @@
 use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
-use crate::theme::theme;
-use crate::workspace::requests::OverlayRequest;
+use okena_ui::theme::theme;
+use okena_workspace::requests::OverlayRequest;
 use gpui::*;
 
-use super::Sidebar;
+use crate::sidebar::Sidebar;
 
 /// Owned snapshot of a single connection for rendering.
 struct ConnectionSnapshot {
@@ -15,18 +15,22 @@ impl Sidebar {
     /// Render the REMOTE section (header + connection status headers + add button).
     /// Remote projects are now rendered as regular workspace projects inside auto-created folders,
     /// so this section only needs connection management UI.
-    pub(super) fn render_remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(ref remote_manager) = self.remote_manager else {
-            return div().into_any_element();
-        };
+    pub fn render_remote_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_remote = self.get_remote_connections.is_some();
 
-        // Snapshot connection data
-        let snapshots: Vec<ConnectionSnapshot> = remote_manager.read(cx).connections().iter().map(|(config, status, _state)| {
-            ConnectionSnapshot {
-                config: (*config).clone(),
-                status: (*status).clone(),
-            }
-        }).collect();
+        if !has_remote {
+            return div().into_any_element();
+        }
+
+        // Snapshot connection data via callback
+        let snapshots: Vec<ConnectionSnapshot> = if let Some(ref get_connections) = self.get_remote_connections {
+            (get_connections)(cx).into_iter().map(|s| ConnectionSnapshot {
+                config: s.config,
+                status: s.status,
+            }).collect()
+        } else {
+            Vec::new()
+        };
 
         if snapshots.is_empty() {
             return div()
@@ -92,8 +96,6 @@ impl Sidebar {
             ConnectionStatus::Connecting => "Connecting...",
             ConnectionStatus::Pairing => "Pairing...",
             ConnectionStatus::Reconnecting { .. } => {
-                // We can't easily format with the attempt number in a static str,
-                // so we'll just show "Reconnecting..."
                 "Reconnecting..."
             }
             ConnectionStatus::Disconnected => "Disconnected",
@@ -119,7 +121,7 @@ impl Sidebar {
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                 this.request_broker.update(cx, |broker, cx| {
                     broker.push_overlay_request(
-                        crate::workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
+                        okena_workspace::requests::OverlayRequest::RemoteConnectionContextMenu {
                             connection_id: conn_id_for_ctx.clone(),
                             connection_name: conn_name_for_ctx.clone(),
                             is_pairing,

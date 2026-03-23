@@ -1,26 +1,16 @@
 //! Service list rendering for the sidebar
 
-use crate::process;
-use crate::theme::theme;
+use okena_ui::theme::theme;
 use gpui::*;
 use okena_core::api::ActionRequest;
 use okena_views_services::types::ServiceSnapshot;
 
-use super::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
-use super::item_widgets::sidebar_group_header;
+use crate::sidebar::{Sidebar, SidebarProjectInfo, SidebarServiceInfo, GroupKind};
+use crate::item_widgets::sidebar_group_header;
 
 impl Sidebar {
-    /// Dispatch a service action for a project.
-    /// Routes through ActionDispatcher (works for both local and remote).
-    /// Falls back to ServiceManager for local projects if no dispatcher is available.
-    fn dispatch_service_action(&self, project_id: &str, action: ActionRequest, cx: &mut Context<Self>) {
-        if let Some(dispatcher) = self.dispatcher_for_project(project_id, cx) {
-            dispatcher.dispatch(action, cx);
-        }
-    }
-
     /// Render the "Services" group header with collapse chevron + Start All / Stop All / Reload buttons.
-    pub(super) fn render_services_group_header(
+    pub fn render_services_group_header(
         &self,
         project: &SidebarProjectInfo,
         is_collapsed: bool,
@@ -56,7 +46,7 @@ impl Sidebar {
                     move |_window, cx| {
                         if let Some(entity) = entity.upgrade() {
                             entity.update(cx, |this, cx| {
-                                this.dispatch_service_action(&project_id, ActionRequest::StartAllServices {
+                                this.dispatch_action_for_project(&project_id, ActionRequest::StartAllServices {
                                     project_id: project_id.clone(),
                                 }, cx);
                             });
@@ -69,7 +59,7 @@ impl Sidebar {
                     move |_window, cx| {
                         if let Some(entity) = entity.upgrade() {
                             entity.update(cx, |this, cx| {
-                                this.dispatch_service_action(&project_id, ActionRequest::StopAllServices {
+                                this.dispatch_action_for_project(&project_id, ActionRequest::StopAllServices {
                                     project_id: project_id.clone(),
                                 }, cx);
                             });
@@ -82,7 +72,7 @@ impl Sidebar {
                     move |_window, cx| {
                         if let Some(entity) = entity.upgrade() {
                             entity.update(cx, |this, cx| {
-                                this.dispatch_service_action(&project_id, ActionRequest::ReloadServices {
+                                this.dispatch_action_for_project(&project_id, ActionRequest::ReloadServices {
                                     project_id: project_id.clone(),
                                 }, cx);
                             });
@@ -101,7 +91,7 @@ impl Sidebar {
     }
 
     /// Render a single service item row with status dot, name, and action buttons.
-    pub(super) fn render_service_item(
+    pub fn render_service_item(
         &self,
         project: &SidebarProjectInfo,
         service: &SidebarServiceInfo,
@@ -139,7 +129,7 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_service_action(&project_id, ActionRequest::StartService {
+                            this.dispatch_action_for_project(&project_id, ActionRequest::StartService {
                                 project_id: project_id.clone(),
                                 service_name: service_name.clone(),
                             }, cx);
@@ -155,7 +145,7 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_service_action(&project_id, ActionRequest::StopService {
+                            this.dispatch_action_for_project(&project_id, ActionRequest::StopService {
                                 project_id: project_id.clone(),
                                 service_name: service_name.clone(),
                             }, cx);
@@ -171,7 +161,7 @@ impl Sidebar {
                 move |_window, cx| {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
-                            this.dispatch_service_action(&project_id, ActionRequest::RestartService {
+                            this.dispatch_action_for_project(&project_id, ActionRequest::RestartService {
                                 project_id: project_id.clone(),
                                 service_name: service_name.clone(),
                             }, cx);
@@ -193,7 +183,7 @@ impl Sidebar {
                             });
                             this.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(
-                                    crate::workspace::requests::OverlayRequest::ShowServiceLog {
+                                    okena_workspace::requests::OverlayRequest::ShowServiceLog {
                                         project_id: project_id.clone(),
                                         service_name: service_name.clone(),
                                     },
@@ -209,7 +199,7 @@ impl Sidebar {
                 let port_host = port_host.clone();
                 move |port: u16| {
                     let url = format!("http://{}:{}", port_host, port);
-                    process::open_url(&url);
+                    okena_core::process::open_url(&url);
                 }
             },
         )

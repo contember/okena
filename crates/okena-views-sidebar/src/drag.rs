@@ -2,13 +2,13 @@ use gpui::*;
 
 /// Drag payload for project reordering
 #[derive(Clone)]
-pub(super) struct ProjectDrag {
+pub struct ProjectDrag {
     pub project_id: String,
     pub project_name: String,
 }
 
 /// Drag preview view
-pub(super) struct ProjectDragView {
+pub struct ProjectDragView {
     pub name: String,
 }
 
@@ -30,14 +30,14 @@ impl Render for ProjectDragView {
 
 /// Drag payload for worktree reordering within a parent
 #[derive(Clone)]
-pub(super) struct WorktreeDrag {
+pub struct WorktreeDrag {
     pub worktree_id: String,
     pub parent_id: String,
     pub worktree_name: String,
 }
 
 /// Drag preview view for worktree items
-pub(super) struct WorktreeDragView {
+pub struct WorktreeDragView {
     pub name: String,
 }
 
@@ -68,13 +68,13 @@ impl Render for WorktreeDragView {
 
 /// Drag payload for folder reordering
 #[derive(Clone)]
-pub(super) struct FolderDrag {
+pub struct FolderDrag {
     pub folder_id: String,
     pub folder_name: String,
 }
 
 /// Drag preview view for folders
-pub(super) struct FolderDragView {
+pub struct FolderDragView {
     pub name: String,
 }
 

@@ -3,14 +3,15 @@
 //! Each helper returns a partially-built element that the caller can chain
 //! additional handlers onto (e.g. `.on_click()`).
 
-use crate::theme::ThemeColors;
-use crate::views::components::{rename_input, SimpleInput, RenameState};
+use okena_core::theme::ThemeColors;
+use okena_ui::rename_state::{rename_input, RenameState};
+use okena_ui::simple_input::SimpleInput;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
 use okena_ui::icon_button::icon_button;
 
-/// Expand/collapse arrow (chevron-down/right, 16×16).
+/// Expand/collapse arrow (chevron-down/right, 16x16).
 ///
 /// Caller chains `.on_click()` to toggle.
 pub fn sidebar_expand_arrow(
@@ -38,9 +39,9 @@ pub fn sidebar_expand_arrow(
         )
 }
 
-/// Color indicator container (16×16, cursor_pointer, hover opacity).
+/// Color indicator container (16x16, cursor_pointer, hover opacity).
 ///
-/// `child` is the inner element – either a colored dot or a folder SVG.
+/// `child` is the inner element -- either a colored dot or a folder SVG.
 /// Caller chains `.on_click()` to show color picker.
 pub fn sidebar_color_indicator(
     id: impl Into<ElementId>,
@@ -265,7 +266,7 @@ pub fn sidebar_name_or_badge(
     }
 }
 
-/// Empty spacer matching expand arrow dimensions (12×16).
+/// Empty spacer matching expand arrow dimensions (12x16).
 pub fn sidebar_expand_spacer() -> Div {
     div().flex_shrink_0().w(px(12.0)).h(px(16.0))
 }

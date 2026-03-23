@@ -1,17 +1,16 @@
 //! Worktree list popover for showing/hiding worktrees in the sidebar
 
-use crate::settings::settings;
-use crate::theme::theme;
+use okena_ui::theme::theme;
 use gpui::*;
 use gpui::prelude::*;
 
-use super::Sidebar;
+use crate::sidebar::Sidebar;
 
 impl Sidebar {
     /// Render the worktree list popover for a project.
     /// Shows all git worktrees with checkboxes to toggle sidebar visibility.
     /// Uses cached entries from `self.worktree_list_entries` (computed in `show_worktree_list`).
-    pub(super) fn render_worktree_list(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_worktree_list(&self, project_id: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let ws = self.workspace.read(cx);
 
@@ -34,8 +33,8 @@ impl Sidebar {
         let worktrees: Vec<(String, String, bool)> = git_worktrees.iter()
             .filter(|(wt_path, _)| {
                 // Skip the main worktree (same path as parent project)
-                let norm_wt = crate::git::repository::normalize_path(std::path::Path::new(wt_path));
-                let norm_proj = crate::git::repository::normalize_path(std::path::Path::new(&project_path));
+                let norm_wt = okena_git::repository::normalize_path(std::path::Path::new(wt_path));
+                let norm_proj = okena_git::repository::normalize_path(std::path::Path::new(&project_path));
                 norm_wt != norm_proj
             })
             .map(|(wt_path, branch)| {
@@ -43,6 +42,8 @@ impl Sidebar {
                 (wt_path.clone(), branch.clone(), is_tracked)
             })
             .collect();
+
+        let settings = self.sidebar_settings(cx);
 
         okena_ui::popover::popover_panel("worktree-list-panel", &t)
             .w(px(280.0))
@@ -68,6 +69,7 @@ impl Sidebar {
                 let project_id = project_id.to_string();
                 let wt_path_clone = wt_path.clone();
                 let branch_clone = branch.clone();
+                let hooks = settings.hooks.clone();
 
                 div()
                     .id(ElementId::Name(format!("wt-list-{}", wt_path).into()))
@@ -89,7 +91,7 @@ impl Sidebar {
                                 .map(|p| p.id.clone());
                             if let Some(id) = wt_project_id {
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.delete_project(&id, &settings(cx).hooks, cx);
+                                    ws.delete_project(&id, &hooks, cx);
                                 });
                             }
                         } else {

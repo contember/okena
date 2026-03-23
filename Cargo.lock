@@ -4538,6 +4538,7 @@ dependencies = [
  "okena-ui",
  "okena-views-git",
  "okena-views-services",
+ "okena-views-sidebar",
  "okena-views-terminal",
  "okena-workspace",
  "parking_lot",
@@ -4769,6 +4770,24 @@ dependencies = [
  "okena-ui",
  "okena-views-terminal",
  "okena-workspace",
+]
+
+[[package]]
+name = "okena-views-sidebar"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "log",
+ "okena-core",
+ "okena-git",
+ "okena-services",
+ "okena-terminal",
+ "okena-ui",
+ "okena-views-services",
+ "okena-views-terminal",
+ "okena-workspace",
+ "smol",
 ]
 
 [[package]]

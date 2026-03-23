@@ -140,10 +140,37 @@ impl RootView {
         // Wrap PtyManager in LocalBackend for the TerminalBackend trait
         let backend: Arc<dyn TerminalBackend> = Arc::new(LocalBackend::new(pty_manager));
 
-        // Give the sidebar access to the backend for building dispatchers
-        sidebar.update(cx, |s, _cx| {
-            s.set_backend(backend.clone());
-        });
+        // Wire up sidebar callbacks
+        {
+            let workspace_for_dispatch = workspace.clone();
+            let backend_for_dispatch = backend.clone();
+            let terminals_for_dispatch = terminals.clone();
+            sidebar.update(cx, |s, _cx| {
+                // Dispatch action callback
+                s.set_dispatch_action(Box::new(move |project_id, action, cx| {
+                    if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
+                        project_id,
+                        &workspace_for_dispatch,
+                        &Some(backend_for_dispatch.clone()),
+                        &terminals_for_dispatch,
+                        &None, // service_manager - wired later
+                        &None, // remote_manager - wired later
+                        cx,
+                    ) {
+                        dispatcher.dispatch(action, cx);
+                    }
+                }));
+
+                // Settings callback
+                s.set_settings(Box::new(|cx| {
+                    let app_settings = crate::settings::settings(cx);
+                    okena_views_sidebar::SidebarSettings {
+                        worktree_path_template: app_settings.worktree.path_template.clone(),
+                        hooks: app_settings.hooks.clone(),
+                    }
+                }));
+            });
+        }
 
         let mut view = Self {
             workspace,
@@ -215,12 +242,53 @@ impl RootView {
             cx.notify();
         }).detach();
 
-        // Pass to sidebar
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_remote_manager(manager.clone(), cx);
-        });
+        // Wire up remote callbacks on sidebar
+        {
+            let rm_for_connections = manager.clone();
+            let rm_for_send = manager.clone();
+            let rm_for_folder = manager.clone();
+            self.sidebar.update(cx, |sidebar, _cx| {
+                // Get remote connections callback
+                sidebar.set_remote_connections(Box::new(move |cx| {
+                    rm_for_connections.read(cx).connections().iter().map(|(config, status, _state)| {
+                        okena_views_sidebar::RemoteConnectionSnapshot {
+                            config: (*config).clone(),
+                            status: (*status).clone(),
+                        }
+                    }).collect()
+                }));
+
+                // Send remote action callback
+                sidebar.set_send_remote_action(Box::new(move |conn_id, action, cx| {
+                    rm_for_send.update(cx, |rm, cx| {
+                        rm.send_action(conn_id, action, cx);
+                    });
+                }));
+
+                // Get remote folder callback
+                sidebar.set_get_remote_folder(Box::new(move |conn_id, prefixed_project_id, cx| {
+                    let server_project_id = okena_core::client::strip_prefix(prefixed_project_id, conn_id);
+                    rm_for_folder.read(cx).connections().iter()
+                        .find(|(config, _, _)| config.id == conn_id)
+                        .and_then(|(_, _, state)| state.as_ref())
+                        .and_then(|state| {
+                            state.folders.iter().find(|f| f.project_ids.contains(&server_project_id))
+                                .map(|f| f.id.clone())
+                        })
+                }));
+            });
+
+            // Observe remote manager for sidebar updates
+            let sidebar_for_observe = self.sidebar.clone();
+            cx.observe(&manager, move |_this, _rm, cx| {
+                sidebar_for_observe.update(cx, |_, cx| cx.notify());
+            }).detach();
+        }
 
         self.remote_manager = Some(manager);
+
+        // Rebuild dispatch callback with remote manager
+        self.rebuild_sidebar_dispatch(cx);
     }
 
     /// Set the service manager entity (called by Okena after creation).
@@ -233,6 +301,9 @@ impl RootView {
             sidebar.set_service_manager(manager.clone(), cx);
         });
 
+        // Rebuild dispatch callback with service manager
+        self.rebuild_sidebar_dispatch(cx);
+
         // Wire service manager into existing project columns
         for col in self.project_columns.values() {
             col.update(cx, |col, cx| {
@@ -241,6 +312,30 @@ impl RootView {
         }
 
         self.service_manager = Some(manager);
+    }
+
+    /// Rebuild the sidebar dispatch action callback with current service/remote managers.
+    fn rebuild_sidebar_dispatch(&self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        let backend = self.backend.clone();
+        let terminals = self.terminals.clone();
+        let service_manager = self.service_manager.clone();
+        let remote_manager = self.remote_manager.clone();
+        self.sidebar.update(cx, |s, _cx| {
+            s.set_dispatch_action(Box::new(move |project_id, action, cx| {
+                if let Some(dispatcher) = crate::action_dispatch::dispatcher_for_project(
+                    project_id,
+                    &workspace,
+                    &Some(backend.clone()),
+                    &terminals,
+                    &service_manager,
+                    &remote_manager,
+                    cx,
+                ) {
+                    dispatcher.dispatch(action, cx);
+                }
+            }));
+        });
     }
 
     /// Sync remote connection state into workspace as materialized ProjectData entries.

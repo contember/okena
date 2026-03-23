@@ -1,17 +1,17 @@
 //! Hook terminal list rendering for the sidebar
 
-use crate::theme::theme;
-use crate::workspace::state::HookTerminalStatus;
+use okena_ui::theme::theme;
+use okena_workspace::state::HookTerminalStatus;
 use gpui::*;
 use gpui::prelude::*;
 use okena_ui::icon_button::icon_button;
 
-use super::{Sidebar, SidebarProjectInfo, SidebarHookInfo, GroupKind};
-use super::item_widgets::sidebar_group_header;
+use crate::sidebar::{Sidebar, SidebarProjectInfo, SidebarHookInfo, GroupKind};
+use crate::item_widgets::sidebar_group_header;
 
 impl Sidebar {
     /// Render the "Hooks" group header with collapse chevron.
-    pub(super) fn render_hooks_group_header(
+    pub fn render_hooks_group_header(
         &self,
         project: &SidebarProjectInfo,
         is_collapsed: bool,
@@ -38,7 +38,7 @@ impl Sidebar {
     }
 
     /// Render a single hook terminal item row with status icon, label, and click to focus.
-    pub(super) fn render_hook_item(
+    pub fn render_hook_item(
         &self,
         project: &SidebarProjectInfo,
         hook: &SidebarHookInfo,
@@ -151,7 +151,7 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(monitor) = cx.try_global::<crate::workspace::hook_monitor::HookMonitor>() {
+                                    if let Some(monitor) = cx.try_global::<okena_workspace::hook_monitor::HookMonitor>() {
                                         monitor.notify_exit(&terminal_id, None);
                                     }
                                     this.workspace.update(cx, |ws, cx| {
@@ -167,7 +167,7 @@ impl Sidebar {
     }
 
     /// Rerun a hook by killing the old PTY and creating a new one with the same command.
-    pub(super) fn rerun_hook_terminal(
+    pub fn rerun_hook_terminal(
         &self,
         project_id: &str,
         terminal_id: &str,
@@ -175,7 +175,7 @@ impl Sidebar {
         cwd: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(runner) = cx.try_global::<crate::workspace::hooks::HookRunner>().cloned() else {
+        let Some(runner) = cx.try_global::<okena_workspace::hooks::HookRunner>().cloned() else {
             log::warn!("Cannot rerun hook: no HookRunner available");
             return;
         };
@@ -187,9 +187,9 @@ impl Sidebar {
         match runner.backend.create_terminal(cwd, None) {
             Ok(new_terminal_id) => {
                 let transport = runner.backend.transport();
-                let terminal = std::sync::Arc::new(crate::terminal::terminal::Terminal::new(
+                let terminal = std::sync::Arc::new(okena_terminal::terminal::Terminal::new(
                     new_terminal_id.clone(),
-                    crate::terminal::terminal::TerminalSize::default(),
+                    okena_terminal::terminal::TerminalSize::default(),
                     transport.clone(),
                     cwd.to_string(),
                 ));

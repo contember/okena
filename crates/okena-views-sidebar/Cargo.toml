@@ -1,0 +1,21 @@
+[package]
+name = "okena-views-sidebar"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-git = { path = "../okena-git" }
+okena-services = { path = "../okena-services" }
+okena-terminal = { path = "../okena-terminal" }
+okena-ui = { path = "../okena-ui" }
+okena-views-services = { path = "../okena-views-services" }
+okena-views-terminal = { path = "../okena-views-terminal" }
+okena-workspace = { path = "../okena-workspace" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+
+smol = "2.0"
+log = "0.4"

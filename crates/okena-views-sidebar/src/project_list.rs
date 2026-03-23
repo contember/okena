@@ -1,8 +1,8 @@
 //! Project and terminal list rendering for the sidebar
 
-use crate::keybindings::{MinimizeTerminal, ToggleFullscreen};
-use crate::theme::theme;
-use crate::views::components::is_renaming;
+use okena_views_terminal::actions::{MinimizeTerminal, ToggleFullscreen};
+use okena_ui::theme::theme;
+use okena_ui::rename_state::is_renaming;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
@@ -10,13 +10,14 @@ use okena_core::api::ActionRequest;
 use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 
-use super::item_widgets::*;
-use super::{Sidebar, SidebarProjectInfo, ProjectDrag, ProjectDragView, FolderDrag, WorktreeDrag, WorktreeDragView};
+use crate::item_widgets::*;
+use crate::sidebar::{Sidebar, SidebarProjectInfo};
+use crate::drag::{ProjectDrag, ProjectDragView, FolderDrag, WorktreeDrag, WorktreeDragView};
 use std::collections::HashMap;
 
 /// Drag/drop configuration for group header rendering.
 /// Determines how project drag and folder drag are handled.
-pub(super) enum GroupHeaderDragConfig {
+pub enum GroupHeaderDragConfig {
     /// Top-level group header: reorder projects/folders by index.
     TopLevel { index: usize },
     /// Group header inside a folder: move projects into folder at position.
@@ -24,7 +25,7 @@ pub(super) enum GroupHeaderDragConfig {
 }
 
 /// Determines how a project row renders its color dot, badges, and visibility toggle.
-pub(super) enum ProjectRowStyle {
+pub enum ProjectRowStyle {
     /// Standard project: clickable color dot, worktree badge, rename support.
     Project,
     /// Worktree item: plain hollow dot, optional busy state, rename support.
@@ -36,7 +37,7 @@ pub(super) enum ProjectRowStyle {
 impl Sidebar {
     /// Appends standard project row content (expand arrow, color dot, name, badges, visibility)
     /// to a pre-configured container div. Each caller sets up its own container with drag/drop.
-    pub(super) fn append_project_row_content(
+    pub fn append_project_row_content(
         &self,
         row: Stateful<Div>,
         project: &SidebarProjectInfo,
@@ -202,7 +203,7 @@ impl Sidebar {
             })
     }
 
-    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
@@ -267,7 +268,7 @@ impl Sidebar {
 
     /// Renders a worktree project row. Promoted worktrees use the same indent as their parent
     /// (solid dot, conditional expand arrow). Nested worktrees are indented with a hollow circle.
-    pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let is_closing = project.is_closing;
         let is_creating = project.is_creating;
@@ -338,7 +339,7 @@ impl Sidebar {
         )
     }
 
-    pub(super) fn render_terminal_item(
+    pub fn render_terminal_item(
         &self,
         project_id: &str,
         terminal_id: &str,
@@ -525,12 +526,10 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
-                                        dispatcher.dispatch(ActionRequest::ToggleMinimized {
-                                            project_id: project_id.clone(),
-                                            terminal_id: terminal_id.clone(),
-                                        }, cx);
-                                    }
+                                    this.dispatch_action_for_project(&project_id, ActionRequest::ToggleMinimized {
+                                        project_id: project_id.clone(),
+                                        terminal_id: terminal_id.clone(),
+                                    }, cx);
                                 }
                             }))
                             .tooltip({
@@ -557,12 +556,10 @@ impl Sidebar {
                                 let terminal_id = terminal_id.clone();
                                 move |this, _, _window, cx| {
                                     cx.stop_propagation();
-                                    if let Some(dispatcher) = this.dispatcher_for_project(&project_id, cx) {
-                                        dispatcher.dispatch(ActionRequest::SetFullscreen {
-                                            project_id: project_id.clone(),
-                                            terminal_id: Some(terminal_id.clone()),
-                                        }, cx);
-                                    }
+                                    this.dispatch_action_for_project(&project_id, ActionRequest::SetFullscreen {
+                                        project_id: project_id.clone(),
+                                        terminal_id: Some(terminal_id.clone()),
+                                    }, cx);
                                 }
                             }))
                             .tooltip(|_window, cx| {
@@ -576,7 +573,7 @@ impl Sidebar {
 
     /// Render project as a group header when it has worktrees.
     /// Click = show parent + all worktrees (non-individual focus).
-    pub(super) fn render_project_group_header(
+    pub fn render_project_group_header(
         &self,
         project: &SidebarProjectInfo,
         left_padding: f32,
@@ -735,7 +732,7 @@ impl Sidebar {
 
     /// Render main project as a child row under a group header.
     /// Click = show just this project (individual focus).
-    pub(super) fn render_project_group_child(
+    pub fn render_project_group_child(
         &self,
         project: &SidebarProjectInfo,
         left_padding: f32,
