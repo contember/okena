@@ -6,6 +6,7 @@ pub mod persistence;
 pub mod request_broker;
 pub mod requests;
 pub mod sessions;
+pub mod sidebar_controller;
 pub mod settings;
 pub mod state;
 pub mod toast;
