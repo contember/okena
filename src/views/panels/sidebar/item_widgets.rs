@@ -207,7 +207,7 @@ pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors) -> Div {
         .rounded(px(3.0))
         .bg(rgb(t.bg_header))
         .text_size(px(10.0))
-        .text_color(rgb(t.text_secondary))
+        .text_color(rgb(t.text_primary))
         .child(format!("{}", count))
 }
 
