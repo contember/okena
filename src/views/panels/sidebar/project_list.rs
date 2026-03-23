@@ -23,28 +23,191 @@ pub(super) enum GroupHeaderDragConfig {
     InFolder { folder_id: String },
 }
 
+/// Determines how a project row renders its color dot, badges, and visibility toggle.
+pub(super) enum ProjectRowStyle {
+    /// Standard project: clickable color dot, worktree badge, rename support.
+    Project,
+    /// Worktree item: plain hollow dot, optional busy state, rename support.
+    Worktree { is_orphan: bool, is_busy: bool, busy_label: &'static str },
+    /// Child under a group header: plain solid dot, no rename.
+    GroupChild,
+}
+
 impl Sidebar {
-    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Appends standard project row content (expand arrow, color dot, name, badges, visibility)
+    /// to a pre-configured container div. Each caller sets up its own container with drag/drop.
+    pub(super) fn append_project_row_content(
+        &self,
+        row: Stateful<Div>,
+        project: &SidebarProjectInfo,
+        id_prefix: &str,
+        group_name: &'static str,
+        style: &ProjectRowStyle,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = theme(cx);
-        let has_worktrees = project.worktree_count > 0;
         let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
+        let is_renaming_now = is_renaming(&self.project_rename, &project.id);
+        let is_busy = matches!(style, ProjectRowStyle::Worktree { is_busy: true, .. });
+        let is_worktree_style = matches!(style, ProjectRowStyle::Worktree { .. });
+        let supports_rename = !matches!(style, ProjectRowStyle::GroupChild);
 
-        let is_renaming = is_renaming(&self.project_rename, &project.id);
-
-        let has_layout = project.has_layout;
-
-
-        // Count idle terminals when project is collapsed (not expanded)
-        let idle_count = if !is_expanded {
-            self.count_waiting_terminals(&project.terminal_ids)
-        } else {
-            0
+        let has_expandable = match style {
+            ProjectRowStyle::Project => project.has_layout || project.worktree_count > 0 || !project.services.is_empty(),
+            _ => project.has_layout || !project.services.is_empty(),
         };
 
-        // Project row
-        div()
+        let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
+
+        // Hide the terminal count badge when expanded (terminals are visible) or busy
+        let hide_terminal_badge = is_expanded || is_busy;
+
+        let (vis_tooltip_show, vis_tooltip_hide): (&'static str, &'static str) = if is_worktree_style {
+            ("Show Worktree", "Hide Worktree")
+        } else {
+            ("Show Project", "Hide Project")
+        };
+
+        row
+            // 1. Expand arrow
+            .child(if has_expandable {
+                sidebar_expand_arrow(
+                    ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()),
+                    is_expanded, &t,
+                ).on_click(cx.listener({
+                    let project_id = project_id.clone();
+                    move |this, _, _window, cx| {
+                        this.toggle_expanded(&project_id);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                })).into_any_element()
+            } else {
+                sidebar_expand_spacer().into_any_element()
+            })
+            // 2. Color dot
+            .child(match style {
+                ProjectRowStyle::Project => {
+                    let folder_color = t.get_folder_color(project.folder_color);
+                    let pid = project.id.clone();
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
+                        color_dot(folder_color, project.is_worktree),
+                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.show_color_picker(pid.clone(), event.position, cx);
+                        cx.stop_propagation();
+                    }))
+                    .into_any_element()
+                }
+                ProjectRowStyle::Worktree { is_orphan, .. } => {
+                    let folder_color = t.get_folder_color(project.folder_color);
+                    let dot_color = if *is_orphan { t.warning } else { folder_color };
+                    let pid = project.id.clone();
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
+                        color_dot(dot_color, true),
+                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.show_color_picker(pid.clone(), event.position, cx);
+                        cx.stop_propagation();
+                    }))
+                    .into_any_element()
+                }
+                ProjectRowStyle::GroupChild => {
+                    let folder_color = t.get_folder_color(project.folder_color);
+                    let pid = project.id.clone();
+                    sidebar_color_indicator(
+                        ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
+                        color_dot(folder_color, false),
+                    )
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        this.show_color_picker(pid.clone(), event.position, cx);
+                        cx.stop_propagation();
+                    }))
+                    .into_any_element()
+                }
+            })
+            // 3. Name / rename / name+badge
+            .child(if is_renaming_now {
+                sidebar_rename_input(
+                    ElementId::Name(format!("{}-rename-input", id_prefix).into()),
+                    &self.project_rename, &t,
+                )
+                .map(|el| el.into_any_element())
+                .unwrap_or_else(|| div().flex_1().into_any_element())
+            } else {
+                let name_label = sidebar_name_label(
+                    ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()),
+                    project_name.clone(), &t,
+                )
+                .on_click(cx.listener({
+                    let project_id = project_id.clone();
+                    let project_name = project_name.clone();
+                    move |this, _event: &ClickEvent, window, cx| {
+                        if supports_rename && this.check_project_double_click(&project_id) {
+                            this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
+                        } else {
+                            this.cursor_index = None;
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                            });
+                        }
+                        cx.stop_propagation();
+                    }
+                }));
+                sidebar_name_or_badge(name_label, &project_name, hide_terminal_badge, project.terminal_ids.len(), &t)
+            })
+            // 4. Idle dot
+            .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
+            // 5. Worktree badge (Project style only)
+            .when(matches!(style, ProjectRowStyle::Project) && project.worktree_count > 0, |d| {
+                d.child(sidebar_worktree_badge(project.worktree_count, &t))
+            })
+            // 6. Busy label (Worktree busy only)
+            .when(is_busy, |d| {
+                let label = match style {
+                    ProjectRowStyle::Worktree { busy_label, .. } => *busy_label,
+                    _ => "",
+                };
+                d.child(
+                    div().ml_auto().text_size(px(10.0)).text_color(rgb(t.text_secondary)).child(label)
+                )
+            })
+            // 7. Visibility button
+            .when(!is_busy, |d| {
+                d.child(
+                    sidebar_visibility_button(
+                        ElementId::Name(format!("{}-vis-{}", id_prefix, project_id).into()),
+                        project.show_in_overview, group_name,
+                        if project.show_in_overview { vis_tooltip_hide } else { vis_tooltip_show },
+                        &t,
+                    )
+                    .on_click(cx.listener({
+                        let project_id = project_id.clone();
+                        move |this, _, _window, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                if is_worktree_style {
+                                    ws.toggle_worktree_visibility(&project_id, cx);
+                                } else {
+                                    ws.toggle_project_overview_visibility(&project_id, cx);
+                                }
+                            });
+                            cx.stop_propagation();
+                        }
+                    }))
+                )
+            })
+    }
+
+    pub(super) fn render_project_item(&self, project: &SidebarProjectInfo, index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let project_id = project.id.clone();
+        let project_name = project.name.clone();
+
+        let row = div()
             .id(ElementId::Name(format!("project-row-{}", project.id).into()))
             .group("project-item")
             .h(px(24.0))
@@ -58,11 +221,9 @@ impl Sidebar {
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             .when(!project.show_in_overview, |d| d.opacity(0.75))
-            // Drag source
             .on_drag(ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| ProjectDragView { name: drag.project_name.clone() })
             })
-            // Drop target - show indicator line at top
             .drag_over::<ProjectDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
@@ -76,7 +237,6 @@ impl Sidebar {
                     }
                 }
             }))
-            // Drop target for folder reordering among projects
             .drag_over::<FolderDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
@@ -100,96 +260,15 @@ impl Sidebar {
                         ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
-            }))
-            .child({
-                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
-                if has_expandable_content {
-                    sidebar_expand_arrow(
-                        ElementId::Name(format!("expand-{}", project.id).into()),
-                        is_expanded, &t,
-                    ).on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                    })).into_any_element()
-                } else {
-                    sidebar_expand_spacer().into_any_element()
-                }
-            })
-            .child({
-                // Project color dot - clickable for color picker
-                let folder_color = t.get_folder_color(project.folder_color);
-                let project_id = project.id.clone();
-                sidebar_color_indicator(
-                    ElementId::Name(format!("folder-icon-{}", project.id).into()),
-                    color_dot(folder_color, project.is_worktree),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }))
-            })
-            .child(
-                if is_renaming {
-                    sidebar_rename_input("project-rename-input", &self.project_rename, &t)
-                        .map(|el| el.into_any_element())
-                        .unwrap_or_else(|| div().flex_1().into_any_element())
-                } else {
-                    let name_label = sidebar_name_label(
-                        ElementId::Name(format!("project-name-{}", project.id).into()),
-                        project_name.clone(),
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        let project_name = project_name.clone();
-                        move |this, _event: &ClickEvent, window, cx| {
-                            if this.check_project_double_click(&project_id) {
-                                this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
-                            } else {
-                                this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                });
-                            }
-                            cx.stop_propagation();
-                        }
-                    }));
-                    sidebar_name_or_badge(name_label, &project_name, project.show_in_overview, project.terminal_ids.len(), &t)
-                },
-            )
-            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
-            .when(project.worktree_count > 0, |d| {
-                d.child(sidebar_worktree_badge(project.worktree_count, &t))
-            })
-            .child(
-                sidebar_visibility_button(
-                    ElementId::Name(format!("visibility-{}", project.id).into()),
-                    project.show_in_overview,
-                    "project-item",
-                    if project.show_in_overview { "Hide Project" } else { "Show Project" },
-                    &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_project_overview_visibility(&project_id, cx);
-                        });
-                        cx.stop_propagation();
-                    }
-                }))
-            )
+            }));
+
+        self.append_project_row_content(row, project, "project", "project-item", &ProjectRowStyle::Project, cx)
     }
 
     /// Renders a worktree project row. Promoted worktrees use the same indent as their parent
     /// (solid dot, conditional expand arrow). Nested worktrees are indented with a hollow circle.
     pub(super) fn render_worktree_item(&self, project: &SidebarProjectInfo, indent: f32, worktree_index: usize, is_cursor: bool, is_focused_project: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
         let is_closing = project.is_closing;
         let is_creating = project.is_creating;
         let is_busy = is_closing || is_creating;
@@ -197,18 +276,7 @@ impl Sidebar {
         let project_name = project.name.clone();
         let parent_id = project.parent_project_id.clone().unwrap_or_default();
 
-        let is_renaming = is_renaming(&self.project_rename, &project.id);
-
-        let has_layout = project.has_layout;
-
-        // Count idle terminals when project is collapsed (not expanded)
-        let idle_count = if !is_expanded {
-            self.count_waiting_terminals(&project.terminal_ids)
-        } else {
-            0
-        };
-
-        div()
+        let row = div()
             .id(ElementId::Name(format!("worktree-row-{}", project.id).into()))
             .group("worktree-item")
             .h(px(24.0))
@@ -223,7 +291,6 @@ impl Sidebar {
             .when(is_focused_project && !is_busy, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             .when(!project.show_in_overview && !is_busy, |d| d.opacity(0.75))
-            // Drag source for worktree reordering
             .when(!parent_id.is_empty(), |d| {
                 let wt_id = project_id.clone();
                 let wt_name = project_name.clone();
@@ -232,7 +299,6 @@ impl Sidebar {
                     cx.new(|_| WorktreeDragView { name: drag.worktree_name.clone() })
                 })
             })
-            // Drop target for worktree reordering within same parent
             .drag_over::<WorktreeDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
@@ -262,98 +328,14 @@ impl Sidebar {
                         ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
-            }))
-            .child({
-                let has_expandable_content = has_layout || !project.services.is_empty();
-                if has_expandable_content {
-                    sidebar_expand_arrow(
-                        ElementId::Name(format!("expand-wt-{}", project.id).into()),
-                        is_expanded, &t,
-                    ).on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                    })).into_any_element()
-                } else {
-                    sidebar_expand_spacer().into_any_element()
-                }
-            })
-            .child({
-                let folder_color = t.get_folder_color(project.folder_color);
-                let dot_color = if project.is_orphan { t.warning } else { folder_color };
-                let project_id = project_id.clone();
-                sidebar_color_indicator(
-                    ElementId::Name(format!("wt-icon-{}", project.id).into()),
-                    color_dot(dot_color, true),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }))
-            })
-            .child(
-                if is_renaming {
-                    sidebar_rename_input("worktree-rename-input", &self.project_rename, &t)
-                        .map(|el| el.into_any_element())
-                        .unwrap_or_else(|| div().flex_1().into_any_element())
-                } else {
-                    let name_label = sidebar_name_label(
-                        ElementId::Name(format!("worktree-name-{}", project.id).into()),
-                        project_name.clone(),
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        let project_name = project_name.clone();
-                        move |this, _event: &ClickEvent, window, cx| {
-                            if this.check_project_double_click(&project_id) {
-                                this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
-                            } else {
-                                this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                });
-                            }
-                            cx.stop_propagation();
-                        }
-                    }));
-                    let show = project.show_in_overview || is_busy;
-                    sidebar_name_or_badge(name_label, &project_name, show, project.terminal_ids.len(), &t)
-                },
-            )
-            .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
-            .when(is_busy, |d| {
-                d.child(
-                    div()
-                        .ml_auto()
-                        .text_size(px(10.0))
-                        .text_color(rgb(t.text_secondary))
-                        .child(if is_creating { "Creating\u{2026}" } else { "Closing\u{2026}" })
-                )
-            })
-            .when(!is_busy, |d| {
-                d.child(
-                    sidebar_visibility_button(
-                        ElementId::Name(format!("visibility-wt-{}", project_id).into()),
-                        project.show_in_overview,
-                        "worktree-item",
-                        if project.show_in_overview { "Hide Worktree" } else { "Show Worktree" },
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.toggle_worktree_visibility(&project_id, cx);
-                            });
-                            cx.stop_propagation();
-                        }
-                    }))
-                )
-            })
+            }));
+
+        let busy_label = if is_creating { "Creating\u{2026}" } else { "Closing\u{2026}" };
+        self.append_project_row_content(
+            row, project, "wt", "worktree-item",
+            &ProjectRowStyle::Worktree { is_orphan: project.is_orphan, is_busy, busy_label },
+            cx,
+        )
     }
 
     pub(super) fn render_terminal_item(
@@ -765,12 +747,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
-        let has_layout = project.has_layout;
-        let idle_count = if !is_expanded { self.count_waiting_terminals(&project.terminal_ids) } else { 0 };
 
-        div()
+        let row = div()
             .id(ElementId::Name(format!("{}-{}", id_prefix, project.id).into()))
             .group(group_name)
             .h(px(24.0))
@@ -799,62 +778,9 @@ impl Sidebar {
                     this.request_context_menu(project_id.clone(), event.position, cx);
                     cx.stop_propagation();
                 }
-            }))
-            .child({
-                let has_expandable = has_layout || !project.services.is_empty();
-                if has_expandable {
-                    sidebar_expand_arrow(
-                        ElementId::Name(format!("expand-{}-{}", id_prefix, project.id).into()),
-                        is_expanded, &t,
-                    ).on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| { this.toggle_expanded(&project_id); cx.notify(); cx.stop_propagation(); }
-                    })).into_any_element()
-                } else {
-                    sidebar_expand_spacer().into_any_element()
-                }
-            })
-            .child({
-                let folder_color = t.get_folder_color(project.folder_color);
-                let project_id = project_id.clone();
-                sidebar_color_indicator(
-                    ElementId::Name(format!("{}-icon-{}", id_prefix, project.id).into()),
-                    color_dot(folder_color, false),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }))
-            })
-            .child({
-                let name_label = sidebar_name_label(ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()), project.name.clone(), &t)
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _event: &ClickEvent, _window, cx| {
-                        this.cursor_index = None;
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                        });
-                        cx.stop_propagation();
-                    }
-                }));
-                sidebar_name_or_badge(name_label, &project.name, project.show_in_overview, project.terminal_ids.len(), &t)
-            })
-            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
-            .child(
-                sidebar_visibility_button(
-                    ElementId::Name(format!("{}-vis-{}", id_prefix, project.id).into()),
-                    project.show_in_overview, group_name,
-                    if project.show_in_overview { "Hide Project" } else { "Show Project" }, &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.workspace.update(cx, |ws, cx| { ws.toggle_project_overview_visibility(&project_id, cx); });
-                        cx.stop_propagation();
-                    }
-                }))
-            )
+            }));
+
+        self.append_project_row_content(row, project, id_prefix, group_name, &ProjectRowStyle::GroupChild, cx)
     }
 
 

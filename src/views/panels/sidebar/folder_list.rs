@@ -6,7 +6,6 @@ use crate::views::components::is_renaming;
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
-use okena_ui::color_dot::color_dot;
 use okena_ui::icon_button::icon_button;
 
 use super::item_widgets::*;
@@ -233,28 +232,15 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme(cx);
-        let has_worktrees = project.worktree_count > 0;
-        let is_expanded = self.expanded_projects.contains(&project.id);
         let project_id = project.id.clone();
         let project_name = project.name.clone();
         let folder_id = folder_id.to_string();
 
-        let is_renaming = is_renaming(&self.project_rename, &project.id);
-
-        let has_layout = project.has_layout;
-
-        // Count idle terminals when project is collapsed (not expanded)
-        let idle_count = if !is_expanded {
-            self.count_waiting_terminals(&project.terminal_ids)
-        } else {
-            0
-        };
-
-        div()
+        let row = div()
             .id(ElementId::Name(format!("folder-project-row-{}", project.id).into()))
             .group("folder-project-item")
             .h(px(24.0))
-            .pl(px(20.0))  // Indented for folder nesting
+            .pl(px(20.0))
             .pr(px(8.0))
             .flex()
             .items_center()
@@ -264,11 +250,9 @@ impl Sidebar {
             .when(is_focused_project, |d| d.bg(rgb(t.bg_hover)))
             .when(is_cursor, |d| d.border_l_2().border_color(rgb(t.border_active)))
             .when(!project.show_in_overview, |d| d.opacity(0.75))
-            // Drag source
             .on_drag(super::ProjectDrag { project_id: project_id.clone(), project_name: project_name.clone() }, move |drag, _position, _window, cx| {
                 cx.new(|_| super::ProjectDragView { name: drag.project_name.clone() })
             })
-            // Drop target for reordering within folder
             .drag_over::<super::ProjectDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
@@ -283,7 +267,6 @@ impl Sidebar {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
                             });
-                            // Send reorder to server for remote folders
                             if folder_id.starts_with("remote-folder:") {
                                 if let Some(conn_id) = folder_id.strip_prefix("remote-folder:") {
                                     Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
@@ -293,7 +276,6 @@ impl Sidebar {
                     }
                 }
             }))
-            // Also accept FolderDrag for top-level reordering
             .drag_over::<super::FolderDrag>(move |style, _, _, _| {
                 style.border_t_2().border_color(rgb(t.border_active))
             })
@@ -317,100 +299,11 @@ impl Sidebar {
                         ws.set_focused_project_individual(Some(project_id.clone()), cx);
                     });
                 }
-            }))
-            .child({
-                let has_expandable_content = has_layout || has_worktrees || !project.services.is_empty();
-                if has_expandable_content {
-                    sidebar_expand_arrow(
-                        ElementId::Name(format!("expand-fp-{}", project.id).into()),
-                        is_expanded,
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        move |this, _, _window, cx| {
-                            this.toggle_expanded(&project_id);
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                    }))
-                    .into_any_element()
-                } else {
-                    div().flex_shrink_0().w(px(12.0)).h(px(16.0)).into_any_element()
-                }
-            })
-            .child({
-                // Project color dot
-                let folder_color = t.get_folder_color(project.folder_color);
-                let project_id = project.id.clone();
-                sidebar_color_indicator(
-                    ElementId::Name(format!("fp-folder-icon-{}", project.id).into()),
-                    color_dot(folder_color, project.is_worktree),
-                )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                    this.show_color_picker(project_id.clone(), event.position, cx);
-                    cx.stop_propagation();
-                }))
-            })
-            .child(
-                // Project name (or input if renaming)
-                if is_renaming {
-                    sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t)
-                        .map(|el| el.into_any_element())
-                        .unwrap_or_else(|| div().flex_1().into_any_element())
-                } else {
-                    let name_label = sidebar_name_label(
-                        ElementId::Name(format!("fp-project-name-{}", project.id).into()),
-                        project_name.clone(),
-                        &t,
-                    )
-                    .on_click(cx.listener({
-                        let project_id = project_id.clone();
-                        let project_name = project_name.clone();
-                        move |this, _event: &ClickEvent, window, cx| {
-                            if this.check_project_double_click(&project_id) {
-                                this.start_project_rename(project_id.clone(), project_name.clone(), window, cx);
-                            } else {
-                                this.cursor_index = None;
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.set_focused_project_individual(Some(project_id.clone()), cx);
-                                });
-                            }
-                            cx.stop_propagation();
-                        }
-                    }));
-                    if !project.show_in_overview && !project.terminal_ids.is_empty() {
-                        div().min_w_0().flex().items_center().gap(px(2.0))
-                            .child(
-                                div().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                                    .text_size(px(12.0)).text_color(rgb(t.text_primary))
-                                    .child(project_name.clone())
-                            )
-                            .child(sidebar_terminal_count_badge(project.terminal_ids.len(), &t))
-                            .into_any_element()
-                    } else {
-                        name_label.into_any_element()
-                    }
-                },
-            )
-            .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))
-            .child(
-                sidebar_visibility_button(
-                    ElementId::Name(format!("fp-visibility-{}", project.id).into()),
-                    project.show_in_overview,
-                    "folder-project-item",
-                    if project.show_in_overview { "Hide Project" } else { "Show Project" },
-                    &t,
-                )
-                .on_click(cx.listener({
-                    let project_id = project_id.clone();
-                    move |this, _, _window, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_project_overview_visibility(&project_id, cx);
-                        });
-                        cx.stop_propagation();
-                    }
-                }))
-            )
+            }));
+
+        self.append_project_row_content(
+            row, project, "fp", "folder-project-item",
+            &super::project_list::ProjectRowStyle::Project, cx,
+        )
     }
 }
