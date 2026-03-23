@@ -128,12 +128,15 @@ pub fn register_keybindings(cx: &mut App) {
         KeyBinding::new("escape", Cancel, None),
         KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
         KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
-        KeyBinding::new("escape", Cancel, Some("TerminalRename")),
-        // okena-files crate Cancel action for file search dialog
+        // Terminal rename uses the crate's Cancel action
+        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("TerminalRename")),
+        // okena-files crate Cancel action for file search/viewer
         KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileSearchDialog")),
-        // okena-views-git crate Cancel action for worktree dialogs
+        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileViewer")),
+        // okena-views-git crate Cancel actions for git overlays
         KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
         KeyBinding::new("escape", okena_views_git::Cancel, Some("CloseWorktreeDialog")),
+        KeyBinding::new("escape", okena_views_git::diff_viewer::Cancel, Some("DiffViewer")),
     ]);
 }
 
