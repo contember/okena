@@ -10,6 +10,7 @@ pub mod color_picker;
 pub mod context_menu;
 pub mod folder_context_menu;
 pub mod rename_directory_dialog;
+pub mod hook_log;
 pub mod drag;
 
 pub use sidebar::Sidebar;
@@ -24,6 +25,7 @@ pub use sidebar::{RemoteConnectionSnapshot, GetRemoteConnectionsFn, SendRemoteAc
 pub use context_menu::{ContextMenu, ContextMenuEvent};
 pub use folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 pub use rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
+pub use hook_log::{HookLog, HookLogEvent};
 
 gpui::actions!(okena_views_sidebar, [
     SidebarUp,

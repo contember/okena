@@ -61,9 +61,6 @@ impl CloseEvent for SettingsPanelEvent {
 impl CloseEvent for PairingDialogEvent {
     fn is_close(&self) -> bool { matches!(self, Self::Close) }
 }
-impl CloseEvent for HookLogEvent {
-    fn is_close(&self) -> bool { matches!(self, Self::Close) }
-}
 
 // ============================================================================
 // OverlayManager Entity
