@@ -1,6 +1,6 @@
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::shell_config::ShellType;
-use crate::terminal::terminal::TerminalTransport;
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::shell_config::ShellType;
+use okena_terminal::terminal::TerminalTransport;
 use anyhow::Result;
 use okena_core::client::{make_prefixed_id, strip_prefix, WsClientMessage};
 use std::path::PathBuf;

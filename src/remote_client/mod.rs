@@ -1,3 +1,1 @@
-pub mod backend;
-pub mod connection;
-pub mod manager;
+pub use okena_remote_client::manager;

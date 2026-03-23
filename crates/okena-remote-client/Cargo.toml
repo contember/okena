@@ -1,0 +1,23 @@
+[package]
+name = "okena-remote-client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-terminal = { path = "../okena-terminal" }
+okena-workspace = { path = "../okena-workspace" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+tokio = { version = "1", features = ["rt-multi-thread"] }
+async-channel = "2.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+anyhow = "1.0"
+log = "0.4"
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+parking_lot = "0.12"

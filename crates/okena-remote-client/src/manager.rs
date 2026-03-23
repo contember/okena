@@ -1,8 +1,8 @@
-use crate::remote_client::connection::RemoteConnection;
-use crate::terminal::backend::TerminalBackend;
-use crate::views::panels::toast::ToastManager;
-use crate::views::root::TerminalsRegistry;
-use crate::workspace::settings::{load_settings, update_remote_connections};
+use crate::connection::RemoteConnection;
+use okena_terminal::backend::TerminalBackend;
+use okena_workspace::toast::ToastManager;
+use okena_terminal::TerminalsRegistry;
+use okena_workspace::settings::{load_settings, update_remote_connections};
 
 use okena_core::api::{ActionRequest, StateResponse};
 use okena_core::client::{
@@ -408,8 +408,8 @@ fn now_unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::remote_client::manager::RemoteConnectionManager;
-    use crate::views::root::TerminalsRegistry;
+    use super::RemoteConnectionManager;
+    use okena_terminal::TerminalsRegistry;
     use gpui::AppContext as _;
     use okena_core::client::RemoteConnectionConfig;
     use parking_lot::Mutex as PMutex;

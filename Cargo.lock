@@ -4532,6 +4532,7 @@ dependencies = [
  "okena-files",
  "okena-git",
  "okena-markdown",
+ "okena-remote-client",
  "okena-services",
  "okena-terminal",
  "okena-ui",
@@ -4671,6 +4672,23 @@ dependencies = [
  "okena-core",
  "okena-ui",
  "pulldown-cmark",
+]
+
+[[package]]
+name = "okena-remote-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel 2.5.0",
+ "gpui",
+ "log",
+ "okena-core",
+ "okena-terminal",
+ "okena-workspace",
+ "parking_lot",
+ "reqwest",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

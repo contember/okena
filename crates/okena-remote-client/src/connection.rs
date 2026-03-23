@@ -1,7 +1,7 @@
-use crate::remote_client::backend::{RemoteBackend, RemoteTransport};
-use crate::terminal::backend::TerminalBackend;
-use crate::terminal::terminal::{Terminal, TerminalSize};
-use crate::views::root::TerminalsRegistry;
+use crate::backend::{RemoteBackend, RemoteTransport};
+use okena_terminal::backend::TerminalBackend;
+use okena_terminal::terminal::{Terminal, TerminalSize};
+use okena_terminal::TerminalsRegistry;
 
 use okena_core::api::StateResponse;
 use okena_core::client::{
