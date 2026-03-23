@@ -19,73 +19,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-// Rename state imports
-use crate::simple_input::SimpleInputState;
-
-/// State for an active rename operation.
-pub struct RenameState<Id> {
-    pub target: Id,
-    pub input: Entity<SimpleInputState>,
-    _blur_subscription: Option<Subscription>,
-}
-
-impl<Id> RenameState<Id> {
-    pub fn value(&self, cx: &App) -> String {
-        self.input.read(cx).value().to_string()
-    }
-}
-
-pub fn start_rename_with_blur<Id, V, F>(
-    target: Id,
-    current_name: &str,
-    placeholder: &str,
-    on_blur: F,
-    window: &mut Window,
-    cx: &mut Context<V>,
-) -> RenameState<Id>
-where
-    Id: Clone + 'static,
-    V: 'static,
-    F: Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
-{
-    let input = cx.new(|cx| {
-        SimpleInputState::new(cx)
-            .placeholder(placeholder)
-            .default_value(current_name)
-    });
-
-    let focus_handle = input.read(cx).focus_handle(cx);
-    let subscription = cx.on_blur(&focus_handle, window, on_blur);
-    window.focus(&focus_handle, cx);
-
-    RenameState { target, input, _blur_subscription: Some(subscription) }
-}
-
-pub fn finish_rename<Id>(
-    state: &mut Option<RenameState<Id>>,
-    cx: &App,
-) -> Option<(Id, String)> {
-    let rename_state = state.take()?;
-    let new_name = rename_state.value(cx);
-
-    if new_name.is_empty() {
-        None
-    } else {
-        Some((rename_state.target, new_name))
-    }
-}
-
-pub fn cancel_rename<Id>(state: &mut Option<RenameState<Id>>) {
-    *state = None;
-}
-
-pub fn is_renaming<Id: PartialEq>(state: &Option<RenameState<Id>>, target: &Id) -> bool {
-    state.as_ref().map_or(false, |s| &s.target == target)
-}
-
-pub fn rename_input<Id>(state: &Option<RenameState<Id>>) -> Option<&Entity<SimpleInputState>> {
-    state.as_ref().map(|s| &s.input)
-}
+// Re-export rename state from okena-ui
+pub use okena_ui::rename_state::*;
 
 /// Recursive layout container that renders terminal/split/tabs nodes
 pub struct LayoutContainer<D: ActionDispatch> {

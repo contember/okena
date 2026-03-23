@@ -14,7 +14,6 @@ pub mod file_icon;
 pub mod list_overlay;
 pub mod modal_backdrop;
 pub mod path_autocomplete;
-pub mod rename_state;
 pub mod simple_input;
 pub mod ui_helpers;
 
@@ -26,8 +25,4 @@ pub use list_overlay::{
 pub use modal_backdrop::{modal_backdrop, modal_content, modal_header};
 pub use ui_helpers::{badge, button, button_primary, context_menu_panel, input_container, keyboard_hints_footer, labeled_input, menu_item, menu_item_with_color, menu_separator, search_input_area, search_input_area_selected};
 pub use path_autocomplete::PathAutoCompleteState;
-pub use rename_state::{
-    cancel_rename, finish_rename, is_renaming, rename_input, start_rename_with_blur,
-    RenameState,
-};
 pub use simple_input::{SimpleInput, SimpleInputState};

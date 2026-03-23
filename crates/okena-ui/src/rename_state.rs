@@ -2,7 +2,7 @@
 //!
 //! Provides a generic helper for inline rename functionality with SimpleInput.
 
-use super::simple_input::SimpleInputState;
+use crate::simple_input::SimpleInputState;
 use gpui::*;
 
 /// State for an active rename operation.
@@ -28,14 +28,6 @@ impl<Id> RenameState<Id> {
 ///
 /// Creates a new `RenameState` with a configured `SimpleInputState`.
 /// Sets up a blur handler that will be called when the input loses focus.
-///
-/// # Arguments
-/// * `target` - The ID of the item being renamed
-/// * `current_name` - The current name to pre-fill
-/// * `placeholder` - Placeholder text for the input
-/// * `on_blur` - Callback to invoke when input loses focus
-/// * `window` - Window reference for focus management
-/// * `cx` - Context for the parent view
 pub fn start_rename_with_blur<Id, V, F>(
     target: Id,
     current_name: &str,
@@ -55,11 +47,8 @@ where
             .default_value(current_name)
     });
 
-    // Set up blur handler
     let focus_handle = input.read(cx).focus_handle(cx);
     let subscription = cx.on_blur(&focus_handle, window, on_blur);
-
-    // Focus will be set by on_blur registration
     window.focus(&focus_handle, cx);
 
     RenameState { target, input, _blur_subscription: Some(subscription) }
@@ -69,15 +58,6 @@ where
 ///
 /// Returns `Some((target, new_name))` if the rename was active and the name is not empty.
 /// Returns `None` if the state was `None` or the input was empty.
-///
-/// This function clears the rename state.
-///
-/// # Example
-/// ```rust
-/// if let Some((terminal_id, new_name)) = finish_rename(&mut self.rename_state, cx) {
-///     workspace.rename_terminal(&terminal_id, new_name, cx);
-/// }
-/// ```
 pub fn finish_rename<Id>(
     state: &mut Option<RenameState<Id>>,
     cx: &App,
@@ -93,8 +73,6 @@ pub fn finish_rename<Id>(
 }
 
 /// Cancel a rename operation without applying changes.
-///
-/// Simply clears the rename state.
 pub fn cancel_rename<Id>(state: &mut Option<RenameState<Id>>) {
     *state = None;
 }
