@@ -34,7 +34,7 @@ use okena_core::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, SidebarRequest};
+use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, SidebarRequest};
 use crate::workspace::state::{Workspace, WorkspaceData};
 
 // Re-export generic overlay utilities from okena-ui
@@ -624,6 +624,38 @@ impl OverlayManager {
                         project_id: project_id.clone(),
                     });
                 }
+                ContextMenuEvent::CopyPath { .. } => {
+                    // Path already copied to clipboard in the handler
+                    this.hide_context_menu(cx);
+                }
+                ContextMenuEvent::BrowseFiles { project_path } => {
+                    this.hide_context_menu(cx);
+                    this.show_file_browser(std::path::PathBuf::from(project_path), cx);
+                }
+                ContextMenuEvent::ShowDiff { project_id } => {
+                    this.hide_context_menu(cx);
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::DiffViewer {
+                                project_id: project_id.clone(),
+                                file: None,
+                                mode: None,
+                                commit_message: None,
+                                commits: None,
+                                commit_index: None,
+                            },
+                            cx,
+                        );
+                    });
+                }
+                ContextMenuEvent::FocusProject { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::FocusProject(project_id.clone()));
+                }
+                ContextMenuEvent::HideProject { project_id } => {
+                    this.hide_context_menu(cx);
+                    cx.emit(OverlayManagerEvent::ToggleProjectVisibility(project_id.clone()));
+                }
             }
         })
         .detach();
@@ -948,8 +980,27 @@ impl OverlayManager {
     }
 
     // ========================================================================
-    // File viewer (parametric)
+    // File browser / viewer (parametric)
     // ========================================================================
+
+    /// Show file browser for a project (no pre-selected file).
+    pub fn show_file_browser(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
+        let font_size = crate::settings::settings_entity(cx).read(cx).settings.file_font_size;
+        let is_dark = crate::theme::theme(cx).is_dark();
+        let viewer = cx.new(|cx| FileViewer::new_browse(project_path, font_size, is_dark, cx));
+
+        cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
+            match event {
+                FileViewerEvent::Close => {
+                    this.close_modal(cx);
+                }
+            }
+        })
+        .detach();
+
+        self.open_modal(viewer, cx);
+        cx.notify();
+    }
 
     /// Show file viewer for a file.
     pub fn show_file_viewer(&mut self, file_path: PathBuf, project_path: PathBuf, cx: &mut Context<Self>) {

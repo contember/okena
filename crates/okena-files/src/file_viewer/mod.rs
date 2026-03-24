@@ -140,6 +140,52 @@ impl FileViewer {
         viewer
     }
 
+    /// Create a file viewer for browsing a project without a pre-selected file.
+    ///
+    /// Opens the sidebar file tree with no file loaded.
+    pub fn new_browse(
+        project_path: PathBuf,
+        font_size: f32,
+        is_dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let focus_handle = cx.focus_handle();
+
+        let files = FileSearchDialog::scan_files(&project_path);
+        let file_tree = build_file_tree(
+            files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str()))
+        );
+
+        Self {
+            focus_handle,
+            file_path: project_path.clone(),
+            project_path,
+            content: String::new(),
+            highlighted_lines: Vec::new(),
+            line_count: 0,
+            line_num_width: 3,
+            error_message: None,
+            selection: Selection::default(),
+            display_mode: DisplayMode::Source,
+            is_markdown: false,
+            markdown_doc: None,
+            markdown_selection: MarkdownSelection::default(),
+            markdown_scroll_handle: ScrollHandle::new(),
+            source_scroll_handle: UniformListScrollHandle::new(),
+            scrollbar_drag: None,
+            syntax_set: load_syntax_set(),
+            file_font_size: font_size,
+            measured_char_width: font_size * 0.6,
+            files,
+            file_tree,
+            expanded_folders: HashSet::new(),
+            selected_file_index: None,
+            tree_scroll_handle: ScrollHandle::new(),
+            sidebar_visible: true,
+            is_dark,
+        }
+    }
+
     /// Update configuration (font size and dark mode) from the host app.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
         let rehighlight = is_dark != self.is_dark;

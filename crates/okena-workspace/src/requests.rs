@@ -53,6 +53,8 @@ pub enum OverlayRequest {
         position: gpui::Point<gpui::Pixels>,
     },
     ShowServiceLog { project_id: String, service_name: String },
+    FileSearch { project_path: String },
+    FileBrowser { project_path: String },
 }
 
 /// Requests consumed by Sidebar::render()

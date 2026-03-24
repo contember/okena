@@ -389,6 +389,16 @@ impl RootView {
                 OverlayRequest::ShowServiceLog { project_id, service_name } => {
                     self.handle_show_service_log(project_id, service_name, cx);
                 }
+                OverlayRequest::FileSearch { project_path } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.toggle_file_search(std::path::PathBuf::from(project_path), cx);
+                    });
+                }
+                OverlayRequest::FileBrowser { project_path } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_file_browser(std::path::PathBuf::from(project_path), cx);
+                    });
+                }
             }
         }
     }

@@ -23,6 +23,11 @@ pub enum ContextMenuEvent {
     ConfigureHooks { project_id: String },
     ReloadServices { project_id: String },
     FocusParent { project_id: String },
+    CopyPath { path: String },
+    BrowseFiles { project_path: String },
+    ShowDiff { project_id: String },
+    FocusProject { project_id: String },
+    HideProject { project_id: String },
 }
 
 impl okena_ui::overlay::CloseEvent for ContextMenuEvent {
@@ -123,6 +128,33 @@ impl ContextMenu {
             project_id: self.request.project_id.clone(),
         });
     }
+
+    fn copy_path(&self, path: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(path));
+        cx.emit(ContextMenuEvent::Close);
+    }
+
+    fn browse_files(&self, project_path: String, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::BrowseFiles { project_path });
+    }
+
+    fn show_diff(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::ShowDiff {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn focus_project(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::FocusProject {
+            project_id: self.request.project_id.clone(),
+        });
+    }
+
+    fn hide_project(&self, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::HideProject {
+            project_id: self.request.project_id.clone(),
+        });
+    }
 }
 
 impl EventEmitter<ContextMenuEvent> for ContextMenu {}
@@ -178,6 +210,51 @@ impl Render for ContextMenu {
                                 this.add_terminal(cx);
                             })),
                     )
+                    // Browse Files
+                    .child(
+                        menu_item("context-menu-browse-files", "icons/file.svg", "Browse Files", &t)
+                            .on_click(cx.listener({
+                                let project_path = project_path.clone();
+                                move |this, _, _window, cx| {
+                                    this.browse_files(project_path.clone(), cx);
+                                }
+                            })),
+                    )
+                    // Show Diff
+                    .when(is_git_repo, |d| {
+                        d.child(
+                            menu_item("context-menu-show-diff", "icons/git-commit.svg", "Show Diff", &t)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.show_diff(cx);
+                                })),
+                        )
+                    })
+                    .child(menu_separator(&t))
+                    // Copy Path
+                    .child(
+                        menu_item("context-menu-copy-path", "icons/copy.svg", "Copy Path", &t)
+                            .on_click(cx.listener({
+                                let project_path = project_path.clone();
+                                move |this, _, _window, cx| {
+                                    this.copy_path(project_path.clone(), cx);
+                                }
+                            })),
+                    )
+                    // Focus Project
+                    .child(
+                        menu_item("context-menu-focus-project", "icons/fullscreen.svg", "Focus Project", &t)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.focus_project(cx);
+                            })),
+                    )
+                    // Hide Project
+                    .child(
+                        menu_item("context-menu-hide-project", "icons/eye-off.svg", "Hide Project", &t)
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.hide_project(cx);
+                            })),
+                    )
+                    .child(menu_separator(&t))
                     // Create Worktree option (only for git repos that are not already worktrees)
                     .when(is_git_repo && !is_worktree, |d| {
                         d.child(
