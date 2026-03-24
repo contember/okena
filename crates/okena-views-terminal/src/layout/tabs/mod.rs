@@ -251,9 +251,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
             return v_flex()
                 .size_full()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ));
+                .child(okena_ui::cached_on_non_macos(container.into()));
         }
 
         let num_children = children.len();
@@ -305,7 +303,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         })
                         .clone();
 
-                    AnyView::from(container).cached(StyleRefinement::default().size_full())
+                    okena_ui::cached_on_non_macos(container.into())
                 }),
             )
     }

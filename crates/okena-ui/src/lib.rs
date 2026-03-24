@@ -2,6 +2,22 @@
 //!
 //! Reusable UI components, design tokens, and theme helpers for the Okena terminal.
 
+use gpui::{AnyView, StyleRefinement, Styled};
+
+/// Wrap a view with `cached(size_full())` on platforms where it helps.
+///
+/// On macOS, GPUI calls `window.refresh()` frequently (hover tracking, input
+/// modality switches), which forces all cached views to miss. The miss path
+/// uses `layout_as_root()` — an independent taffy tree that doubles layout
+/// cost. On Linux/Windows, refreshes are rare so caches hit most frames.
+pub fn cached_on_non_macos(view: AnyView) -> AnyView {
+    if cfg!(target_os = "macos") {
+        view
+    } else {
+        view.cached(StyleRefinement::default().size_full())
+    }
+}
+
 pub mod badge;
 pub mod button;
 pub mod chip;

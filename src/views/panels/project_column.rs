@@ -704,9 +704,7 @@ impl Render for ProjectColumn {
                         .flex_1()
                         .min_h_0()
                         .overflow_hidden()
-                        .child(AnyView::from(self.layout_container.clone().unwrap()).cached(
-                            StyleRefinement::default().size_full()
-                        ))
+                        .child(okena_ui::cached_on_non_macos(self.layout_container.clone().unwrap().into()))
                         .into_any_element()
                 } else if is_creating {
                     self.render_creating_state(cx).into_any_element()

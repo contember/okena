@@ -246,9 +246,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(AnyView::from(self.terminal_pane.clone().unwrap()).cached(
-                        StyleRefinement::default().size_full()
-                    ))
+                    .child(okena_ui::cached_on_non_macos(self.terminal_pane.clone().unwrap().into()))
                     .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
             )
     }
@@ -397,9 +395,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .size_full()
                 .min_h_0()
                 .min_w_0()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ));
+                .child(okena_ui::cached_on_non_macos(container.into()));
         }
 
         let is_horizontal = direction == SplitDirection::Horizontal;
@@ -478,9 +474,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .flex_basis(relative(size_percent / 100.0))
                 .min_w_0()
                 .min_h_0()
-                .child(AnyView::from(container).cached(
-                    StyleRefinement::default().size_full()
-                ))
+                .child(okena_ui::cached_on_non_macos(container.into()))
                 .into_any_element();
 
             elements.push(child_element);
