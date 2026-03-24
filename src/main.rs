@@ -631,6 +631,11 @@ fn main() {
                     })
                     .detach();
 
+                // Wire up content pane registration so PTY events can notify terminal views
+                okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
+                    crate::views::root::content_pane_registry().lock().insert(terminal_id, weak_content);
+                }));
+
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
                 let okena = cx.new(|cx| {
                     Okena::new(workspace_data, pty_manager.clone(), pty_events, listen_addr, window, cx)
