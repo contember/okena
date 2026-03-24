@@ -300,7 +300,6 @@ impl GitHeader {
     pub fn render_git_status(
         &self,
         project_path: &str,
-        is_worktree: bool,
         status: Option<GitStatus>,
         t: &ThemeColors,
         cx: &mut Context<Self>,
@@ -320,10 +319,10 @@ impl GitHeader {
                     .gap(px(6.0))
                     .text_size(px(10.0))
                     .line_height(px(12.0))
-                    // Branch name (hidden for worktrees — shown in header badge instead)
-                    .when(!is_worktree, |d| {
+                    // Branch name + PR badge + CI status
+                    .child({
                         let pr_url = status.pr_info.as_ref().map(|p| p.url.clone());
-                        d.child(project_header::render_branch_status(
+                        project_header::render_branch_status(
                             &status,
                             pr_url.map(|url| {
                                 move |_: &mut Window, _: &mut App| {
@@ -331,7 +330,7 @@ impl GitHeader {
                                 }
                             }),
                             t,
-                        ))
+                        )
                     })
                     // Commit log button
                     .child({

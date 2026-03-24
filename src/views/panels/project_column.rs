@@ -1,4 +1,4 @@
-use crate::git::{self, PrStateColor, CiStatusColor};
+use crate::git;
 use crate::git::watcher::GitStatusWatcher;
 use crate::action_dispatch::ActionDispatcher;
 use okena_views_git::git_header::GitHeader;
@@ -16,6 +16,7 @@ use gpui_component::{h_flex, v_flex};
 use std::sync::Arc;
 
 use okena_core::api::ActionRequest;
+use okena_workspace::requests::OverlayRequest;
 use okena_views_services::service_panel::ServicePanel;
 use crate::views::root::TerminalsRegistry;
 
@@ -304,7 +305,6 @@ impl ProjectColumn {
                 })
             });
 
-        let is_worktree = project.worktree_info.is_some();
         let project_path = project.path.clone();
 
         v_flex()
@@ -327,6 +327,22 @@ impl ProjectColumn {
             .bg(rgb(t.bg_header))
             .border_b_1()
             .border_color(rgb(t.border))
+            .on_mouse_down(MouseButton::Right, {
+                let request_broker = self.request_broker.clone();
+                let project_id = self.project_id.clone();
+                move |event, _window, cx| {
+                    cx.stop_propagation();
+                    request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::ContextMenu {
+                                project_id: project_id.clone(),
+                                position: event.position,
+                            },
+                            cx,
+                        );
+                    });
+                }
+            })
             .child(
                 h_flex()
                     .gap(px(6.0))
@@ -360,130 +376,40 @@ impl ProjectColumn {
                         } else {
                             project.name.clone()
                         };
+                        let path_for_tooltip = project.path.clone();
+                        let path_for_click = project.path.clone();
+                        let request_broker_for_click = self.request_broker.clone();
                         div()
+                            .id("project-name")
                             .flex_shrink_0()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
                             .line_height(px(14.0))
                             .text_ellipsis()
-                            .child(display_name)
-                    })
-                    // Branch badge — for worktrees, also acts as PR button with color-coded icon
-                    .when(project.worktree_info.is_some(), |d| {
-                        let branch = git_status.as_ref()
-                            .and_then(|s| s.branch.clone())
-                            .unwrap_or_else(|| project.name.clone());
-                        let pr_info = git_status.as_ref().and_then(|s| s.pr_info.clone());
-
-                        let (icon_path, icon_color, tooltip_text) = if let Some(ref pr) = pr_info {
-                            ("icons/git-pull-request.svg", pr.state.color(&t), format!("Pull Request ({})", pr.state.label()))
-                        } else {
-                            ("icons/git-branch.svg", t.text_muted, branch.clone())
-                        };
-
-                        let pr_number = pr_info.as_ref().map(|p| p.number);
-                        let ci_checks = pr_info.as_ref().and_then(|p| p.ci_checks.clone());
-                        let has_pr = pr_info.is_some();
-                        let pr_url = pr_info.map(|p| p.url);
-
-                        d.child(
-                            h_flex()
-                                .id("branch-badge")
-                                .flex_shrink_0()
-                                .gap(px(3.0))
-                                .px(px(4.0))
-                                .py(px(1.0))
-                                .rounded(px(3.0))
-                                .items_center()
-                                .when(has_pr, |d| {
-                                    d.cursor_pointer()
-                                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                })
-                                .when_some(pr_url, |d, url| {
-                                    d.on_click(move |_, _, _cx| {
-                                        crate::process::open_url(&url);
-                                    })
-                                })
-                                .child(
-                                    svg()
-                                        .path(icon_path)
-                                        .size(px(10.0))
-                                        .text_color(rgb(icon_color))
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(t.text_secondary))
-                                        .line_height(px(12.0))
-                                        .max_w(px(120.0))
-                                        .text_ellipsis()
-                                        .overflow_hidden()
-                                        .child(branch)
-                                )
-                                .when_some(pr_number, |d, num| {
-                                    d.child(
-                                        div()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(t.text_muted))
-                                            .line_height(px(12.0))
-                                            .child(format!("#{num}"))
-                                    )
-                                })
-                                .when_some(ci_checks, |d, checks| {
-                                    let ci_tooltip = checks.tooltip_text();
-                                    d.child(
-                                        div()
-                                            .id("ci-status-wt")
-                                            .child(
-                                                svg()
-                                                    .path(checks.status.icon())
-                                                    .size(px(8.0))
-                                                    .text_color(rgb(checks.status.color(&t)))
-                                            )
-                                            .tooltip(move |_window, cx| Tooltip::new(ci_tooltip.clone()).build(_window, cx))
-                                    )
-                                })
-                                .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
-                        )
-                    })
-                    .child({
-                        let path_for_copy = project.path.clone();
-                        div()
-                            .id("project-path")
-                            .max_w(px(300.0))
-                            .overflow_hidden()
-                            .flex()
-                            .justify_end()
                             .cursor_pointer()
                             .rounded(px(3.0))
+                            .px(px(2.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
                             .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(path_for_copy.clone()));
-                                crate::views::panels::toast::ToastManager::success("Path copied to clipboard".to_string(), cx);
+                                request_broker_for_click.update(cx, |broker, cx| {
+                                    broker.push_overlay_request(
+                                        OverlayRequest::FileBrowser { project_path: path_for_click.clone() },
+                                        cx,
+                                    );
+                                });
                             })
-                            .tooltip(move |_window, cx| Tooltip::new("Copy path").build(_window, cx))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(t.text_muted))
-                                    .line_height(px(12.0))
-                                    .child(project.path.clone()),
-                            )
+                            .tooltip(move |_window, cx| Tooltip::new(path_for_tooltip.clone()).build(_window, cx))
+                            .child(display_name)
                     })
                     // Git status (delegated to GitHeader entity)
                     .child({
                         self.git_header.update(cx, |gh, cx| {
                             gh.render_git_status(
                                 &project_path,
-                                is_worktree,
                                 git_status,
                                 &t,
                                 cx,
