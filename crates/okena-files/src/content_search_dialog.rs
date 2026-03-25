@@ -101,6 +101,8 @@ pub struct ContentSearchDialog {
     is_dark: bool,
     /// Debounce task for search.
     debounce_task: Option<Task<()>>,
+    /// Scroll handle for the preview panel.
+    preview_scroll_handle: UniformListScrollHandle,
     /// Expanded folder paths in the sidebar.
     expanded_folders: HashSet<String>,
     /// Scroll handle for the sidebar tree.
@@ -195,6 +197,7 @@ impl ContentSearchDialog {
             syntax_set,
             is_dark,
             debounce_task: None,
+            preview_scroll_handle: UniformListScrollHandle::new(),
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             scope_path: None,
@@ -532,9 +535,12 @@ impl ContentSearchDialog {
         .w_full()
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _, _window, cx| {
+            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                 this.selected_index = idx;
-                this.open_selected(cx);
+                if event.click_count >= 2 {
+                    this.open_selected(cx);
+                }
+                cx.notify();
             }),
         )
         .gap(px(8.0))
@@ -543,7 +549,203 @@ impl ContentSearchDialog {
         .into_any_element()
     }
 
-    /// Render the toggle buttons row (case, regex, fuzzy, glob).
+    /// Render the file preview panel showing the selected match's file.
+    fn render_preview_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme(cx);
+
+        // Get the currently selected match info
+        let selected_match = self.rows.get(self.selected_index).and_then(|row| match row {
+            ResultRow::Match {
+                file_path,
+                line_number,
+                match_ranges,
+                ..
+            } => Some((file_path.clone(), *line_number, match_ranges.clone())),
+            ResultRow::FileHeader { file_path, .. } => Some((file_path.clone(), 1, vec![])),
+        });
+
+        let Some((file_path, match_line, match_ranges)) = selected_match else {
+            return div()
+                .flex_1()
+                .h_full()
+                .bg(rgb(t.bg_primary))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Select a match to preview"),
+                );
+        };
+
+        // Ensure file is in highlight cache
+        if !self.highlight_cache.contains_key(&file_path) {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let lines = highlight_content(
+                    &content,
+                    &file_path,
+                    &self.syntax_set,
+                    5000,
+                    self.is_dark,
+                );
+                self.highlight_cache.insert(file_path.clone(), lines);
+            }
+        }
+
+        let lines = self.highlight_cache.get(&file_path).cloned().unwrap_or_default();
+        let line_count = lines.len();
+        let match_bg = search_match_bg(t.search_match_bg);
+        let current_match_bg = Hsla::from(Rgba {
+            r: ((t.search_current_bg >> 16) & 0xFF) as f32 / 255.0,
+            g: ((t.search_current_bg >> 8) & 0xFF) as f32 / 255.0,
+            b: (t.search_current_bg & 0xFF) as f32 / 255.0,
+            a: 0.4,
+        });
+
+        // Find all matches in this file to highlight them all (current brighter)
+        let all_matches_in_file: Vec<(usize, Vec<std::ops::Range<usize>>)> = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                ResultRow::Match {
+                    file_path: fp,
+                    line_number,
+                    match_ranges,
+                    ..
+                } if *fp == file_path => Some((*line_number, match_ranges.clone())),
+                _ => None,
+            })
+            .collect();
+
+        let relative_path = file_path
+            .strip_prefix(&self.project_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
+
+        // Scroll to the match line
+        let scroll_to = match_line.saturating_sub(5); // 5 lines above for context
+        self.preview_scroll_handle
+            .scroll_to_item(scroll_to, ScrollStrategy::Top);
+
+        let view = cx.entity().clone();
+
+        div()
+            .flex_1()
+            .h_full()
+            .bg(rgb(t.bg_primary))
+            .border_l_1()
+            .border_color(rgb(t.border))
+            .flex()
+            .flex_col()
+            // File path header
+            .child(
+                div()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(relative_path),
+            )
+            // File content
+            .child(
+                uniform_list(
+                    "preview-lines",
+                    line_count,
+                    move |range, _window, cx| {
+                        view.update(cx, |this, cx| {
+                            let t = theme(cx);
+                            range
+                                .map(|line_idx| {
+                                    let line_number = line_idx + 1;
+                                    let line_num_str = format!("{:>4}", line_number);
+
+                                    // Check if this line has matches
+                                    let line_match = all_matches_in_file
+                                        .iter()
+                                        .find(|(ln, _)| *ln == line_number);
+
+                                    let is_current_match = line_number == match_line;
+
+                                    let styled_text = if let Some(hl) =
+                                        lines.get(line_idx)
+                                    {
+                                        if let Some((_, ranges)) = line_match {
+                                            let bg = if is_current_match {
+                                                current_match_bg
+                                            } else {
+                                                match_bg
+                                            };
+                                            let bg_ranges: Vec<(
+                                                std::ops::Range<usize>,
+                                                Hsla,
+                                            )> = ranges
+                                                .iter()
+                                                .filter(|r| {
+                                                    r.end <= hl.plain_text.len()
+                                                })
+                                                .map(|r| (r.clone(), bg))
+                                                .collect();
+                                            build_styled_text_with_backgrounds(
+                                                &hl.spans, &bg_ranges,
+                                            )
+                                        } else {
+                                            build_styled_text_with_backgrounds(
+                                                &hl.spans, &[],
+                                            )
+                                        }
+                                    } else {
+                                        StyledText::new(String::new())
+                                    };
+
+                                    let row_bg = if is_current_match {
+                                        Some(current_match_bg)
+                                    } else if line_match.is_some() {
+                                        Some(match_bg)
+                                    } else {
+                                        None
+                                    };
+
+                                    div()
+                                        .flex()
+                                        .gap(px(8.0))
+                                        .px(px(8.0))
+                                        .h(px(20.0))
+                                        .when_some(row_bg, |d, bg| d.bg(bg))
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_muted))
+                                                .min_w(px(36.0))
+                                                .flex_shrink_0()
+                                                .child(line_num_str),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .text_size(ui_text_sm(cx))
+                                                .font_family("monospace")
+                                                .text_color(rgb(t.text_primary))
+                                                .child(styled_text),
+                                        )
+                                        .into_any_element()
+                                })
+                                .collect()
+                        })
+                    },
+                )
+                .flex_1()
+                .track_scroll(&self.preview_scroll_handle),
+            )
+    }
+
     /// Set scope to a folder or file path, updating the glob filter and re-searching.
     fn set_scope(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         self.scope_path = path.clone();
@@ -1072,8 +1274,9 @@ impl Render for ContentSearchDialog {
         );
 
         if self.expanded {
-            // Fullscreen mode with sidebar
+            // Fullscreen mode: file tree | results | file preview
             let sidebar = self.render_sidebar(cx);
+            let preview = self.render_preview_panel(cx);
 
             fullscreen_overlay("content-search-fullscreen", &t)
                 .track_focus(&focus_handle)
@@ -1082,7 +1285,7 @@ impl Render for ContentSearchDialog {
                 .on_key_down(key_handler)
                 .child(header)
                 .child(
-                    // h_flex: sidebar | main content
+                    // 3-column layout: sidebar | search+results | preview
                     div()
                         .flex()
                         .flex_1()
@@ -1090,7 +1293,7 @@ impl Render for ContentSearchDialog {
                         .child(sidebar)
                         .child(
                             div()
-                                .flex_1()
+                                .w(px(450.0))
                                 .flex()
                                 .flex_col()
                                 .h_full()
@@ -1100,7 +1303,8 @@ impl Render for ContentSearchDialog {
                                 .children(glob_row)
                                 .child(results_area)
                                 .child(footer),
-                        ),
+                        )
+                        .child(preview),
                 )
                 .into_any_element()
         } else {
