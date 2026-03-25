@@ -16,6 +16,7 @@ use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
+use gpui_component::tooltip::Tooltip;
 use okena_ui::badge::keyboard_hint;
 use okena_ui::empty_state::empty_state;
 use okena_ui::file_icon::file_icon;
@@ -879,12 +880,8 @@ impl ContentSearchDialog {
                     .cursor_pointer()
                     .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
-                        if event.click_count >= 2 {
-                            this.set_scope(Some(fp_scope.clone()), cx);
-                        } else {
-                            this.toggle_folder(&fp_toggle, cx);
-                        }
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_folder(&fp_toggle, cx);
                     }))
                     // Chevron
                     .child(
@@ -906,11 +903,34 @@ impl ContentSearchDialog {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .text_size(ui_text(13.0, cx))
                             .text_color(rgb(t.text_secondary))
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(format!("{name}/")),
+                    )
+                    // Scope button
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("scope-folder-{}", folder_path).into()))
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(if is_scoped { t.text_primary } else { t.text_muted }))
+                            .when(is_scoped, |d| d.bg(rgb(t.border_active)))
+                            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                            .flex_shrink_0()
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                                if this.scope_path.as_ref() == Some(&fp_scope) {
+                                    this.set_scope(None, cx);
+                                } else {
+                                    this.set_scope(Some(fp_scope.clone()), cx);
+                                }
+                            }))
+                            .child(if is_scoped { "scoped" } else { "scope" }),
                     )
                     .into_any_element(),
             );
@@ -935,6 +955,7 @@ impl ContentSearchDialog {
                 let is_scoped = self.scope_path.as_ref() == Some(&rel);
                 let count = *match_count;
 
+                let rel2 = relative_path.clone();
                 elements.push(
                     div()
                         .id(ElementId::Name(format!("cs-file-{}", row_index).into()))
@@ -949,7 +970,11 @@ impl ContentSearchDialog {
                         .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.set_scope(Some(rel.clone()), cx);
+                            if this.scope_path.as_ref() == Some(&rel) {
+                                this.set_scope(None, cx);
+                            } else {
+                                this.set_scope(Some(rel.clone()), cx);
+                            }
                         }))
                         .child(
                             file_icon(&filename, t, cx)
@@ -994,9 +1019,9 @@ impl ContentSearchDialog {
             .py(px(6.0))
             .border_b_1()
             .border_color(rgb(t.border))
-            .child(self.render_toggle_button("Aa", self.case_sensitive, "case", cx))
-            .child(self.render_toggle_button(".*", self.regex_mode, "regex", cx))
-            .child(self.render_toggle_button("~", self.fuzzy_mode, "fuzzy", cx))
+            .child(self.render_toggle_button("Aa", self.case_sensitive, "Case Sensitive", "case", cx))
+            .child(self.render_toggle_button(".*", self.regex_mode, "Regular Expression", "regex", cx))
+            .child(self.render_toggle_button("~", self.fuzzy_mode, "Fuzzy Match", "fuzzy", cx))
             // Glob filter input
             .child(
                 div()
@@ -1054,16 +1079,18 @@ impl ContentSearchDialog {
             )
     }
 
-    /// Render a single toggle button.
+    /// Render a single toggle button with tooltip.
     fn render_toggle_button(
         &self,
         label: &str,
         active: bool,
+        tooltip: &str,
         id: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let t = theme(cx);
         let id_owned = id.to_string();
+        let tooltip_text: SharedString = tooltip.to_string().into();
 
         div()
             .id(ElementId::Name(format!("toggle-{}", id).into()))
@@ -1073,6 +1100,7 @@ impl ContentSearchDialog {
             .rounded(px(4.0))
             .text_size(ui_text_sm(cx))
             .font_weight(FontWeight::MEDIUM)
+            .tooltip(move |_window, cx| Tooltip::new(tooltip_text.clone()).build(_window, cx))
             .when(active, |d: Stateful<Div>| {
                 d.bg(rgb(t.border_active))
                     .text_color(rgb(t.text_primary))
