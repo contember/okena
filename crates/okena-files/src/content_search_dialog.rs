@@ -713,25 +713,24 @@ impl ContentSearchDialog {
 
                                     div()
                                         .flex()
-                                        .gap(px(8.0))
+                                        .items_center()
                                         .px(px(8.0))
-                                        .h(px(22.0))
+                                        .h(px(24.0))
+                                        .text_size(ui_text(13.0, cx))
+                                        .font_family("monospace")
                                         .when_some(row_bg, |d, bg| d.bg(bg))
                                         .child(
                                             div()
-                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_muted))
-                                                .min_w(px(40.0))
+                                                .min_w(px(44.0))
                                                 .flex_shrink_0()
+                                                .text_size(ui_text_ms(cx))
                                                 .child(line_num_str),
                                         )
                                         .child(
                                             div()
                                                 .flex_1()
                                                 .overflow_hidden()
-                                                .text_ellipsis()
-                                                .text_size(ui_text_ms(cx))
-                                                .font_family("monospace")
                                                 .text_color(rgb(t.text_primary))
                                                 .child(styled_text),
                                         )
@@ -844,6 +843,7 @@ impl ContentSearchDialog {
     }
 
     /// Recursively render file tree nodes for the sidebar.
+    /// Matches FileViewer's tree style (chevrons, folder icons, sizing).
     fn render_tree_node(
         &self,
         node: &FileTreeNode,
@@ -855,7 +855,6 @@ impl ContentSearchDialog {
         let mut elements = Vec::new();
         let indent = depth as f32 * 14.0;
 
-        // Render folders first
         for (name, child) in &node.children {
             let folder_path = if parent_path.is_empty() {
                 name.clone()
@@ -864,42 +863,53 @@ impl ContentSearchDialog {
             };
             let is_expanded = self.expanded_folders.contains(&folder_path);
             let is_scoped = self.scope_path.as_ref() == Some(&folder_path);
-            let fp = folder_path.clone();
-            let fp2 = folder_path.clone();
+            let fp_toggle = folder_path.clone();
+            let fp_scope = folder_path.clone();
 
             elements.push(
                 div()
-                    .id(ElementId::Name(format!("folder-{}", folder_path).into()))
-                    .cursor_pointer()
+                    .id(ElementId::Name(format!("cs-folder-{}", folder_path).into()))
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
                     .h(px(26.0))
                     .pl(px(indent + 8.0))
-                    .pr(px(8.0))
+                    .pr(px(12.0))
+                    .mx(px(4.0))
                     .rounded(px(4.0))
+                    .cursor_pointer()
                     .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                         if event.click_count >= 2 {
-                            // Double-click to scope
-                            this.set_scope(Some(fp.clone()), cx);
+                            this.set_scope(Some(fp_scope.clone()), cx);
                         } else {
-                            this.toggle_folder(&fp2, cx);
+                            this.toggle_folder(&fp_toggle, cx);
                         }
                     }))
+                    // Chevron
                     .child(
                         svg()
-                            .path(if is_expanded { "icons/chevron_down.svg" } else { "icons/chevron_right.svg" })
-                            .size(px(12.0))
-                            .text_color(rgb(t.text_muted)),
+                            .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_muted))
+                            .mr(px(4.0))
+                            .flex_shrink_0(),
+                    )
+                    // Folder icon
+                    .child(
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_secondary))
+                            .mr(px(4.0))
+                            .flex_shrink_0(),
                     )
                     .child(
                         div()
-                            .text_size(ui_text_sm(cx))
+                            .text_size(ui_text(13.0, cx))
                             .text_color(rgb(t.text_secondary))
                             .overflow_hidden()
-                            .text_ellipsis()
+                            .whitespace_nowrap()
                             .child(format!("{name}/")),
                     )
                     .into_any_element(),
@@ -910,7 +920,6 @@ impl ContentSearchDialog {
             }
         }
 
-        // Render files (file_index is index into self.rows for FileHeader rows)
         for &row_index in &node.files {
             if let Some(ResultRow::FileHeader {
                 relative_path,
@@ -928,34 +937,39 @@ impl ContentSearchDialog {
 
                 elements.push(
                     div()
-                        .id(ElementId::Name(format!("tree-file-{}", row_index).into()))
-                        .cursor_pointer()
+                        .id(ElementId::Name(format!("cs-file-{}", row_index).into()))
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
                         .h(px(26.0))
-                        .pl(px(indent + 8.0 + 18.0))
-                        .pr(px(8.0))
+                        .pl(px(indent + 8.0 + 18.0)) // align past chevron
+                        .pr(px(12.0))
+                        .mx(px(4.0))
                         .rounded(px(4.0))
+                        .cursor_pointer()
                         .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                        .on_click(cx.listener(move |this, _, _window, cx| {
                             this.set_scope(Some(rel.clone()), cx);
                         }))
-                        .child(file_icon(&filename, t, cx))
+                        .child(
+                            file_icon(&filename, t, cx)
+                                .mr(px(4.0)),
+                        )
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(ui_text_sm(cx))
+                                .text_size(ui_text(13.0, cx))
                                 .text_color(rgb(t.text_primary))
                                 .overflow_hidden()
-                                .text_ellipsis()
+                                .whitespace_nowrap()
                                 .child(filename),
                         )
                         .child(
                             div()
                                 .text_size(ui_text_sm(cx))
                                 .text_color(rgb(t.text_muted))
+                                .flex_shrink_0()
+                                .ml(px(4.0))
                                 .child(count.to_string()),
                         )
                         .into_any_element(),
