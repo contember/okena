@@ -394,6 +394,12 @@ impl RootView {
                         om.toggle_file_search(std::path::PathBuf::from(project_path), cx);
                     });
                 }
+                OverlayRequest::ContentSearch { project_path } => {
+                    let is_dark = crate::theme::theme(cx).is_dark();
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.toggle_content_search(std::path::PathBuf::from(project_path), is_dark, cx);
+                    });
+                }
                 OverlayRequest::FileBrowser { project_path } => {
                     self.overlay_manager.update(cx, |om, cx| {
                         om.show_file_browser(std::path::PathBuf::from(project_path), cx);

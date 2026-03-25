@@ -1,4 +1,6 @@
 pub mod code_view;
+pub mod content_search;
+pub mod content_search_dialog;
 pub mod file_search;
 pub mod file_tree;
 pub mod file_viewer;

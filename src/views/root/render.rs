@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
@@ -750,6 +750,30 @@ impl Render for RootView {
                     if let Some(path) = project_path {
                         overlay_manager.update(cx, |om, cx| {
                             om.toggle_file_search(std::path::PathBuf::from(path), cx);
+                        });
+                    }
+                }
+            }))
+            // Handle show content search action
+            .on_action(cx.listener({
+                let overlay_manager = overlay_manager.clone();
+                let workspace = workspace.clone();
+                move |_this, _: &ShowContentSearch, _window, cx| {
+                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                        .map(|f| f.project_id.clone())
+                        .or_else(|| {
+                            workspace.read(cx).visible_projects()
+                                .first()
+                                .map(|p| p.id.clone())
+                        })
+                        .and_then(|id| {
+                            workspace.read(cx).project(&id).map(|p| p.path.clone())
+                        });
+
+                    if let Some(path) = project_path {
+                        let is_dark = crate::theme::theme(cx).is_dark();
+                        overlay_manager.update(cx, |om, cx| {
+                            om.toggle_content_search(std::path::PathBuf::from(path), is_dark, cx);
                         });
                     }
                 }

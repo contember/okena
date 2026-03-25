@@ -7,7 +7,7 @@ use super::{
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
-    ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
+    ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
     StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleSidebar, ToggleSidebarAutoHide,
     ZoomIn, ZoomOut, EqualizeLayout,
@@ -377,6 +377,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Quick file search in the active project",
             category: "Global",
             factory: || Box::new(ShowFileSearch),
+        },
+    );
+    map.insert(
+        "ShowContentSearch",
+        ActionDescription {
+            name: "Find in Files",
+            description: "Search file contents in the active project",
+            category: "Global",
+            factory: || Box::new(ShowContentSearch),
         },
     );
     map.insert(

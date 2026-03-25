@@ -108,6 +108,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "ShowContentSearch".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-f", None),
+                KeybindingEntry::new("ctrl-shift-f", None),
+            ],
+        );
+        bindings.insert(
             "ShowProjectSwitcher".to_string(),
             vec![
                 KeybindingEntry::new("cmd-e", None),

@@ -13,6 +13,7 @@ use crate::views::overlays::keybindings_help::{KeybindingsHelp, KeybindingsHelpE
 use crate::views::overlays::add_project_dialog::{AddProjectDialog, AddProjectDialogEvent};
 use crate::views::overlays::context_menu::{ContextMenu, ContextMenuEvent};
 use crate::views::overlays::folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
+use crate::views::overlays::content_search::{ContentSearchDialog, ContentSearchDialogEvent};
 use crate::views::overlays::file_search::{FileSearchDialog, FileSearchDialogEvent};
 use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
@@ -969,6 +970,43 @@ impl OverlayManager {
                     let project_path = pp.clone();
                     this.close_modal(cx);
                     // Open the file viewer
+                    this.show_file_viewer(path, project_path, cx);
+                }
+            }
+        })
+        .detach();
+
+        self.open_modal(dialog, cx);
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Content search (Find in Files)
+    // ========================================================================
+
+    /// Toggle content search dialog for a project.
+    pub fn toggle_content_search(&mut self, project_path: PathBuf, is_dark: bool, cx: &mut Context<Self>) {
+        if self.is_modal::<ContentSearchDialog>() {
+            self.close_modal(cx);
+        } else {
+            self.show_content_search(project_path, is_dark, cx);
+        }
+    }
+
+    /// Show content search dialog for a project.
+    pub fn show_content_search(&mut self, project_path: PathBuf, is_dark: bool, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| ContentSearchDialog::new(project_path.clone(), is_dark, cx));
+        let pp = project_path;
+
+        cx.subscribe(&dialog, move |this, _, event: &ContentSearchDialogEvent, cx| {
+            match event {
+                ContentSearchDialogEvent::Close => {
+                    this.close_modal(cx);
+                }
+                ContentSearchDialogEvent::FileSelected { path, line: _ } => {
+                    let path = path.clone();
+                    let project_path = pp.clone();
+                    this.close_modal(cx);
                     this.show_file_viewer(path, project_path, cx);
                 }
             }

@@ -54,6 +54,7 @@ pub enum OverlayRequest {
     },
     ShowServiceLog { project_id: String, service_name: String },
     FileSearch { project_path: String },
+    ContentSearch { project_path: String },
     FileBrowser { project_path: String },
 }
 

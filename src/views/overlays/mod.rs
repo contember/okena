@@ -16,6 +16,7 @@
 
 pub mod add_project_dialog;
 pub mod command_palette;
+pub mod content_search;
 pub mod context_menu;
 pub mod folder_context_menu;
 pub mod detached_terminal;
