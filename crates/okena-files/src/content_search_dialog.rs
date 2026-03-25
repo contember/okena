@@ -715,13 +715,13 @@ impl ContentSearchDialog {
                                         .flex()
                                         .gap(px(8.0))
                                         .px(px(8.0))
-                                        .h(px(20.0))
+                                        .h(px(22.0))
                                         .when_some(row_bg, |d, bg| d.bg(bg))
                                         .child(
                                             div()
-                                                .text_size(ui_text_sm(cx))
+                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_muted))
-                                                .min_w(px(36.0))
+                                                .min_w(px(40.0))
                                                 .flex_shrink_0()
                                                 .child(line_num_str),
                                         )
@@ -730,7 +730,7 @@ impl ContentSearchDialog {
                                                 .flex_1()
                                                 .overflow_hidden()
                                                 .text_ellipsis()
-                                                .text_size(ui_text_sm(cx))
+                                                .text_size(ui_text_ms(cx))
                                                 .font_family("monospace")
                                                 .text_color(rgb(t.text_primary))
                                                 .child(styled_text),
