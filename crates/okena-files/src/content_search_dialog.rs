@@ -7,6 +7,8 @@ use crate::content_search::{
     ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode, search_content,
 };
 use crate::code_view::build_styled_text_with_backgrounds;
+use crate::file_search::{FileEntry, FileSearchDialog};
+use crate::file_tree::{build_file_tree, FileTreeNode};
 use crate::list_overlay::ListOverlayConfig;
 use crate::syntax::{
     HighlightedLine, highlight_content, load_syntax_set,
@@ -22,7 +24,7 @@ use okena_ui::modal::{fullscreen_overlay, modal_backdrop, modal_content, modal_h
 use okena_ui::selectable_list::selectable_list_item;
 use okena_ui::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use syntect::parsing::SyntaxSet;
 
@@ -100,6 +102,16 @@ pub struct ContentSearchDialog {
     is_dark: bool,
     /// Debounce task for search.
     debounce_task: Option<Task<()>>,
+    /// Project files for sidebar tree.
+    files: Vec<FileEntry>,
+    /// File tree for sidebar navigation.
+    file_tree: FileTreeNode,
+    /// Expanded folder paths in the sidebar.
+    expanded_folders: HashSet<String>,
+    /// Scroll handle for the sidebar tree.
+    tree_scroll_handle: ScrollHandle,
+    /// Currently active scope path (folder or file) shown in sidebar.
+    scope_path: Option<String>,
 }
 
 impl ContentSearchDialog {
@@ -166,6 +178,12 @@ impl ContentSearchDialog {
 
         let has_query = !query.is_empty();
 
+        // Scan project files and build tree for sidebar
+        let files = FileSearchDialog::scan_files(&project_path);
+        let file_tree = build_file_tree(
+            files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
+        );
+
         let mut dialog = Self {
             focus_handle,
             scroll_handle,
@@ -188,6 +206,11 @@ impl ContentSearchDialog {
             syntax_set,
             is_dark,
             debounce_task: None,
+            files,
+            file_tree,
+            expanded_folders: HashSet::new(),
+            tree_scroll_handle: ScrollHandle::new(),
+            scope_path: None,
         };
 
         // Run initial search if we have a restored query
@@ -550,6 +573,196 @@ impl ContentSearchDialog {
     }
 
     /// Render the toggle buttons row (case, regex, fuzzy, glob).
+    /// Set scope to a folder or file path, updating the glob filter and re-searching.
+    fn set_scope(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        self.scope_path = path.clone();
+        // Determine if path is a folder (exists in expanded_folders or has children in tree)
+        // by checking if any file's relative_path starts with it + "/"
+        let glob = path.map(|p| {
+            let is_folder = self.files.iter().any(|f| f.relative_path.starts_with(&format!("{p}/")));
+            if is_folder { format!("{p}/**") } else { p }
+        });
+        self.file_glob = glob.clone();
+        self.glob_input.update(cx, |input, cx| {
+            input.set_value(glob.as_deref().unwrap_or(""), cx);
+        });
+        self.trigger_search(cx);
+        cx.notify();
+    }
+
+    /// Toggle folder expansion in the sidebar tree.
+    fn toggle_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
+        if !self.expanded_folders.remove(folder_path) {
+            self.expanded_folders.insert(folder_path.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Render the sidebar file tree for expanded mode.
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme(cx);
+
+        let tree_elements = self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx);
+
+        div()
+            .w(px(240.0))
+            .h_full()
+            .border_r_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_primary))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .border_b_1()
+                    .border_color(rgb(t.border))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(t.text_secondary))
+                            .child("Scope"),
+                    )
+                    .when_some(self.scope_path.clone(), |d, _| {
+                        d.child(
+                            div()
+                                .id("clear-scope")
+                                .cursor_pointer()
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_muted))
+                                .hover(|s| s.text_color(rgb(t.text_primary)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        this.set_scope(None, cx);
+                                    }),
+                                )
+                                .child("clear"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("scope-tree")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.tree_scroll_handle)
+                    .py(px(6.0))
+                    .children(tree_elements),
+            )
+    }
+
+    /// Recursively render file tree nodes for the sidebar.
+    fn render_tree_node(
+        &self,
+        node: &FileTreeNode,
+        depth: usize,
+        parent_path: &str,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut elements = Vec::new();
+        let indent = depth as f32 * 14.0;
+
+        // Render folders first
+        for (name, child) in &node.children {
+            let folder_path = if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{parent_path}/{name}")
+            };
+            let is_expanded = self.expanded_folders.contains(&folder_path);
+            let is_scoped = self.scope_path.as_ref() == Some(&folder_path);
+            let fp = folder_path.clone();
+            let fp2 = folder_path.clone();
+
+            elements.push(
+                div()
+                    .id(ElementId::Name(format!("folder-{}", folder_path).into()))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .h(px(26.0))
+                    .pl(px(indent + 8.0))
+                    .pr(px(8.0))
+                    .rounded(px(4.0))
+                    .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                        if event.click_count >= 2 {
+                            // Double-click to scope
+                            this.set_scope(Some(fp.clone()), cx);
+                        } else {
+                            this.toggle_folder(&fp2, cx);
+                        }
+                    }))
+                    .child(
+                        svg()
+                            .path(if is_expanded { "icons/chevron_down.svg" } else { "icons/chevron_right.svg" })
+                            .size(px(12.0))
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(format!("{name}/")),
+                    )
+                    .into_any_element(),
+            );
+
+            if is_expanded {
+                elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
+            }
+        }
+
+        // Render files
+        for &file_index in &node.files {
+            if let Some(file) = self.files.get(file_index) {
+                let rel = file.relative_path.clone();
+                let is_scoped = self.scope_path.as_ref() == Some(&rel);
+
+                elements.push(
+                    div()
+                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .h(px(26.0))
+                        .pl(px(indent + 8.0 + 18.0))
+                        .pr(px(8.0))
+                        .rounded(px(4.0))
+                        .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
+                            this.set_scope(Some(rel.clone()), cx);
+                        }))
+                        .child(file_icon(&file.filename, t, cx))
+                        .child(
+                            div()
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_primary))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(file.filename.clone()),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
+        elements
+    }
+
     fn render_toggles(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
 
@@ -858,18 +1071,36 @@ impl Render for ContentSearchDialog {
         );
 
         if self.expanded {
-            // Fullscreen mode — like FileViewer
+            // Fullscreen mode with sidebar
+            let sidebar = self.render_sidebar(cx);
+
             fullscreen_overlay("content-search-fullscreen", &t)
                 .track_focus(&focus_handle)
                 .key_context(self.config.key_context.as_str())
                 .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
                 .on_key_down(key_handler)
                 .child(header)
-                .child(search_row)
-                .child(toggles)
-                .children(glob_row)
-                .child(results_area)
-                .child(footer)
+                .child(
+                    // h_flex: sidebar | main content
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(sidebar)
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .h_full()
+                                .min_w_0()
+                                .child(search_row)
+                                .child(toggles)
+                                .children(glob_row)
+                                .child(results_area)
+                                .child(footer),
+                        ),
+                )
                 .into_any_element()
         } else {
             // Compact modal mode
