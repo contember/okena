@@ -4,6 +4,12 @@ use crate::theme::ThemeColors;
 use crate::tokens::*;
 use gpui::*;
 
+/// Menu item text size (13px) — slightly larger than TEXT_MD for readability.
+const MENU_TEXT: Pixels = px(13.0);
+
+/// Menu item icon size (15px).
+const MENU_ICON: Pixels = px(15.0);
+
 /// Context menu item with icon and label.
 ///
 /// Returns a Stateful<Div> that can have `.on_click()` chained.
@@ -13,7 +19,7 @@ pub fn menu_item(
     label: impl Into<SharedString>,
     t: &ThemeColors,
 ) -> Stateful<Div> {
-    menu_item_with_color(id, icon, label, t.text_primary, t.text_secondary, t)
+    menu_item_with_color(id, icon, label, t.text_primary, t.text_muted, t)
 }
 
 /// Context menu item with custom text and icon colors.
@@ -29,19 +35,21 @@ pub fn menu_item_with_color(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .mx(SPACE_SM)
         .px(SPACE_LG)
         .py(SPACE_SM)
         .flex()
         .items_center()
-        .gap(SPACE_MD)
+        .gap(SPACE_LG)
+        .rounded(RADIUS_STD)
         .cursor_pointer()
-        .text_size(TEXT_MD)
+        .text_size(MENU_TEXT)
         .text_color(rgb(text_color))
         .hover(|s| s.bg(rgb(t.bg_hover)))
         .child(
             svg()
                 .path(icon)
-                .size(ICON_STD)
+                .size(MENU_ICON)
                 .text_color(rgb(icon_color)),
         )
         .child(label.into())
@@ -56,17 +64,19 @@ pub fn menu_item_disabled(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .mx(SPACE_SM)
         .px(SPACE_LG)
         .py(SPACE_SM)
         .flex()
         .items_center()
-        .gap(SPACE_MD)
-        .text_size(TEXT_MD)
+        .gap(SPACE_LG)
+        .rounded(RADIUS_STD)
+        .text_size(MENU_TEXT)
         .text_color(rgb(t.text_muted))
         .child(
             svg()
                 .path(icon)
-                .size(ICON_STD)
+                .size(MENU_ICON)
                 .text_color(rgb(t.text_muted)),
         )
         .child(label.into())
@@ -86,7 +96,7 @@ pub fn menu_item_conditional(
     t: &ThemeColors,
 ) -> Stateful<Div> {
     let (text_color, icon_color) = if enabled {
-        (t.text_primary, t.text_secondary)
+        (t.text_primary, t.text_muted)
     } else {
         (t.text_muted, t.text_muted)
     };
@@ -95,18 +105,20 @@ pub fn menu_item_conditional(
 
     let base = div()
         .id(id)
+        .mx(SPACE_SM)
         .px(SPACE_LG)
         .py(SPACE_SM)
         .flex()
         .items_center()
-        .gap(SPACE_MD)
-        .text_size(TEXT_MD)
+        .gap(SPACE_LG)
+        .rounded(RADIUS_STD)
+        .text_size(MENU_TEXT)
         .text_color(rgb(text_color))
         .cursor(if enabled { CursorStyle::PointingHand } else { CursorStyle::Arrow })
         .child(
             svg()
                 .path(icon)
-                .size(ICON_STD)
+                .size(MENU_ICON)
                 .text_color(rgb(icon_color)),
         )
         .child(label.into());
@@ -128,10 +140,10 @@ pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful
         .bg(rgb(t.bg_primary))
         .border_1()
         .border_color(rgb(t.border))
-        .rounded(px(4.0))
+        .rounded(px(8.0))
         .shadow_xl()
-        .min_w(px(160.0))
-        .py(px(4.0))
+        .min_w(px(240.0))
+        .py(SPACE_SM)
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
@@ -147,7 +159,7 @@ pub fn context_menu_panel(id: impl Into<ElementId>, t: &ThemeColors) -> Stateful
 pub fn menu_separator(t: &ThemeColors) -> Div {
     div()
         .h(px(1.0))
-        .mx(SPACE_MD)
-        .my(SPACE_XS)
+        .mx(SPACE_XL)
+        .my(SPACE_SM)
         .bg(rgb(t.border))
 }
