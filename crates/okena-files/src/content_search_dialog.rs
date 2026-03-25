@@ -52,18 +52,16 @@ enum ResultRow {
         relative_path: String,
         match_count: usize,
     },
-    /// Context line (before or after a match) — shown in expanded mode.
-    Context {
-        file_path: PathBuf,
-        line_number: usize,
-        line_content: String,
-    },
-    /// Match row within a file.
+    /// Match row within a file, with optional context lines.
     Match {
         file_path: PathBuf,
         line_number: usize,
         line_content: String,
         match_ranges: Vec<std::ops::Range<usize>>,
+        /// Context lines before the match (line_number, content).
+        context_before: Vec<(usize, String)>,
+        /// Context lines after the match (line_number, content).
+        context_after: Vec<(usize, String)>,
     },
 }
 
@@ -226,7 +224,6 @@ impl ContentSearchDialog {
         if let Some(row) = self.rows.get(self.selected_index) {
             let (path, line) = match row {
                 ResultRow::Match { file_path, line_number, .. } => (file_path.clone(), *line_number),
-                ResultRow::Context { file_path, line_number, .. } => (file_path.clone(), *line_number),
                 ResultRow::FileHeader { file_path, .. } => (file_path.clone(), 1),
             };
             self.save_memory(cx);
@@ -348,31 +345,15 @@ impl ContentSearchDialog {
             });
 
             for m in &file_result.matches {
-                // Context lines before
-                for (ln, content) in &m.context_before {
-                    self.rows.push(ResultRow::Context {
-                        file_path: file_result.file_path.clone(),
-                        line_number: *ln,
-                        line_content: content.clone(),
-                    });
-                }
-
                 self.total_matches += 1;
                 self.rows.push(ResultRow::Match {
                     file_path: file_result.file_path.clone(),
                     line_number: m.line_number,
                     line_content: m.line_content.clone(),
                     match_ranges: m.match_ranges.clone(),
+                    context_before: m.context_before.clone(),
+                    context_after: m.context_after.clone(),
                 });
-
-                // Context lines after
-                for (ln, content) in &m.context_after {
-                    self.rows.push(ResultRow::Context {
-                        file_path: file_result.file_path.clone(),
-                        line_number: *ln,
-                        line_content: content.clone(),
-                    });
-                }
             }
         }
 
@@ -457,7 +438,70 @@ impl ContentSearchDialog {
         )
     }
 
-    /// Render a match result row with syntax highlighting.
+    /// Render a single styled code line (used for both match and context lines).
+    fn render_code_line(
+        &mut self,
+        file_path: &Path,
+        line_number: usize,
+        line_content: &str,
+        match_ranges: Option<&[std::ops::Range<usize>]>,
+        t: &okena_core::theme::ThemeColors,
+        cx: &App,
+    ) -> Div {
+        let styled_text = if let Some(highlighted) = self.get_highlighted_line(file_path, line_number) {
+            if let Some(ranges) = match_ranges {
+                let match_bg = search_match_bg(t.search_match_bg);
+                let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = ranges
+                    .iter()
+                    .filter(|r| r.end <= highlighted.plain_text.len())
+                    .map(|r| (r.clone(), match_bg))
+                    .collect();
+                build_styled_text_with_backgrounds(&highlighted.spans, &bg_ranges)
+            } else {
+                build_styled_text_with_backgrounds(&highlighted.spans, &[])
+            }
+        } else if let Some(ranges) = match_ranges {
+            let match_bg = search_match_bg(t.search_match_bg);
+            let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = ranges
+                .iter()
+                .filter(|r| r.end <= line_content.len())
+                .map(|r| (r.clone(), HighlightStyle {
+                    background_color: Some(match_bg),
+                    ..Default::default()
+                }))
+                .collect();
+            StyledText::new(line_content.to_string()).with_highlights(highlights)
+        } else {
+            StyledText::new(line_content.to_string())
+        };
+
+        let is_context = match_ranges.is_none();
+
+        div()
+            .flex()
+            .gap(px(8.0))
+            .when(is_context, |d| d.opacity(0.5))
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .min_w(px(40.0))
+                    .flex_shrink_0()
+                    .child(format!("{:>4}", line_number)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(ui_text_ms(cx))
+                    .font_family("monospace")
+                    .text_color(rgb(if is_context { t.text_muted } else { t.text_primary }))
+                    .child(styled_text),
+            )
+    }
+
+    /// Render a match result row with optional context lines as one selectable block.
     fn render_match_row(
         &mut self,
         idx: usize,
@@ -465,43 +509,14 @@ impl ContentSearchDialog {
         line_number: usize,
         line_content: &str,
         match_ranges: &[std::ops::Range<usize>],
+        context_before: &[(usize, String)],
+        context_after: &[(usize, String)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
         let is_selected = idx == self.selected_index;
-        let match_bg = search_match_bg(t.search_match_bg);
 
-        // Try to get syntax-highlighted version of this line
-        let styled_text = if let Some(highlighted) = self.get_highlighted_line(file_path, line_number) {
-            let bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = match_ranges
-                .iter()
-                .filter(|r| r.end <= highlighted.plain_text.len())
-                .map(|r| (r.clone(), match_bg))
-                .collect();
-
-            build_styled_text_with_backgrounds(&highlighted.spans, &bg_ranges)
-        } else {
-
-            let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = match_ranges
-                .iter()
-                .filter(|r| r.end <= line_content.len())
-                .map(|r| {
-                    (
-                        r.clone(),
-                        HighlightStyle {
-                            background_color: Some(match_bg),
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect();
-
-            StyledText::new(line_content.to_string()).with_highlights(highlights)
-        };
-
-        let line_num_str = format!("{:>4}", line_number);
-
-        selectable_list_item(
+        let mut block = selectable_list_item(
             ElementId::Name(format!("match-{}", idx).into()),
             is_selected,
             &t,
@@ -514,85 +529,24 @@ impl ContentSearchDialog {
                 this.open_selected(cx);
             }),
         )
-        .gap(px(8.0))
-        .pl(px(28.0)) // Indent under file header
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_muted))
-                .min_w(px(40.0))
-                .flex_shrink_0()
-                .child(line_num_str),
-        )
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(ui_text_ms(cx))
-                .font_family("monospace")
-                .text_color(rgb(t.text_primary))
-                .child(styled_text),
-        )
-        .into_any_element()
-    }
-
-    /// Render a context line row (dimmer, no match highlight).
-    fn render_context_row(
-        &mut self,
-        idx: usize,
-        file_path: &Path,
-        line_number: usize,
-        line_content: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = theme(cx);
-        let is_selected = idx == self.selected_index;
-
-        // Try to get syntax-highlighted version
-        let styled_text = if let Some(highlighted) = self.get_highlighted_line(file_path, line_number) {
-            build_styled_text_with_backgrounds(&highlighted.spans, &[])
-        } else {
-            StyledText::new(line_content.to_string())
-        };
-
-        let line_num_str = format!("{:>4}", line_number);
-
-        selectable_list_item(
-            ElementId::Name(format!("ctx-{}", idx).into()),
-            is_selected,
-            &t,
-        )
-        .w_full()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _window, cx| {
-                this.selected_index = idx;
-                this.open_selected(cx);
-            }),
-        )
-        .gap(px(8.0))
         .pl(px(28.0))
-        .opacity(0.5)
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_muted))
-                .min_w(px(40.0))
-                .flex_shrink_0()
-                .child(line_num_str),
-        )
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(ui_text_ms(cx))
-                .font_family("monospace")
-                .text_color(rgb(t.text_muted))
-                .child(styled_text),
-        )
-        .into_any_element()
+        .flex_col()
+        .gap(px(0.0));
+
+        // Context before
+        for (ln, content) in context_before {
+            block = block.child(self.render_code_line(file_path, *ln, content, None, &t, cx));
+        }
+
+        // The match line
+        block = block.child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx));
+
+        // Context after
+        for (ln, content) in context_after {
+            block = block.child(self.render_code_line(file_path, *ln, content, None, &t, cx));
+        }
+
+        block.into_any_element()
     }
 
     /// Render the toggle buttons row (case, regex, fuzzy, glob).
@@ -842,18 +796,16 @@ impl Render for ContentSearchDialog {
                                 } => this
                                     .render_file_header(i, relative_path, *match_count, cx)
                                     .into_any_element(),
-                                ResultRow::Context {
-                                    file_path,
-                                    line_number,
-                                    line_content,
-                                } => this.render_context_row(i, file_path, *line_number, line_content, cx),
                                 ResultRow::Match {
                                     file_path,
                                     line_number,
                                     line_content,
                                     match_ranges,
+                                    context_before,
+                                    context_after,
                                 } => this.render_match_row(
-                                    i, file_path, *line_number, line_content, match_ranges, cx,
+                                    i, file_path, *line_number, line_content, match_ranges,
+                                    context_before, context_after, cx,
                                 ),
                             }
                         })
