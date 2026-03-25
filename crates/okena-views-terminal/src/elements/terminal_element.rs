@@ -503,7 +503,13 @@ impl Element for TerminalElement {
             }
 
             // Phase 2.5: Paint search highlights
+            // search_match.line is an absolute grid line; convert to visual row
             for (idx, search_match) in self.search_matches.iter().enumerate() {
+                let visual_line = search_match.line + display_offset;
+                if visual_line < 0 || visual_line >= screen_lines as i32 {
+                    continue;
+                }
+
                 let is_current = self.current_match_index == Some(idx);
                 let highlight_color = if is_current {
                     let c = rgb(t.search_current_bg);
@@ -515,7 +521,7 @@ impl Element for TerminalElement {
 
                 let position = point(
                     px((f32::from(origin.x) + search_match.col as f32 * cell_width_f).floor()),
-                    origin.y + line_height * search_match.line as f32,
+                    origin.y + line_height * visual_line as f32,
                 );
                 let size = size(
                     px((cell_width_f * search_match.len as f32).ceil()),

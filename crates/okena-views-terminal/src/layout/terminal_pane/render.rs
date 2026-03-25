@@ -21,6 +21,9 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
+        // Refresh search results if terminal content changed (scroll, new output)
+        self.search_bar.update(cx, |bar, cx| bar.refresh_if_needed(cx));
+
         let focus_handle = self.focus_handle.clone();
         let id_suffix = self.id_suffix();
 

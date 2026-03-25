@@ -143,6 +143,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     ) {
         match event {
             SearchBarEvent::Closed => {
+                self.content.update(cx, |content, _| {
+                    content.set_search_highlights(Arc::new(Vec::new()), None);
+                });
                 self.pending_focus = true;
                 cx.notify();
             }

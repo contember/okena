@@ -6,6 +6,7 @@ use okena_terminal::terminal::Terminal;
 use okena_files::theme::theme;
 use okena_ui::tokens::ui_text_md;
 use crate::simple_input::{SimpleInput, SimpleInputState};
+use okena_ui::simple_input::InputChangedEvent;
 use okena_workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -29,6 +30,7 @@ pub struct SearchBar {
     case_sensitive: bool,
     use_regex: bool,
     is_active: bool,
+    last_search_generation: u64,
 }
 
 impl SearchBar {
@@ -42,6 +44,7 @@ impl SearchBar {
             case_sensitive: false,
             use_regex: false,
             is_active: false,
+            last_search_generation: 0,
         }
     }
 
@@ -63,6 +66,9 @@ impl SearchBar {
         input.update(cx, |input, cx| {
             input.focus(window, cx);
         });
+        cx.subscribe(&input, |this: &mut Self, _, _: &InputChangedEvent, cx| {
+            this.perform_search(cx);
+        }).detach();
         self.input = Some(input);
         self.matches = Arc::new(Vec::new());
         self.current_match_index = None;
@@ -91,6 +97,7 @@ impl SearchBar {
         let query = self.input.as_ref().map(|i| i.read(cx).value().to_string()).unwrap_or_default();
 
         if let Some(ref terminal) = self.terminal {
+            self.last_search_generation = terminal.content_generation();
             let matches = terminal.search_grid(&query, self.case_sensitive, self.use_regex);
             let search_matches: Vec<SearchMatch> = matches
                 .into_iter()
@@ -106,6 +113,17 @@ impl SearchBar {
             ));
         }
         cx.notify();
+    }
+
+    /// Re-run search if terminal content has changed since last search.
+    pub fn refresh_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.is_active { return; }
+        if let Some(ref terminal) = self.terminal {
+            let current_gen = terminal.content_generation();
+            if current_gen != self.last_search_generation {
+                self.perform_search(cx);
+            }
+        }
     }
 
     fn toggle_case_sensitive(&mut self, cx: &mut Context<Self>) {
@@ -146,10 +164,12 @@ impl SearchBar {
         if let (Some(idx), Some(terminal)) = (self.current_match_index, &self.terminal) {
             if let Some(search_match) = self.matches.get(idx) {
                 let screen_lines = terminal.screen_lines() as i32;
-                let match_line = search_match.line;
-                if match_line < 0 || match_line >= screen_lines {
+                let display_offset = terminal.display_offset() as i32;
+                // Convert absolute grid line to visual line
+                let visual_line = search_match.line + display_offset;
+                if visual_line < 0 || visual_line >= screen_lines {
                     let target_visible_line = screen_lines / 2;
-                    let scroll_delta = target_visible_line - match_line;
+                    let scroll_delta = target_visible_line - visual_line;
                     if scroll_delta > 0 { terminal.scroll_up(scroll_delta); }
                     else if scroll_delta < 0 { terminal.scroll_down(-scroll_delta); }
                 }
@@ -163,7 +183,7 @@ impl SearchBar {
                 if event.keystroke.modifiers.shift { self.prev_match(cx); }
                 else { self.next_match(cx); }
             }
-            _ => { self.perform_search(cx); }
+            _ => {}
         }
     }
 }

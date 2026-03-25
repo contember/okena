@@ -786,12 +786,26 @@ impl Terminal {
                     line_text.push(cell.c);
                 }
 
+                // Build byte-to-column mapping for converting byte offsets to grid columns.
+                // Each char in line_text corresponds to exactly one grid column.
+                let total_chars = line_text.chars().count();
+
+                // Convert a byte offset to a column index
+                let col_at_byte = |byte_offset: usize| -> usize {
+                    line_text.char_indices()
+                        .enumerate()
+                        .find(|(_, (b, _))| *b == byte_offset)
+                        .map(|(col, _)| col)
+                        .unwrap_or(total_chars)
+                };
+
                 if let Some(ref regex) = regex {
                     // Regex search
                     for mat in regex.find_iter(&line_text) {
-                        // Convert line to display-relative coordinate
-                        let display_line = line + display_offset;
-                        matches.push((display_line, mat.start(), mat.len()));
+                        let col = col_at_byte(mat.start());
+                        let end_col = col_at_byte(mat.end());
+                        // Store absolute grid line (not display-relative)
+                        matches.push((line, col, end_col - col));
                     }
                 } else {
                     // Plain text search
@@ -801,13 +815,14 @@ impl Terminal {
                         (line_text.to_lowercase(), query.to_lowercase())
                     };
 
+                    let query_char_len = query.chars().count();
                     let mut search_start = 0;
                     while let Some(pos) = search_text[search_start..].find(&query_text) {
-                        let col = search_start + pos;
-                        // Convert line to display-relative coordinate
-                        let display_line = line + display_offset;
-                        matches.push((display_line, col, query.len()));
-                        search_start = col + 1;
+                        let byte_pos = search_start + pos;
+                        let col = col_at_byte(byte_pos);
+                        // Store absolute grid line (not display-relative)
+                        matches.push((line, col, query_char_len));
+                        search_start = byte_pos + query_text.len();
                         if search_start >= search_text.len() {
                             break;
                         }
