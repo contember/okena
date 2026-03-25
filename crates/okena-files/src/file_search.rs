@@ -123,13 +123,24 @@ impl FileSearchDialog {
     pub fn scan_files(project_path: &PathBuf) -> Vec<FileEntry> {
         let mut files = Vec::new();
 
-        let walker = WalkBuilder::new(project_path)
+        let mut walk_builder = WalkBuilder::new(project_path);
+        walk_builder
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .max_depth(Some(15))
-            .build();
+            .max_depth(Some(15));
+
+        // Always ignore common non-source directories even without .gitignore
+        let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
+        for pattern in crate::content_search::ALWAYS_IGNORE {
+            let _ = override_builder.add(pattern);
+        }
+        if let Ok(overrides) = override_builder.build() {
+            walk_builder.overrides(overrides);
+        }
+
+        let walker = walk_builder.build();
 
         for entry in walker.flatten() {
             if files.len() >= MAX_FILES {

@@ -391,7 +391,7 @@ impl ContentSearchDialog {
                 &content,
                 file_path,
                 &self.syntax_set,
-                0, // unlimited
+                5000, // skip syntax highlighting for very large files
                 self.is_dark,
             );
             self.highlight_cache.insert(file_path.to_path_buf(), lines);

@@ -72,6 +72,21 @@ impl Default for ContentSearchConfig {
 }
 
 /// Build an ignore walker for the given project and config.
+/// Directories to always ignore even without .gitignore.
+pub const ALWAYS_IGNORE: &[&str] = &[
+    "!node_modules/",
+    "!.git/",
+    "!target/",
+    "!__pycache__/",
+    "!.venv/",
+    "!venv/",
+    "!dist/",
+    "!build/",
+    "!.next/",
+    "!.nuxt/",
+];
+
+/// Build an ignore walker for the given project and config.
 fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Walk {
     let mut walk_builder = WalkBuilder::new(project_path);
     walk_builder
@@ -81,13 +96,16 @@ fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Wa
         .git_exclude(true)
         .max_depth(Some(20));
 
+    // Build overrides: always-ignore dirs + optional user glob filter
+    let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
+    for pattern in ALWAYS_IGNORE {
+        let _ = override_builder.add(pattern);
+    }
     if let Some(ref glob) = config.file_glob {
-        let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
-        if override_builder.add(glob).is_ok() {
-            if let Ok(g) = override_builder.build() {
-                walk_builder.overrides(g);
-            }
-        }
+        let _ = override_builder.add(glob);
+    }
+    if let Ok(overrides) = override_builder.build() {
+        walk_builder.overrides(overrides);
     }
 
     walk_builder.build()
