@@ -7,7 +7,6 @@ use crate::content_search::{
     ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode, search_content,
 };
 use crate::code_view::build_styled_text_with_backgrounds;
-use crate::file_search::{FileEntry, FileSearchDialog};
 use crate::file_tree::{build_file_tree, FileTreeNode};
 use crate::list_overlay::ListOverlayConfig;
 use crate::syntax::{
@@ -102,10 +101,6 @@ pub struct ContentSearchDialog {
     is_dark: bool,
     /// Debounce task for search.
     debounce_task: Option<Task<()>>,
-    /// Project files for sidebar tree.
-    files: Vec<FileEntry>,
-    /// File tree for sidebar navigation.
-    file_tree: FileTreeNode,
     /// Expanded folder paths in the sidebar.
     expanded_folders: HashSet<String>,
     /// Scroll handle for the sidebar tree.
@@ -178,12 +173,6 @@ impl ContentSearchDialog {
 
         let has_query = !query.is_empty();
 
-        // Scan project files and build tree for sidebar
-        let files = FileSearchDialog::scan_files(&project_path);
-        let file_tree = build_file_tree(
-            files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
-        );
-
         let mut dialog = Self {
             focus_handle,
             scroll_handle,
@@ -206,8 +195,6 @@ impl ContentSearchDialog {
             syntax_set,
             is_dark,
             debounce_task: None,
-            files,
-            file_tree,
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             scope_path: None,
@@ -539,37 +526,60 @@ impl ContentSearchDialog {
         let t = theme(cx);
         let is_selected = idx == self.selected_index;
 
-        let mut block = selectable_list_item(
-            ElementId::Name(format!("match-{}", idx).into()),
-            is_selected,
-            &t,
-        )
-        .w_full()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _window, cx| {
-                this.selected_index = idx;
-                this.open_selected(cx);
-            }),
-        )
-        .pl(px(28.0))
-        .flex_col()
-        .gap(px(0.0));
+        // In compact mode (no context), render just the match line.
+        // In expanded mode (with context), show context as a compact sub-block.
+        let has_context = !context_before.is_empty() || !context_after.is_empty();
 
-        // Context before
-        for (ln, content) in context_before {
-            block = block.child(self.render_code_line(file_path, *ln, content, None, &t, cx));
+        if has_context {
+            // Expanded: match line with context shown as a tooltip-like block below
+            selectable_list_item(
+                ElementId::Name(format!("match-{}", idx).into()),
+                is_selected,
+                &t,
+            )
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.selected_index = idx;
+                    this.open_selected(cx);
+                }),
+            )
+            .pl(px(28.0))
+            .flex_col()
+            .gap(px(0.0))
+            .children(
+                context_before.iter().map(|(ln, content)| {
+                    self.render_code_line(file_path, *ln, content, None, &t, cx)
+                }),
+            )
+            .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
+            .children(
+                context_after.iter().map(|(ln, content)| {
+                    self.render_code_line(file_path, *ln, content, None, &t, cx)
+                }),
+            )
+            .into_any_element()
+        } else {
+            // Compact: just the match line
+            selectable_list_item(
+                ElementId::Name(format!("match-{}", idx).into()),
+                is_selected,
+                &t,
+            )
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.selected_index = idx;
+                    this.open_selected(cx);
+                }),
+            )
+            .gap(px(8.0))
+            .pl(px(28.0))
+            .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
+            .into_any_element()
         }
-
-        // The match line
-        block = block.child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx));
-
-        // Context after
-        for (ln, content) in context_after {
-            block = block.child(self.render_code_line(file_path, *ln, content, None, &t, cx));
-        }
-
-        block.into_any_element()
     }
 
     /// Render the toggle buttons row (case, regex, fuzzy, glob).
@@ -579,7 +589,8 @@ impl ContentSearchDialog {
         // Determine if path is a folder (exists in expanded_folders or has children in tree)
         // by checking if any file's relative_path starts with it + "/"
         let glob = path.map(|p| {
-            let is_folder = self.files.iter().any(|f| f.relative_path.starts_with(&format!("{p}/")));
+            let prefix = format!("{p}/");
+            let is_folder = self.rows.iter().any(|r| matches!(r, ResultRow::FileHeader { relative_path, .. } if relative_path.starts_with(&prefix)));
             if is_folder { format!("{p}/**") } else { p }
         });
         self.file_glob = glob.clone();
@@ -599,10 +610,22 @@ impl ContentSearchDialog {
     }
 
     /// Render the sidebar file tree for expanded mode.
+    /// Shows only files/folders that have search results.
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
 
-        let tree_elements = self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx);
+        // Build tree from matched files only
+        let matched_files: Vec<(usize, &str)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| match row {
+                ResultRow::FileHeader { relative_path, .. } => Some((i, relative_path.as_str())),
+                _ => None,
+            })
+            .collect();
+        let result_tree = build_file_tree(matched_files.into_iter());
+        let tree_elements = self.render_tree_node(&result_tree, 0, "", &t, cx);
 
         div()
             .w(px(240.0))
@@ -724,15 +747,25 @@ impl ContentSearchDialog {
             }
         }
 
-        // Render files
-        for &file_index in &node.files {
-            if let Some(file) = self.files.get(file_index) {
-                let rel = file.relative_path.clone();
+        // Render files (file_index is index into self.rows for FileHeader rows)
+        for &row_index in &node.files {
+            if let Some(ResultRow::FileHeader {
+                relative_path,
+                match_count,
+                ..
+            }) = self.rows.get(row_index)
+            {
+                let filename = std::path::Path::new(relative_path.as_str())
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| relative_path.clone());
+                let rel = relative_path.clone();
                 let is_scoped = self.scope_path.as_ref() == Some(&rel);
+                let count = *match_count;
 
                 elements.push(
                     div()
-                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
+                        .id(ElementId::Name(format!("tree-file-{}", row_index).into()))
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -746,14 +779,21 @@ impl ContentSearchDialog {
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _window, cx| {
                             this.set_scope(Some(rel.clone()), cx);
                         }))
-                        .child(file_icon(&file.filename, t, cx))
+                        .child(file_icon(&filename, t, cx))
                         .child(
                             div()
+                                .flex_1()
                                 .text_size(ui_text_sm(cx))
                                 .text_color(rgb(t.text_primary))
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(file.filename.clone()),
+                                .child(filename),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_sm(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(count.to_string()),
                         )
                         .into_any_element(),
                 );
@@ -995,7 +1035,9 @@ impl Render for ContentSearchDialog {
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
+            let has_context = self.expanded;
             let view = cx.entity().clone();
+
             uniform_list("content-search-list", rows.len(), move |range, _window, cx| {
                 view.update(cx, |this, cx| {
                     range
