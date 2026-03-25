@@ -2,7 +2,7 @@
 
 use crate::ActionDispatch;
 use okena_terminal::input::{KeyEvent, KeyModifiers, key_to_bytes};
-use crate::layout::navigation::{get_pane_map, NavigationDirection};
+use crate::layout::navigation::{get_pane_map, PaneBounds, NavigationDirection};
 use gpui::*;
 
 use super::TerminalPane;
@@ -11,7 +11,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn handle_navigation(
         &mut self,
         direction: NavigationDirection,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let pane_map = get_pane_map();
@@ -22,16 +22,14 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         };
 
         if let Some(target) = pane_map.find_nearest_in_direction(&source, direction) {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
-            });
+            self.focus_target(target, window, cx);
         }
     }
 
     pub(super) fn handle_sequential_navigation(
         &mut self,
         next: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let pane_map = get_pane_map();
@@ -48,10 +46,17 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         };
 
         if let Some(target) = target {
-            self.workspace.update(cx, |ws, cx| {
-                ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
-            });
+            self.focus_target(target, window, cx);
         }
+    }
+
+    fn focus_target(&self, target: &PaneBounds, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ref fh) = target.focus_handle {
+            window.focus(fh, cx);
+        }
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_focused_terminal(target.project_id.clone(), target.layout_path.clone(), cx);
+        });
     }
 
     pub(super) fn start_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {

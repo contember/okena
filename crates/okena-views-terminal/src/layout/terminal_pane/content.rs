@@ -348,8 +348,9 @@ impl Render for TerminalContent {
             let entity = cx.entity().downgrade();
             let project_id = self.project_id.clone();
             let layout_path = self.layout_path.clone();
+            let fh = self.focus_handle.clone();
             move |bounds: Bounds<Pixels>, _window: &mut Window, cx: &mut App| {
-                register_pane_bounds(project_id.clone(), layout_path.clone(), bounds);
+                register_pane_bounds(project_id.clone(), layout_path.clone(), bounds, Some(fh.clone()));
 
                 if let Some(entity) = entity.upgrade() {
                     entity.update(cx, |this, _| {

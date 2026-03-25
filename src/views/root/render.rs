@@ -1,7 +1,7 @@
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
-use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
+use crate::views::layout::navigation::get_pane_map;
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::workspace::requests::OverlayRequest;
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
@@ -361,10 +361,6 @@ impl Render for RootView {
         let has_tab_context_menu = om.has_tab_context_menu();
         let has_worktree_list = om.has_worktree_list();
         let has_color_picker = om.has_color_picker();
-
-        // Clear the pane map at the start of each render cycle
-        // Each terminal pane will re-register itself during prepaint
-        clear_pane_map();
 
         // Get active drag for global mouse handling
         let active_drag = self.active_drag.clone();

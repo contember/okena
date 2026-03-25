@@ -474,8 +474,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
 impl<D: ActionDispatch> Drop for TerminalPane<D> {
     fn drop(&mut self) {
-        // Don't unregister from ContentPaneRegistry here.
-        // See original code comments for explanation.
+        // Remove this pane from the spatial navigation map so stale entries
+        // don't linger after a terminal is closed.
+        crate::layout::navigation::deregister_pane_bounds(&self.project_id, &self.layout_path);
     }
 }
 
