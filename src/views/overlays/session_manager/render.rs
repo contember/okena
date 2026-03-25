@@ -539,6 +539,7 @@ impl Render for SessionManager {
                         "Session Manager",
                         Some("Save and restore workspace sessions"),
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(

@@ -8,6 +8,7 @@ use okena_ui::input::{input_container, labeled_input};
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -310,27 +311,27 @@ impl Render for RemoteConnectDialog {
         let status_element = match &self.status {
             ConnectionDialogStatus::Idle => div().into_any_element(),
             ConnectionDialogStatus::Testing => div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
                 .child("Testing connection...")
                 .into_any_element(),
             ConnectionDialogStatus::TestSuccess(version) => div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.term_green))
                 .child(format!("Server reachable (v{})", version))
                 .into_any_element(),
             ConnectionDialogStatus::TestFailed(err) => div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.term_red))
                 .child(format!("Failed: {}", err))
                 .into_any_element(),
             ConnectionDialogStatus::Connecting => div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
                 .child("Connecting...")
                 .into_any_element(),
             ConnectionDialogStatus::ConnectFailed(err) => div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.term_red))
                 .child(format!("Failed: {}", err))
                 .into_any_element(),
@@ -364,6 +365,7 @@ impl Render for RemoteConnectDialog {
                         "Connect to Remote Okena",
                         None::<&str>,
                         &t,
+                        cx,
                         cx.listener(|this, _, _, cx| this.close(cx)),
                     ))
                     .child(
@@ -375,21 +377,21 @@ impl Render for RemoteConnectDialog {
                             .child(
                                 labeled_input("Name:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.name_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.name_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
                             .child(
                                 labeled_input("Host:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.host_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.host_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
                             .child(
                                 labeled_input("Port:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.port_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.port_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
@@ -412,13 +414,13 @@ impl Render for RemoteConnectDialog {
                             .child(
                                 labeled_input("Pairing Code:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.code_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.code_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(
                                         "Enter the pairing code shown on the remote machine's status bar",

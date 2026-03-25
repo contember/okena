@@ -3,7 +3,23 @@
 //! This module defines named constants for common UI values to ensure
 //! consistency across the application and make global adjustments easier.
 
-use gpui::px;
+use gpui::{px, App, Global};
+
+// =============================================================================
+// Global UI font size provider
+// =============================================================================
+
+/// Global function pointer that reads the current ui_font_size from the host app's settings.
+/// The host app registers this at startup; crate views call `ui_text_*(cx)` to get scaled sizes.
+pub struct GlobalUiFontSize(pub fn(&App) -> f32);
+
+impl Global for GlobalUiFontSize {}
+
+fn get_ui_font_size(cx: &App) -> f32 {
+    cx.try_global::<GlobalUiFontSize>()
+        .map(|g| (g.0)(cx))
+        .unwrap_or(DEFAULT_UI_FONT_SIZE)
+}
 
 // =============================================================================
 // Spacing (padding, margin, gap)
@@ -53,28 +69,28 @@ fn ui_scale(ui_font_size: f32) -> f32 {
     ui_font_size / DEFAULT_UI_FONT_SIZE
 }
 
-pub fn ui_text_xs(ui_font_size: f32) -> gpui::Pixels {
-    px(9.0 * ui_scale(ui_font_size))
+pub fn ui_text_xs(cx: &App) -> gpui::Pixels {
+    px(9.0 * ui_scale(get_ui_font_size(cx)))
 }
 
-pub fn ui_text_sm(ui_font_size: f32) -> gpui::Pixels {
-    px(10.0 * ui_scale(ui_font_size))
+pub fn ui_text_sm(cx: &App) -> gpui::Pixels {
+    px(10.0 * ui_scale(get_ui_font_size(cx)))
 }
 
-pub fn ui_text_ms(ui_font_size: f32) -> gpui::Pixels {
-    px(11.0 * ui_scale(ui_font_size))
+pub fn ui_text_ms(cx: &App) -> gpui::Pixels {
+    px(11.0 * ui_scale(get_ui_font_size(cx)))
 }
 
-pub fn ui_text_md(ui_font_size: f32) -> gpui::Pixels {
-    px(12.0 * ui_scale(ui_font_size))
+pub fn ui_text_md(cx: &App) -> gpui::Pixels {
+    px(12.0 * ui_scale(get_ui_font_size(cx)))
 }
 
-pub fn ui_text_xl(ui_font_size: f32) -> gpui::Pixels {
-    px(14.0 * ui_scale(ui_font_size))
+pub fn ui_text_xl(cx: &App) -> gpui::Pixels {
+    px(14.0 * ui_scale(get_ui_font_size(cx)))
 }
 
-pub fn ui_text(default_px: f32, ui_font_size: f32) -> gpui::Pixels {
-    px(default_px * ui_scale(ui_font_size))
+pub fn ui_text(default_px: f32, cx: &App) -> gpui::Pixels {
+    px(default_px * ui_scale(get_ui_font_size(cx)))
 }
 
 // =============================================================================

@@ -1,6 +1,7 @@
 //! Worktree list popover for showing/hiding worktrees in the sidebar
 
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_md};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -50,7 +51,7 @@ impl Sidebar {
             .max_h(px(400.0))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .pb(px(6.0))
@@ -59,7 +60,7 @@ impl Sidebar {
             .when(worktrees.is_empty(), |d| {
                 d.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_muted))
                         .py(px(8.0))
                         .child("No worktrees found")
@@ -143,7 +144,7 @@ impl Sidebar {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(ui_text_md(cx))
                                     .text_color(rgb(t.text_primary))
                                     .overflow_hidden()
                                     .text_ellipsis()

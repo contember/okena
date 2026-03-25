@@ -26,11 +26,11 @@ impl SettingsPanel {
         let dec_fn = update_fn.clone();
         let inc_fn = update_fn;
 
-        settings_row(id.to_string(), label, &t, has_border).child(
+        settings_row(id.to_string(), label, &t, cx, has_border).child(
             h_flex()
                 .gap(px(4.0))
                 .child(
-                    stepper_button(format!("{}-dec", id), "-", &t)
+                    stepper_button(format!("{}-dec", id), "-", &t, cx)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
                             let dec_fn = dec_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
@@ -38,9 +38,9 @@ impl SettingsPanel {
                             });
                         })),
                 )
-                .child(value_display(format.replace("{}", &format!("{:.1}", value)), width, &t))
+                .child(value_display(format.replace("{}", &format!("{:.1}", value)), width, &t, cx))
                 .child(
-                    stepper_button(format!("{}-inc", id), "+", &t)
+                    stepper_button(format!("{}-inc", id), "+", &t, cx)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
                             let inc_fn = inc_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
@@ -66,11 +66,11 @@ impl SettingsPanel {
         let dec_fn = update_fn.clone();
         let inc_fn = update_fn;
 
-        settings_row(id.to_string(), label, &t, has_border).child(
+        settings_row(id.to_string(), label, &t, cx, has_border).child(
             h_flex()
                 .gap(px(4.0))
                 .child(
-                    stepper_button(format!("{}-dec", id), "-", &t)
+                    stepper_button(format!("{}-dec", id), "-", &t, cx)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
                             let dec_fn = dec_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
@@ -78,9 +78,9 @@ impl SettingsPanel {
                             });
                         })),
                 )
-                .child(value_display(format!("{}", value), width, &t))
+                .child(value_display(format!("{}", value), width, &t, cx))
                 .child(
-                    stepper_button(format!("{}-inc", id), "+", &t)
+                    stepper_button(format!("{}-inc", id), "+", &t, cx)
                         .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
                             let inc_fn = inc_fn.clone();
                             settings_entity(cx).update(cx, |state, cx| {
@@ -102,7 +102,7 @@ impl SettingsPanel {
     ) -> impl IntoElement {
         let t = theme(cx);
 
-        settings_row(id.to_string(), label, &t, has_border).child(
+        settings_row(id.to_string(), label, &t, cx, has_border).child(
             toggle_switch(format!("{}-toggle", id), enabled, &t)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| {
                     let update_fn = update_fn.clone();
@@ -116,9 +116,10 @@ impl SettingsPanel {
     pub(super) fn render_font_dropdown_row(&mut self, current_family: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        settings_row("font-family".to_string(), "Font Family", &t, true).child(
-            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t,
-                Self::bounds_setter(cx, |s, b| s.font_button_bounds = b))
+        let font_bounds_setter = Self::bounds_setter(cx, |s, b| s.font_button_bounds = b);
+        settings_row("font-family".to_string(), "Font Family", &t, cx, true).child(
+            dropdown_button("font-family-btn", current_family, self.font_dropdown_open, &t, cx,
+                font_bounds_setter)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.font_dropdown_open = !this.font_dropdown_open;
                     this.shell_dropdown_open = false;
@@ -137,7 +138,7 @@ impl SettingsPanel {
                 let is_selected = *family == current;
                 let family_str = family.to_string();
 
-                dropdown_option(format!("font-opt-{}", family), family, is_selected, &t)
+                dropdown_option(format!("font-opt-{}", family), family, is_selected, &t, cx)
                     .on_mouse_down(MouseButton::Left, cx.listener({
                         let family = family_str.clone();
                         move |this, _, _, cx| {
@@ -156,9 +157,10 @@ impl SettingsPanel {
         let t = theme(cx);
         let display_name = current_shell.display_name();
 
-        settings_row("default-shell".to_string(), "Default Shell", &t, true).child(
-            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t,
-                Self::bounds_setter(cx, |s, b| s.shell_button_bounds = b))
+        let shell_bounds_setter = Self::bounds_setter(cx, |s, b| s.shell_button_bounds = b);
+        settings_row("default-shell".to_string(), "Default Shell", &t, cx, true).child(
+            dropdown_button("default-shell-btn", &display_name, self.shell_dropdown_open, &t, cx,
+                shell_bounds_setter)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.shell_dropdown_open = !this.shell_dropdown_open;
                     this.font_dropdown_open = false;
@@ -184,7 +186,7 @@ impl SettingsPanel {
                 let shell_type = shell_info.shell_type.clone();
                 let name = shell_info.name.clone();
 
-                dropdown_option(format!("shell-opt-{}", name), &name, is_selected, &t)
+                dropdown_option(format!("shell-opt-{}", name), &name, is_selected, &t, cx)
                     .on_mouse_down(MouseButton::Left, cx.listener({
                         let shell_type = shell_type.clone();
                         move |this, _, _, cx| {
@@ -203,9 +205,10 @@ impl SettingsPanel {
         let t = theme(cx);
         let display_name = current_backend.display_name();
 
-        settings_row_with_desc("session-backend".to_string(), "Session Backend", "Requires restart", &t, true).child(
-            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t,
-                Self::bounds_setter(cx, |s, b| s.session_backend_button_bounds = b))
+        let session_bounds_setter = Self::bounds_setter(cx, |s, b| s.session_backend_button_bounds = b);
+        settings_row_with_desc("session-backend".to_string(), "Session Backend", "Requires restart", &t, cx, true).child(
+            dropdown_button("session-backend-btn", display_name, self.session_backend_dropdown_open, &t, cx,
+                session_bounds_setter)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                     this.session_backend_dropdown_open = !this.session_backend_dropdown_open;
                     this.font_dropdown_open = false;
@@ -226,7 +229,7 @@ impl SettingsPanel {
                 let backend_copy = *backend;
                 let name = backend.display_name();
 
-                dropdown_option(format!("backend-opt-{:?}", backend), name, is_selected, &t)
+                dropdown_option(format!("backend-opt-{:?}", backend), name, is_selected, &t, cx)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                         settings_entity(cx).update(cx, |state, cx| {
                             state.set_session_backend(backend_copy, cx);

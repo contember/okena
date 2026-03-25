@@ -14,6 +14,7 @@ use okena_ui::code_block::code_block_container;
 use okena_ui::modal::fullscreen_overlay;
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
+use okena_ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl};
 use okena_markdown::RenderedNode;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
 use gpui::*;
@@ -53,7 +54,7 @@ impl FileViewer {
             .id(ElementId::Name(format!("line-{}", line_number).into()))
             .flex()
             .h(px(line_height))
-            .text_size(px(font_size))
+            .text_size(ui_text(font_size, cx))
             .font_family("monospace")
             .on_mouse_down(MouseButton::Left, {
                 let text_layout = text_layout.clone();
@@ -148,6 +149,7 @@ impl FileViewer {
         &self,
         t: &ThemeColors,
         tree_elements: Vec<AnyElement>,
+        cx: &App,
     ) -> impl IntoElement {
         div()
             .w(px(SIDEBAR_WIDTH))
@@ -163,7 +165,7 @@ impl FileViewer {
                     .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(t.text_secondary))
                     .line_height(px(11.0))
@@ -235,7 +237,7 @@ impl FileViewer {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_secondary))
                             .child(format!("{}/", name)),
                     )
@@ -269,12 +271,12 @@ impl FileViewer {
                             this.select_file(file_index, cx);
                         }))
                         .child(
-                            file_icon(&file.filename, t)
+                            file_icon(&file.filename, t, cx)
                                 .mr(px(4.0)),
                         )
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(ui_text(13.0, cx))
                                 .text_color(rgb(t.text_primary))
                                 .overflow_hidden()
                                 .whitespace_nowrap()
@@ -394,7 +396,7 @@ impl Render for FileViewer {
         let preview_nodes: Vec<RenderedNode> = if !has_error && is_preview_mode && is_markdown {
             self.markdown_doc.as_ref().map(|doc| {
                 let selection = self.markdown_selection.normalized_non_empty();
-                doc.render_nodes_with_offsets(&t, selection)
+                doc.render_nodes_with_offsets(&t, cx, selection)
             }).unwrap_or_default()
         } else {
             Vec::new()
@@ -507,14 +509,14 @@ impl Render for FileViewer {
                                             .gap(px(2.0))
                                             .child(
                                                 div()
-                                                    .text_size(px(14.0))
+                                                    .text_size(ui_text_xl(cx))
                                                     .font_weight(FontWeight::MEDIUM)
                                                     .text_color(rgb(t.text_primary))
                                                     .child(filename),
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(11.0))
+                                                    .text_size(ui_text_ms(cx))
                                                     .text_color(rgb(t.text_muted))
                                                     .child(relative_path),
                                             ),
@@ -537,6 +539,7 @@ impl Render for FileViewer {
                                                         ("Source", !is_preview_mode),
                                                     ],
                                                     &t,
+                                                    cx,
                                                 ))
                                         )
                                     })
@@ -551,7 +554,7 @@ impl Render for FileViewer {
                                             .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                                             .child(
                                                 div()
-                                                    .text_size(px(18.0))
+                                                    .text_size(ui_text(18.0, cx))
                                                     .text_color(rgb(t.text_muted))
                                                     .child("\u{00d7}"),
                                             ),
@@ -565,7 +568,7 @@ impl Render for FileViewer {
                             .min_h_0()
                             // Sidebar (when visible)
                             .when(sidebar_visible, |d| {
-                                d.child(self.render_sidebar(&t, tree_elements))
+                                d.child(self.render_sidebar(&t, tree_elements, cx))
                             })
                             // Content + footer column
                             .child(
@@ -583,7 +586,7 @@ impl Render for FileViewer {
                                                 .justify_center()
                                                 .child(
                                                     div()
-                                                        .text_size(px(14.0))
+                                                        .text_size(ui_text_xl(cx))
                                                         .text_color(rgb(t.text_muted))
                                                         .child(error_message.unwrap_or_default()),
                                                 ),
@@ -703,13 +706,13 @@ impl Render for FileViewer {
                                                             .into_any_element()
                                                     }).collect();
 
-                                                    let code_block = code_block_container(language.as_deref(), &t)
+                                                    let code_block = code_block_container(language.as_deref(), &t, cx)
                                                         .id(ElementId::Name(format!("md-codeblock-{}", idx).into()))
                                                         .child(
                                                             div()
                                                                 .p(px(12.0))
                                                                 .font_family("monospace")
-                                                                .text_size(px(self.file_font_size))
+                                                                .text_size(ui_text(self.file_font_size, cx))
                                                                 .text_color(rgb(t.text_secondary))
                                                                 .flex()
                                                                 .flex_col()
@@ -850,25 +853,27 @@ impl Render for FileViewer {
                                             .child(
                                                 h_flex()
                                                     .gap(px(16.0))
-                                                    .child(self.render_hint("B", "files", &t))
+                                                    .child(self.render_hint("B", "files", &t, cx))
                                                     .when(is_markdown, |d| {
-                                                        d.child(self.render_hint("Tab", "toggle preview", &t))
+                                                        d.child(self.render_hint("Tab", "toggle preview", &t, cx))
                                                     })
                                                     .child(self.render_hint(
                                                         if cfg!(target_os = "macos") { "Cmd+C" } else { "Ctrl+C" },
                                                         "copy",
                                                         &t,
+                                                        cx,
                                                     ))
                                                     .child(self.render_hint(
                                                         if cfg!(target_os = "macos") { "Cmd+A" } else { "Ctrl+A" },
                                                         "select all",
                                                         &t,
+                                                        cx,
                                                     ))
-                                                    .child(self.render_hint("Esc", "close", &t)),
+                                                    .child(self.render_hint("Esc", "close", &t, cx)),
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(10.0))
+                                                    .text_size(ui_text_sm(cx))
                                                     .text_color(rgb(t.text_muted))
                                                     .when(!is_preview_mode, |d| {
                                                         d.child(format!("{} lines", self.line_count))
@@ -889,6 +894,7 @@ impl FileViewer {
         key: &str,
         action: &str,
         t: &ThemeColors,
+        cx: &App,
     ) -> impl IntoElement {
         h_flex()
             .gap(px(4.0))
@@ -898,13 +904,13 @@ impl FileViewer {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .bg(rgb(t.bg_secondary))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(key.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(action.to_string()),
             )

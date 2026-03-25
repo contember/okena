@@ -1,4 +1,5 @@
 use okena_extensions::ThemeColors;
+use okena_ui::tokens::ui_text_sm;
 use gpui::*;
 use gpui_component::h_flex;
 use parking_lot::Mutex;
@@ -236,7 +237,7 @@ impl Render for UpdateStatusWidget {
                     .id("update-ready")
                     .gap(px(6.0))
                     .items_center()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .child(
                         div()
                             .id("update-install")
@@ -292,7 +293,7 @@ impl Render for UpdateStatusWidget {
                     .px(px(6.0))
                     .py(px(1.0))
                     .text_color(rgb(t.term_yellow))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .child(format!("Installing v{}...", version))
                     .into_any_element()
             }
@@ -303,7 +304,7 @@ impl Render for UpdateStatusWidget {
                     .px(px(6.0))
                     .py(px(1.0))
                     .text_color(rgb(t.term_green))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .child("Restart to update")
                     .on_click(move |_, _, cx| {
                         crate::installer::restart_app(cx);
@@ -316,7 +317,7 @@ impl Render for UpdateStatusWidget {
                     .child(
                         div()
                             .text_color(rgb(t.term_yellow))
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .child(format!("Downloading v{}... {}%", version, progress))
                     )
                     .into_any_element()
@@ -326,7 +327,7 @@ impl Render for UpdateStatusWidget {
                     .px(px(6.0))
                     .py(px(1.0))
                     .text_color(rgb(t.text_muted))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .child("Checking for updates...")
                     .into_any_element()
             }
@@ -340,7 +341,7 @@ impl Render for UpdateStatusWidget {
                     .child(
                         div()
                             .text_color(rgb(t.term_red))
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .child(format!("Update failed: {}", error))
                     )
                     .child(
@@ -348,7 +349,7 @@ impl Render for UpdateStatusWidget {
                             .id("update-failed-dismiss")
                             .cursor_pointer()
                             .text_color(rgb(t.text_muted))
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();
@@ -366,7 +367,7 @@ impl Render for UpdateStatusWidget {
                     .child(
                         div()
                             .text_color(rgb(t.text_muted))
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .child(format!("v{} — brew upgrade okena", version))
                     )
                     .child(
@@ -374,7 +375,7 @@ impl Render for UpdateStatusWidget {
                             .id("update-dismiss")
                             .cursor_pointer()
                             .text_color(rgb(t.text_muted))
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .child("x")
                             .on_click(move |_, _, _cx| {
                                 info_dismiss.dismiss();

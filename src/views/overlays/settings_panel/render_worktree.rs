@@ -12,7 +12,7 @@ impl SettingsPanel {
         let wt = &s.worktree;
 
         div()
-            .child(section_header("Path", &t))
+            .child(section_header("Path", &t, cx))
             .child(
                 section_container(&t)
                     .child(
@@ -28,7 +28,7 @@ impl SettingsPanel {
                         ),
                     ),
             )
-            .child(section_header("Close Defaults", &t))
+            .child(section_header("Close Defaults", &t, cx))
             .child(
                 section_container(&t)
                     .child(self.render_toggle(

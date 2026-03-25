@@ -3,6 +3,7 @@ use crate::Cancel;
 use okena_files::theme::theme;
 use okena_ui::button::{button, button_primary};
 use okena_ui::modal::{modal_backdrop, modal_content};
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm, ui_text_xl, ui_text};
 use okena_workspace::hooks;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::{PendingWorktreeClose, Workspace};
@@ -661,7 +662,7 @@ impl Render for CloseWorktreeDialog {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(14.0))
+                                            .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
                                             .child("Close Worktree"),
@@ -707,7 +708,7 @@ impl Render for CloseWorktreeDialog {
                                     .gap(px(4.0))
                                     .child(
                                         div()
-                                            .text_size(px(13.0))
+                                            .text_size(ui_text(13.0, cx))
                                             .text_color(rgb(t.text_primary))
                                             .child(format!(
                                                 "Project: {} ({})",
@@ -716,7 +717,7 @@ impl Render for CloseWorktreeDialog {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(11.0))
+                                            .text_size(ui_text_ms(cx))
                                             .text_color(rgb(t.text_muted))
                                             .child(format!("Path: {}", self.project_path)),
                                     ),
@@ -734,14 +735,14 @@ impl Render for CloseWorktreeDialog {
                                         .gap(px(2.0))
                                         .child(
                                             div()
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(0xffaa33))
                                                 .child("This worktree has uncommitted changes."),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
+                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(0xffaa33))
                                                 .child("They will be lost if you proceed."),
                                         ),
@@ -760,7 +761,7 @@ impl Render for CloseWorktreeDialog {
                                         .gap(px(2.0))
                                         .child(
                                             div()
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(0xffaa33))
                                                 .child(format!(
@@ -770,7 +771,7 @@ impl Render for CloseWorktreeDialog {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
+                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(0xffaa33))
                                                 .child("Enable merge to preserve them, or they will remain on the unmerged branch."),
                                         ),
@@ -831,7 +832,7 @@ impl Render for CloseWorktreeDialog {
                                                 .gap(px(1.0))
                                                 .child(
                                                     div()
-                                                        .text_size(px(12.0))
+                                                        .text_size(ui_text_md(cx))
                                                         .text_color(if can_merge {
                                                             rgb(t.text_primary)
                                                         } else {
@@ -841,7 +842,7 @@ impl Render for CloseWorktreeDialog {
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_size(px(10.0))
+                                                        .text_size(ui_text_sm(cx))
                                                         .text_color(rgb(t.text_muted))
                                                         .child(if can_merge {
                                                             "rebase + merge commit"
@@ -899,13 +900,13 @@ impl Render for CloseWorktreeDialog {
                                                 .gap(px(1.0))
                                                 .child(
                                                     div()
-                                                        .text_size(px(12.0))
+                                                        .text_size(ui_text_md(cx))
                                                         .text_color(rgb(t.text_primary))
                                                         .child("Stash changes before merge"),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_size(px(10.0))
+                                                        .text_size(ui_text_sm(cx))
                                                         .text_color(rgb(t.text_muted))
                                                         .child("Auto-pop on failure"),
                                                 ),
@@ -965,13 +966,13 @@ impl Render for CloseWorktreeDialog {
                                                         .gap(px(1.0))
                                                         .child(
                                                             div()
-                                                                .text_size(px(12.0))
+                                                                .text_size(ui_text_md(cx))
                                                                 .text_color(rgb(t.text_primary))
                                                                 .child("Fetch remote before rebase"),
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_size(px(10.0))
+                                                                .text_size(ui_text_sm(cx))
                                                                 .text_color(rgb(t.text_muted))
                                                                 .child("git fetch --all"),
                                                         ),
@@ -1023,13 +1024,13 @@ impl Render for CloseWorktreeDialog {
                                                         .gap(px(1.0))
                                                         .child(
                                                             div()
-                                                                .text_size(px(12.0))
+                                                                .text_size(ui_text_md(cx))
                                                                 .text_color(rgb(t.text_primary))
                                                                 .child("Delete branch after merge"),
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_size(px(10.0))
+                                                                .text_size(ui_text_sm(cx))
                                                                 .text_color(rgb(t.text_muted))
                                                                 .child("local + remote"),
                                                         ),
@@ -1080,13 +1081,13 @@ impl Render for CloseWorktreeDialog {
                                                         .gap(px(1.0))
                                                         .child(
                                                             div()
-                                                                .text_size(px(12.0))
+                                                                .text_size(ui_text_md(cx))
                                                                 .text_color(rgb(t.text_primary))
                                                                 .child("Push target branch after merge"),
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_size(px(10.0))
+                                                                .text_size(ui_text_sm(cx))
                                                                 .text_color(rgb(t.text_muted))
                                                                 .child(format!(
                                                                     "git push origin {}",
@@ -1107,7 +1108,7 @@ impl Render for CloseWorktreeDialog {
                                         .py(px(6.0))
                                         .rounded(px(4.0))
                                         .bg(rgba(0x3399ff15))
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.border_active))
                                         .child(text),
                                 )
@@ -1120,7 +1121,7 @@ impl Render for CloseWorktreeDialog {
                                 .px(px(16.0))
                                 .py(px(8.0))
                                 .bg(rgba(0xff00001a))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
                                 .child(msg),
                         )

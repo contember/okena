@@ -1,12 +1,13 @@
 //! Toggle components.
 
 use crate::theme::ThemeColors;
+use crate::tokens::ui_text_md;
 use gpui::*;
 
 /// Segmented toggle button for switching between options.
 ///
 /// `options` is a slice of `(label, is_active)` pairs.
-pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
+pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors, cx: &App) -> Div {
     let mut container = div()
         .flex()
         .rounded(px(6.0))
@@ -18,7 +19,7 @@ pub fn segmented_toggle(options: &[(&str, bool)], t: &ThemeColors) -> Div {
             .px(px(10.0))
             .py(px(4.0))
             .rounded(px(4.0))
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .cursor_pointer();
 
         if is_active {

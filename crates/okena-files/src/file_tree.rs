@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use okena_core::theme::ThemeColors;
 use okena_ui::file_icon::file_icon;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -60,14 +61,14 @@ pub fn flatten_file_tree(node: &FileTreeNode, depth: usize) -> Vec<FileTreeItem<
 }
 
 /// Render a folder row in a file tree.
-pub fn render_folder_row(name: &str, depth: usize, t: &ThemeColors) -> AnyElement {
+pub fn render_folder_row(name: &str, depth: usize, t: &ThemeColors, cx: &App) -> AnyElement {
     let indent = depth * 14;
     h_flex()
         .h(px(26.0))
         .pl(px(indent as f32 + 12.0))
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
                 .child(format!("{}/", name)),
         )
@@ -86,6 +87,7 @@ pub fn render_file_row(
     is_deleted: bool,
     selected: bool,
     t: &ThemeColors,
+    cx: &App,
 ) -> Div {
     let indent = depth * 14;
 
@@ -112,18 +114,18 @@ pub fn render_file_row(
         // Status badge
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(status_color))
                 .child(status_char),
         )
         // File type icon
-        .child(file_icon(filename, t))
+        .child(file_icon(filename, t, cx))
         // Filename
         .child(
             div()
                 .flex_1()
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_primary))
                 .overflow_hidden()
                 .whitespace_nowrap()
@@ -135,7 +137,7 @@ pub fn render_file_row(
             d.child(
                 h_flex()
                     .gap(px(4.0))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .when(added > 0, |d| {
                         d.child(
                             div()

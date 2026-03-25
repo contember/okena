@@ -21,6 +21,7 @@ use okena_ui::rename_state::{
     RenameState,
 };
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_xl};
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::requests::SidebarRequest;
 use okena_workspace::state::{FolderData, ProjectData, Workspace};
@@ -501,6 +502,7 @@ impl Sidebar {
                     is_cursor,
                     group_header_padding,
                     &t,
+                    cx,
                 )
                 .on_click(cx.listener(move |this, _, _window, cx| {
                     this.toggle_group(&project_id, GroupKind::Terminals);
@@ -1251,7 +1253,7 @@ impl Sidebar {
             .border_color(rgb(t.border))
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .child("EXPLORER"),
@@ -1292,13 +1294,13 @@ impl Sidebar {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(ui_text_xl(cx))
                                     .text_color(rgb(t.text_secondary))
                                     .child("+"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_secondary))
                                     .child("Add Project"),
                             )
@@ -1343,7 +1345,7 @@ impl Sidebar {
             })
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .child("PROJECTS"),

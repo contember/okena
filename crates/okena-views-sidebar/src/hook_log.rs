@@ -4,6 +4,7 @@ use crate::Cancel;
 use okena_ui::badge::keyboard_hints_footer;
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text};
 use okena_workspace::hook_monitor::{HookExecution, HookMonitor, HookStatus};
 use okena_core::theme::ThemeColors;
 use gpui::*;
@@ -118,6 +119,7 @@ impl Render for HookLog {
                         "Hook Log",
                         None::<&str>,
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(
@@ -129,7 +131,7 @@ impl Render for HookLog {
                                 vec![div()
                                     .px(px(16.0))
                                     .py(px(24.0))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("No hooks have been executed yet.")
                                     .into_any_element()]
@@ -138,7 +140,7 @@ impl Render for HookLog {
                                     .iter()
                                     .enumerate()
                                     .map(|(i, exec)| {
-                                        render_hook_row(i, exec, &t).into_any_element()
+                                        render_hook_row(i, exec, &t, cx).into_any_element()
                                     })
                                     .collect()
                             }),
@@ -152,6 +154,7 @@ fn render_hook_row(
     index: usize,
     exec: &HookExecution,
     t: &ThemeColors,
+    cx: &App,
 ) -> impl IntoElement {
     let (status_icon, status_color) = match &exec.status {
         HookStatus::Running => ("◦", t.term_yellow),
@@ -190,27 +193,27 @@ fn render_hook_row(
                 .child(
                     div()
                         .text_color(rgb(status_color))
-                        .text_size(px(13.0))
+                        .text_size(ui_text(13.0, cx))
                         .flex_shrink_0()
                         .child(status_icon),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(t.text_primary))
                         .child(hook_type),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_muted))
                         .child(project_name),
                 )
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(ui_text_ms(cx))
                         .font_family("monospace")
                         .text_color(rgb(t.text_secondary))
                         .child(duration_str),
@@ -219,7 +222,7 @@ fn render_hook_row(
         .child(
             div()
                 .pl(px(21.0))
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .font_family("monospace")
                 .text_color(rgb(t.text_secondary))
                 .overflow_x_hidden()
@@ -230,7 +233,7 @@ fn render_hook_row(
             el.child(
                 div()
                     .pl(px(21.0))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_family("monospace")
                     .text_color(rgb(t.error))
                     .overflow_x_hidden()

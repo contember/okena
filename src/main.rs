@@ -559,6 +559,11 @@ fn main() {
             crate::theme::theme(cx)
         }));
 
+        // Register UI font size provider for all crates
+        cx.set_global(okena_ui::tokens::GlobalUiFontSize(|cx| {
+            settings::settings_entity(cx).read(cx).settings.ui_font_size
+        }));
+
         // NOTE: Terminal and git view settings are now served through
         // ExtensionSettingsStore (registered above) — no separate globals needed.
 

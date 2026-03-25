@@ -6,6 +6,7 @@ use okena_ui::input::input_container;
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl, ui_text};
 use okena_workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
@@ -192,7 +193,7 @@ impl Render for RenameDirectoryDialog {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(14.0))
+                                            .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
                                             .child("Rename Directory"),
@@ -229,7 +230,7 @@ impl Render for RenameDirectoryDialog {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_muted))
                                     .overflow_x_hidden()
                                     .whitespace_nowrap()
@@ -237,7 +238,7 @@ impl Render for RenameDirectoryDialog {
                             )
                             .child(
                                 input_container(&t, Some(input_focused))
-                                    .child(SimpleInput::new(&name_input).text_size(px(13.0))),
+                                    .child(SimpleInput::new(&name_input).text_size(ui_text(13.0, cx))),
                             ),
                     )
                     .when_some(error_msg, |d, msg| {
@@ -246,7 +247,7 @@ impl Render for RenameDirectoryDialog {
                                 .px(px(16.0))
                                 .py(px(8.0))
                                 .bg(rgba(0xff00001a))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
                                 .child(msg),
                         )

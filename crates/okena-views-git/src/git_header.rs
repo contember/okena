@@ -18,6 +18,7 @@ use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -317,7 +318,7 @@ impl GitHeader {
                 h_flex()
                     .flex_shrink_0()
                     .gap(px(6.0))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .line_height(px(12.0))
                     // Branch name + PR badge + CI status
                     .child({
@@ -457,6 +458,7 @@ impl GitHeader {
                 });
             },
             t,
+            cx,
         );
 
         let bounds = self.diff_stats_bounds;
@@ -559,6 +561,7 @@ impl GitHeader {
                 self.commit_log_loading,
                 on_commit_click,
                 t,
+                cx,
             )
         };
 
@@ -617,7 +620,7 @@ impl GitHeader {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
+                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_secondary))
                                                 .child("GRAPH"),
                                         )
@@ -641,7 +644,7 @@ impl GitHeader {
                                                         .rounded(px(4.0))
                                                         .bg(rgb(if is_compare { t.bg_selection } else { t.bg_hover }))
                                                         .hover(|s| s.bg(rgb(t.bg_selection)))
-                                                        .text_size(px(10.0))
+                                                        .text_size(ui_text_sm(cx))
                                                         .text_color(rgb(if is_compare { t.term_cyan } else { t.text_muted }))
                                                         .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                                                         .on_click(cx.listener(|this, _, _window, cx| {
@@ -679,7 +682,7 @@ impl GitHeader {
                                                                 }))
                                                                 .child(svg().path("icons/git-branch.svg").size(px(10.0)).text_color(rgb(t.term_green)))
                                                                 .child(
-                                                                    div().text_size(px(10.0)).text_color(rgb(t.text_secondary))
+                                                                    div().text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary))
                                                                         .max_w(px(140.0)).text_ellipsis().overflow_hidden().child(name),
                                                                 ),
                                                         )
@@ -712,7 +715,7 @@ impl GitHeader {
                                                     .rounded(px(4.0))
                                                     .bg(rgb(t.bg_hover))
                                                     .hover(|s| s.bg(rgb(t.bg_selection)))
-                                                    .text_size(px(10.0))
+                                                    .text_size(ui_text_sm(cx))
                                                     .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                                                     .on_click(cx.listener(|this, _, _window, cx| {
                                                         this.commit_log_picker_target = BranchPickerTarget::CompareBase;
@@ -731,7 +734,7 @@ impl GitHeader {
                                                     ),
                                             )
                                             // Arrow
-                                            .child(div().text_size(px(10.0)).text_color(rgb(t.text_muted)).child("\u{2192}"))
+                                            .child(div().text_size(ui_text_sm(cx)).text_color(rgb(t.text_muted)).child("\u{2192}"))
                                             // Head branch pill
                                             .child(
                                                 div()
@@ -742,7 +745,7 @@ impl GitHeader {
                                                     .rounded(px(4.0))
                                                     .bg(rgb(t.bg_hover))
                                                     .hover(|s| s.bg(rgb(t.bg_selection)))
-                                                    .text_size(px(10.0))
+                                                    .text_size(ui_text_sm(cx))
                                                     .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                                                     .on_click(cx.listener(|this, _, _window, cx| {
                                                         this.commit_log_picker_target = BranchPickerTarget::CompareHead;
@@ -782,7 +785,7 @@ impl GitHeader {
                                                                 d.bg(rgb(t.bg_hover))
                                                                     .text_color(rgb(t.text_muted))
                                                             })
-                                                            .text_size(px(10.0))
+                                                            .text_size(ui_text_sm(cx))
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                                                             .when(both_selected, |d| {
@@ -832,7 +835,7 @@ impl GitHeader {
                                                             .py(px(4.0))
                                                             .rounded(px(4.0))
                                                             .bg(rgb(t.bg_secondary))
-                                                            .text_size(px(11.0))
+                                                            .text_size(ui_text_ms(cx))
                                                             .text_color(rgb(t.text_primary))
                                                             .child(
                                                                 if filter.is_empty() {
@@ -864,7 +867,7 @@ impl GitHeader {
                                                                 .px(px(10.0))
                                                                 .py(px(3.0))
                                                                 .cursor_pointer()
-                                                                .text_size(px(11.0))
+                                                                .text_size(ui_text_ms(cx))
                                                                 .text_color(rgb(if is_selected { t.text_primary } else { t.text_secondary }))
                                                                 .when(is_selected, |d| d.font_weight(FontWeight::SEMIBOLD))
                                                                 .hover(|s| s.bg(rgb(t.bg_hover)))

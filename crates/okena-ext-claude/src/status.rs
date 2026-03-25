@@ -1,5 +1,6 @@
 use crate::ui_helpers::{format_api_timestamp, capitalize_first, open_url};
 use okena_extensions::ThemeColors;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -280,7 +281,7 @@ impl ClaudeStatus {
                                                 })
                                                 .child(
                                                     div()
-                                                        .text_size(px(12.0))
+                                                        .text_size(ui_text_md(cx))
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(rgb(0x000000))
                                                         .child(incident.name.clone()),
@@ -298,7 +299,7 @@ impl ClaudeStatus {
                                                             .child(
                                                                 h_flex().gap(px(4.0)).child(
                                                                     div()
-                                                                        .text_size(px(11.0))
+                                                                        .text_size(ui_text_ms(cx))
                                                                         .font_weight(
                                                                             FontWeight::BOLD,
                                                                         )
@@ -311,7 +312,7 @@ impl ClaudeStatus {
                                                                 )
                                                                 .child(
                                                                     div()
-                                                                        .text_size(px(11.0))
+                                                                        .text_size(ui_text_ms(cx))
                                                                         .text_color(rgb(
                                                                             t.text_secondary,
                                                                         ))
@@ -323,7 +324,7 @@ impl ClaudeStatus {
                                                             )
                                                             .child(
                                                                 div()
-                                                                    .text_size(px(10.0))
+                                                                    .text_size(ui_text_sm(cx))
                                                                     .text_color(rgb(t.text_muted))
                                                                     .child(
                                                                         update

@@ -3,6 +3,7 @@
 //! A 22x22 square button with a centered icon character (e.g., "▶", "■", "↻").
 
 use crate::theme::ThemeColors;
+use crate::tokens::ui_text_sm;
 use gpui::*;
 
 /// 22×22 icon action button with text icon character.
@@ -14,8 +15,9 @@ pub fn icon_action_button(
     icon_char: impl Into<SharedString>,
     icon_color: u32,
     t: &ThemeColors,
+    cx: &App,
 ) -> Stateful<Div> {
-    icon_action_button_sized(id, icon_char, icon_color, 22.0, t)
+    icon_action_button_sized(id, icon_char, icon_color, 22.0, t, cx)
 }
 
 /// Icon action button with custom size.
@@ -25,6 +27,7 @@ pub fn icon_action_button_sized(
     icon_color: u32,
     size: f32,
     t: &ThemeColors,
+    cx: &App,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -41,7 +44,7 @@ pub fn icon_action_button_sized(
         })
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(icon_color))
                 .child(icon_char.into()),
         )

@@ -7,6 +7,7 @@ use crate::ActionDispatch;
 use crate::terminal_view_settings;
 use okena_files::theme::theme;
 use okena_ui::theme::with_alpha;
+use okena_ui::tokens::{ui_text_sm, ui_text_md};
 use okena_ui::header_buttons::{header_button_base, ButtonSize, HeaderAction};
 use crate::layout::layout_container::{LayoutContainer, is_renaming, rename_input};
 use crate::layout::pane_drag::{PaneDrag, PaneDragView};
@@ -411,7 +412,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .pb(px(4.0))
                 .border_r_1()
                 .border_color(rgb(t.border))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .items_center()
                 .when(is_active && is_pane_focused, |d| {
                     d.bg(rgb(t.term_background))
@@ -452,7 +453,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             .border_1()
                             .border_color(rgb(t.border_active))
                             .rounded(px(4.0))
-                            .child(SimpleInput::new(input).text_size(px(12.0)))
+                            .child(SimpleInput::new(input).text_size(ui_text_md(cx)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                 cx.stop_propagation();
                             })
@@ -476,7 +477,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
-                                div().text_size(px(10.0)).text_color(rgb(t.border_idle)).child(d.clone())
+                                div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
                             }))
                             .into_any_element()
                     }

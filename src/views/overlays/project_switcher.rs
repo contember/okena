@@ -243,6 +243,7 @@ impl Render for ProjectSwitcher {
                         config_title,
                         config_subtitle,
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(search_input_area(&search_query, &search_placeholder, &t))
@@ -259,7 +260,7 @@ impl Render for ProjectSwitcher {
                                 },
                             ))
                             .when(self.state.is_empty(), |d| {
-                                d.child(empty_state(empty_message.clone(), &t))
+                                d.child(empty_state(empty_message.clone(), &t, cx))
                             }),
                     )
                     .child(keyboard_hints_footer(&[("Enter", "focus"), ("Space", "toggle visibility"), ("Esc", "close")], &t)),

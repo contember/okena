@@ -2,6 +2,7 @@
 
 use okena_files::theme::theme;
 use okena_ui::theme::with_alpha;
+use okena_ui::tokens::ui_text_md;
 use gpui::*;
 use gpui_component::h_flex;
 
@@ -37,7 +38,7 @@ impl Render for PaneDragView {
             .border_color(rgb(t.border_active))
             .rounded(px(6.0))
             .shadow_xl()
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .text_color(rgb(t.text_primary))
             .font_weight(FontWeight::MEDIUM)
             .child(

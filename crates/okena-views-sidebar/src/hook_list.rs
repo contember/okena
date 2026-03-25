@@ -1,6 +1,7 @@
 //! Hook terminal list rendering for the sidebar
 
 use okena_ui::theme::theme;
+use okena_ui::tokens::ui_text_md;
 use okena_workspace::state::HookTerminalStatus;
 use gpui::*;
 use gpui::prelude::*;
@@ -30,6 +31,7 @@ impl Sidebar {
             is_cursor,
             left_padding,
             &t,
+            cx,
         )
         .on_click(cx.listener(move |this, _, _window, cx| {
             this.toggle_group(&project_id, GroupKind::Hooks);
@@ -101,7 +103,7 @@ impl Sidebar {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(t.text_primary))
                     .text_ellipsis()
                     .child(hook.label.clone()),

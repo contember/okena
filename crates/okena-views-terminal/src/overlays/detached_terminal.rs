@@ -1,6 +1,7 @@
 use okena_terminal::terminal::{Terminal, TerminalTransport};
 use okena_terminal::TerminalsRegistry;
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_md};
 use crate::layout::terminal_pane::TerminalContent;
 use okena_workspace::state::Workspace;
 use crate::overlays::terminal_overlay_utils::{
@@ -206,7 +207,7 @@ impl Render for DetachedTerminalView {
                     })
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(ui_text(13.0, cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.text_primary))
                             .child(terminal_name),
@@ -216,7 +217,7 @@ impl Render for DetachedTerminalView {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("Detached"),
                             )
@@ -229,7 +230,7 @@ impl Render for DetachedTerminalView {
                                     .rounded(px(4.0))
                                     .bg(rgb(t.bg_secondary))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(12.0))
+                                    .text_size(ui_text_md(cx))
                                     .text_color(rgb(t.text_primary))
                                     .child("Re-attach")
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -253,7 +254,7 @@ impl Render for DetachedTerminalView {
                                                 .items_center()
                                                 .justify_center()
                                                 .rounded(px(4.0))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_secondary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 .child("─")
@@ -274,7 +275,7 @@ impl Render for DetachedTerminalView {
                                                 .items_center()
                                                 .justify_center()
                                                 .rounded(px(4.0))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_secondary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 .child(if is_maximized { "❐" } else { "□" })
@@ -295,7 +296,7 @@ impl Render for DetachedTerminalView {
                                                 .items_center()
                                                 .justify_center()
                                                 .rounded(px(4.0))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_secondary))
                                                 .hover(|s| s.bg(rgb(0xE81123)).text_color(rgb(0xffffff)))
                                                 .child("✕")

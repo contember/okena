@@ -4,6 +4,7 @@
 //! file type, with a 1-2 character uppercase label positioned at the bottom.
 
 use crate::theme::ThemeColors;
+use crate::tokens::ui_text;
 use gpui::*;
 
 /// Style for a file type icon.
@@ -136,7 +137,7 @@ fn icon_style_for_special(filename: &str) -> Option<FileIconStyle> {
 /// Shows the classic file silhouette (page with folded corner) tinted by type,
 /// with a small uppercase label overlaid at the bottom center.
 /// Unknown types use `text_muted` color with no label.
-pub fn file_icon(filename: &str, t: &ThemeColors) -> Div {
+pub fn file_icon(filename: &str, t: &ThemeColors, cx: &App) -> Div {
     let style = icon_style_for_special(filename).or_else(|| icon_style_for(filename));
 
     let (color, label) = match &style {
@@ -168,7 +169,7 @@ pub fn file_icon(filename: &str, t: &ThemeColors) -> Div {
                 .justify_center()
                 .child(
                     div()
-                        .text_size(px(7.0))
+                        .text_size(ui_text(7.0, cx))
                         .line_height(px(9.0))
                         .font_weight(FontWeight::EXTRA_BOLD)
                         .text_color(rgb(0xffffff))

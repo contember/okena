@@ -2,6 +2,7 @@
 
 use okena_core::theme::ThemeColors;
 use okena_ui::code_block::code_block_container;
+use okena_ui::tokens::{ui_text, ui_text_md, ui_text_xl};
 use gpui::*;
 use gpui::prelude::FluentBuilder;
 use gpui_component::{h_flex, v_flex};
@@ -16,6 +17,7 @@ impl MarkdownDocument {
     pub fn render_nodes_with_offsets(
         &self,
         t: &ThemeColors,
+        cx: &App,
         selection: Option<(usize, usize)>,
     ) -> Vec<RenderedNode> {
         let mut result = Vec::new();
@@ -140,8 +142,8 @@ impl MarkdownDocument {
                                     .px(px(12.0))
                                     .py(px(8.0))
                                     .child(
-                                        Self::render_inlines_with_selection(header, t, cell_sel)
-                                            .text_size(px(12.0))
+                                        Self::render_inlines_with_selection(header, t, cx, cell_sel)
+                                            .text_size(ui_text_md(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
                                     )
@@ -199,8 +201,8 @@ impl MarkdownDocument {
                                     .px(px(12.0))
                                     .py(px(6.0))
                                     .child(
-                                        Self::render_inlines_with_selection(cell, t, cell_sel)
-                                            .text_size(px(12.0))
+                                        Self::render_inlines_with_selection(cell, t, cx, cell_sel)
+                                            .text_size(ui_text_md(cx))
                                             .text_color(rgb(t.text_secondary))
                                     )
                             );
@@ -218,7 +220,7 @@ impl MarkdownDocument {
                 }
                 _ => {
                     // Other nodes are simple blocks
-                    let node_div = Self::render_node_with_selection(node, t, node_selection);
+                    let node_div = Self::render_node_with_selection(node, t, cx, node_selection);
                     result.push(RenderedNode::Simple {
                         div: node_div,
                         start_offset: offset,
@@ -281,7 +283,7 @@ impl MarkdownDocument {
     }
 
     /// Render a node with selection highlighting.
-    fn render_node_with_selection(node: &Node, t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
+    fn render_node_with_selection(node: &Node, t: &ThemeColors, cx: &App, selection: Option<(usize, usize)>) -> Div {
         match node {
             Node::Heading { level, children } => {
                 let (size, weight) = match level {
@@ -316,7 +318,7 @@ impl MarkdownDocument {
                     .child(content)
             }
             Node::Paragraph { children } => {
-                Self::render_inlines_with_selection(children, t, selection)
+                Self::render_inlines_with_selection(children, t, cx, selection)
             }
             Node::CodeBlock { language, code } => {
                 let selection_bg = rgba(0x3390ff40);
@@ -358,12 +360,12 @@ impl MarkdownDocument {
                     offset = line_end;
                 }
 
-                code_block_container(language.as_deref(), t)
+                code_block_container(language.as_deref(), t, cx)
                     .child(
                         div()
                             .p(px(12.0))
                             .font_family("monospace")
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_secondary))
                             .flex()
                             .flex_col()
@@ -398,20 +400,20 @@ impl MarkdownDocument {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(ui_text_xl(cx))
                                     .text_color(rgb(t.text_muted))
                                     .w(px(16.0))
                                     .flex_shrink_0()
                                     .child(marker)
                             )
-                            .child(Self::render_inlines_with_selection(item_inlines, t, item_sel).flex_1())
+                            .child(Self::render_inlines_with_selection(item_inlines, t, cx, item_sel).flex_1())
                     );
                     offset += item_len;
                 }
                 list
             }
             Node::Table { headers, rows } => {
-                Self::render_table_with_selection(headers, rows, t, selection)
+                Self::render_table_with_selection(headers, rows, t, cx, selection)
             }
             Node::Blockquote { children } => {
                 div()
@@ -419,7 +421,7 @@ impl MarkdownDocument {
                     .border_l_2()
                     .border_color(rgb(t.text_muted))
                     .child(
-                        Self::render_inlines_with_selection(children, t, selection)
+                        Self::render_inlines_with_selection(children, t, cx, selection)
                             .text_color(rgb(t.text_muted))
                             .italic()
                     )
@@ -435,7 +437,7 @@ impl MarkdownDocument {
     }
 
     /// Render inline elements with selection highlighting.
-    pub(crate) fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
+    pub(crate) fn render_inlines_with_selection(inlines: &[Inline], t: &ThemeColors, cx: &App, selection: Option<(usize, usize)>) -> Div {
         let mut elements: Vec<Div> = Vec::new();
         let mut offset = 0usize;
 
@@ -458,7 +460,7 @@ impl MarkdownDocument {
                 }
             });
 
-            elements.push(Self::render_inline_with_selection(inline, t, inline_sel));
+            elements.push(Self::render_inline_with_selection(inline, t, cx, inline_sel));
             offset += inline_len;
         }
 
@@ -466,14 +468,14 @@ impl MarkdownDocument {
             .flex()
             .flex_wrap()
             .items_baseline()
-            .text_size(px(14.0))
+            .text_size(ui_text_xl(cx))
             .line_height(px(22.0))
             .text_color(rgb(t.text_secondary))
             .children(elements)
     }
 
     /// Render a single inline element with selection.
-    fn render_inline_with_selection(inline: &Inline, t: &ThemeColors, selection: Option<(usize, usize)>) -> Div {
+    fn render_inline_with_selection(inline: &Inline, t: &ThemeColors, cx: &App, selection: Option<(usize, usize)>) -> Div {
         let selection_bg = rgba(0x3390ff40);
 
         match inline {
@@ -494,7 +496,7 @@ impl MarkdownDocument {
                     let (before, selected, after) = slice_by_chars(code, start, end);
                     div()
                         .font_family("monospace")
-                        .text_size(px(13.0))
+                        .text_size(ui_text(13.0, cx))
                         .px(px(4.0))
                         .rounded(px(3.0))
                         .bg(rgb(t.bg_primary))
@@ -506,7 +508,7 @@ impl MarkdownDocument {
                 } else {
                     div()
                         .font_family("monospace")
-                        .text_size(px(13.0))
+                        .text_size(ui_text(13.0, cx))
                         .px(px(4.0))
                         .rounded(px(3.0))
                         .bg(rgb(t.bg_primary))
@@ -531,7 +533,7 @@ impl MarkdownDocument {
                             Some((s.saturating_sub(offset), (e - offset).min(child_len)))
                         }
                     });
-                    container = container.child(Self::render_inline_with_selection(child, t, child_sel));
+                    container = container.child(Self::render_inline_with_selection(child, t, cx, child_sel));
                     offset += child_len;
                 }
                 container
@@ -553,7 +555,7 @@ impl MarkdownDocument {
                             Some((s.saturating_sub(offset), (e - offset).min(child_len)))
                         }
                     });
-                    container = container.child(Self::render_inline_with_selection(child, t, child_sel));
+                    container = container.child(Self::render_inline_with_selection(child, t, cx, child_sel));
                     offset += child_len;
                 }
                 container
@@ -579,7 +581,7 @@ impl MarkdownDocument {
                             Some((s.saturating_sub(offset), (e - offset).min(child_len)))
                         }
                     });
-                    container = container.child(Self::render_inline_with_selection(child, t, child_sel));
+                    container = container.child(Self::render_inline_with_selection(child, t, cx, child_sel));
                     offset += child_len;
                 }
                 container
@@ -592,6 +594,7 @@ impl MarkdownDocument {
         headers: &[Vec<Inline>],
         rows: &[Vec<Vec<Inline>>],
         t: &ThemeColors,
+        cx: &App,
         selection: Option<(usize, usize)>,
     ) -> Div {
         // Calculate column widths based on content (using character count)
@@ -648,8 +651,8 @@ impl MarkdownDocument {
                         .px(px(12.0))
                         .py(px(8.0))
                         .child(
-                            Self::render_inlines_with_selection(header, t, cell_sel)
-                                .text_size(px(12.0))
+                            Self::render_inlines_with_selection(header, t, cx, cell_sel)
+                                .text_size(ui_text_md(cx))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(t.text_primary))
                         )
@@ -693,8 +696,8 @@ impl MarkdownDocument {
                         .px(px(12.0))
                         .py(px(6.0))
                         .child(
-                            Self::render_inlines_with_selection(cell, t, cell_sel)
-                                .text_size(px(12.0))
+                            Self::render_inlines_with_selection(cell, t, cx, cell_sel)
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.text_secondary))
                         )
                 );

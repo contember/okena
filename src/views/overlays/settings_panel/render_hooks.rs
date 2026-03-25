@@ -50,7 +50,7 @@ impl SettingsPanel {
         let multiline_hint = "Use multiple lines to chain actions. Prefix with terminal: to open in a terminal pane.";
 
         div()
-            .child(section_header(scope_label, &t))
+            .child(section_header(scope_label, &t, cx))
             .child(
                 div()
                     .mx(px(16.0))
@@ -90,7 +90,7 @@ impl SettingsPanel {
                         &h4, "", &t, false, cx,
                     )),
             )
-            .child(section_header("Terminal Hooks", &t))
+            .child(section_header("Terminal Hooks", &t, cx))
             .child(
                 section_container(&t)
                     .child(hook_input_row(
@@ -109,7 +109,7 @@ impl SettingsPanel {
                         &t3, "", &t, false, cx,
                     )),
             )
-            .child(section_header("Worktree Close Flow", &t))
+            .child(section_header("Worktree Close Flow", &t, cx))
             .child(
                 div()
                     .mx(px(16.0))

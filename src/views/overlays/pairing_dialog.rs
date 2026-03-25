@@ -99,6 +99,7 @@ impl Render for PairingDialog {
                         "Pair Device",
                         Some("Enter this code on your client to connect"),
                         &t,
+                        cx,
                         cx.listener(|this, _, _, cx| this.close(cx)),
                     ))
                     .child(

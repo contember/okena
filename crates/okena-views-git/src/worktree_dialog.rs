@@ -5,6 +5,7 @@ use okena_core::process::command;
 use okena_files::theme::theme;
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::input_container;
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl};
 use crate::simple_input::{SimpleInput, SimpleInputState};
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
 use okena_workspace::state::Workspace;
@@ -288,7 +289,7 @@ impl WorktreeDialog {
         if self.loading_prs {
             return div()
                 .p(px(12.0))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_muted))
                 .child("Loading PRs...")
                 .into_any_element();
@@ -297,7 +298,7 @@ impl WorktreeDialog {
         if let Some(ref err) = self.pr_error {
             return div()
                 .p(px(12.0))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_muted))
                 .child(err.clone())
                 .into_any_element();
@@ -306,7 +307,7 @@ impl WorktreeDialog {
         if self.pr_list.is_empty() {
             return div()
                 .p(px(12.0))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_muted))
                 .child("No open pull requests")
                 .into_any_element();
@@ -344,13 +345,13 @@ impl WorktreeDialog {
                                 .items_center()
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!("#{}", pr.number))
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_primary))
                                         .flex_1()
                                         .overflow_x_hidden()
@@ -361,7 +362,7 @@ impl WorktreeDialog {
                         .child(
                             div()
                                 .pl(px(28.0))
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child(pr.branch.clone())
                         )
@@ -376,7 +377,7 @@ impl WorktreeDialog {
         if self.filtered_branches.is_empty() {
             return div()
                 .p(px(12.0))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_muted))
                 .child(if search_empty {
                     "No available branches for worktree"
@@ -405,7 +406,7 @@ impl WorktreeDialog {
                         .items_center()
                         .gap(px(8.0))
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_primary))
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
@@ -539,7 +540,7 @@ impl Render for WorktreeDialog {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(14.0))
+                                            .text_size(ui_text_xl(cx))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(t.text_primary))
                                             .child("Create Worktree")
@@ -598,7 +599,7 @@ impl Render for WorktreeDialog {
                                                     .flex()
                                                     .items_center()
                                                     .justify_center()
-                                                    .text_size(px(12.0))
+                                                    .text_size(ui_text_md(cx))
                                                     .cursor_pointer()
                                                     .when(!pr_mode, |d| {
                                                         d.bg(rgb(t.bg_selection))
@@ -631,7 +632,7 @@ impl Render for WorktreeDialog {
                                                     .flex()
                                                     .items_center()
                                                     .justify_center()
-                                                    .text_size(px(12.0))
+                                                    .text_size(ui_text_md(cx))
                                                     .cursor_pointer()
                                                     .when(pr_mode, |d| {
                                                         d.bg(rgb(t.bg_selection))
@@ -658,7 +659,7 @@ impl Render for WorktreeDialog {
                                     .when(!pr_mode, |d| {
                                         d.child(
                                             input_container(&t, Some(search_input_focused))
-                                                .child(SimpleInput::new(&branch_search_input).text_size(px(12.0))),
+                                                .child(SimpleInput::new(&branch_search_input).text_size(ui_text_md(cx))),
                                         )
                                     })
                                     // Branch list or PR list
@@ -673,7 +674,7 @@ impl Render for WorktreeDialog {
                                 .px(px(16.0))
                                 .py(px(8.0))
                                 .bg(rgba(0xff00001a))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
                                 .child(msg)
                         )

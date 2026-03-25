@@ -1,4 +1,5 @@
 use okena_extensions::ThemeColors;
+use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -474,22 +475,22 @@ impl ClaudeUsage {
                                 .gap(px(8.0))
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(t.text_primary))
                                         .child("Claude Usage"),
                                 )
                                 .when_some(data.five_hour.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, "Session (5h)", tier))
+                                    el.child(render_tier_row(t, cx, "Session (5h)", tier))
                                 })
                                 .when_some(data.seven_day.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, "Weekly (7d)", tier))
+                                    el.child(render_tier_row(t, cx, "Weekly (7d)", tier))
                                 })
                                 .when_some(data.seven_day_sonnet.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, "Sonnet (7d)", tier))
+                                    el.child(render_tier_row(t, cx, "Sonnet (7d)", tier))
                                 })
                                 .when_some(data.seven_day_opus.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, "Opus (7d)", tier))
+                                    el.child(render_tier_row(t, cx, "Opus (7d)", tier))
                                 })
                                 .when(
                                     data.five_hour.as_ref().and_then(|t| t.time_elapsed_pct).is_some()
@@ -497,7 +498,7 @@ impl ClaudeUsage {
                                     |el| {
                                         el.child(
                                             div()
-                                                .text_size(px(9.0))
+                                                .text_size(ui_text_xs(cx))
                                                 .text_color(rgb(t.text_muted))
                                                 .child("Bar color = pace · Marker = time elapsed"),
                                         )
@@ -515,13 +516,13 @@ impl ClaudeUsage {
                                                     .justify_between()
                                                     .child(
                                                         div()
-                                                            .text_size(px(11.0))
+                                                            .text_size(ui_text_ms(cx))
                                                             .text_color(rgb(t.text_secondary))
                                                             .child("Extra Usage"),
                                                     )
                                                     .child(
                                                         div()
-                                                            .text_size(px(11.0))
+                                                            .text_size(ui_text_ms(cx))
                                                             .text_color(rgb(t.text_primary))
                                                             .child(format!(
                                                                 "${:.2} / ${:.2}",
@@ -556,6 +557,7 @@ fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
 
 fn render_tier_row(
     t: &ThemeColors,
+    cx: &App,
     label: &str,
     tier: &TierUsage,
 ) -> impl IntoElement {
@@ -568,7 +570,7 @@ fn render_tier_row(
                 .justify_between()
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_secondary))
                         .child(label.to_string()),
                 )
@@ -577,14 +579,14 @@ fn render_tier_row(
                         .gap(px(6.0))
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(utilization_color(t, pct)))
                                 .child(format!("{:.0}%", pct)),
                         )
                         .when(!tier.resets_at.is_empty(), |el| {
                             el.child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(format!("resets {}", tier.resets_at)),
                             )
@@ -693,13 +695,13 @@ impl Render for ClaudeUsage {
                                 .gap(px(3.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child("5h"),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(utilization_color(&t, pct)))
                                         .child(format!("{:.0}%", pct)),
                                 ),
@@ -708,7 +710,7 @@ impl Render for ClaudeUsage {
                     .when_some(seven_d, |el, pct| {
                         el.child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child("|"),
                         )
@@ -717,13 +719,13 @@ impl Render for ClaudeUsage {
                                 .gap(px(3.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child("7d"),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(utilization_color(&t, pct)))
                                         .child(format!("{:.0}%", pct)),
                                 ),

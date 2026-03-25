@@ -3,6 +3,7 @@
 //! Provides a reusable dropdown button with overlay list.
 
 use crate::theme::{with_alpha, ThemeColors};
+use crate::tokens::{ui_text_sm, ui_text_md};
 use gpui::*;
 use gpui::prelude::*;
 
@@ -15,6 +16,7 @@ pub fn dropdown_button(
     label: &str,
     is_open: bool,
     t: &ThemeColors,
+    cx: &App,
     on_bounds: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     div()
@@ -31,13 +33,13 @@ pub fn dropdown_button(
         .justify_between()
         .child(
             div()
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_primary))
                 .child(label.to_string()),
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.text_muted))
                 .child(if is_open { "▲" } else { "▼" }),
         )
@@ -86,13 +88,14 @@ pub fn dropdown_option(
     label: &str,
     is_selected: bool,
     t: &ThemeColors,
+    cx: &App,
 ) -> Stateful<Div> {
     let row = div()
         .id(ElementId::Name(id.into()))
         .px(px(10.0))
         .py(px(6.0))
         .cursor_pointer()
-        .text_size(px(12.0))
+        .text_size(ui_text_md(cx))
         .text_color(rgb(t.text_primary))
         .when(is_selected, |d| d.bg(with_alpha(t.border_active, 0.2)))
         .hover(|s| s.bg(rgb(t.bg_hover)))
@@ -104,7 +107,7 @@ pub fn dropdown_option(
     if is_selected {
         row.child(
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.border_active))
                 .child("✓"),
         )

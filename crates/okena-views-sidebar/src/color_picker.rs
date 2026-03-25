@@ -2,6 +2,7 @@
 
 use okena_core::theme::FolderColor;
 use okena_ui::theme::theme;
+use okena_ui::tokens::ui_text_ms;
 use gpui::*;
 use gpui::prelude::*;
 
@@ -96,7 +97,7 @@ impl Sidebar {
                                 .py(px(4.0))
                                 .rounded(px(4.0))
                                 .cursor_pointer()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_secondary))
                                 .hover(|s| s.text_color(rgb(t.text_primary)).bg(rgb(t.bg_hover)))
                                 .child("Reset to parent")

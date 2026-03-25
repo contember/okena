@@ -6,6 +6,7 @@
 use okena_core::theme::ThemeColors;
 use okena_ui::rename_state::{rename_input, RenameState};
 use okena_ui::simple_input::SimpleInput;
+use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_md};
 use gpui::*;
 use gpui::prelude::*;
 use gpui_component::tooltip::Tooltip;
@@ -68,6 +69,7 @@ pub fn sidebar_rename_input<T: 'static + Clone>(
     id: impl Into<ElementId>,
     rename_state: &Option<RenameState<T>>,
     t: &ThemeColors,
+    cx: &App,
 ) -> Option<Stateful<Div>> {
     let input = rename_input(rename_state)?;
     Some(
@@ -77,7 +79,7 @@ pub fn sidebar_rename_input<T: 'static + Clone>(
             .min_w_0()
             .bg(rgb(t.bg_hover))
             .rounded(px(2.0))
-            .child(SimpleInput::new(input).text_size(px(12.0)))
+            .child(SimpleInput::new(input).text_size(ui_text_md(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                 cx.stop_propagation();
             })
@@ -94,6 +96,7 @@ pub fn sidebar_name_label(
     id: impl Into<ElementId>,
     name: impl Into<SharedString>,
     t: &ThemeColors,
+    cx: &App,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -101,7 +104,7 @@ pub fn sidebar_name_label(
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_size(px(12.0))
+        .text_size(ui_text_md(cx))
         .text_color(rgb(t.text_primary))
         .text_ellipsis()
         .child(name.into())
@@ -118,6 +121,7 @@ pub fn sidebar_group_header(
     is_cursor: bool,
     left_padding: f32,
     t: &ThemeColors,
+    cx: &App,
 ) -> Stateful<Div> {
     div()
         .id(id)
@@ -145,7 +149,7 @@ pub fn sidebar_group_header(
         .child(
             // Group label
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.text_muted))
                 .child(label.to_string()),
         )
@@ -157,7 +161,7 @@ pub fn sidebar_group_header(
                 .py(px(0.0))
                 .rounded(px(3.0))
                 .bg(rgb(t.bg_secondary))
-                .text_size(px(9.0))
+                .text_size(ui_text_xs(cx))
                 .text_color(rgb(t.text_muted))
                 .child(format!("{}", count)),
         )
@@ -177,7 +181,7 @@ pub fn sidebar_idle_dot(t: &ThemeColors) -> Div {
 
 /// Worktree count badge (git-branch icon + number).
 /// Shown on parent projects that have active worktrees.
-pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement {
+pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors, cx: &App) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .flex()
@@ -191,7 +195,7 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
         )
         .child(
             div()
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.text_muted))
                 .child(format!("{}", count)),
         )
@@ -199,14 +203,14 @@ pub fn sidebar_worktree_badge(count: usize, t: &ThemeColors) -> impl IntoElement
 
 /// Terminal count badge for hidden/inactive projects.
 /// Shown inline after the project name as a small highlighted badge.
-pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors) -> Div {
+pub fn sidebar_terminal_count_badge(count: usize, t: &ThemeColors, cx: &App) -> Div {
     div()
         .flex_shrink_0()
         .ml(px(4.0))
         .px(px(4.0))
         .rounded(px(3.0))
         .bg(rgb(t.bg_header))
-        .text_size(px(10.0))
+        .text_size(ui_text_sm(cx))
         .text_color(rgb(t.text_primary))
         .child(format!("{}", count))
 }
@@ -240,6 +244,7 @@ pub fn sidebar_name_or_badge(
     hide_badge: bool,
     terminal_count: usize,
     t: &ThemeColors,
+    cx: &App,
 ) -> AnyElement {
     if !hide_badge && terminal_count > 0 {
         div()
@@ -254,11 +259,11 @@ pub fn sidebar_name_or_badge(
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(t.text_primary))
                     .child(name.to_string()),
             )
-            .child(sidebar_terminal_count_badge(terminal_count, t))
+            .child(sidebar_terminal_count_badge(terminal_count, t, cx))
             .into_any_element()
     } else {
         name_label.into_any_element()

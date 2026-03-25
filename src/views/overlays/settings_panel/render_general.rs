@@ -68,9 +68,9 @@ impl SettingsPanel {
             ));
 
         div()
-            .child(section_header("Appearance", &t))
+            .child(section_header("Appearance", &t, cx))
             .child(section)
-            .child(section_header("File Opener", &t))
+            .child(section_header("File Opener", &t, cx))
             .child(
                 section_container(&t)
                     .child(

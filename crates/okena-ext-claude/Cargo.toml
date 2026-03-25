@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 okena-extensions = { path = "../okena-extensions" }
+okena-ui = { path = "../okena-ui" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }

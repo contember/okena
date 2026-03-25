@@ -392,6 +392,7 @@ impl Render for ThemeSelector {
                         config_title,
                         config_subtitle,
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(

@@ -40,7 +40,7 @@ impl SettingsPanel {
         }
 
         div()
-            .child(section_header("Extensions", &t))
+            .child(section_header("Extensions", &t, cx))
             .child(section)
     }
 }

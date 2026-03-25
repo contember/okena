@@ -7,6 +7,7 @@ use gpui_component::tooltip::Tooltip;
 use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button_sized;
 use okena_ui::theme::ThemeColors;
+use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_md};
 
 /// Render the action buttons for the services group header.
 ///
@@ -18,6 +19,7 @@ use okena_ui::theme::ThemeColors;
 pub fn render_service_group_actions(
     project_id: &str,
     t: &ThemeColors,
+    cx: &App,
     on_start_all: impl Fn(&mut Window, &mut App) + 'static,
     on_stop_all: impl Fn(&mut Window, &mut App) + 'static,
     on_reload: impl Fn(&mut Window, &mut App) + 'static,
@@ -36,6 +38,7 @@ pub fn render_service_group_actions(
                 t.text_secondary,
                 18.0,
                 t,
+                cx,
             )
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
@@ -51,6 +54,7 @@ pub fn render_service_group_actions(
                 t.text_secondary,
                 18.0,
                 t,
+                cx,
             )
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
@@ -65,6 +69,7 @@ pub fn render_service_group_actions(
                 t.text_secondary,
                 18.0,
                 t,
+                cx,
             )
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
@@ -85,6 +90,7 @@ pub fn render_service_item(
     left_padding: f32,
     port_host: &str,
     t: &ThemeColors,
+    cx: &App,
     on_start: impl Fn(&mut Window, &mut App) + 'static,
     on_stop: impl Fn(&mut Window, &mut App) + 'static,
     on_restart: impl Fn(&mut Window, &mut App) + 'static,
@@ -152,7 +158,7 @@ pub fn render_service_item(
                     .items_center()
                     .rounded(px(2.0))
                     .bg(rgb(t.bg_secondary))
-                    .text_size(px(9.0))
+                    .text_size(ui_text_xs(cx))
                     .text_color(rgb(t.text_muted))
                     .child("docker"),
             )
@@ -163,7 +169,7 @@ pub fn render_service_item(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(t.text_primary))
                 .text_ellipsis()
                 .child(service_name.clone()),
@@ -193,7 +199,7 @@ pub fn render_service_item(
                         .rounded(px(3.0))
                         .bg(rgb(t.bg_secondary))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(10.0))
+                        .text_size(ui_text_sm(cx))
                         .text_color(rgb(t.text_muted))
                         .child(format!(":{}", port))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -224,6 +230,7 @@ pub fn render_service_item(
                             t.term_green,
                             18.0,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -242,6 +249,7 @@ pub fn render_service_item(
                             t.text_secondary,
                             18.0,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -258,6 +266,7 @@ pub fn render_service_item(
                             t.term_red,
                             18.0,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();

@@ -372,6 +372,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     &services,
                     active_name.as_deref(),
                     &t,
+                    cx,
                     // on_overview_click
                     {
                         let entity = entity.clone();
@@ -505,6 +506,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                     let entity = entity.clone();
                     panel::render_not_running_placeholder(
                         t,
+                        cx,
                         move |_window, cx| {
                             if let Some(e) = entity.upgrade() {
                                 e.update(cx, |this, cx| {
@@ -537,6 +539,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             &project_id,
             remote_host.as_deref(),
             &t,
+            cx,
             // on_service_click
             {
                 let entity = entity.clone();

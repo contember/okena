@@ -28,6 +28,11 @@ mod tests {
                 crate::theme::theme(cx)
             }));
 
+            // UI font size provider for view crates
+            cx.set_global(okena_ui::tokens::GlobalUiFontSize(|cx| {
+                crate::settings::settings_entity(cx).read(cx).settings.ui_font_size
+            }));
+
             // Extension settings store (used by terminal and git view crates)
             cx.set_global(okena_extensions::ExtensionSettingsStore::new(
                 |namespace, cx| {

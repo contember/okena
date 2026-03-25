@@ -349,6 +349,7 @@ impl Render for AddProjectDialog {
                         "Add Project",
                         None::<&str>,
                         &t,
+                        cx,
                         cx.listener(|this, _, _, cx| this.close(cx)),
                     ))
                     .child(

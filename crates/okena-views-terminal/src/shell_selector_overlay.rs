@@ -3,6 +3,7 @@
 use crate::actions::Cancel;
 use okena_terminal::shell_config::{available_shells, AvailableShell, ShellType};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text, ui_text_md};
 use okena_files::list_overlay::{
     handle_list_overlay_key, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
@@ -117,6 +118,7 @@ impl Render for ShellSelectorOverlay {
                         config_title,
                         config_subtitle,
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(
@@ -152,14 +154,14 @@ impl Render for ShellSelectorOverlay {
                                             .justify_between()
                                             .child(
                                                 div()
-                                                    .text_size(px(13.0))
+                                                    .text_size(ui_text(13.0, cx))
                                                     .text_color(rgb(t.text_primary))
                                                     .child(name),
                                             )
                                             .when(is_current, |d| {
                                                 d.child(
                                                     div()
-                                                        .text_size(px(12.0))
+                                                        .text_size(ui_text_md(cx))
                                                         .text_color(rgb(t.success))
                                                         .child("✓"),
                                                 )

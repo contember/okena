@@ -212,6 +212,7 @@ impl Render for KeybindingsHelp {
                         "Keyboard Shortcuts",
                         Some("Press ESC to close"),
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(

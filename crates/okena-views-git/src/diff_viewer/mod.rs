@@ -630,7 +630,7 @@ impl Render for DiffViewer {
                 d.child(self.render_commit_info_bar(&t, cx))
             })
             .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
-            .child(self.render_footer(&t))
+            .child(self.render_footer(&t, cx))
     }
 }
 

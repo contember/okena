@@ -1,4 +1,5 @@
 use gpui::*;
+use okena_ui::tokens::ui_text_md;
 
 /// Drag payload for project reordering
 #[derive(Clone)]
@@ -13,7 +14,7 @@ pub struct ProjectDragView {
 }
 
 impl Render for ProjectDragView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(8.0))
             .py(px(4.0))
@@ -22,7 +23,7 @@ impl Render for ProjectDragView {
             .border_color(rgb(0x404040))
             .rounded(px(4.0))
             .shadow_lg()
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .text_color(rgb(0xffffff))
             .child(self.name.clone())
     }
@@ -42,7 +43,7 @@ pub struct WorktreeDragView {
 }
 
 impl Render for WorktreeDragView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(8.0))
             .py(px(4.0))
@@ -51,7 +52,7 @@ impl Render for WorktreeDragView {
             .border_color(rgb(0x404040))
             .rounded(px(4.0))
             .shadow_lg()
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .text_color(rgb(0xffffff))
             .flex()
             .items_center()
@@ -79,7 +80,7 @@ pub struct FolderDragView {
 }
 
 impl Render for FolderDragView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .px(px(8.0))
             .py(px(4.0))
@@ -88,7 +89,7 @@ impl Render for FolderDragView {
             .border_color(rgb(0x404040))
             .rounded(px(4.0))
             .shadow_lg()
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .text_color(rgb(0xffffff))
             .flex()
             .items_center()

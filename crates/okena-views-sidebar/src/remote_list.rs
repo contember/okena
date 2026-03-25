@@ -1,5 +1,6 @@
 use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_ms, ui_text_md, ui_text_sm, ui_text_xl};
 use okena_workspace::requests::OverlayRequest;
 use gpui::*;
 
@@ -64,7 +65,7 @@ impl Sidebar {
             .items_center()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .child("REMOTE"),
@@ -143,13 +144,13 @@ impl Sidebar {
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(t.text_primary))
                     .child(name),
             )
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(format!("{} — {}", host_port, status_text)),
             )
@@ -174,13 +175,13 @@ impl Sidebar {
             }))
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_secondary))
                     .child("+"),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
                     .child("Add Connection"),
             )

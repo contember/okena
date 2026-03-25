@@ -3,6 +3,7 @@
 //! Provides reusable builders for modal dialogs with standard styling.
 
 use crate::theme::ThemeColors;
+use crate::tokens::{ui_text, ui_text_ms};
 use gpui::*;
 use gpui_component::v_flex;
 
@@ -77,6 +78,7 @@ pub fn modal_header<F>(
     title: impl Into<SharedString>,
     subtitle: Option<impl Into<SharedString>>,
     t: &ThemeColors,
+    cx: &App,
     on_close: F,
 ) -> Stateful<Div>
 where
@@ -87,7 +89,7 @@ where
 
     let mut title_section = v_flex().gap(px(2.0)).child(
         div()
-            .text_size(px(16.0))
+            .text_size(ui_text(16.0, cx))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(t.text_primary))
             .child(title),
@@ -96,7 +98,7 @@ where
     if let Some(subtitle) = subtitle {
         title_section = title_section.child(
             div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_muted))
                 .child(subtitle),
         );
@@ -123,7 +125,7 @@ where
                 .justify_center()
                 .rounded(px(4.0))
                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                .text_size(px(16.0))
+                .text_size(ui_text(16.0, cx))
                 .text_color(rgb(t.text_secondary))
                 .child("✕")
                 .on_mouse_down(MouseButton::Left, on_close),

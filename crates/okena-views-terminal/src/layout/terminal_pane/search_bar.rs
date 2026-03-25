@@ -4,6 +4,7 @@ use crate::elements::terminal_element::SearchMatch;
 use crate::actions::CloseSearch;
 use okena_terminal::terminal::Terminal;
 use okena_files::theme::theme;
+use okena_ui::tokens::ui_text_md;
 use crate::simple_input::{SimpleInput, SimpleInputState};
 use okena_workspace::state::Workspace;
 use gpui::prelude::FluentBuilder;
@@ -196,7 +197,7 @@ impl Render for SearchBar {
                         .border_1()
                         .border_color(rgb(t.border_active))
                         .rounded(px(4.0))
-                        .child(SimpleInput::new(input).text_size(px(12.0)))
+                        .child(SimpleInput::new(input).text_size(ui_text_md(cx)))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                         .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| { this.close(cx); }))
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
@@ -214,7 +215,7 @@ impl Render for SearchBar {
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                     .on_click(cx.listener(|this, _, _window, cx| { this.toggle_case_sensitive(cx); }))
-                    .child(div().text_size(px(12.0)).font_weight(FontWeight::BOLD).text_color(if case_sensitive { rgb(t.text_primary) } else { rgb(t.text_secondary) }).child("Aa")),
+                    .child(div().text_size(ui_text_md(cx)).font_weight(FontWeight::BOLD).text_color(if case_sensitive { rgb(t.text_primary) } else { rgb(t.text_secondary) }).child("Aa")),
             )
             .child(
                 div().id("search-regex-btn").cursor_pointer().w(px(24.0)).h(px(24.0)).flex().items_center().justify_center().rounded(px(4.0))
@@ -222,9 +223,9 @@ impl Render for SearchBar {
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                     .on_click(cx.listener(|this, _, _window, cx| { this.toggle_regex(cx); }))
-                    .child(div().text_size(px(12.0)).font_weight(FontWeight::BOLD).text_color(if is_regex { rgb(t.text_primary) } else { rgb(t.text_secondary) }).child(".*")),
+                    .child(div().text_size(ui_text_md(cx)).font_weight(FontWeight::BOLD).text_color(if is_regex { rgb(t.text_primary) } else { rgb(t.text_secondary) }).child(".*")),
             )
-            .child(div().text_size(px(12.0)).text_color(rgb(t.text_secondary)).min_w(px(40.0)).child(match_text))
+            .child(div().text_size(ui_text_md(cx)).text_color(rgb(t.text_secondary)).min_w(px(40.0)).child(match_text))
             .child(icon_button_sized("search-prev-btn", "icons/chevron-up.svg", 24.0, 14.0, &t).on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); }).on_click(cx.listener(|this, _, _window, cx| { this.prev_match(cx); })))
             .child(icon_button_sized("search-next-btn", "icons/chevron-down.svg", 24.0, 14.0, &t).on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); }).on_click(cx.listener(|this, _, _window, cx| { this.next_match(cx); })))
             .child(icon_button_sized("search-close-btn", "icons/close.svg", 24.0, 14.0, &t).hover(|s| s.bg(rgba(0xf14c4c99))).on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); }).on_click(cx.listener(|this, _, _window, cx| { this.close(cx); })))

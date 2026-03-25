@@ -163,7 +163,7 @@ impl Sidebar {
             .child(
                 // Folder name (or input if renaming)
                 if is_renaming {
-                    sidebar_rename_input("folder-rename-input", &self.folder_rename, &t)
+                    sidebar_rename_input("folder-rename-input", &self.folder_rename, &t, cx)
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
@@ -171,6 +171,7 @@ impl Sidebar {
                         ElementId::Name(format!("folder-name-{}", folder.id).into()),
                         folder_name.clone(),
                         &t,
+                        cx,
                     )
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener({
@@ -353,7 +354,7 @@ impl Sidebar {
             .child(
                 // Project name (or input if renaming)
                 if is_renaming {
-                    sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t)
+                    sidebar_rename_input("fp-project-rename-input", &self.project_rename, &t, cx)
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
@@ -361,6 +362,7 @@ impl Sidebar {
                         ElementId::Name(format!("fp-project-name-{}", project.id).into()),
                         project_name.clone(),
                         &t,
+                        cx,
                     )
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
@@ -377,7 +379,7 @@ impl Sidebar {
                             cx.stop_propagation();
                         }
                     }));
-                    sidebar_name_or_badge(name_label, &project_name, is_expanded || project.show_in_overview, project.terminal_ids.len(), &t)
+                    sidebar_name_or_badge(name_label, &project_name, is_expanded || project.show_in_overview, project.terminal_ids.len(), &t, cx)
                 },
             )
             .when(idle_count > 0, |d| d.child(sidebar_idle_dot(&t)))

@@ -294,7 +294,7 @@ impl Render for CommandPalette {
                                     .map(|(i, filter_result)| self.render_command_row(i, filter_result.index, cx)),
                             )
                             .when(self.state.is_empty(), |d| {
-                                d.child(empty_state(empty_message.clone(), &t))
+                                d.child(empty_state(empty_message.clone(), &t, cx))
                             }),
                     )
                     .child(keyboard_hints_footer(&[("Enter", "to select"), ("Esc", "to close")], &t)),

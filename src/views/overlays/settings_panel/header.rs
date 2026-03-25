@@ -93,8 +93,11 @@ impl SettingsPanel {
                     .child("\u{2014}"),
             )
             .child(
-                dropdown_button("project-selector-btn", &label, self.project_dropdown_open, &t,
-                    Self::bounds_setter(cx, |s, b| s.project_button_bounds = b))
+                {
+                    let project_bounds_setter = Self::bounds_setter(cx, |s, b| s.project_button_bounds = b);
+                    dropdown_button("project-selector-btn", &label, self.project_dropdown_open, &t, cx,
+                        project_bounds_setter)
+                }
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                         this.project_dropdown_open = !this.project_dropdown_open;
                         this.font_dropdown_open = false;
@@ -118,14 +121,14 @@ impl SettingsPanel {
             .min_w(px(180.0))
             .max_h(px(250.0))
             .child(
-                dropdown_option("project-opt-user", "User (Global)", is_user_selected, &t)
+                dropdown_option("project-opt-user", "User (Global)", is_user_selected, &t, cx)
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                         this.select_project(None, cx);
                     }))
             )
             .children(projects.into_iter().map(|(id, name)| {
                 let is_selected = self.selected_project_id.as_deref() == Some(&id);
-                dropdown_option(format!("project-opt-{}", id), &name, is_selected, &t)
+                dropdown_option(format!("project-opt-{}", id), &name, is_selected, &t, cx)
                     .on_mouse_down(MouseButton::Left, cx.listener({
                         let id = id.clone();
                         move |this, _, _, cx| {

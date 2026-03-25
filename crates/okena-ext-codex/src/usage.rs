@@ -1,4 +1,5 @@
 use okena_extensions::ThemeColors;
+use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md};
 use base64::Engine as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -500,26 +501,26 @@ impl CodexUsage {
                                         .justify_between()
                                         .child(
                                             div()
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(t.text_primary))
                                                 .child("Codex Usage"),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(10.0))
+                                                .text_size(ui_text_sm(cx))
                                                 .text_color(rgb(t.text_muted))
                                                 .child(data.plan_type.clone()),
                                         ),
                                 )
                                 .when_some(data.primary_window.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, "Rate Limit", w))
+                                    el.child(render_window_row(t, cx, "Rate Limit", w))
                                 })
                                 .when_some(data.secondary_window.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, "Secondary", w))
+                                    el.child(render_window_row(t, cx, "Secondary", w))
                                 })
                                 .when_some(data.review_primary.as_ref(), |el, w| {
-                                    el.child(render_window_row(t, "Code Review", w))
+                                    el.child(render_window_row(t, cx, "Code Review", w))
                                 })
                                 .when(
                                     data.primary_window.as_ref().and_then(|w| w.time_elapsed_pct).is_some()
@@ -527,7 +528,7 @@ impl CodexUsage {
                                     |el| {
                                         el.child(
                                             div()
-                                                .text_size(px(9.0))
+                                                .text_size(ui_text_xs(cx))
                                                 .text_color(rgb(t.text_muted))
                                                 .child("Bar color = pace · Marker = time elapsed"),
                                         )
@@ -540,13 +541,13 @@ impl CodexUsage {
                                                 .justify_between()
                                                 .child(
                                                     div()
-                                                        .text_size(px(11.0))
+                                                        .text_size(ui_text_ms(cx))
                                                         .text_color(rgb(t.text_secondary))
                                                         .child("Credits"),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_size(px(11.0))
+                                                        .text_size(ui_text_ms(cx))
                                                         .text_color(rgb(t.metric_normal))
                                                         .child("Unlimited"),
                                                 ),
@@ -557,13 +558,13 @@ impl CodexUsage {
                                                 .justify_between()
                                                 .child(
                                                     div()
-                                                        .text_size(px(11.0))
+                                                        .text_size(ui_text_ms(cx))
                                                         .text_color(rgb(t.text_secondary))
                                                         .child("Credits"),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_size(px(11.0))
+                                                        .text_size(ui_text_ms(cx))
                                                         .text_color(rgb(t.text_primary))
                                                         .child(format!("${:.2}", c.balance)),
                                                 ),
@@ -626,6 +627,7 @@ fn format_reset_time(reset_at: u64) -> String {
 
 fn render_window_row(
     t: &ThemeColors,
+    cx: &App,
     label: &str,
     window: &RateLimitWindow,
 ) -> impl IntoElement {
@@ -640,7 +642,7 @@ fn render_window_row(
                 .justify_between()
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_secondary))
                         .child(format!("{} ({})", label, window_label)),
                 )
@@ -649,14 +651,14 @@ fn render_window_row(
                         .gap(px(6.0))
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(utilization_color(t, pct)))
                                 .child(format!("{}%", pct)),
                         )
                         .when(!reset.is_empty(), |el| {
                             el.child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(format!("resets in {}", reset)),
                             )
@@ -743,13 +745,13 @@ impl Render for CodexUsage {
                                 .gap(px(3.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format_window_label(window_secs)),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(utilization_color(&t, pct)))
                                         .child(format!("{}%", pct)),
                                 ),
@@ -758,7 +760,7 @@ impl Render for CodexUsage {
                     .when_some(secondary, |el, (pct, window_secs)| {
                         el.child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child("|"),
                         )
@@ -767,13 +769,13 @@ impl Render for CodexUsage {
                                 .gap(px(3.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format_window_label(window_secs)),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(utilization_color(&t, pct)))
                                         .child(format!("{}%", pct)),
                                 ),

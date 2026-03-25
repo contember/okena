@@ -15,7 +15,7 @@ impl SettingsPanel {
         let s = settings_entity(cx).read(cx).settings.clone();
 
         div()
-            .child(section_header("Terminal", &t))
+            .child(section_header("Terminal", &t, cx))
             .child(
                 section_container(&t)
                     .child(self.render_shell_dropdown_row(&s.default_shell, cx))
@@ -49,7 +49,7 @@ impl SettingsPanel {
     fn render_cursor_style_row(&self, current: CursorShape, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        settings_row("cursor-style".to_string(), "Cursor Style", &t, true).child(
+        settings_row("cursor-style".to_string(), "Cursor Style", &t, cx, true).child(
             h_flex()
                 .gap(px(2.0))
                 .rounded(px(4.0))

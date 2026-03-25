@@ -30,6 +30,7 @@ impl Sidebar {
             is_cursor,
             left_padding,
             &t,
+            cx,
         )
         .group("services-header")
         .child(
@@ -40,6 +41,7 @@ impl Sidebar {
             okena_views_services::sidebar::render_service_group_actions(
                 &project_id,
                 &t,
+                cx,
                 {
                     let entity = entity.clone();
                     let project_id = project_id.clone();
@@ -121,6 +123,7 @@ impl Sidebar {
             left_padding,
             &port_host,
             &t,
+            cx,
             // on_start
             {
                 let entity = entity.clone();

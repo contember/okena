@@ -14,14 +14,14 @@ impl SettingsPanel {
 
         if self.auth_store.is_none() {
             return content
-                .child(section_header("Paired Devices", &t))
-                .child(section_container(&t).child(empty_state("Remote server is not running", &t).py(px(16.0))));
+                .child(section_header("Paired Devices", &t, cx))
+                .child(section_container(&t).child(empty_state("Remote server is not running", &t, cx).py(px(16.0))));
         }
 
         if self.paired_devices.is_empty() {
             return content
-                .child(section_header("Paired Devices", &t))
-                .child(section_container(&t).child(empty_state("No devices are currently paired", &t).py(px(16.0))));
+                .child(section_header("Paired Devices", &t, cx))
+                .child(section_container(&t).child(empty_state("No devices are currently paired", &t, cx).py(px(16.0))));
         }
 
         let now_secs = std::time::SystemTime::now()
@@ -112,7 +112,7 @@ impl SettingsPanel {
             .collect();
 
         content
-            .child(section_header("Paired Devices", &t))
+            .child(section_header("Paired Devices", &t, cx))
             .child(section_container(&t).children(items))
     }
 }

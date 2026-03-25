@@ -6,6 +6,7 @@ use okena_ui::input::{input_container, labeled_input};
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::theme;
+use okena_ui::tokens::{ui_text_md, ui_text_sm};
 use gpui::prelude::*;
 use gpui::*;
 
@@ -94,6 +95,7 @@ impl Render for RemotePairDialog {
                         &format!("Pair \"{}\"", self.connection_name),
                         None::<&str>,
                         &t,
+                        cx,
                         cx.listener(|this, _, _, cx| this.close(cx)),
                     ))
                     .child(
@@ -105,13 +107,13 @@ impl Render for RemotePairDialog {
                             .child(
                                 labeled_input("Pairing Code:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.code_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.code_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(
                                         "Enter the pairing code shown on the remote machine's status bar",

@@ -14,6 +14,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::h_flex;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md};
 use std::sync::Arc;
 
 // ── Theme-dependent color traits ────────────────────────────────────────────
@@ -243,7 +244,7 @@ pub fn render_graph_column(graph: &str, max_len: usize, row_h: f32, t: &ThemeCol
 }
 
 /// Render a ref label pill (e.g. "HEAD -> main", "origin/main", "tag: v1.0").
-pub fn render_ref_label(ref_name: &str, t: &ThemeColors) -> AnyElement {
+pub fn render_ref_label(ref_name: &str, t: &ThemeColors, cx: &App) -> AnyElement {
     let color = if ref_name.contains("HEAD") {
         t.term_cyan
     } else if ref_name.starts_with("tag:") {
@@ -262,7 +263,7 @@ pub fn render_ref_label(ref_name: &str, t: &ThemeColors) -> AnyElement {
         .py(px(1.0))
         .rounded(px(3.0))
         .bg(bg)
-        .text_size(px(10.0))
+        .text_size(ui_text_sm(cx))
         .text_color(rgb(color))
         .flex_shrink_0()
         .max_w(px(140.0))
@@ -283,6 +284,7 @@ pub fn render_graph_row(
     all_commits: &[CommitLogEntry],
     on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
     t: &ThemeColors,
+    cx: &App,
 ) -> AnyElement {
     let graph_width = max_graph_len as f32 * GRAPH_CELL_W;
 
@@ -309,7 +311,7 @@ pub fn render_graph_row(
                         .gap(px(6.0))
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.text_primary))
                                 .text_ellipsis()
                                 .overflow_hidden()
@@ -317,10 +319,10 @@ pub fn render_graph_row(
                                 .min_w_0()
                                 .child(entry.message.clone()),
                         )
-                        .children(entry.refs.iter().map(|r| render_ref_label(r, t)))
+                        .children(entry.refs.iter().map(|r| render_ref_label(r, t, cx)))
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_size(ui_text_ms(cx))
                                 .text_color(rgb(t.text_muted))
                                 .flex_shrink_0()
                                 .child(entry.author.clone()),
@@ -364,6 +366,7 @@ pub fn render_commit_log_content(
     loading: bool,
     on_commit_click: Option<Arc<dyn Fn(&str, &str, usize, &mut Window, &mut App)>>,
     t: &ThemeColors,
+    cx: &App,
 ) -> AnyElement {
     if loading && entries.is_empty() {
         return div()
@@ -374,7 +377,7 @@ pub fn render_commit_log_content(
             .justify_center()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child("Loading\u{2026}"),
             )
@@ -390,7 +393,7 @@ pub fn render_commit_log_content(
             .justify_center()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child("No commits"),
             )
@@ -419,7 +422,7 @@ pub fn render_commit_log_content(
             entries
                 .iter()
                 .enumerate()
-                .map(|(i, row)| render_graph_row(row, i, max_graph_len, &all_commits, on_commit_click.clone(), t)),
+                .map(|(i, row)| render_graph_row(row, i, max_graph_len, &all_commits, on_commit_click.clone(), t, cx)),
         )
         .when(loading, |d| {
             d.child(
@@ -431,7 +434,7 @@ pub fn render_commit_log_content(
                     .justify_center()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child("Loading\u{2026}"),
                     ),
@@ -441,7 +444,7 @@ pub fn render_commit_log_content(
 }
 
 /// Render the commit log popover header row (icon + "GRAPH" label).
-pub fn render_commit_log_header(t: &ThemeColors) -> Div {
+pub fn render_commit_log_header(t: &ThemeColors, cx: &App) -> Div {
     h_flex()
         .px(px(10.0))
         .py(px(6.0))
@@ -457,7 +460,7 @@ pub fn render_commit_log_header(t: &ThemeColors) -> Div {
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_secondary))
                 .child("GRAPH"),
         )
@@ -472,6 +475,7 @@ pub fn render_commit_log_header(t: &ThemeColors) -> Div {
 pub fn render_diff_file_list(
     summaries: &[FileDiffSummary],
     t: &ThemeColors,
+    cx: &App,
 ) -> Vec<AnyElement> {
     let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
 
@@ -479,7 +483,7 @@ pub fn render_diff_file_list(
     for item in flatten_file_tree(&tree, 0) {
         match item {
             FileTreeItem::Folder { name, depth } => {
-                tree_elements.push(render_folder_row(name, depth, t));
+                tree_elements.push(render_folder_row(name, depth, t, cx));
             }
             FileTreeItem::File { index, depth } => {
                 if let Some(summary) = summaries.get(index) {
@@ -499,6 +503,7 @@ pub fn render_diff_file_list(
                             is_deleted,
                             false,
                             t,
+                            cx,
                         )
                         .id(ElementId::Name(
                             format!("diff-file-{}", index).into(),
@@ -519,6 +524,7 @@ pub fn render_diff_file_list_interactive(
     summaries: &[FileDiffSummary],
     on_file_click: impl Fn(&str, &mut Window, &mut App) + 'static,
     t: &ThemeColors,
+    cx: &App,
 ) -> Vec<AnyElement> {
     let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
     let on_file_click = std::sync::Arc::new(on_file_click);
@@ -527,7 +533,7 @@ pub fn render_diff_file_list_interactive(
     for item in flatten_file_tree(&tree, 0) {
         match item {
             FileTreeItem::Folder { name, depth } => {
-                tree_elements.push(render_folder_row(name, depth, t));
+                tree_elements.push(render_folder_row(name, depth, t, cx));
             }
             FileTreeItem::File { index, depth } => {
                 if let Some(summary) = summaries.get(index) {
@@ -549,6 +555,7 @@ pub fn render_diff_file_list_interactive(
                             is_deleted,
                             false,
                             t,
+                            cx,
                         )
                         .id(ElementId::Name(
                             format!("diff-file-{}", index).into(),

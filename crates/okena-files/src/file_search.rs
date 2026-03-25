@@ -8,6 +8,7 @@ use crate::theme::theme;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_ui::badge::keyboard_hint;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text};
 use okena_ui::empty_state::empty_state;
 use okena_ui::file_icon::file_icon;
 use okena_ui::input::search_input_area_selected;
@@ -510,7 +511,7 @@ impl FileSearchDialog {
                 }),
             )
             .gap(px(8.0))
-            .child(file_icon(filename, &t))
+            .child(file_icon(filename, &t, cx))
             .child(
                 div()
                     .flex_1()
@@ -520,7 +521,7 @@ impl FileSearchDialog {
                     .overflow_hidden()
                     .child(
                         div()
-                            .text_size(px(13.0))
+                            .text_size(ui_text(13.0, cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.text_primary))
                             .overflow_hidden()
@@ -529,7 +530,7 @@ impl FileSearchDialog {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .overflow_hidden()
                             .text_ellipsis()
@@ -634,6 +635,7 @@ impl Render for FileSearchDialog {
                         &self.config.title,
                         Some(format!("Searching in {}", project_name)),
                         &t,
+                        cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(search_input_area_selected(&search_query, self.config.search_placeholder.as_ref().map(|s| s.as_str()).unwrap_or(""), self.select_all, &t))
@@ -643,6 +645,7 @@ impl Render for FileSearchDialog {
                             .child(empty_state(
                                 if self.files.is_empty() { "No files found in project" } else { "No matching files" },
                                 &t,
+                                cx,
                             ))
                             .into_any_element()
                     } else {
@@ -684,7 +687,7 @@ impl Render for FileSearchDialog {
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(format!("{} files", self.files.len())),
                             ),

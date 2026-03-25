@@ -2,6 +2,7 @@
 
 use okena_views_terminal::actions::{MinimizeTerminal, ToggleFullscreen};
 use okena_ui::theme::theme;
+use okena_ui::tokens::ui_text_sm;
 use okena_ui::rename_state::is_renaming;
 use gpui::*;
 use gpui::prelude::*;
@@ -135,14 +136,14 @@ impl Sidebar {
             .child(if is_renaming_now {
                 sidebar_rename_input(
                     ElementId::Name(format!("{}-rename-input", id_prefix).into()),
-                    &self.project_rename, &t,
+                    &self.project_rename, &t, cx,
                 )
                 .map(|el| el.into_any_element())
                 .unwrap_or_else(|| div().flex_1().into_any_element())
             } else {
                 let name_label = sidebar_name_label(
                     ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()),
-                    project_name.clone(), &t,
+                    project_name.clone(), &t, cx,
                 )
                 .on_click(cx.listener({
                     let project_id = project_id.clone();
@@ -159,13 +160,13 @@ impl Sidebar {
                         cx.stop_propagation();
                     }
                 }));
-                sidebar_name_or_badge(name_label, &project_name, hide_terminal_badge, project.terminal_ids.len(), &t)
+                sidebar_name_or_badge(name_label, &project_name, hide_terminal_badge, project.terminal_ids.len(), &t, cx)
             })
             // 4. Idle dot
             .when(idle_count > 0 && !is_busy, |d| d.child(sidebar_idle_dot(&t)))
             // 5. Worktree badge (Project style only)
             .when(matches!(style, ProjectRowStyle::Project) && project.worktree_count > 0, |d| {
-                d.child(sidebar_worktree_badge(project.worktree_count, &t))
+                d.child(sidebar_worktree_badge(project.worktree_count, &t, cx))
             })
             // 6. Busy label (Worktree busy only)
             .when(is_busy, |d| {
@@ -174,7 +175,7 @@ impl Sidebar {
                     _ => "",
                 };
                 d.child(
-                    div().ml_auto().text_size(px(10.0)).text_color(rgb(t.text_secondary)).child(label)
+                    div().ml_auto().text_size(ui_text_sm(cx)).text_color(rgb(t.text_secondary)).child(label)
                 )
             })
             // 7. Visibility button
@@ -465,6 +466,7 @@ impl Sidebar {
                         ElementId::Name(format!("{}terminal-rename-input", id_prefix).into()),
                         &self.terminal_rename,
                         &t,
+                        cx,
                     )
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().min_w_0().into_any_element())
@@ -473,6 +475,7 @@ impl Sidebar {
                         ElementId::Name(format!("{}terminal-name-{}", id_prefix, terminal_id).into()),
                         terminal_name.clone(),
                         &t,
+                        cx,
                     )
                         .on_mouse_down(MouseButton::Left, cx.listener(|_this, _, _, cx| {
                             cx.stop_propagation();
@@ -498,7 +501,7 @@ impl Sidebar {
             )
             .children(idle_label.map(|d| {
                 div()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.border_idle))
                     .flex_shrink_0()
                     .child(d)
@@ -699,14 +702,14 @@ impl Sidebar {
                 if is_renaming {
                     sidebar_rename_input(
                         ElementId::Name(format!("{}-rename-input", id_prefix).into()),
-                        &self.project_rename, &t,
+                        &self.project_rename, &t, cx,
                     )
                         .map(|el| el.into_any_element())
                         .unwrap_or_else(|| div().flex_1().into_any_element())
                 } else {
                     sidebar_name_label(
                         ElementId::Name(format!("{}-name-{}", id_prefix, project.id).into()),
-                        project_name.clone(), &t,
+                        project_name.clone(), &t, cx,
                     )
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener({

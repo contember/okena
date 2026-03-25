@@ -9,7 +9,7 @@ use gpui_component::v_flex;
 /// Code block container with rounded corners, bg, border, overflow_hidden, and optional language label.
 ///
 /// Caller adds `.child(...)` for the code content area.
-pub fn code_block_container(language: Option<&str>, t: &ThemeColors) -> Div {
+pub fn code_block_container(language: Option<&str>, t: &ThemeColors, cx: &App) -> Div {
     let lang_label = language.unwrap_or("");
     v_flex()
         .rounded(px(6.0))
@@ -25,7 +25,7 @@ pub fn code_block_container(language: Option<&str>, t: &ThemeColors) -> Div {
                     .bg(rgb(t.bg_header))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(lang_label.to_string()),
             )

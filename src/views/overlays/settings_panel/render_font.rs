@@ -11,7 +11,7 @@ impl SettingsPanel {
         let s = settings_entity(cx).read(cx).settings.clone();
 
         div()
-            .child(section_header("Font", &t))
+            .child(section_header("Font", &t, cx))
             .child(
                 section_container(&t)
                     .child(self.render_number_stepper(

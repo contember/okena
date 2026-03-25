@@ -3,6 +3,7 @@
 use crate::ActionDispatch;
 use okena_files::theme::theme;
 use okena_ui::header_buttons::{header_button_base, ButtonSize, HeaderAction};
+use okena_ui::tokens::{ui_text_ms, ui_text_md};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
@@ -109,9 +110,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     .gap(px(6.0))
                     .items_center()
                     .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(if is_hook { rgb(t.term_yellow) } else { rgb(t.success) }))
-                    .child(div().text_size(px(12.0)).text_color(rgb(t.text_primary)).child(terminal_name))
+                    .child(div().text_size(ui_text_md(cx)).text_color(rgb(t.text_primary)).child(terminal_name))
                     .when(has_multiple, |d| {
-                        d.child(div().text_size(px(11.0)).text_color(rgb(t.text_muted)).child(format!("{}/{}", current_index + 1, terminal_count)))
+                        d.child(div().text_size(ui_text_ms(cx)).text_color(rgb(t.text_muted)).child(format!("{}/{}", current_index + 1, terminal_count)))
                     }),
             )
             .child(

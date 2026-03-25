@@ -7,6 +7,7 @@ use gpui_component::tooltip::Tooltip;
 use okena_services::manager::ServiceStatus;
 use okena_ui::icon_action_button::icon_action_button;
 use okena_ui::theme::ThemeColors;
+use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md, ui_text};
 
 /// Render the tab header row for the service panel.
 ///
@@ -16,6 +17,7 @@ pub fn render_service_panel_header(
     services: &[ServiceSnapshot],
     active_service_name: Option<&str>,
     t: &ThemeColors,
+    cx: &App,
     on_overview_click: impl Fn(&mut Window, &mut App) + 'static,
     on_tab_click: impl Fn(String, &mut Window, &mut App) + 'static,
     on_start_all: impl Fn(&mut Window, &mut App) + 'static,
@@ -69,7 +71,7 @@ pub fn render_service_panel_header(
                         .flex()
                         .items_center()
                         .flex_shrink_0()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .when(is_overview, |d| {
                             d.bg(rgb(t.bg_primary))
                                 .text_color(rgb(t.text_primary))
@@ -107,7 +109,7 @@ pub fn render_service_panel_header(
                                 .items_center()
                                 .flex_shrink_0()
                                 .gap(px(6.0))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .when(is_active, |d| {
                                     d.bg(rgb(t.bg_primary))
                                         .text_color(rgb(t.text_primary))
@@ -148,7 +150,7 @@ pub fn render_service_panel_header(
                     d
                         // Start All
                         .child(
-                            icon_action_button("svc-panel-start-all", "\u{25B6}\u{25B6}", t.term_green, t)
+                            icon_action_button("svc-panel-start-all", "\u{25B6}\u{25B6}", t.term_green, t, cx)
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     on_start_all(window, cx);
@@ -159,7 +161,7 @@ pub fn render_service_panel_header(
                         )
                         // Stop All
                         .child(
-                            icon_action_button("svc-panel-stop-all", "\u{25A0}\u{25A0}", t.term_red, t)
+                            icon_action_button("svc-panel-stop-all", "\u{25A0}\u{25A0}", t.term_red, t, cx)
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     on_stop_all(window, cx);
@@ -170,7 +172,7 @@ pub fn render_service_panel_header(
                         )
                         // Reload
                         .child(
-                            icon_action_button("svc-panel-reload", "\u{27F3}", t.text_secondary, t)
+                            icon_action_button("svc-panel-reload", "\u{27F3}", t.text_secondary, t, cx)
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     on_reload(window, cx);
@@ -194,7 +196,7 @@ pub fn render_service_panel_header(
                                     .px(px(5.0))
                                     .py(px(1.0))
                                     .rounded(px(3.0))
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.term_red))
                                     .child(label),
                             )
@@ -202,7 +204,7 @@ pub fn render_service_panel_header(
                         // Start button (when stopped/crashed)
                         .when(active_is_stopped, |d| {
                             d.child(
-                                icon_action_button("svc-panel-start", "\u{25B6}", t.term_green, t)
+                                icon_action_button("svc-panel-start", "\u{25B6}", t.term_green, t, cx)
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         on_start(window, cx);
@@ -215,7 +217,7 @@ pub fn render_service_panel_header(
                         // Restart button (when running)
                         .when(active_is_running, |d| {
                             d.child(
-                                icon_action_button("svc-panel-restart", "\u{27F3}", t.text_secondary, t)
+                                icon_action_button("svc-panel-restart", "\u{27F3}", t.text_secondary, t, cx)
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         on_restart(window, cx);
@@ -228,7 +230,7 @@ pub fn render_service_panel_header(
                         // Stop button (when running)
                         .when(active_is_running, |d| {
                             d.child(
-                                icon_action_button("svc-panel-stop", "\u{25A0}", t.term_red, t)
+                                icon_action_button("svc-panel-stop", "\u{25A0}", t.term_red, t, cx)
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         on_stop(window, cx);
@@ -259,7 +261,7 @@ pub fn render_service_panel_header(
                         .justify_center()
                         .rounded(px(3.0))
                         .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_secondary))
                         .child("\u{2715}")
                         .on_click(move |_, window, cx| {
@@ -278,6 +280,7 @@ pub fn render_service_overview(
     project_id: &str,
     remote_host: Option<&str>,
     t: &ThemeColors,
+    cx: &App,
     on_service_click: impl Fn(String, &mut Window, &mut App) + 'static,
     on_start: impl Fn(String, &mut Window, &mut App) + 'static,
     on_stop: impl Fn(String, &mut Window, &mut App) + 'static,
@@ -313,7 +316,7 @@ pub fn render_service_overview(
                 .gap(px(8.0))
                 .border_b_1()
                 .border_color(rgb(t.border))
-                .text_size(px(10.0))
+                .text_size(ui_text_sm(cx))
                 .text_color(rgb(t.text_muted))
                 // Status column (dot width)
                 .child(div().flex_shrink_0().w(px(7.0)))
@@ -361,7 +364,7 @@ pub fn render_service_overview(
                                     .child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_size(px(9.0))
+                                            .text_size(ui_text_xs(cx))
                                             .text_color(rgb(t.text_muted))
                                             .child("OTHER DOCKER SERVICES"),
                                     )
@@ -378,6 +381,7 @@ pub fn render_service_overview(
                             has_ports,
                             remote_host,
                             t,
+                            cx,
                             on_service_click.clone(),
                             on_start.clone(),
                             on_stop.clone(),
@@ -399,6 +403,7 @@ fn render_overview_row(
     has_ports: bool,
     remote_host: Option<&str>,
     t: &ThemeColors,
+    cx: &App,
     on_service_click: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
     on_start: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
     on_stop: std::sync::Arc<dyn Fn(String, &mut Window, &mut App) + 'static>,
@@ -450,7 +455,7 @@ fn render_overview_row(
                 .cursor_pointer()
                 .flex_1()
                 .min_w(px(80.0))
-                .text_size(px(12.0))
+                .text_size(ui_text_md(cx))
                 .text_color(rgb(name_color))
                 .text_ellipsis()
                 .overflow_hidden()
@@ -465,7 +470,7 @@ fn render_overview_row(
             div()
                 .flex_shrink_0()
                 .w(px(70.0))
-                .text_size(px(11.0))
+                .text_size(ui_text_ms(cx))
                 .text_color(rgb(sc))
                 .child(sl),
         )
@@ -484,7 +489,7 @@ fn render_overview_row(
                                 .items_center()
                                 .rounded(px(2.0))
                                 .bg(rgb(t.bg_secondary))
-                                .text_size(px(9.0))
+                                .text_size(ui_text_xs(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child("docker"),
                         )
@@ -528,7 +533,7 @@ fn render_overview_row(
                                 .rounded(px(3.0))
                                 .bg(rgb(t.bg_secondary))
                                 .hover(|s| s.bg(rgb(t.bg_hover)).underline())
-                                .text_size(px(10.0))
+                                .text_size(ui_text_sm(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child(format!(":{}", port))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -568,6 +573,7 @@ fn render_overview_row(
                             "\u{25B6}",
                             t.term_green,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -587,6 +593,7 @@ fn render_overview_row(
                             "\u{27F3}",
                             t.text_secondary,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -604,6 +611,7 @@ fn render_overview_row(
                             "\u{25A0}",
                             t.term_red,
                             t,
+                            cx,
                         )
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
@@ -691,6 +699,7 @@ pub fn render_service_indicator(
 /// Used in the service panel content area when a service tab is selected but not running.
 pub fn render_not_running_placeholder(
     t: &ThemeColors,
+    cx: &App,
     on_start: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Div {
     div()
@@ -706,7 +715,7 @@ pub fn render_not_running_placeholder(
         .bg(rgb(t.bg_primary))
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(ui_text(13.0, cx))
                 .text_color(rgb(t.text_muted))
                 .child("Service not running"),
         )
@@ -724,13 +733,13 @@ pub fn render_not_running_placeholder(
                 .gap(px(6.0))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.term_green))
                         .child("\u{25B6}"),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .text_color(rgb(t.text_secondary))
                         .child("Start"),
                 )

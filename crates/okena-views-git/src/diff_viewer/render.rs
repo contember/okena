@@ -4,6 +4,7 @@ use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use okena_core::theme::ThemeColors;
 use okena_ui::toggle::segmented_toggle;
+use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
 use okena_git::DiffMode;
 use gpui::prelude::*;
 use gpui::*;
@@ -47,7 +48,7 @@ impl DiffViewer {
                             _ => "Changes".to_string(),
                         };
                         div()
-                            .text_size(px(15.0))
+                            .text_size(ui_text(15.0, cx))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
                             .text_ellipsis()
@@ -68,7 +69,7 @@ impl DiffViewer {
                             d.child(
                                 div()
                                     .id("commit-hash-copy")
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .font_family("monospace")
                                     .text_color(rgb(t.term_yellow))
                                     .cursor_pointer()
@@ -93,7 +94,7 @@ impl DiffViewer {
                                 .border_color(rgb(t.border))
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!(
                                             "{} {}",
@@ -103,19 +104,19 @@ impl DiffViewer {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child("\u{00B7}"),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.diff_added_fg))
                                         .child(format!("+{}", total_added)),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.diff_removed_fg))
                                         .child(format!("-{}", total_removed)),
                                 ),
@@ -144,7 +145,7 @@ impl DiffViewer {
                             }))
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(ui_text_md(cx))
                                     .text_color(rgb(if ignore_whitespace {
                                         t.button_primary_fg
                                     } else {
@@ -169,6 +170,7 @@ impl DiffViewer {
                             .child(segmented_toggle(
                                 &[("Unified", is_unified), ("Split", !is_unified)],
                                 t,
+                                cx,
                             )),
                     )
                     // Diff mode toggle (hidden for commit/branch compare diffs)
@@ -180,6 +182,7 @@ impl DiffViewer {
                                 .child(segmented_toggle(
                                     &[("Unstaged", is_working), ("Staged", !is_working)],
                                     t,
+                                    cx,
                                 )),
                         )
                     })
@@ -206,7 +209,7 @@ impl DiffViewer {
                             .on_click(cx.listener(|this, _, _window, cx| this.close(cx)))
                             .child(
                                 div()
-                                    .text_size(px(16.0))
+                                    .text_size(ui_text(16.0, cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("\u{00D7}"),
                             ),
@@ -243,7 +246,7 @@ impl DiffViewer {
                     .justify_center()
                     .rounded(px(4.0))
                     .when(can_prev, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(if can_prev { t.text_secondary } else { t.text_muted }))
                     .when(can_prev, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.prev_commit(cx)))
@@ -254,7 +257,7 @@ impl DiffViewer {
             // Position
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .min_w(px(36.0))
                     .text_align(TextAlign::Center)
@@ -272,7 +275,7 @@ impl DiffViewer {
                     .justify_center()
                     .rounded(px(4.0))
                     .when(can_next, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(if can_next { t.text_secondary } else { t.text_muted }))
                     .when(can_next, |d| {
                         d.on_click(cx.listener(|this, _, _window, cx| this.next_commit(cx)))
@@ -292,7 +295,7 @@ impl DiffViewer {
                     .child(
                         div()
                             .id("commit-info-hash")
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .font_family("monospace")
                             .text_color(rgb(t.term_yellow))
                             .cursor_pointer()
@@ -309,14 +312,14 @@ impl DiffViewer {
                     // Author
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_secondary))
                             .child(commit.author.clone()),
                     )
                     // Date
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child(time_str),
                     )
@@ -351,7 +354,7 @@ impl DiffViewer {
                         .justify_center()
                         .child(
                             div()
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child("Loading..."),
                         ),
@@ -366,14 +369,14 @@ impl DiffViewer {
                         .justify_center()
                         .child(
                             div()
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child(error_message.unwrap_or_default()),
                         ),
                 )
             })
             .when(!loading && !has_error && has_files, |d| {
-                d.child(self.render_sidebar(t, tree_elements)).child(
+                d.child(self.render_sidebar(t, tree_elements, cx)).child(
                     self.render_diff_pane(
                         t,
                         is_binary,
@@ -391,6 +394,7 @@ impl DiffViewer {
         &self,
         t: &ThemeColors,
         tree_elements: Vec<AnyElement>,
+        cx: &App,
     ) -> impl IntoElement {
         div()
             .w(px(SIDEBAR_WIDTH))
@@ -406,7 +410,7 @@ impl DiffViewer {
                     .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(t.text_muted))
                     .line_height(px(11.0))
@@ -475,7 +479,7 @@ impl DiffViewer {
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .bg(rgb(t.bg_header))
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .font_family("monospace")
                     .text_color(rgb(t.text_secondary))
                     .child(file_path),
@@ -489,7 +493,7 @@ impl DiffViewer {
                         .justify_center()
                         .child(
                             div()
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .text_color(rgb(t.text_muted))
                                 .child("Binary file - cannot display diff"),
                         ),
@@ -687,7 +691,7 @@ impl DiffViewer {
             )
     }
 
-    pub(super) fn render_footer(&self, t: &ThemeColors) -> impl IntoElement {
+    pub(super) fn render_footer(&self, t: &ThemeColors, cx: &App) -> impl IntoElement {
         let has_commits = self.has_commits();
         div()
             .px(px(16.0))
@@ -700,14 +704,14 @@ impl DiffViewer {
             .child(
                 h_flex()
                     .gap(px(20.0))
-                    .child(self.render_hint("Esc", "close", t))
+                    .child(self.render_hint("Esc", "close", t, cx))
                     .when(!has_commits, |d| {
-                        d.child(self.render_hint("Tab", "staged/unstaged", t))
+                        d.child(self.render_hint("Tab", "staged/unstaged", t, cx))
                     })
-                    .child(self.render_hint("S", "split", t))
-                    .child(self.render_hint("\u{2191}\u{2193}", "files", t))
+                    .child(self.render_hint("S", "split", t, cx))
+                    .child(self.render_hint("\u{2191}\u{2193}", "files", t, cx))
                     .when(has_commits, |d| {
-                        d.child(self.render_hint("[ ]", "commits", t))
+                        d.child(self.render_hint("[ ]", "commits", t, cx))
                     })
                     .child(self.render_hint(
                         if cfg!(target_os = "macos") {
@@ -717,6 +721,7 @@ impl DiffViewer {
                         },
                         "copy",
                         t,
+                        cx,
                     )),
             )
     }
@@ -726,6 +731,7 @@ impl DiffViewer {
         key: &str,
         action: &str,
         t: &ThemeColors,
+        cx: &App,
     ) -> impl IntoElement {
         h_flex()
             .gap(px(5.0))
@@ -737,14 +743,14 @@ impl DiffViewer {
                     .bg(rgb(t.bg_secondary))
                     .border_1()
                     .border_color(rgb(t.border))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(t.text_muted))
                     .child(key.to_string()),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child(action.to_string()),
             )
@@ -762,14 +768,14 @@ impl DiffViewer {
         for item in flatten_file_tree(tree, 0) {
             match item {
                 FileTreeItem::Folder { name, depth } => {
-                    elements.push(render_folder_row(name, depth, t));
+                    elements.push(render_folder_row(name, depth, t, cx));
                 }
                 FileTreeItem::File { index, depth } => {
                     if let Some(file) = self.file_stats.get(index) {
                         let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
                         let is_selected = index == self.selected_file_index;
                         elements.push(
-                            render_file_row(depth, filename, file.added, file.removed, file.is_new, file.is_deleted, is_selected, t)
+                            render_file_row(depth, filename, file.added, file.removed, file.is_new, file.is_deleted, is_selected, t, cx)
                                 .id(ElementId::Name(format!("tree-file-{}", index).into()))
                                 .on_click(cx.listener(move |this, _, _window, cx| {
                                     this.select_file(index, cx);
