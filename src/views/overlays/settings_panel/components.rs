@@ -1,4 +1,5 @@
 use crate::theme::ThemeColors;
+use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
 use crate::views::components::simple_input::{SimpleInput, SimpleInputState};
 use gpui::*;
 use gpui_component::v_flex;
@@ -33,6 +34,7 @@ pub(super) fn hook_input_row(
     placeholder: &str,
     t: &ThemeColors,
     has_border: bool,
+    cx: &App,
 ) -> Stateful<Div> {
     let _ = placeholder; // placeholder is set on the entity itself
     let row = div()
@@ -47,13 +49,13 @@ pub(super) fn hook_input_row(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(ui_text(13.0, cx))
                         .text_color(rgb(t.text_primary))
                         .child(label.to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(ui_text_sm(cx))
                         .text_color(rgb(t.text_muted))
                         .child(desc.to_string()),
                 ),
@@ -64,7 +66,7 @@ pub(super) fn hook_input_row(
                 .border_1()
                 .border_color(rgb(t.border))
                 .rounded(px(4.0))
-                .child(SimpleInput::new(input).text_size(px(12.0))),
+                .child(SimpleInput::new(input).text_size(ui_text_md(cx))),
         );
 
     if has_border {

@@ -9,6 +9,7 @@ use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{ProjectData, Workspace};
+use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -197,7 +198,7 @@ impl ProjectColumn {
         workspace.project(&self.project_id)
     }
 
-    fn render_hidden_taskbar(&self, project: &ProjectData, t: ThemeColors) -> impl IntoElement {
+    fn render_hidden_taskbar(&self, project: &ProjectData, t: ThemeColors, cx: &App) -> impl IntoElement {
         let minimized_terminals = project.layout.as_ref()
             .map(|l| l.collect_minimized_terminals())
             .unwrap_or_default();
@@ -232,7 +233,7 @@ impl ProjectColumn {
                         .flex()
                         .items_center()
                         .gap(px(4.0))
-                        .text_size(px(10.0))
+                        .text_size(ui_text_sm(cx))
                         .child(
                             svg()
                                 .path("icons/terminal-minimized.svg")
@@ -271,7 +272,7 @@ impl ProjectColumn {
                         .border_color(rgb(t.border))
                         .bg(rgb(t.bg_hover))
                         .hover(|s| s.bg(rgb(t.bg_selection)))
-                        .text_size(px(10.0))
+                        .text_size(ui_text_sm(cx))
                         .text_color(rgb(t.text_primary))
                         .child(format!("\u{2197} {}", terminal_name))
                         .on_click(move |_, _window, cx| {
@@ -382,7 +383,7 @@ impl ProjectColumn {
                         div()
                             .id("project-name")
                             .flex_shrink_0()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
                             .line_height(px(14.0))
@@ -421,7 +422,7 @@ impl ProjectColumn {
                 // Right side: minimized taskbar + controls
                 h_flex()
                     .gap(px(8.0))
-                    .child(self.render_hidden_taskbar(project, t))
+                    .child(self.render_hidden_taskbar(project, t, cx))
                     .child(
                         div()
                             .flex()
@@ -511,13 +512,13 @@ impl ProjectColumn {
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_secondary))
                     .child("Setting up worktree\u{2026}")
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .max_w(px(240.0))
                     .text_center()
@@ -543,13 +544,13 @@ impl ProjectColumn {
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(ui_text_xl(cx))
                     .text_color(rgb(t.text_muted))
                     .child("No terminal attached")
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .max_w(px(200.0))
                     .text_center()
@@ -575,7 +576,7 @@ impl ProjectColumn {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(t.button_primary_fg))
                             .child("Start Terminal")

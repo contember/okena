@@ -4,6 +4,7 @@ use crate::keybindings::{
 };
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
@@ -62,7 +63,7 @@ impl KeybindingsHelp {
             .child(
                 // Category header
                 div()
-                    .text_size(px(13.0))
+                    .text_size(ui_text(13.0, cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_primary))
                     .mb(px(8.0))
@@ -101,14 +102,14 @@ impl KeybindingsHelp {
                                                 .gap(px(8.0))
                                                 .child(
                                                     div()
-                                                        .text_size(px(13.0))
+                                                        .text_size(ui_text(13.0, cx))
                                                         .text_color(rgb(t.text_primary))
                                                         .child(name.to_string()),
                                                 )
                                                 .when(*is_customized, |d| {
                                                     d.child(
                                                         div()
-                                                            .text_size(px(10.0))
+                                                            .text_size(ui_text_sm(cx))
                                                             .px(px(4.0))
                                                             .py(px(1.0))
                                                             .rounded(px(3.0))
@@ -120,7 +121,7 @@ impl KeybindingsHelp {
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(11.0))
+                                                .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_muted))
                                                 .child(description.to_string()),
                                         ),
@@ -133,7 +134,7 @@ impl KeybindingsHelp {
                                         .bg(rgb(t.bg_primary))
                                         .border_1()
                                         .border_color(rgb(t.border))
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .font_family("monospace")
                                         .text_color(rgb(t.text_secondary))
                                         .child(keystroke.clone()),
@@ -227,7 +228,7 @@ impl Render for KeybindingsHelp {
                                             .gap(px(8.0))
                                             .child(
                                                 div()
-                                                    .text_size(px(14.0))
+                                                    .text_size(ui_text_xl(cx))
                                                     .child("⚠️"),
                                             )
                                             .child(
@@ -235,7 +236,7 @@ impl Render for KeybindingsHelp {
                                                     .gap(px(2.0))
                                                     .child(
                                                         div()
-                                                            .text_size(px(12.0))
+                                                            .text_size(ui_text_md(cx))
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(rgb(t.text_primary))
                                                             .child(format!(
@@ -246,7 +247,7 @@ impl Render for KeybindingsHelp {
                                                     )
                                                     .child(
                                                         div()
-                                                            .text_size(px(11.0))
+                                                            .text_size(ui_text_ms(cx))
                                                             .text_color(rgb(t.text_secondary))
                                                             .child(
                                                                 conflicts
@@ -289,13 +290,13 @@ impl Render for KeybindingsHelp {
                                     .gap(px(2.0))
                                     .child(
                                         div()
-                                            .text_size(px(11.0))
+                                            .text_size(ui_text_ms(cx))
                                             .text_color(rgb(t.text_muted))
                                             .child("Configuration file:"),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(10.0))
+                                            .text_size(ui_text_sm(cx))
                                             .font_family("monospace")
                                             .text_color(rgb(t.text_secondary))
                                             .child(get_keybindings_path().display().to_string()),
@@ -310,7 +311,7 @@ impl Render for KeybindingsHelp {
                                             .gap(px(8.0))
                                             .child(
                                                 div()
-                                                    .text_size(px(12.0))
+                                                    .text_size(ui_text_md(cx))
                                                     .text_color(rgb(t.text_muted))
                                                     .child("Reset all?"),
                                             )
@@ -322,7 +323,7 @@ impl Render for KeybindingsHelp {
                                                     .py(px(6.0))
                                                     .rounded(px(4.0))
                                                     .bg(rgb(t.error))
-                                                    .text_size(px(12.0))
+                                                    .text_size(ui_text_md(cx))
                                                     .text_color(rgb(0xFFFFFF))
                                                     .child("Confirm")
                                                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
@@ -338,7 +339,7 @@ impl Render for KeybindingsHelp {
                                                     .rounded(px(4.0))
                                                     .bg(rgb(t.bg_secondary))
                                                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                    .text_size(px(12.0))
+                                                    .text_size(ui_text_md(cx))
                                                     .text_color(rgb(t.text_primary))
                                                     .child("Cancel")
                                                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
@@ -356,7 +357,7 @@ impl Render for KeybindingsHelp {
                                                 .rounded(px(4.0))
                                                 .bg(rgb(t.bg_secondary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_primary))
                                                 .child("Reset to Defaults")
                                                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {

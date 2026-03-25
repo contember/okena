@@ -2,7 +2,7 @@
 pub use crate::workspace::toast::{Toast, ToastLevel, ToastManager};
 
 use crate::theme::theme;
-use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MS, ICON_SM};
+use crate::ui::tokens::{RADIUS_STD, SPACE_MD, SPACE_SM, SPACE_XS, ICON_SM, ui_text_ms};
 use gpui::*;
 use std::time::Duration;
 
@@ -153,7 +153,7 @@ impl Render for ToastOverlay {
                             .child(
                                 div()
                                     .text_color(rgb(accent_color))
-                                    .text_size(TEXT_MS)
+                                    .text_size(ui_text_ms(cx))
                                     .flex_shrink_0()
                                     .mt(px(1.0))
                                     .child(icon_char),
@@ -165,7 +165,7 @@ impl Render for ToastOverlay {
                                     .min_w(px(0.))
                                     .overflow_x_hidden()
                                     .whitespace_normal()
-                                    .text_size(TEXT_MS)
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_primary))
                                     .child(toast.message.clone()),
                             )

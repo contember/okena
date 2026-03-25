@@ -1,4 +1,5 @@
 use crate::theme::theme;
+use crate::ui::tokens::ui_text_sm;
 use gpui::*;
 
 use super::components::*;
@@ -54,7 +55,7 @@ impl SettingsPanel {
                 div()
                     .mx(px(16.0))
                     .mb(px(4.0))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(env_note),
             )
@@ -62,7 +63,7 @@ impl SettingsPanel {
                 div()
                     .mx(px(16.0))
                     .mb(px(8.0))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(multiline_hint),
             )
@@ -71,22 +72,22 @@ impl SettingsPanel {
                     .child(hook_input_row(
                         "hook-project-open", "On Project Open",
                         "Runs when a project is added to the workspace or on startup",
-                        &h1, "", &t, true,
+                        &h1, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-project-close", "On Project Close",
                         "Runs when a project is removed from the workspace",
-                        &h2, "", &t, true,
+                        &h2, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-worktree-create", "On Worktree Create",
                         "Runs in the new worktree directory after git worktree add completes",
-                        &h3, "", &t, true,
+                        &h3, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-worktree-close", "On Worktree Close",
                         "Runs after a worktree project is removed from the workspace",
-                        &h4, "", &t, false,
+                        &h4, "", &t, false, cx,
                     )),
             )
             .child(section_header("Terminal Hooks", &t))
@@ -95,17 +96,17 @@ impl SettingsPanel {
                     .child(hook_input_row(
                         "hook-terminal-on-create", "On Terminal Create",
                         "Runs inside each new terminal after the shell starts",
-                        &t1, "", &t, true,
+                        &t1, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-terminal-on-close", "On Terminal Close",
                         "Runs when a terminal process exits",
-                        &t2, "", &t, true,
+                        &t2, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-terminal-shell-wrapper", "Shell Wrapper",
                         "Wraps the shell invocation. Use {shell} as placeholder for the original command",
-                        &t3, "", &t, false,
+                        &t3, "", &t, false, cx,
                     )),
             )
             .child(section_header("Worktree Close Flow", &t))
@@ -113,7 +114,7 @@ impl SettingsPanel {
                 div()
                     .mx(px(16.0))
                     .mb(px(4.0))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child(merge_env_note),
             )
@@ -121,7 +122,7 @@ impl SettingsPanel {
                 div()
                     .mx(px(16.0))
                     .mb(px(8.0))
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .text_color(rgb(t.text_muted))
                     .child("Close flow: stash \u{2192} fetch \u{2192} pre merge \u{2192} rebase \u{2192} merge \u{2192} post merge \u{2192} remove"),
             )
@@ -130,32 +131,32 @@ impl SettingsPanel {
                     .child(hook_input_row(
                         "hook-pre-merge", "Pre Merge",
                         "Runs before rebase + merge. Blocks the flow \u{2014} non-zero exit aborts the merge",
-                        &h5, "", &t, true,
+                        &h5, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-post-merge", "Post Merge",
                         "Runs after branch is merged into the default branch",
-                        &h6, "", &t, true,
+                        &h6, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-before-worktree-remove", "Before Worktree Remove",
                         "Runs before git worktree remove. Blocks \u{2014} non-zero exit aborts removal",
-                        &h7, "", &t, true,
+                        &h7, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-worktree-removed", "After Worktree Remove",
                         "Runs after the worktree directory is deleted from disk",
-                        &h8, "", &t, true,
+                        &h8, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-on-rebase-conflict", "On Rebase Conflict",
                         "Runs when rebase fails due to conflicts. Extra env: $OKENA_REBASE_ERROR",
-                        &h9, "", &t, true,
+                        &h9, "", &t, true, cx,
                     ))
                     .child(hook_input_row(
                         "hook-on-dirty-worktree-close", "On Dirty Close",
                         "Runs when closing a worktree that has uncommitted changes without merging",
-                        &h10, "", &t, false,
+                        &h10, "", &t, false, cx,
                     )),
             )
     }

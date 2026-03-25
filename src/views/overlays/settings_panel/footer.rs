@@ -1,4 +1,5 @@
 use crate::theme::theme;
+use crate::ui::tokens::ui_text_sm;
 use crate::workspace::persistence::get_settings_path;
 use gpui::*;
 
@@ -16,7 +17,7 @@ impl SettingsPanel {
             .border_color(rgb(t.border))
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(ui_text_sm(cx))
                     .font_family("monospace")
                     .text_color(rgb(t.text_muted))
                     .child(format!("Config: {}", config_path.display())),

@@ -15,6 +15,7 @@ use crate::views::components::{
 use crate::workspace::state::{ProjectData, Workspace};
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
+use crate::ui::tokens::{ui_text, ui_text_ms};
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -143,7 +144,7 @@ impl ProjectSwitcher {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
@@ -154,7 +155,7 @@ impl ProjectSwitcher {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .overflow_hidden()
                             .text_ellipsis()

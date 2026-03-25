@@ -8,6 +8,7 @@ use crate::views::components::{
     badge, handle_list_overlay_key, modal_backdrop, modal_content, modal_header, ListOverlayAction,
     ListOverlayConfig, ListOverlayState,
 };
+use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -204,7 +205,7 @@ impl ThemeSelector {
         });
     }
 
-    fn render_theme_preview(&self, colors: &ThemeColors) -> impl IntoElement {
+    fn render_theme_preview(&self, colors: &ThemeColors, cx: &App) -> impl IntoElement {
         // Mini terminal preview with the theme colors
         div()
             .w(px(80.0))
@@ -244,13 +245,13 @@ impl ThemeSelector {
                             .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(6.0))
+                                    .text_size(ui_text(6.0, cx))
                                     .text_color(rgb(colors.term_green))
                                     .child("$"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(6.0))
+                                    .text_size(ui_text(6.0, cx))
                                     .text_color(rgb(colors.text_primary))
                                     .child("ls"),
                             ),
@@ -261,13 +262,13 @@ impl ThemeSelector {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(px(5.0))
+                                    .text_size(ui_text(5.0, cx))
                                     .text_color(rgb(colors.term_blue))
                                     .child("src"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(5.0))
+                                    .text_size(ui_text(5.0, cx))
                                     .text_color(rgb(colors.text_primary))
                                     .child("Cargo.toml"),
                             ),
@@ -300,7 +301,7 @@ impl ThemeSelector {
                     this.select_theme(index, cx);
                 }),
             )
-            .child(self.render_theme_preview(&colors))
+            .child(self.render_theme_preview(&colors, cx))
             .child(
                 div()
                     .flex_1()
@@ -312,7 +313,7 @@ impl ThemeSelector {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(ui_text_xl(cx))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
@@ -323,7 +324,7 @@ impl ThemeSelector {
                             .when(is_selected, |d| {
                                 d.child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.border_active))
                                         .child("✓"),
                                 )
@@ -331,7 +332,7 @@ impl ThemeSelector {
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_muted))
                             .child(description),
                     ),
@@ -418,13 +419,13 @@ impl Render for ThemeSelector {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("Add custom themes by placing JSON files in:"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .font_family("monospace")
                                     .text_color(rgb(t.text_secondary))
                                     .child(themes_dir.display().to_string()),

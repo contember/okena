@@ -1,4 +1,5 @@
 use crate::theme::theme;
+use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_ms};
 use gpui::*;
 use okena_ui::empty_state::empty_state;
 
@@ -63,13 +64,13 @@ impl SettingsPanel {
                             .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
                                     .child(display_name),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child(format!(
                                         "Created {} \u{2022} Last used {} \u{2022} Expires in {}",
@@ -84,7 +85,7 @@ impl SettingsPanel {
                             .px(px(8.0))
                             .py(px(4.0))
                             .rounded(px(4.0))
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_secondary))
                             .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(0xE06C75)))
                             .child("Revoke")

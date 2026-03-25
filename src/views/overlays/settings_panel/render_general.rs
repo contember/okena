@@ -1,5 +1,6 @@
 use crate::settings::settings_entity;
 use crate::theme::theme;
+use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_md};
 use crate::views::components::simple_input::SimpleInput;
 use gpui::*;
 use gpui::prelude::*;
@@ -39,13 +40,13 @@ impl SettingsPanel {
                                 .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(ui_text(13.0, cx))
                                         .text_color(rgb(t.text_primary))
                                         .child("Listen Address"),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(ui_text_sm(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child("IP address to bind the remote server (e.g. 0.0.0.0 for all interfaces)"),
                                 ),
@@ -56,7 +57,7 @@ impl SettingsPanel {
                                 .border_1()
                                 .border_color(rgb(t.border))
                                 .rounded(px(4.0))
-                                .child(SimpleInput::new(&self.listen_address_input).text_size(px(12.0))),
+                                .child(SimpleInput::new(&self.listen_address_input).text_size(ui_text_md(cx))),
                         ),
                 )
             })
@@ -84,13 +85,13 @@ impl SettingsPanel {
                                     .gap(px(2.0))
                                     .child(
                                         div()
-                                            .text_size(px(13.0))
+                                            .text_size(ui_text(13.0, cx))
                                             .text_color(rgb(t.text_primary))
                                             .child("Editor Command"),
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(10.0))
+                                            .text_size(ui_text_sm(cx))
                                             .text_color(rgb(t.text_muted))
                                             .child("Command to open file paths (empty = system default)"),
                                     ),
@@ -101,7 +102,7 @@ impl SettingsPanel {
                                     .border_1()
                                     .border_color(rgb(t.border))
                                     .rounded(px(4.0))
-                                    .child(SimpleInput::new(&self.file_opener_input).text_size(px(12.0))),
+                                    .child(SimpleInput::new(&self.file_opener_input).text_size(ui_text_md(cx))),
                             ),
                     ),
             )

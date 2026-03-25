@@ -24,6 +24,7 @@ impl SettingsPanel {
                             "",
                             &t,
                             false,
+                            cx,
                         ),
                     ),
             )

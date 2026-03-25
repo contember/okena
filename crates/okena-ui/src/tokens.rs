@@ -44,6 +44,40 @@ pub const TEXT_MD: gpui::Pixels = px(12.0);
 pub const TEXT_XL: gpui::Pixels = px(14.0);
 
 // =============================================================================
+// Scaled text sizes (relative to ui_font_size setting)
+// =============================================================================
+
+const DEFAULT_UI_FONT_SIZE: f32 = 13.0;
+
+fn ui_scale(ui_font_size: f32) -> f32 {
+    ui_font_size / DEFAULT_UI_FONT_SIZE
+}
+
+pub fn ui_text_xs(ui_font_size: f32) -> gpui::Pixels {
+    px(9.0 * ui_scale(ui_font_size))
+}
+
+pub fn ui_text_sm(ui_font_size: f32) -> gpui::Pixels {
+    px(10.0 * ui_scale(ui_font_size))
+}
+
+pub fn ui_text_ms(ui_font_size: f32) -> gpui::Pixels {
+    px(11.0 * ui_scale(ui_font_size))
+}
+
+pub fn ui_text_md(ui_font_size: f32) -> gpui::Pixels {
+    px(12.0 * ui_scale(ui_font_size))
+}
+
+pub fn ui_text_xl(ui_font_size: f32) -> gpui::Pixels {
+    px(14.0 * ui_scale(ui_font_size))
+}
+
+pub fn ui_text(default_px: f32, ui_font_size: f32) -> gpui::Pixels {
+    px(default_px * ui_scale(ui_font_size))
+}
+
+// =============================================================================
 // Border radius
 // =============================================================================
 

@@ -10,6 +10,7 @@ use crate::views::components::{
 };
 use okena_ui::dialog_actions::dialog_actions;
 use crate::workspace::state::Workspace;
+use crate::ui::tokens::{ui_text_md, ui_text_ms};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
@@ -172,7 +173,7 @@ impl AddProjectDialog {
                     .id(ElementId::Name(format!("target-{}", i).into()))
                     .px(px(10.0))
                     .py(px(4.0))
-                    .text_size(px(11.0))
+                    .text_size(ui_text_ms(cx))
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .when(is_selected, |d| {
@@ -274,7 +275,7 @@ impl AddProjectDialog {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(if suggestion.is_select_current {
                                             rgb(t.border_active)
                                         } else {
@@ -367,7 +368,7 @@ impl Render for AddProjectDialog {
                             .child(
                                 labeled_input("Name:", &t).child(
                                     input_container(&t, None).child(
-                                        SimpleInput::new(&self.name_input).text_size(px(12.0)),
+                                        SimpleInput::new(&self.name_input).text_size(ui_text_md(cx)),
                                     ),
                                 ),
                             )
@@ -383,7 +384,7 @@ impl Render for AddProjectDialog {
                                                 SimpleInput::new(
                                                     self.path_input.read(cx).input(),
                                                 )
-                                                .text_size(px(12.0)),
+                                                .text_size(ui_text_md(cx)),
                                             ),
                                         )
                                     }),
@@ -394,7 +395,7 @@ impl Render for AddProjectDialog {
                                     button("browse-folder-btn", "Browse...", &t)
                                         .px(px(8.0))
                                         .py(px(4.0))
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_primary))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_folder_picker(window, cx);

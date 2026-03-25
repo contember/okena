@@ -2,6 +2,7 @@ use crate::keybindings::ToggleSidebar;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::workspace::state::Workspace;
+use crate::ui::tokens::{ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
@@ -235,7 +236,7 @@ impl Render for StatusBar {
             .bg(rgb(t.bg_header))
             .border_t_1()
             .border_color(rgb(t.border))
-            .text_size(px(11.0))
+            .text_size(ui_text_ms(cx))
             // Left side - sidebar toggle (macOS only) + system stats
             .child({
                 let mut left = h_flex().gap(px(16.0))
@@ -249,7 +250,7 @@ impl Render for StatusBar {
                                 .py(px(2.0))
                                 .rounded(px(4.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .text_color(if self.sidebar_open {
                                     rgb(t.term_blue)
                                 } else {
@@ -335,7 +336,7 @@ impl Render for StatusBar {
                                         .py(px(1.0))
                                         .rounded(px(3.0))
                                         .text_color(rgb(t.term_yellow))
-                                        .text_size(px(10.0))
+                                        .text_size(ui_text_sm(cx))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .hover(|s| s.bg(rgb(t.bg_hover)))
                                         .child("Pair")
@@ -365,7 +366,7 @@ impl Render for StatusBar {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("Focused:"),
                             )
@@ -376,7 +377,7 @@ impl Render for StatusBar {
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border_focused))
-                                    .text_size(px(11.0))
+                                    .text_size(ui_text_ms(cx))
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
                             )
@@ -384,7 +385,7 @@ impl Render for StatusBar {
                                 div()
                                     .cursor_pointer()
                                     .px(px(4.0))
-                                    .text_size(px(10.0))
+                                    .text_size(ui_text_sm(cx))
                                     .text_color(rgb(t.text_muted))
                                     .hover(|s| s.text_color(rgb(t.text_primary)))
                                     .child("✕")

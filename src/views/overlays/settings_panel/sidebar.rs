@@ -1,4 +1,5 @@
 use crate::theme::theme;
+use crate::ui::tokens::ui_text_md;
 use gpui::*;
 use gpui::prelude::*;
 use okena_extensions::ExtensionRegistry;
@@ -65,6 +66,7 @@ impl SettingsPanel {
                         this.close_all_dropdowns();
                         cx.notify();
                     }),
+                    cx,
                 )
             }))
             // Extension categories
@@ -81,6 +83,7 @@ impl SettingsPanel {
                         this.close_all_dropdowns();
                         cx.notify();
                     }),
+                    cx,
                 )
             }))
     }
@@ -90,6 +93,7 @@ impl SettingsPanel {
         is_active: bool,
         t: &okena_core::theme::ThemeColors,
         on_click: T,
+        cx: &App,
     ) -> impl IntoElement + use<T> {
         div()
             .id(ElementId::Name(format!("sidebar-{}", label).into()))
@@ -98,7 +102,7 @@ impl SettingsPanel {
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(4.0))
-            .text_size(px(12.0))
+            .text_size(ui_text_md(cx))
             .when(is_active, |d| {
                 d.bg(rgb(t.bg_secondary))
                     .text_color(rgb(t.text_primary))

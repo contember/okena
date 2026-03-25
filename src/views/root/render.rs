@@ -4,6 +4,7 @@ use crate::theme::theme;
 use crate::views::layout::navigation::{clear_pane_map, get_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::workspace::requests::OverlayRequest;
+use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use gpui::*;
 use gpui::prelude::*;
 use std::future::Future;
@@ -128,14 +129,14 @@ impl RootView {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(ui_text_xl(cx))
                             .text_color(rgb(t.text_muted))
                             .child("No projects in this folder"),
                     )
                     .child(
                         div()
                             .id("clear-folder-filter")
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.border_active))
                             .cursor_pointer()
                             .hover(|s| s.underline())

@@ -4,6 +4,7 @@ use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     search_input_area_selected, substring_filter, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
+use crate::ui::tokens::{ui_text, ui_text_ms};
 use gpui::*;
 use gpui_component::h_flex;
 use gpui::prelude::*;
@@ -163,7 +164,7 @@ impl CommandPalette {
                             .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(t.text_primary))
                                     .child(name),
@@ -172,7 +173,7 @@ impl CommandPalette {
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child(description),
                     ),
@@ -186,7 +187,7 @@ impl CommandPalette {
                             .py(px(2.0))
                             .rounded(px(4.0))
                             .bg(rgb(t.bg_secondary))
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .font_family("monospace")
                             .text_color(rgb(t.text_secondary))
                             .child(kb)

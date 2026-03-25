@@ -1,5 +1,6 @@
 use crate::theme::theme;
 use crate::views::components::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
+use crate::ui::tokens::ui_text_md;
 use gpui::prelude::*;
 use gpui::*;
 use std::path::PathBuf;
@@ -392,7 +393,7 @@ impl Render for PathAutoCompleteState {
                     .rounded(px(4.0))
                     .child(
                         SimpleInput::new(&self.input)
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                     )
             )
     }

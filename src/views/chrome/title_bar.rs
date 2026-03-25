@@ -1,5 +1,6 @@
 use crate::keybindings::{Quit, ShowCommandPalette, ShowKeybindings, ShowSettings, ShowThemeSelector, ToggleSidebar};
 use crate::theme::theme;
+use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_xl};
 use crate::views::components::menu_item;
 use gpui::*;
 use gpui_component::h_flex;
@@ -189,7 +190,7 @@ impl TitleBar {
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(10.0))
+            .text_size(ui_text_sm(cx))
             .text_color(rgb(t.text_secondary))
             .when(is_close, |d| {
                 d.hover(|s| s.bg(rgb(0xE81123)).text_color(rgb(0xffffff)))
@@ -494,7 +495,7 @@ impl Render for TitleBar {
                                 .py(px(4.0))
                                 .rounded(px(4.0))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .text_color(if self.sidebar_open {
                                     rgb(t.term_blue)
                                 } else {
@@ -530,14 +531,14 @@ impl Render for TitleBar {
                                 .when(menu_open, |d| d.bg(rgb(t.bg_hover)))
                                 .child(
                                     div()
-                                        .text_size(px(13.0))
+                                        .text_size(ui_text(13.0, cx))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(rgb(t.text_primary))
                                         .child(self.title.clone()),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(8.0))
+                                        .text_size(ui_text(8.0, cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(chevron),
                                 )

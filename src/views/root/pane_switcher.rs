@@ -1,6 +1,7 @@
 use crate::theme::theme;
 use crate::views::layout::navigation::PaneMap;
 use crate::workspace::state::Workspace;
+use crate::ui::tokens::ui_text;
 use gpui::*;
 
 use super::RootView;
@@ -89,7 +90,7 @@ impl Render for PaneSwitcher {
                             .bg(badge_bg)
                             .child(
                                 div()
-                                    .text_size(px(32.0))
+                                    .text_size(ui_text(32.0, cx))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(badge_fg)
                                     .child(label),

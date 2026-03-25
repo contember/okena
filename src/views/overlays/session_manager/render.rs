@@ -1,5 +1,6 @@
 use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
+use crate::ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl};
 use crate::views::components::{modal_backdrop, modal_content, modal_header, SimpleInput};
 use crate::workspace::persistence::{config_dir, SessionInfo};
 use gpui::*;
@@ -38,7 +39,7 @@ impl SessionManager {
                         .w_full()
                         .child(
                             div()
-                                .text_size(px(13.0))
+                                .text_size(ui_text(13.0, cx))
                                 .text_color(rgb(t.error))
                                 .child(format!("Delete '{}'?", name)),
                         )
@@ -53,7 +54,7 @@ impl SessionManager {
                                         .py(px(4.0))
                                         .rounded(px(4.0))
                                         .bg(rgb(t.error))
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(0xFFFFFF))
                                         .child("Delete")
                                         .on_mouse_down(
@@ -72,7 +73,7 @@ impl SessionManager {
                                         .rounded(px(4.0))
                                         .bg(rgb(t.bg_secondary))
                                         .hover(|s| s.bg(rgb(t.bg_hover)))
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_primary))
                                         .child("Cancel")
                                         .on_mouse_down(
@@ -92,7 +93,7 @@ impl SessionManager {
                         .gap(px(2.0))
                         .child(
                             div()
-                                .text_size(px(14.0))
+                                .text_size(ui_text_xl(cx))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(t.text_primary))
                                 .child(name.clone()),
@@ -102,7 +103,7 @@ impl SessionManager {
                                 .gap(px(12.0))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!(
                                             "{} project{}",
@@ -112,7 +113,7 @@ impl SessionManager {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!("Modified: {}", &session.modified_at[..10])),
                                 ),
@@ -130,7 +131,7 @@ impl SessionManager {
                                 .rounded(px(4.0))
                                 .bg(rgb(t.button_primary_bg))
                                 .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.button_primary_fg))
                                 .child("Load")
                                 .on_mouse_down(
@@ -149,7 +150,7 @@ impl SessionManager {
                                 .rounded(px(4.0))
                                 .bg(rgb(t.bg_secondary))
                                 .hover(|s| s.bg(rgb(t.bg_hover)))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.text_secondary))
                                 .child("Rename")
                                 .on_mouse_down(
@@ -168,7 +169,7 @@ impl SessionManager {
                                 .rounded(px(4.0))
                                 .bg(rgb(t.bg_secondary))
                                 .hover(|s| s.bg(with_alpha(t.error, 0.2)))
-                                .text_size(px(12.0))
+                                .text_size(ui_text_md(cx))
                                 .text_color(rgb(t.error))
                                 .child("Delete")
                                 .on_mouse_down(
@@ -195,7 +196,7 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border_active))
-                                    .child(SimpleInput::new(rename_input).text_size(px(13.0)))
+                                    .child(SimpleInput::new(rename_input).text_size(ui_text(13.0, cx)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
@@ -220,7 +221,7 @@ impl SessionManager {
                                             .rounded(px(4.0))
                                             .bg(rgb(t.button_primary_bg))
                                             .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                            .text_size(px(12.0))
+                                            .text_size(ui_text_md(cx))
                                             .text_color(rgb(t.button_primary_fg))
                                             .child("Save")
                                             .on_mouse_down(
@@ -239,7 +240,7 @@ impl SessionManager {
                                             .rounded(px(4.0))
                                             .bg(rgb(t.bg_secondary))
                                             .hover(|s| s.bg(rgb(t.bg_hover)))
-                                            .text_size(px(12.0))
+                                            .text_size(ui_text_md(cx))
                                             .text_color(rgb(t.text_primary))
                                             .child("Cancel")
                                             .on_mouse_down(
@@ -283,7 +284,7 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .border_1()
                                     .border_color(rgb(t.border))
-                                    .child(SimpleInput::new(&new_session_input).text_size(px(13.0)))
+                                    .child(SimpleInput::new(&new_session_input).text_size(ui_text(13.0, cx)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
@@ -303,7 +304,7 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .bg(rgb(t.button_primary_bg))
                                     .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.button_primary_fg))
                                     .child("Save Current")
                                     .on_mouse_down(
@@ -327,7 +328,7 @@ impl SessionManager {
                             .justify_center()
                             .child(
                                 div()
-                                    .text_size(px(14.0))
+                                    .text_size(ui_text_xl(cx))
                                     .text_color(rgb(t.text_muted))
                                     .child("No saved sessions"),
                             )
@@ -359,14 +360,14 @@ impl SessionManager {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(ui_text_xl(cx))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
                             .child("Export Current Workspace"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_muted))
                             .child("Save your current workspace configuration to a file that can be shared or backed up."),
                     )
@@ -383,7 +384,7 @@ impl SessionManager {
                                     .border_1()
                                     .border_color(rgb(t.border))
                                     .font_family("monospace")
-                                    .child(SimpleInput::new(&export_path_input).text_size(px(12.0)))
+                                    .child(SimpleInput::new(&export_path_input).text_size(ui_text_md(cx)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
@@ -403,7 +404,7 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .bg(rgb(t.button_primary_bg))
                                     .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.button_primary_fg))
                                     .child("Export")
                                     .on_mouse_down(
@@ -421,14 +422,14 @@ impl SessionManager {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .text_size(px(14.0))
+                            .text_size(ui_text_xl(cx))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(t.text_primary))
                             .child("Import Workspace"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(ui_text_md(cx))
                             .text_color(rgb(t.text_muted))
                             .child("Load a workspace configuration from an exported file. This will replace your current workspace."),
                     )
@@ -445,7 +446,7 @@ impl SessionManager {
                                     .border_1()
                                     .border_color(rgb(t.border))
                                     .font_family("monospace")
-                                    .child(SimpleInput::new(&import_path_input).text_size(px(12.0)))
+                                    .child(SimpleInput::new(&import_path_input).text_size(ui_text_md(cx)))
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation();
                                     })
@@ -465,7 +466,7 @@ impl SessionManager {
                                     .rounded(px(4.0))
                                     .bg(rgb(t.bg_secondary))
                                     .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
                                     .child("Import")
                                     .on_mouse_down(
@@ -486,13 +487,13 @@ impl SessionManager {
                     .border_color(rgb(t.border))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child("Sessions are stored in:"),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(ui_text_sm(cx))
                             .font_family("monospace")
                             .text_color(rgb(t.text_secondary))
                             .child(config_dir().join("sessions").display().to_string()),
@@ -552,7 +553,7 @@ impl Render for SessionManager {
                                     .cursor_pointer()
                                     .px(px(16.0))
                                     .py(px(10.0))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(if active_tab == SessionManagerTab::Sessions {
                                         rgb(t.text_primary)
                                     } else {
@@ -577,7 +578,7 @@ impl Render for SessionManager {
                                     .cursor_pointer()
                                     .px(px(16.0))
                                     .py(px(10.0))
-                                    .text_size(px(13.0))
+                                    .text_size(ui_text(13.0, cx))
                                     .text_color(if active_tab == SessionManagerTab::ExportImport {
                                         rgb(t.text_primary)
                                     } else {
@@ -609,7 +610,7 @@ impl Render for SessionManager {
                                     .border_color(rgb(t.border))
                                     .child(
                                         div()
-                                            .text_size(px(12.0))
+                                            .text_size(ui_text_md(cx))
                                             .text_color(rgb(t.error))
                                             .child(msg),
                                     ),

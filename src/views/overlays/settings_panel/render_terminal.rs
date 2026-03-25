@@ -1,5 +1,6 @@
 use crate::settings::settings_entity;
 use crate::theme::theme;
+use crate::ui::tokens::ui_text_md;
 use crate::workspace::settings::CursorShape;
 use gpui::*;
 use gpui::prelude::FluentBuilder;
@@ -63,7 +64,7 @@ impl SettingsPanel {
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(px(3.0))
-                        .text_size(px(12.0))
+                        .text_size(ui_text_md(cx))
                         .when(is_selected, |el: Stateful<Div>| {
                             el.bg(rgb(t.border_active))
                                 .text_color(rgb(t.text_primary))

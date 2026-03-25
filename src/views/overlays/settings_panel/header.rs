@@ -1,5 +1,6 @@
 use crate::settings::open_settings_file;
 use crate::theme::theme;
+use crate::ui::tokens::{ui_text_ms, ui_text_md, ui_text_xl};
 use crate::views::components::{dropdown_button, dropdown_option, dropdown_overlay};
 use gpui::*;
 use gpui_component::h_flex;
@@ -35,7 +36,7 @@ impl SettingsPanel {
                             .rounded(px(4.0))
                             .bg(rgb(t.bg_secondary))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(11.0))
+                            .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_secondary))
                             .child("Edit in settings.json")
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -54,7 +55,7 @@ impl SettingsPanel {
                             .justify_center()
                             .rounded(px(4.0))
                             .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(px(14.0))
+                            .text_size(ui_text_xl(cx))
                             .text_color(rgb(t.text_muted))
                             .child("\u{2715}")
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
@@ -80,14 +81,14 @@ impl SettingsPanel {
             .gap(px(4.0))
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(ui_text_xl(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_primary))
                     .child("Settings"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(ui_text_md(cx))
                     .text_color(rgb(t.text_muted))
                     .child("\u{2014}"),
             )

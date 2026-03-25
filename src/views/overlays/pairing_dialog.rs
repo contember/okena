@@ -2,6 +2,7 @@ use crate::keybindings::Cancel;
 use crate::remote::auth::AuthStore;
 use crate::theme::theme;
 use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::ui::tokens::{ui_text, ui_text_md};
 use gpui::*;
 use gpui::prelude::*;
 use std::sync::Arc;
@@ -112,7 +113,7 @@ impl Render for PairingDialog {
                             .when(!expired, |d| {
                                 d.child(
                                     div()
-                                        .text_size(px(32.0))
+                                        .text_size(ui_text(32.0, cx))
                                         .font_weight(FontWeight::BOLD)
                                         .font_family("JetBrains Mono")
                                         .text_color(rgb(t.term_yellow))
@@ -122,7 +123,7 @@ impl Render for PairingDialog {
                             .when(expired, |d| {
                                 d.child(
                                     div()
-                                        .text_size(px(18.0))
+                                        .text_size(ui_text(18.0, cx))
                                         .text_color(rgb(t.text_muted))
                                         .child("Code expired"),
                                 )
@@ -131,7 +132,7 @@ impl Render for PairingDialog {
                             .when(!expired, |d| {
                                 d.child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_muted))
                                         .child(format!("Expires in {}s", remaining)),
                                 )
@@ -152,7 +153,7 @@ impl Render for PairingDialog {
                                                 .bg(rgb(t.bg_secondary))
                                                 .border_1()
                                                 .border_color(rgb(t.border))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.text_primary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 .child("Copy Code")
@@ -172,7 +173,7 @@ impl Render for PairingDialog {
                                                 .py(px(6.0))
                                                 .rounded(px(4.0))
                                                 .bg(rgb(t.term_cyan))
-                                                .text_size(px(12.0))
+                                                .text_size(ui_text_md(cx))
                                                 .text_color(rgb(t.bg_primary))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .hover(|s| s.opacity(0.9))
