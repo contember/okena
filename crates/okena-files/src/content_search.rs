@@ -34,6 +34,8 @@ pub struct FileSearchResult {
     pub file_path: PathBuf,
     pub relative_path: String,
     pub matches: Vec<ContentMatch>,
+    /// Best match score in this file (for sorting files by relevance). 0 for non-fuzzy.
+    pub best_score: u16,
 }
 
 /// Search mode.
@@ -270,6 +272,7 @@ fn search_content_grep(
                 file_path: path.to_path_buf(),
                 relative_path,
                 matches: file_matches,
+                best_score: 0,
             });
         }
     }
@@ -307,13 +310,22 @@ fn search_content_fuzzy(
             Err(_) => continue,
         };
 
-        let mut file_matches: Vec<ContentMatch> = Vec::new();
+        let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
+
+        // Minimum score threshold — scale with query length.
+        // Short queries need higher threshold to avoid noise.
+        let query_len = query.chars().count();
+        let min_score: u16 = match query_len {
+            0..=2 => 80,
+            3..=4 => 50,
+            _ => 30,
+        };
 
         for (line_idx, line) in content.lines().enumerate() {
             if cancelled.load(Ordering::Relaxed) {
                 return;
             }
-            if total_matches + file_matches.len() >= config.max_results {
+            if total_matches + scored_matches.len() >= config.max_results {
                 break;
             }
 
@@ -324,8 +336,11 @@ fn search_content_fuzzy(
             let needle = Utf32Str::new(query, &mut needle_buf2);
 
             let mut indices: Vec<u32> = Vec::new();
-            if let Some(_score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
-                // Convert char indices to byte ranges (each matched char is a separate range)
+            if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
+                if score < min_score {
+                    continue;
+                }
+
                 let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
                 let match_ranges: Vec<Range<usize>> = indices
                     .iter()
@@ -335,17 +350,26 @@ fn search_content_fuzzy(
                     })
                     .collect();
 
-                file_matches.push(ContentMatch {
+                scored_matches.push((score, ContentMatch {
                     line_number: line_idx + 1,
                     line_content: line.to_string(),
                     match_ranges,
                     context_before: Vec::new(),
                     context_after: Vec::new(),
-                });
+                }));
             }
         }
 
-        if !file_matches.is_empty() {
+        if !scored_matches.is_empty() {
+            // Sort by score descending — best matches first
+            scored_matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+            let best_score = scored_matches.first().map(|(s, _)| *s).unwrap_or(0);
+            let mut file_matches: Vec<ContentMatch> = scored_matches
+                .into_iter()
+                .map(|(_, m)| m)
+                .collect();
+
             total_matches += file_matches.len();
 
             if config.context_lines > 0 {
@@ -361,6 +385,7 @@ fn search_content_fuzzy(
                 file_path: path.to_path_buf(),
                 relative_path,
                 matches: file_matches,
+                best_score,
             });
         }
     }

@@ -325,6 +325,8 @@ impl ContentSearchDialog {
                             results.push(result);
                         },
                     );
+                    // Sort files by best match score (highest first) for fuzzy mode
+                    results.sort_by(|a, b| b.best_score.cmp(&a.best_score));
                     results
                 })
                 .await;
