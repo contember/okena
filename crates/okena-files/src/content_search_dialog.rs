@@ -301,7 +301,7 @@ impl ContentSearchDialog {
             mode,
             max_results: 1000,
             file_glob: self.file_glob.clone(),
-            context_lines: if self.expanded { 2 } else { 0 },
+            context_lines: 0,
         };
 
         let project_path = self.project_path.clone();
@@ -519,67 +519,28 @@ impl ContentSearchDialog {
         line_number: usize,
         line_content: &str,
         match_ranges: &[std::ops::Range<usize>],
-        context_before: &[(usize, String)],
-        context_after: &[(usize, String)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
         let is_selected = idx == self.selected_index;
 
-        // In compact mode (no context), render just the match line.
-        // In expanded mode (with context), show context as a compact sub-block.
-        let has_context = !context_before.is_empty() || !context_after.is_empty();
-
-        if has_context {
-            // Expanded: match line with context shown as a tooltip-like block below
-            selectable_list_item(
-                ElementId::Name(format!("match-{}", idx).into()),
-                is_selected,
-                &t,
-            )
-            .w_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.selected_index = idx;
-                    this.open_selected(cx);
-                }),
-            )
-            .pl(px(28.0))
-            .flex_col()
-            .gap(px(0.0))
-            .children(
-                context_before.iter().map(|(ln, content)| {
-                    self.render_code_line(file_path, *ln, content, None, &t, cx)
-                }),
-            )
-            .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
-            .children(
-                context_after.iter().map(|(ln, content)| {
-                    self.render_code_line(file_path, *ln, content, None, &t, cx)
-                }),
-            )
-            .into_any_element()
-        } else {
-            // Compact: just the match line
-            selectable_list_item(
-                ElementId::Name(format!("match-{}", idx).into()),
-                is_selected,
-                &t,
-            )
-            .w_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.selected_index = idx;
-                    this.open_selected(cx);
-                }),
-            )
-            .gap(px(8.0))
-            .pl(px(28.0))
-            .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
-            .into_any_element()
-        }
+        selectable_list_item(
+            ElementId::Name(format!("match-{}", idx).into()),
+            is_selected,
+            &t,
+        )
+        .w_full()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _window, cx| {
+                this.selected_index = idx;
+                this.open_selected(cx);
+            }),
+        )
+        .gap(px(8.0))
+        .pl(px(28.0))
+        .child(self.render_code_line(file_path, line_number, line_content, Some(match_ranges), &t, cx))
+        .into_any_element()
     }
 
     /// Render the toggle buttons row (case, regex, fuzzy, glob).
@@ -1056,11 +1017,9 @@ impl Render for ContentSearchDialog {
                                     line_number,
                                     line_content,
                                     match_ranges,
-                                    context_before,
-                                    context_after,
+                                    ..
                                 } => this.render_match_row(
-                                    i, file_path, *line_number, line_content, match_ranges,
-                                    context_before, context_after, cx,
+                                    i, file_path, *line_number, line_content, match_ranges, cx,
                                 ),
                             }
                         })
