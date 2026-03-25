@@ -7,13 +7,14 @@ use crate::list_overlay::ListOverlayConfig;
 use crate::theme::theme;
 use gpui::*;
 use gpui_component::h_flex;
+use ignore::WalkBuilder;
 use okena_ui::badge::keyboard_hint;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text};
 use okena_ui::empty_state::empty_state;
 use okena_ui::file_icon::file_icon;
-use okena_ui::input::search_input_area_selected;
 use okena_ui::modal::{modal_backdrop, modal_content, modal_header};
 use okena_ui::selectable_list::selectable_list_item;
+use okena_ui::simple_input::{InputChangedEvent, SimpleInputState};
 use std::path::PathBuf;
 
 // Define Cancel action locally so we don't depend on the main app's keybindings
@@ -29,47 +30,6 @@ const BINARY_EXTENSIONS: &[&str] = &[
 
 /// Maximum number of files to scan
 const MAX_FILES: usize = 10000;
-
-/// Maximum directory depth to scan
-const MAX_DEPTH: usize = 10;
-
-/// Directories to ignore during scan
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".idea",
-    ".vscode",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-];
-
-/// File patterns to ignore
-const IGNORED_FILES: &[&str] = &[
-    ".DS_Store",
-    "Thumbs.db",
-    ".gitignore",
-];
-
-/// File extensions to ignore
-const IGNORED_EXTENSIONS: &[&str] = &[
-    "pyc",
-    "pyo",
-    "class",
-    "o",
-    "obj",
-    "dll",
-    "so",
-    "dylib",
-];
-
-/// Characters allowed in search queries
-const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./";
 
 /// A file entry in the search list
 #[derive(Clone, Debug)]
@@ -95,14 +55,12 @@ impl Global for FileSearchMemory {}
 pub struct FileSearchDialog {
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
-    search_query: String,
+    search_input: Entity<SimpleInputState>,
     files: Vec<FileEntry>,
     filtered_files: Vec<(usize, Vec<usize>)>,
     selected_index: usize,
     project_path: PathBuf,
     config: ListOverlayConfig,
-    /// When true, the entire query is "selected" -- first keystroke replaces it.
-    select_all: bool,
 }
 
 impl FileSearchDialog {
@@ -123,21 +81,36 @@ impl FileSearchDialog {
         let (query, restored_index) = memory
             .map(|m| (m.query.clone(), m.selected_index))
             .unwrap_or_default();
-        let select_all = !query.is_empty();
+
+        // Create search input entity
+        let search_input = cx.new(|cx| {
+            let mut input = SimpleInputState::new(cx)
+                .placeholder("Type to search files...");
+            if !query.is_empty() {
+                input.set_value(&query, cx);
+            }
+            input
+        });
+
+        // Subscribe to input changes for filtering
+        cx.subscribe(&search_input, |this: &mut Self, _, _: &InputChangedEvent, cx| {
+            this.filter_files(cx);
+            cx.notify();
+        })
+        .detach();
 
         let mut dialog = Self {
             focus_handle,
             scroll_handle,
-            search_query: query,
+            search_input,
             files,
             filtered_files: vec![],
             selected_index: 0,
             project_path,
             config,
-            select_all,
         };
 
-        dialog.filter_files();
+        dialog.filter_files(cx);
         if restored_index < dialog.filtered_files.len() {
             dialog.selected_index = restored_index;
         }
@@ -145,87 +118,54 @@ impl FileSearchDialog {
         dialog
     }
 
-    /// Scan files in the project directory.
+    /// Scan files in the project directory using the `ignore` crate
+    /// (respects .gitignore, hidden files, etc.).
     pub fn scan_files(project_path: &PathBuf) -> Vec<FileEntry> {
         let mut files = Vec::new();
-        Self::scan_dir(project_path, project_path, 0, &mut files);
 
-        // Sort by relative path for consistent ordering
-        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        let walker = WalkBuilder::new(project_path)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .max_depth(Some(15))
+            .build();
 
-        files
-    }
-
-    /// Recursively scan a directory for files.
-    fn scan_dir(
-        root: &PathBuf,
-        dir: &PathBuf,
-        depth: usize,
-        files: &mut Vec<FileEntry>,
-    ) {
-        if depth > MAX_DEPTH || files.len() >= MAX_FILES {
-            return;
-        }
-
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
+        for entry in walker.flatten() {
             if files.len() >= MAX_FILES {
                 break;
             }
 
             let path = entry.path();
-            let file_name = match entry.file_name().into_string() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-
-            // Skip hidden files (except common config files)
-            if file_name.starts_with('.') && !file_name.starts_with(".env") {
+            if !path.is_file() {
                 continue;
             }
 
-            if path.is_dir() {
-                // Skip ignored directories
-                if IGNORED_DIRS.contains(&file_name.as_str()) {
-                    continue;
-                }
-                Self::scan_dir(root, &path, depth + 1, files);
-            } else {
-                // Skip ignored files
-                if IGNORED_FILES.contains(&file_name.as_str()) {
-                    continue;
-                }
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
 
-                // Skip ignored extensions
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if IGNORED_EXTENSIONS.contains(&ext) {
-                        continue;
-                    }
-                }
+            let relative_path = path
+                .strip_prefix(project_path)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| filename.clone());
 
-                // Calculate relative path
-                let relative_path = path
-                    .strip_prefix(root)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| file_name.clone());
-
-                files.push(FileEntry {
-                    path,
-                    relative_path,
-                    filename: file_name,
-                });
-            }
+            files.push(FileEntry {
+                path: path.to_path_buf(),
+                relative_path,
+                filename,
+            });
         }
+
+        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        files
     }
 
     /// Save current state for next open.
     fn save_memory(&self, cx: &mut Context<Self>) {
         cx.set_global(FileSearchMemory {
-            query: self.search_query.clone(),
+            query: self.search_input.read(cx).value().to_string(),
             selected_index: self.selected_index,
         });
     }
@@ -245,38 +185,17 @@ impl FileSearchDialog {
         }
     }
 
-    /// Scroll to keep the selected item visible.
-    fn scroll_to_selected(&self) {
-        if !self.filtered_files.is_empty() {
-            self.scroll_handle.scroll_to_item(self.selected_index, ScrollStrategy::Top);
-        }
-    }
-
-    /// Move selection up.
     fn select_prev(&mut self) -> bool {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            self.scroll_to_selected();
-            true
-        } else {
-            false
-        }
+        crate::list_overlay::select_prev(&mut self.selected_index, &self.scroll_handle)
     }
 
-    /// Move selection down.
     fn select_next(&mut self) -> bool {
-        if self.selected_index < self.filtered_files.len().saturating_sub(1) {
-            self.selected_index += 1;
-            self.scroll_to_selected();
-            true
-        } else {
-            false
-        }
+        crate::list_overlay::select_next(&mut self.selected_index, self.filtered_files.len(), &self.scroll_handle)
     }
 
     /// Filter files based on the search query using fuzzy matching with scoring.
-    fn filter_files(&mut self) {
-        let query = self.search_query.to_lowercase();
+    fn filter_files(&mut self, cx: &Context<Self>) {
+        let query = self.search_input.read(cx).value().to_lowercase();
 
         if query.is_empty() {
             self.filtered_files = (0..self.files.len()).map(|i| (i, vec![])).collect();
@@ -298,98 +217,38 @@ impl FileSearchDialog {
         self.selected_index = 0;
     }
 
-    /// Greedy character matching within a substring. Returns byte positions or None.
-    fn find_positions(text: &str, query_chars: &[char]) -> Option<Vec<usize>> {
-        let mut positions = Vec::with_capacity(query_chars.len());
-        let mut text_idx = 0;
-        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
-        for &qc in query_chars {
-            let mut found = false;
-            while text_idx < text_bytes.len() {
-                if text_bytes[text_idx].1 == qc {
-                    positions.push(text_bytes[text_idx].0);
-                    text_idx += 1;
-                    found = true;
-                    break;
-                }
-                text_idx += 1;
-            }
-            if !found {
-                return None;
-            }
-        }
-        Some(positions)
-    }
-
-    /// Fuzzy match with scoring. Returns (score, matched_byte_positions) or None.
+    /// Fuzzy match with scoring using nucleo-matcher. Returns (score, matched_byte_positions) or None.
     fn fuzzy_score(text: &str, query: &str, filename: &str, relative_path: &str) -> Option<(i32, Vec<usize>)> {
-        let query_chars: Vec<char> = query.chars().collect();
-
-        if query_chars.is_empty() {
+        if query.is_empty() {
             return Some((0, vec![]));
         }
 
-        // Try to match entirely within the filename first for better highlights
+        use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut haystack_buf = Vec::new();
+        let mut needle_buf = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        let haystack = Utf32Str::new(text, &mut haystack_buf);
+        let needle = Utf32Str::new(query, &mut needle_buf);
+
+        // Run nucleo fuzzy matching
+        let nucleo_score = matcher.fuzzy_indices(haystack, needle, &mut indices)?;
+        let mut score = nucleo_score as i32;
+
+        // Convert char indices to byte positions
+        let char_to_byte: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+        let positions: Vec<usize> = indices
+            .iter()
+            .filter_map(|&idx| char_to_byte.get(idx as usize).copied())
+            .collect();
+
+        // Additional bonuses on top of nucleo's score
+
+        // Filename match bonus
         let filename_lower = filename.to_lowercase();
         let filename_start_byte = text.len().saturating_sub(filename_lower.len());
-        let positions = if let Some(fn_positions) =
-            Self::find_positions(&text[filename_start_byte..], &query_chars)
-        {
-            fn_positions.iter().map(|p| p + filename_start_byte).collect()
-        } else if let Some(path_positions) = Self::find_positions(text, &query_chars) {
-            path_positions
-        } else {
-            return None;
-        };
-
-        let text_bytes: Vec<(usize, char)> = text.char_indices().collect();
-
-        // Calculate score
-        let mut score: i32 = 0;
-
-        // Consecutive matches bonus + gap penalty (multiplier 2)
-        for w in positions.windows(2) {
-            let p0_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
-            let p1_text_idx = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
-            if p1_text_idx == p0_text_idx + 1 {
-                score += 5;
-            } else {
-                score -= (p1_text_idx - p0_text_idx - 1) as i32 * 2;
-            }
-        }
-
-        // Best contiguous streak bonus
-        if positions.len() > 1 {
-            let mut best_streak: usize = 1;
-            let mut current_streak: usize = 1;
-            for w in positions.windows(2) {
-                let p0 = text_bytes.iter().position(|(bi, _)| *bi == w[0])?;
-                let p1 = text_bytes.iter().position(|(bi, _)| *bi == w[1])?;
-                if p1 == p0 + 1 {
-                    current_streak += 1;
-                    best_streak = best_streak.max(current_streak);
-                } else {
-                    current_streak = 1;
-                }
-            }
-            if best_streak > 1 {
-                score += (best_streak as i32 - 1) * 15;
-            }
-        }
-
-        // Start-of-word bonus
-        let word_separators = ['/', '.', '-', '_', '\\'];
-        for &pos in &positions {
-            if pos == 0 {
-                score += 10;
-            } else if let Some(prev_char) = text[..pos].chars().last() {
-                if word_separators.contains(&prev_char) {
-                    score += 10;
-                }
-            }
-        }
-
-        // Filename match bonus: matches in the filename portion score higher
         for &pos in &positions {
             if pos >= filename_start_byte {
                 score += 25;
@@ -559,15 +418,15 @@ impl Render for FileSearchDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let search_query = self.search_query.clone();
         let project_name = self.project_path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Project".to_string());
 
-        // Focus on first render
-        if !focus_handle.is_focused(window) {
-            window.focus(&focus_handle, cx);
+        // Focus search input on first render
+        let input_focus = self.search_input.read(cx).focus_handle(cx);
+        if !input_focus.is_focused(window) {
+            self.search_input.update(cx, |input, cx| input.focus(window, cx));
         }
 
         modal_backdrop("file-search-backdrop", &t)
@@ -581,43 +440,17 @@ impl Render for FileSearchDialog {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
                     "up" => {
-                        this.select_all = false;
                         if this.select_prev() {
                             cx.notify();
                         }
                     }
                     "down" => {
-                        this.select_all = false;
                         if this.select_next() {
                             cx.notify();
                         }
                     }
                     "enter" => this.open_selected(cx),
-                    "backspace" => {
-                        if this.select_all {
-                            this.search_query.clear();
-                            this.select_all = false;
-                            this.filter_files();
-                            cx.notify();
-                        } else if !this.search_query.is_empty() {
-                            this.search_query.pop();
-                            this.filter_files();
-                            cx.notify();
-                        }
-                    }
-                    key if key.len() == 1 => {
-                        let Some(ch) = key.chars().next() else { return };
-
-                        if SEARCH_CHARS.contains(ch) {
-                            if this.select_all {
-                                this.search_query.clear();
-                                this.select_all = false;
-                            }
-                            this.search_query.push(ch);
-                            this.filter_files();
-                            cx.notify();
-                        }
-                    }
+                    "escape" => this.close(cx),
                     _ => {}
                 }
             }))
@@ -638,7 +471,7 @@ impl Render for FileSearchDialog {
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
-                    .child(search_input_area_selected(&search_query, self.config.search_placeholder.as_ref().map(|s| s.as_str()).unwrap_or(""), self.select_all, &t))
+                    .child(crate::list_overlay::search_input_row(&self.search_input, &t, cx))
                     .child(if self.filtered_files.is_empty() {
                         div()
                             .flex_1()

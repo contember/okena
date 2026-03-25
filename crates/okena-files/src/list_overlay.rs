@@ -306,6 +306,65 @@ pub fn handle_list_overlay_key<T: Clone>(
     }
 }
 
+/// Navigation helper for uniform list overlays.
+///
+/// Manages selected_index within a total count, scrolling to keep selection visible.
+/// Returns true if the selection changed.
+pub fn select_prev(selected_index: &mut usize, scroll_handle: &UniformListScrollHandle) -> bool {
+    if *selected_index > 0 {
+        *selected_index -= 1;
+        scroll_handle.scroll_to_item(*selected_index, ScrollStrategy::Top);
+        true
+    } else {
+        false
+    }
+}
+
+/// Move selection down. Returns true if the selection changed.
+pub fn select_next(
+    selected_index: &mut usize,
+    total: usize,
+    scroll_handle: &UniformListScrollHandle,
+) -> bool {
+    if *selected_index < total.saturating_sub(1) {
+        *selected_index += 1;
+        scroll_handle.scroll_to_item(*selected_index, ScrollStrategy::Top);
+        true
+    } else {
+        false
+    }
+}
+
+/// Render a search input row with ">" prompt prefix and a SimpleInput.
+pub fn search_input_row(
+    input: &Entity<okena_ui::simple_input::SimpleInputState>,
+    t: &okena_core::theme::ThemeColors,
+    cx: &App,
+) -> Div {
+    use okena_ui::simple_input::SimpleInput;
+    use okena_ui::tokens::{ui_text, ui_text_ms};
+
+    div()
+        .px(px(12.0))
+        .py(px(6.0))
+        .border_b_1()
+        .border_color(rgb(t.border))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_muted))
+                .child(">"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .child(SimpleInput::new(input).text_size(ui_text(13.0, cx))),
+        )
+}
+
 /// Substring filter for list items.
 ///
 /// Returns filtered indices where any of the search fields contain the query.
