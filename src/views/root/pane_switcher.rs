@@ -118,10 +118,12 @@ impl Render for PaneSwitcher {
                                 cx,
                             );
                         });
+                        cx.emit(PaneSwitcherEvent::Close);
+                        return;
                     }
                 }
 
-                // Any key deactivates - emit close event
+                // Any other key deactivates without switching
                 cx.emit(PaneSwitcherEvent::Close);
             }))
             .on_mouse_down(
@@ -145,6 +147,9 @@ impl EventEmitter<PaneSwitcherEvent> for PaneSwitcher {}
 impl RootView {
     /// Create and show the pane switcher overlay entity.
     pub(super) fn show_pane_switcher(&mut self, pane_map: PaneMap, cx: &mut Context<Self>) {
+        // Clear terminal focus so TerminalPane doesn't steal focus from the overlay
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+
         let workspace = self.workspace.clone();
         let entity = cx.new(|cx| PaneSwitcher::new(workspace, &pane_map, cx));
 
@@ -153,6 +158,7 @@ impl RootView {
                 PaneSwitcherEvent::Close => {
                     this.pane_switch_active = false;
                     this.pane_switcher_entity = None;
+                    this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
                     cx.notify();
                 }
             }
