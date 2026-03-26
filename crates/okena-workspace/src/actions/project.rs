@@ -659,9 +659,11 @@ impl Workspace {
         let project_hooks = project.hooks.clone();
         let project_name = project.name.clone();
         let project_path = project.path.clone();
-        // Use the stored worktree path (repo-level checkout), falling back to project path
-        // for backwards compatibility with worktrees created before monorepo support
-        let worktree_path = std::path::PathBuf::from(&project_path);
+        // For monorepos the project path is a subdirectory inside the worktree checkout.
+        // Resolve the actual worktree root via git so `git worktree remove` gets the right path.
+        let project_pathbuf = std::path::PathBuf::from(&project_path);
+        let worktree_path = okena_git::get_repo_root(&project_pathbuf)
+            .unwrap_or(project_pathbuf);
 
         // Resolve branch BEFORE removal (git worktree remove deletes the checkout)
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
