@@ -5,6 +5,7 @@ mod macros;
 mod action_dispatch;
 mod app;
 mod assets;
+mod cli;
 mod elements;
 mod git;
 mod keybindings;
@@ -237,38 +238,6 @@ fn set_app_menus(cx: &mut App) {
 }
 
 /// `okena pair` — generate a pairing code and write it to a file for the running server to validate.
-fn cli_pair() -> i32 {
-    use crate::remote::auth::{generate_pairing_code, pair_code_path};
-
-    let code = generate_pairing_code();
-    let path = pair_code_path();
-
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("Failed to create config directory: {e}");
-            return 1;
-        }
-    }
-
-    if let Err(e) = std::fs::write(&path, &code) {
-        eprintln!("Failed to write pairing code: {e}");
-        return 1;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(&path, perms) {
-            eprintln!("Warning: failed to set file permissions: {e}");
-        }
-    }
-
-    println!("Pairing code: {code}");
-    println!("Expires in 60s — run `okena pair` again for a fresh code.");
-    0
-}
-
 /// Global handle keeping the headless app entity alive for the process lifetime.
 struct GlobalHeadless(#[allow(dead_code)] Entity<HeadlessApp>);
 impl Global for GlobalHeadless {}
@@ -311,9 +280,9 @@ fn main() {
         return;
     }
 
-    // Handle `okena pair` subcommand before GPUI init
-    if std::env::args().nth(1).as_deref() == Some("pair") {
-        std::process::exit(cli_pair());
+    // Handle CLI subcommands before GPUI init
+    if let Some(exit_code) = cli::try_handle_cli() {
+        std::process::exit(exit_code);
     }
 
     // Set up file logging: rotate previous log, write to both stderr and file
