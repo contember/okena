@@ -55,9 +55,54 @@ pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
     branches
 }
 
+/// If `target_path` exists but is NOT a currently registered worktree, remove
+/// the stale directory and prune worktree metadata so a fresh `worktree add`
+/// can succeed.  Returns an error only when the path is still an active worktree.
+fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> Result<(), String> {
+    if !target_path.exists() {
+        return Ok(());
+    }
+
+    // Ask git which paths are active worktrees
+    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let output = safe_output(
+        command("git").args(["-C", repo_str, "worktree", "list", "--porcelain"]),
+    )
+    .map_err(|e| format!("Failed to list worktrees: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let target_normalized = normalize_path(target_path);
+        for line in stdout.lines() {
+            if let Some(wt_path) = line.strip_prefix("worktree ") {
+                if normalize_path(Path::new(wt_path)) == target_normalized {
+                    return Err(format!(
+                        "Directory '{}' is already an active worktree",
+                        target_path.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    // Not an active worktree — remove the stale directory and prune metadata
+    log::info!(
+        "Removing stale worktree directory: {}",
+        target_path.display()
+    );
+    std::fs::remove_dir_all(target_path)
+        .map_err(|e| format!("Failed to remove stale directory '{}': {}", target_path.display(), e))?;
+
+    let _ = safe_output(command("git").args(["-C", repo_str, "worktree", "prune"]));
+
+    Ok(())
+}
+
 /// Create a new worktree
 /// Returns Ok(()) on success, Err(error_message) on failure
 pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, create_branch: bool) -> Result<(), String> {
+    clean_stale_worktree_dir(repo_path, target_path)?;
+
     let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
     let target_str = target_path.to_str().ok_or("Invalid target path")?;
 
@@ -101,6 +146,8 @@ pub fn create_worktree_with_start_point(
     target_path: &Path,
     start_branch: Option<&str>,
 ) -> Result<(), String> {
+    clean_stale_worktree_dir(repo_path, target_path)?;
+
     let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
     let target_str = target_path.to_str().ok_or("Invalid target path")?;
 

@@ -666,14 +666,14 @@ impl Workspace {
         // Resolve branch BEFORE removal (git worktree remove deletes the checkout)
         let branch = okena_git::get_current_branch(&worktree_path).unwrap_or_default();
 
+        // Fire on_worktree_close hook BEFORE removal so the hook has a valid CWD
+        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
+
         // Remove the git worktree
         okena_git::remove_worktree(&worktree_path, force)?;
 
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, global_hooks, cx);
-
-        // Fire worktree-specific hook (runs headlessly since project is deleted)
-        hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
 
         Ok(())
     }
