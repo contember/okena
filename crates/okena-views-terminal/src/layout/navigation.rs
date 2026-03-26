@@ -129,6 +129,13 @@ impl PaneMap {
         self.panes.get(next_idx)
     }
 
+    /// Remove panes whose project_id is not in the given set.
+    /// Called during render to evict stale entries from hidden projects
+    /// (e.g. worktree columns that are retained but not currently visible).
+    pub fn retain_projects(&mut self, visible_ids: &std::collections::HashSet<&str>) {
+        self.panes.retain(|p| visible_ids.contains(p.project_id.as_str()));
+    }
+
     /// Get all registered panes
     pub fn panes(&self) -> &[PaneBounds] {
         &self.panes
@@ -214,6 +221,13 @@ pub fn register_pane_bounds(
 /// Remove a pane from the global map (call when a terminal pane is dropped)
 pub fn deregister_pane_bounds(project_id: &str, layout_path: &[usize]) {
     pane_map_lock().lock().deregister(project_id, layout_path);
+}
+
+/// Remove pane entries for projects not in the visible set.
+/// Prevents stale entries from hidden columns (e.g. worktree projects with
+/// show_in_overview=false) from blocking spatial navigation.
+pub fn prune_pane_map(visible_project_ids: &std::collections::HashSet<&str>) {
+    pane_map_lock().lock().retain_projects(visible_project_ids);
 }
 
 #[cfg(test)]
@@ -307,6 +321,41 @@ mod tests {
 
         map.deregister("nonexistent", &[0]);
         assert_eq!(map.panes().len(), 1);
+    }
+
+    #[test]
+    fn retain_projects_removes_hidden() {
+        let mut map = PaneMap::new();
+        map.register("parent".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        map.register("worktree".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
+        map.register("other".into(), vec![0], make_bounds(800.0, 0.0, 400.0, 600.0), None);
+        assert_eq!(map.panes().len(), 3);
+
+        // Only parent and other are visible (worktree hidden in overview)
+        let visible: std::collections::HashSet<&str> = ["parent", "other"].into_iter().collect();
+        map.retain_projects(&visible);
+        assert_eq!(map.panes().len(), 2);
+        assert!(map.find_pane("parent", &[0]).is_some());
+        assert!(map.find_pane("worktree", &[0]).is_none());
+        assert!(map.find_pane("other", &[0]).is_some());
+    }
+
+    #[test]
+    fn retain_projects_allows_navigation_past_hidden() {
+        let mut map = PaneMap::new();
+        map.register("a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        map.register("hidden_wt".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 600.0), None);
+        map.register("b".into(), vec![0], make_bounds(800.0, 0.0, 400.0, 600.0), None);
+
+        // Prune hidden worktree
+        let visible: std::collections::HashSet<&str> = ["a", "b"].into_iter().collect();
+        map.retain_projects(&visible);
+
+        // Navigation from a should reach b (not get stuck on hidden_wt)
+        let source = map.find_pane("a", &[0]).unwrap();
+        let target = map.find_nearest_in_direction(source, NavigationDirection::Right);
+        assert!(target.is_some());
+        assert_eq!(target.unwrap().project_id, "b");
     }
 
     #[test]

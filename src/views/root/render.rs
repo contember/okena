@@ -1,7 +1,7 @@
 use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
-use crate::views::layout::navigation::get_pane_map;
+use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
 use crate::workspace::requests::OverlayRequest;
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
@@ -111,6 +111,14 @@ impl RootView {
         };
 
         let num_projects = visible_projects.len();
+
+        // Evict stale pane map entries for projects no longer rendered
+        // (e.g. worktree columns hidden in overview mode)
+        {
+            let visible_ids: std::collections::HashSet<&str> = visible_projects.iter()
+                .map(|s| s.as_str()).collect();
+            prune_pane_map(&visible_ids);
+        }
 
         // Empty state when folder filter yields no results
         if num_projects == 0 {
