@@ -31,6 +31,8 @@ use crate::views::overlays::close_worktree_dialog::{CloseWorktreeDialog, CloseWo
 use crate::views::overlays::hook_log::{HookLog, HookLogEvent};
 use crate::views::overlays::rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 use crate::views::overlays::worktree_dialog::{WorktreeDialog, WorktreeDialogEvent};
+use okena_views_sidebar::{WorktreeListPopover, WorktreeListPopoverEvent};
+use okena_views_sidebar::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
 use okena_core::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
@@ -110,8 +112,8 @@ pub enum OverlayManagerEvent {
     /// Context menu: Quick create worktree (one-click)
     QuickCreateWorktree { project_id: String },
 
-    /// Context menu: Open manage worktrees popover in sidebar
-    ManageWorktrees { project_id: String, position: gpui::Point<gpui::Pixels> },
+    /// Color picker: project color was changed (for remote sync)
+    ProjectColorChanged { project_id: String, color: okena_core::theme::FolderColor },
 
     /// Context menu: Reload services (okena.yaml) for a project
     ReloadServices { project_id: String },
@@ -184,6 +186,10 @@ pub struct OverlayManager {
     remote_context_menu: OverlaySlot<RemoteContextMenu>,
     terminal_context_menu: OverlaySlot<TerminalContextMenu>,
     tab_context_menu: OverlaySlot<TabContextMenu>,
+
+    // Positioned popovers (like context menus, rendered at RootView level)
+    worktree_list: OverlaySlot<WorktreeListPopover>,
+    color_picker: OverlaySlot<ColorPickerPopover>,
 }
 
 impl OverlayManager {
@@ -199,6 +205,8 @@ impl OverlayManager {
             remote_context_menu: OverlaySlot::new(),
             terminal_context_menu: OverlaySlot::new(),
             tab_context_menu: OverlaySlot::new(),
+            worktree_list: OverlaySlot::new(),
+            color_picker: OverlaySlot::new(),
         }
     }
 
@@ -248,6 +256,8 @@ impl OverlayManager {
         self.remote_context_menu.close();
         self.terminal_context_menu.close();
         self.tab_context_menu.close();
+        self.worktree_list.close();
+        self.color_picker.close();
     }
 
     /// Check if context menu is open.
@@ -624,10 +634,7 @@ impl OverlayManager {
                 }
                 ContextMenuEvent::ManageWorktrees { project_id, position } => {
                     this.hide_context_menu(cx);
-                    cx.emit(OverlayManagerEvent::ManageWorktrees {
-                        project_id: project_id.clone(),
-                        position: *position,
-                    });
+                    this.show_worktree_list(project_id.clone(), *position, cx);
                 }
                 ContextMenuEvent::ReloadServices { project_id } => {
                     this.hide_context_menu(cx);
@@ -956,6 +963,90 @@ impl OverlayManager {
     /// Get tab context menu entity for rendering.
     pub fn render_tab_context_menu(&self) -> Option<Entity<TabContextMenu>> {
         self.tab_context_menu.render()
+    }
+
+    // ========================================================================
+    // Worktree list popover (positioned popup)
+    // ========================================================================
+
+    /// Check if worktree list popover is open.
+    pub fn has_worktree_list(&self) -> bool {
+        self.worktree_list.is_open()
+    }
+
+    /// Show worktree list popover.
+    pub fn show_worktree_list(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.close_all_context_menus();
+
+        let workspace = self.workspace.clone();
+        let hooks = crate::settings::settings(cx).hooks.clone();
+        let popover = cx.new(|cx| WorktreeListPopover::new(workspace, project_id, position, hooks, cx));
+
+        cx.subscribe(&popover, |this, _, event: &WorktreeListPopoverEvent, cx| {
+            if event.is_close() {
+                this.hide_worktree_list(cx);
+            }
+        }).detach();
+
+        self.worktree_list.set(popover);
+        cx.notify();
+    }
+
+    /// Hide worktree list popover.
+    pub fn hide_worktree_list(&mut self, cx: &mut Context<Self>) {
+        self.worktree_list.close();
+        cx.notify();
+    }
+
+    /// Get worktree list popover entity for rendering.
+    pub fn render_worktree_list(&self) -> Option<Entity<WorktreeListPopover>> {
+        self.worktree_list.render()
+    }
+
+    // ========================================================================
+    // Color picker popover (positioned popup)
+    // ========================================================================
+
+    /// Check if color picker popover is open.
+    pub fn has_color_picker(&self) -> bool {
+        self.color_picker.is_open()
+    }
+
+    /// Show color picker popover.
+    pub fn show_color_picker(&mut self, target: ColorPickerTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.close_all_context_menus();
+
+        let workspace = self.workspace.clone();
+        let popover = cx.new(|cx| ColorPickerPopover::new(workspace, target, position, cx));
+
+        cx.subscribe(&popover, |this, _, event: &ColorPickerPopoverEvent, cx| {
+            match event {
+                ColorPickerPopoverEvent::Close => {
+                    this.hide_color_picker(cx);
+                }
+                ColorPickerPopoverEvent::ProjectColorChanged { project_id, color } => {
+                    // Emit for sidebar to handle remote sync
+                    cx.emit(OverlayManagerEvent::ProjectColorChanged {
+                        project_id: project_id.clone(),
+                        color: *color,
+                    });
+                }
+            }
+        }).detach();
+
+        self.color_picker.set(popover);
+        cx.notify();
+    }
+
+    /// Hide color picker popover.
+    pub fn hide_color_picker(&mut self, cx: &mut Context<Self>) {
+        self.color_picker.close();
+        cx.notify();
+    }
+
+    /// Get color picker popover entity for rendering.
+    pub fn render_color_picker(&self) -> Option<Entity<ColorPickerPopover>> {
+        self.color_picker.render()
     }
 
     // ========================================================================

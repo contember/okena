@@ -27,6 +27,10 @@ pub use folder_context_menu::{FolderContextMenu, FolderContextMenuEvent};
 pub use rename_directory_dialog::{RenameDirectoryDialog, RenameDirectoryDialogEvent};
 pub use hook_log::{HookLog, HookLogEvent};
 
+// Re-export popover types
+pub use worktree_list::{WorktreeListPopover, WorktreeListPopoverEvent};
+pub use color_picker::{ColorPickerPopover, ColorPickerPopoverEvent, ColorPickerTarget};
+
 gpui::actions!(okena_views_sidebar, [
     SidebarUp,
     SidebarDown,

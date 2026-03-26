@@ -108,12 +108,9 @@ impl RootView {
                     }, cx);
                 });
             }
-            OverlayManagerEvent::ManageWorktrees { project_id, position } => {
-                self.request_broker.update(cx, |broker, cx| {
-                    broker.push_sidebar_request(crate::workspace::requests::SidebarRequest::ShowWorktreeList {
-                        project_id: project_id.clone(),
-                        position: *position,
-                    }, cx);
+            OverlayManagerEvent::ProjectColorChanged { project_id, color } => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.sync_remote_color(project_id, *color, cx);
                 });
             }
             OverlayManagerEvent::FocusParent { project_id } => {
@@ -403,6 +400,29 @@ impl RootView {
                 OverlayRequest::FileBrowser { project_path } => {
                     self.overlay_manager.update(cx, |om, cx| {
                         om.show_file_browser(std::path::PathBuf::from(project_path), cx);
+                    });
+                }
+                OverlayRequest::ColorPicker { project_id, position } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_color_picker(
+                            okena_views_sidebar::ColorPickerTarget::Project { project_id },
+                            position,
+                            cx,
+                        );
+                    });
+                }
+                OverlayRequest::FolderColorPicker { folder_id, position } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_color_picker(
+                            okena_views_sidebar::ColorPickerTarget::Folder { folder_id },
+                            position,
+                            cx,
+                        );
+                    });
+                }
+                OverlayRequest::WorktreeList { project_id, position } => {
+                    self.overlay_manager.update(cx, |om, cx| {
+                        om.show_worktree_list(project_id, position, cx);
                     });
                 }
             }

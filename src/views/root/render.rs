@@ -359,6 +359,8 @@ impl Render for RootView {
         let has_remote_context_menu = om.has_remote_context_menu();
         let has_terminal_context_menu = om.has_terminal_context_menu();
         let has_tab_context_menu = om.has_tab_context_menu();
+        let has_worktree_list = om.has_worktree_list();
+        let has_color_picker = om.has_color_picker();
 
         // Clear the pane map at the start of each render cycle
         // Each terminal pane will re-register itself during prepaint
@@ -895,6 +897,14 @@ impl Render for RootView {
             // App menu dropdown (renders on top of everything, not on macOS where native menu is used)
             .when(!cfg!(target_os = "macos") && self.title_bar.read(cx).is_menu_open(), |d| {
                 d.child(self.title_bar.update(cx, |tb, cx| tb.render_menu(cx)))
+            })
+            // Color picker popover (positioned popup, rendered at root for full-window backdrop)
+            .when(has_color_picker, |d| {
+                d.children(self.overlay_manager.read(cx).render_color_picker())
+            })
+            // Worktree list popover (positioned popup, rendered at root for full-window backdrop)
+            .when(has_worktree_list, |d| {
+                d.children(self.overlay_manager.read(cx).render_worktree_list())
             })
             // Context menu overlay (positioned popup, separate from modals)
             .when(has_context_menu, |d| {

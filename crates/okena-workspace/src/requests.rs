@@ -56,6 +56,9 @@ pub enum OverlayRequest {
     FileSearch { project_path: String },
     ContentSearch { project_path: String },
     FileBrowser { project_path: String },
+    ColorPicker { project_id: String, position: gpui::Point<gpui::Pixels> },
+    FolderColorPicker { folder_id: String, position: gpui::Point<gpui::Pixels> },
+    WorktreeList { project_id: String, position: gpui::Point<gpui::Pixels> },
 }
 
 /// Requests consumed by Sidebar::render()
@@ -64,5 +67,4 @@ pub enum SidebarRequest {
     RenameProject { project_id: String, project_name: String },
     RenameFolder { folder_id: String, folder_name: String },
     QuickCreateWorktree { project_id: String },
-    ShowWorktreeList { project_id: String, position: gpui::Point<gpui::Pixels> },
 }
