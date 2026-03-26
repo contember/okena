@@ -297,7 +297,23 @@ impl OverlayManager {
 
     /// Toggle keybindings help overlay.
     pub fn toggle_keybindings_help(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, KeybindingsHelp, KeybindingsHelpEvent, |cx| KeybindingsHelp::new(cx));
+        if self.is_modal::<KeybindingsHelp>() {
+            self.close_modal(cx);
+        } else {
+            let entity = cx.new(|cx| KeybindingsHelp::new(cx));
+            cx.subscribe(&entity, |this, _, event: &KeybindingsHelpEvent, cx| {
+                match event {
+                    KeybindingsHelpEvent::Close => {
+                        this.close_modal(cx);
+                    }
+                    KeybindingsHelpEvent::ReloadBindings => {
+                        crate::keybindings::reload_keybindings(cx);
+                    }
+                }
+            }).detach();
+            self.open_modal(entity, cx);
+        }
+        cx.notify();
     }
 
     /// Toggle theme selector overlay.

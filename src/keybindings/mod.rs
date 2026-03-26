@@ -20,6 +20,7 @@ actions!(
         Quit,
         About,
         Cancel,
+        ReloadKeybindings,
         ToggleSidebar,
         ToggleSidebarAutoHide,
         NewProject,
@@ -83,6 +84,79 @@ pub fn reset_to_defaults() -> anyhow::Result<()> {
     save_keybindings(&config)?;
     *KEYBINDING_CONFIG.write() = Some(config);
     Ok(())
+}
+
+/// Convert a GPUI Keystroke to the config string format (e.g., "cmd-shift-d")
+/// GPUI's unparse() uses "super-" on Linux for the platform modifier,
+/// but our config format uses "cmd-" for cross-platform consistency.
+pub fn keystroke_to_config_string(keystroke: &gpui::Keystroke) -> String {
+    let unparsed = keystroke.unparse();
+    // Normalize platform modifier names to "cmd-" for config consistency
+    unparsed
+        .replace("super-", "cmd-")
+        .replace("win-", "cmd-")
+}
+
+/// Reload keybindings: update global config, save to disk, and re-register with GPUI.
+/// Call this after modifying the config via get_config_mut() or update_config().
+pub fn reload_keybindings(cx: &mut App) {
+    let config = {
+        KEYBINDING_CONFIG.read().as_ref().cloned().unwrap_or_default()
+    };
+
+    // Save to disk
+    if let Err(e) = save_keybindings(&config) {
+        log::error!("Failed to save keybindings: {}", e);
+    }
+
+    // Clear existing bindings and re-register everything
+    cx.clear_key_bindings();
+    register_bindings_from_config(cx, &config);
+
+    // Re-register essential non-overridable bindings
+    cx.bind_keys([
+        KeyBinding::new("tab", SendTab, Some("TerminalPane")),
+        KeyBinding::new("shift-tab", SendBacktab, Some("TerminalPane")),
+    ]);
+
+    cx.bind_keys([
+        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+        KeyBinding::new("enter", SidebarConfirm, Some("Sidebar")),
+        KeyBinding::new("space", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("left", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("right", SidebarToggleExpand, Some("Sidebar")),
+        KeyBinding::new("escape", SidebarEscape, Some("Sidebar")),
+    ]);
+
+    cx.bind_keys([
+        KeyBinding::new("escape", Cancel, None),
+        KeyBinding::new("escape", SendEscape, Some("TerminalPane")),
+        KeyBinding::new("escape", CloseSearch, Some("SearchBar")),
+        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("TerminalRename")),
+        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileSearchDialog")),
+        KeyBinding::new("escape", okena_files::file_search::Cancel, Some("FileViewer")),
+        KeyBinding::new("escape", okena_views_git::Cancel, Some("WorktreeDialog")),
+        KeyBinding::new("escape", okena_views_git::Cancel, Some("CloseWorktreeDialog")),
+        KeyBinding::new("escape", okena_views_git::diff_viewer::Cancel, Some("DiffViewer")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("ContextMenu")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("FolderContextMenu")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("RenameDirectoryDialog")),
+        KeyBinding::new("escape", okena_views_sidebar::Cancel, Some("HookLog")),
+        KeyBinding::new("escape", okena_views_terminal::actions::Cancel, Some("ShellSelectorOverlay")),
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteConnectDialog")),
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemotePairDialog")),
+        KeyBinding::new("escape", okena_views_remote::Cancel, Some("RemoteContextMenu")),
+    ]);
+}
+
+/// Get a mutable reference to the global keybinding configuration.
+/// After modifying, call reload_keybindings(cx) to apply changes.
+pub fn update_config(f: impl FnOnce(&mut KeybindingConfig)) {
+    let mut guard = KEYBINDING_CONFIG.write();
+    if let Some(config) = guard.as_mut() {
+        f(config);
+    }
 }
 
 /// Register keybindings for the application from configuration

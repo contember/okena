@@ -319,6 +319,55 @@ impl KeybindingConfig {
         conflicts
     }
 
+    /// Update the keystroke for a specific binding entry
+    pub fn update_binding(&mut self, action: &str, entry_index: usize, new_keystroke: String) {
+        if let Some(entries) = self.bindings.get_mut(action) {
+            if let Some(entry) = entries.get_mut(entry_index) {
+                entry.keystroke = new_keystroke;
+            }
+        }
+    }
+
+    /// Reset a single action's bindings back to defaults
+    pub fn reset_single_action(&mut self, action: &str) {
+        let defaults = Self::defaults();
+        if let Some(default_entries) = defaults.bindings.get(action) {
+            self.bindings.insert(action.to_string(), default_entries.clone());
+        } else {
+            // Action doesn't exist in defaults — remove it
+            self.bindings.remove(action);
+        }
+    }
+
+    /// Add a new binding entry for an action
+    pub fn add_binding(&mut self, action: &str, entry: KeybindingEntry) {
+        self.bindings
+            .entry(action.to_string())
+            .or_insert_with(Vec::new)
+            .push(entry);
+    }
+
+    /// Remove a specific binding entry by index
+    /// Returns true if the entry was removed
+    pub fn remove_binding(&mut self, action: &str, entry_index: usize) -> bool {
+        if let Some(entries) = self.bindings.get_mut(action) {
+            if entry_index < entries.len() {
+                entries.remove(entry_index);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Toggle the enabled state of a specific binding entry
+    pub fn toggle_binding(&mut self, action: &str, entry_index: usize) {
+        if let Some(entries) = self.bindings.get_mut(action) {
+            if let Some(entry) = entries.get_mut(entry_index) {
+                entry.enabled = !entry.enabled;
+            }
+        }
+    }
+
     /// Get all actions that have custom (non-default) bindings
     pub fn get_customized_actions(&self) -> HashSet<String> {
         let defaults = Self::defaults();
