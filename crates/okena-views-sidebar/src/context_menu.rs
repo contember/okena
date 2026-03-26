@@ -285,8 +285,8 @@ impl Render for ContextMenu {
                                 })),
                         )
                     })
-                    // Separator
-                    .child(menu_separator(&t))
+                    // Separator (only if worktree items above were shown)
+                    .when(is_git_repo && !is_worktree, |d| d.child(menu_separator(&t)))
                     // Rename option
                     .child(
                         menu_item("context-menu-rename", "icons/edit.svg", "Rename Project", &t)
