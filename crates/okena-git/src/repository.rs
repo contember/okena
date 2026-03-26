@@ -1030,6 +1030,70 @@ mod tests {
         assert_paths_eq(&proj, &expected);
     }
 
+    // ─── get_repo_root worktree / monorepo tests ───────────────────────
+
+    /// Helper: initialise a throwaway git repo with one commit so worktrees can
+    /// be created from it.
+    fn init_temp_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let repo = tmp.path().to_path_buf();
+        let r = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test")
+                .output()
+                .expect("git command failed")
+        };
+        r(&["init", "-b", "main"]);
+        std::fs::write(repo.join("file.txt"), "x").unwrap();
+        r(&["add", "."]);
+        r(&["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
+        (tmp, repo)
+    }
+
+    #[test]
+    fn get_repo_root_returns_toplevel_for_subdirectory() {
+        let (_tmp, repo) = init_temp_repo();
+        let sub = repo.join("packages").join("app");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let root = get_repo_root(&sub).expect("should resolve repo root");
+        assert_eq!(root, repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn get_repo_root_resolves_worktree_root_not_subdir() {
+        let (_tmp, repo) = init_temp_repo();
+        // Create a worktree on a new branch
+        let wt_path = repo.parent().unwrap().join("my-worktree");
+        let status = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ])
+            .output()
+            .expect("git worktree add");
+        assert!(status.status.success(), "worktree add failed");
+
+        // Create a nested subdirectory inside the worktree (monorepo subproject)
+        let nested = wt_path.join("packages").join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // get_repo_root from the nested subdir should return the worktree root,
+        // NOT the main repo — this is the path `git worktree remove` needs.
+        let root = get_repo_root(&nested).expect("should resolve worktree root");
+        assert_eq!(root, wt_path.canonicalize().unwrap());
+    }
+
     // ─── CI check parsing tests ────────────────────────────────────────
 
     #[test]
