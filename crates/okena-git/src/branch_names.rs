@@ -146,12 +146,14 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
         (u.join().unwrap(), t.join().unwrap())
     });
 
-    // Shuffle goods deterministically using a simple hash of current time
-    let mut indices: Vec<usize> = (0..GOODS.len()).collect();
-    shuffle(&mut indices);
+    // Shuffle goods and adjectives so the generated name feels random
+    let mut good_idx: Vec<usize> = (0..GOODS.len()).collect();
+    let mut adj_idx: Vec<usize> = (0..ADJECTIVE_STEMS.len()).collect();
+    shuffle(&mut good_idx);
+    shuffle(&mut adj_idx);
 
     // Phase 1: try plain goods
-    for &i in &indices {
+    for &i in &good_idx {
         let candidate = format!("{}/{}", username, GOODS[i].name);
         if !taken.contains(&candidate) {
             return candidate;
@@ -159,8 +161,9 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
     }
 
     // Phase 2: try adjective+good combos
-    for &(stem, sm, sf, sn) in ADJECTIVE_STEMS {
-        for &i in &indices {
+    for &ai in &adj_idx {
+        let (stem, sm, sf, sn) = ADJECTIVE_STEMS[ai];
+        for &i in &good_idx {
             let good = &GOODS[i];
             let adj = adjective_for(stem, sm, sf, sn, good);
             let candidate = format!("{}/{}-{}", username, adj, good.name);
@@ -173,8 +176,9 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
     // Phase 3: numeric suffix fallback (practically unreachable — Phase 1 covers 38,
     // Phase 2 covers 380 combos, so 418+ branches must already exist for this user)
     for suffix_num in 2u32..1000 {
-        for &(stem, sm, sf, sn) in ADJECTIVE_STEMS {
-            for &i in &indices {
+        for &ai in &adj_idx {
+            let (stem, sm, sf, sn) = ADJECTIVE_STEMS[ai];
+            for &i in &good_idx {
                 let good = &GOODS[i];
                 let adj = adjective_for(stem, sm, sf, sn, good);
                 let candidate = format!("{}/{}-{}-{}", username, adj, good.name, suffix_num);
