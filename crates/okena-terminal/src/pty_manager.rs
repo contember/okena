@@ -314,7 +314,7 @@ impl PtyManager {
             }
         };
 
-        Self::set_terminal_env(&mut cmd);
+        Self::set_terminal_env(&mut cmd, terminal_id);
         cmd
     }
 
@@ -371,12 +371,15 @@ impl PtyManager {
             }
         };
 
-        Self::set_terminal_env(&mut cmd);
+        Self::set_terminal_env(&mut cmd, terminal_id);
         (cmd, wsl_distro, wsl_backend)
     }
 
     /// Set common terminal environment variables on a command.
-    fn set_terminal_env(cmd: &mut CommandBuilder) {
+    fn set_terminal_env(cmd: &mut CommandBuilder, terminal_id: &str) {
+        // Allow processes inside the terminal to identify which Okena terminal they run in
+        cmd.env("OKENA_TERMINAL_ID", terminal_id);
+
         // Set TERM environment variable - required for proper terminal operation
         // especially when running as a macOS app bundle which doesn't inherit shell environment
         cmd.env("TERM", "xterm-256color");

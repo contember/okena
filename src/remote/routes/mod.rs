@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod auth_reload;
 pub mod health;
 pub mod pair;
 pub mod refresh;
@@ -70,7 +71,11 @@ pub fn build_router(
     // Public routes (no auth required)
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
-        .route("/v1/pair", axum::routing::post(pair::post_pair));
+        .route("/v1/pair", axum::routing::post(pair::post_pair))
+        .route(
+            "/v1/auth/reload",
+            axum::routing::post(auth_reload::post_reload),
+        );
 
     public
         .merge(protected)

@@ -328,6 +328,14 @@ impl AuthStore {
         removed
     }
 
+    /// Reload tokens from disk, replacing the in-memory token list.
+    /// Called after external tools (e.g. CLI) write new tokens to `remote_tokens.json`.
+    pub fn reload_tokens(&self) {
+        let tokens = load_tokens_from(&self.tokens_path);
+        let mut inner = self.inner.lock();
+        inner.tokens = tokens;
+    }
+
     /// Refresh a valid token: validate the current token, generate a new one,
     /// and keep both valid until their respective expiry times.
     pub fn refresh_token(&self, current_token: &str) -> Result<String, &'static str> {
@@ -424,7 +432,7 @@ fn check_file_pair_code(code: &str, path: &std::path::Path) -> bool {
 }
 
 /// Compute HMAC-SHA256.
-fn compute_hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
+pub fn compute_hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key length is always valid");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
@@ -462,7 +470,7 @@ pub fn generate_pairing_code() -> String {
 }
 
 /// Path to the app secret file.
-fn secret_path() -> std::path::PathBuf {
+pub fn secret_path() -> std::path::PathBuf {
     crate::workspace::persistence::config_dir().join("remote_secret")
 }
 
@@ -504,16 +512,16 @@ fn load_or_create_secret() -> Vec<u8> {
 
 /// Serializable representation of a token record for disk persistence.
 #[derive(Serialize, Deserialize)]
-struct PersistedToken {
-    id: String,
+pub struct PersistedToken {
+    pub id: String,
     /// Base64-encoded HMAC digest.
-    token_hmac: String,
+    pub token_hmac: String,
     /// Unix timestamp (seconds since epoch).
-    created_at: u64,
+    pub created_at: u64,
 }
 
 /// Path to the persisted tokens file.
-fn tokens_path() -> PathBuf {
+pub fn tokens_path() -> PathBuf {
     crate::workspace::persistence::config_dir().join("remote_tokens.json")
 }
 
@@ -809,5 +817,51 @@ mod tests {
         assert_eq!(loaded.len(), 1, "only non-expired token should survive");
         assert_eq!(loaded[0].id, "valid");
         assert_eq!(loaded[0].token_hmac, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn reload_tokens_picks_up_externally_written_token() {
+        let store = test_store();
+
+        // Pair a token through normal flow
+        let token1 = pair_token(&store);
+        assert!(store.validate_token(&token1));
+
+        // Simulate an external tool writing a new token directly to disk
+        let external_token = "external-test-token-value";
+        let external_hmac = compute_hmac(&vec![42u8; 32], external_token.as_bytes());
+        let now_unix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let persisted = vec![
+            // Keep existing tokens by re-reading
+            PersistedToken {
+                id: "original".into(),
+                token_hmac: base64::engine::general_purpose::STANDARD
+                    .encode(&store.inner.lock().tokens[0].token_hmac),
+                created_at: now_unix,
+            },
+            PersistedToken {
+                id: "external".into(),
+                token_hmac: base64::engine::general_purpose::STANDARD.encode(&external_hmac),
+                created_at: now_unix,
+            },
+        ];
+        let json = serde_json::to_string(&persisted).unwrap();
+        std::fs::write(&store.tokens_path, json).unwrap();
+
+        // Before reload: external token is NOT valid in memory
+        assert!(!store.validate_token(external_token));
+
+        // Reload from disk
+        store.reload_tokens();
+
+        // After reload: both tokens are valid
+        assert!(store.validate_token(&token1), "original token should still work");
+        assert!(
+            store.validate_token(external_token),
+            "externally written token should be valid after reload"
+        );
     }
 }
