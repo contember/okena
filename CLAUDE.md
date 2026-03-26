@@ -1,96 +1,68 @@
-# Okena - Development Notes
+# Okena
+
+Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
 
 ## Git Rules
 
 - **Never revert or discard changes you didn't make.** If you see unexpected modifications in the working tree (e.g. from worktrees, other branches, or manual edits), leave them alone. Only stage and commit your own work.
 
-Cross-platform terminal multiplexer built with Rust and GPUI (from Zed editor).
-
 ## Build Commands
 
-**Linux:**
 ```bash
 cargo build
 cargo run
+cargo test
 ```
 
-**Windows** (from x64 Native Tools Command Prompt for VS 2022):
-```cmd
-cargo build
-cargo run
-```
+On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid link.exe PATH conflicts with Git for Windows.
 
 ## Project Structure
 
 ```
-src/            # Desktop app (Rust + GPUI)
-crates/         # Shared crates (okena-core)
-mobile/         # Mobile app (Flutter + Rust FFI)
-web/            # Web client
-assets/         # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
-scripts/        # Build & utility scripts
-macos/          # macOS-specific resources
-Casks/          # Homebrew cask definition
-docs/           # Documentation
+src/                        # Desktop app — main binary, GPUI views, app coordinator
+crates/                     # Library crates (17 crates, see below)
+mobile/                     # Mobile app (Flutter + Rust FFI)
+web/                        # Web client (React + TypeScript + xterm.js)
+assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
+scripts/                    # Build & utility scripts
 ```
 
-Detailed documentation lives in `src/CLAUDE.md` and `src/*/CLAUDE.md` files.
+### Crate layout
 
-## Platform Support
+Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use okena_*::*`) so existing `use crate::` imports keep working.
 
-### Linux
-- Standard shells: bash, zsh, fish, sh (auto-detected)
-- Session backends: tmux, screen (optional)
-- `simple_root.rs` — Wayland maximize workaround
+| Crate | Purpose |
+|-------|---------|
+| `okena-workspace` | State management, persistence, settings, hooks, sessions |
+| `okena-terminal` | PTY management, shell config, session backends |
+| `okena-git` | Git status, diff parsing, worktree operations |
+| `okena-theme` | Theming system (built-in + custom themes) |
+| `okena-ui` | Design tokens, shared UI utilities |
+| `okena-files` | File search, file viewer, syntax highlighting |
+| `okena-markdown` | Markdown parsing and rendering |
+| `okena-views-terminal` | Terminal pane, layout container, split/tabs views |
+| `okena-views-sidebar` | Sidebar, project list, folder list, drag-and-drop |
+| `okena-views-git` | Diff viewer, worktree dialog, git status UI |
+| `okena-views-remote` | Remote connection dialogs |
+| `okena-views-services` | Service panel views |
+| `okena-remote-client` | Remote client connection manager |
+| `okena-services` | Docker Compose, port detection |
+| `okena-extensions` | Extension system |
+| `okena-ext-claude` | Claude AI extension |
+| `okena-ext-codex` | Codex extension |
+| `okena-ext-updater` | Self-update system |
+| `okena-core` | Shared types, API client, key handling |
 
-### Windows
-- Shells: cmd, PowerShell (classic/core), WSL with distro detection
-- WSL path conversion: `C:\Path` → `/mnt/c/Path`
-- Custom titlebar (client-side decorations)
-- Session backends not supported
+## Module-Specific Context
 
-### macOS
-- Native traffic light buttons
-- Extended PATH for homebrew shells
+Read these when working in the corresponding areas:
 
-## Building on Windows
-
-### Prerequisites
-
-1. **Visual Studio 2022** with:
-   - MSVC v143 - VS 2022 C++ x64/x86 build tools
-   - **Windows 10/11 SDK** (e.g., `Windows 10 SDK (10.0.22621.0)`)
-
-2. **Rust** toolchain (via rustup)
-
-### PATH Conflict
-
-Git for Windows includes `C:\Program Files\Git\usr\bin\link.exe` which conflicts with MSVC's `link.exe`. Errors like:
-- `link: extra operand '...'`
-- `Try 'link --help' for more information`
-
-**Solution:** Build from **x64 Native Tools Command Prompt for VS 2022**.
-
-Or use vcvars64.bat:
-```cmd
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-cargo build
-```
-
-### Common Build Errors
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `LNK1181: cannot open kernel32.lib` | Windows SDK not installed | Install via VS Installer |
-| `link: extra operand` | Wrong link.exe (Git) | Use VS Developer Command Prompt |
-
-## Key Dependencies
-
-- **gpui** + **gpui-component** — UI framework (from Zed)
-- **alacritty_terminal** — Terminal emulation
-- **portable-pty** — Cross-platform PTY
-- **smol** + **async-channel** — Async runtime for PTY threads
-- **tokio** + **axum** — Remote control server
-- **serde** / **serde_json** — Serialization
-- **syntect** — Syntax highlighting
-- **reqwest** + **semver** — Update checker
+- `src/CLAUDE.md` — Desktop app architecture, event flow, GPUI entity model, testing rules
+- `src/app/CLAUDE.md` — Main app entity, PTY event loop, remote bridge
+- `src/remote/CLAUDE.md` — Remote control server (HTTP/WS API)
+- `src/keybindings/CLAUDE.md` — Keyboard actions, bindings config
+- `crates/okena-workspace/CLAUDE.md` — State management, LayoutNode tree, persistence
+- `crates/okena-terminal/CLAUDE.md` — PTY threading model, shell detection
+- `crates/okena-git/CLAUDE.md` — Diff parsing, worktree operations
+- `mobile/CLAUDE.md` — Flutter + Rust FFI mobile app
+- `web/CLAUDE.md` — React web client

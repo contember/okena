@@ -6,7 +6,7 @@ Defines all keyboard actions, default bindings, and user-configurable keybinding
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | ~40 actions defined via `actions!()` macro. `register_keybindings()` binds defaults + user overrides to GPUI context. |
+| `mod.rs` | Actions defined via `actions!()` macro. `register_keybindings()` binds defaults + user overrides to GPUI context. |
 | `config.rs` | `KeybindingConfig` — loads `keybindings.json`, merges with defaults, conflict detection. |
 | `types.rs` | `KeybindingEntry` — keystroke + action + context scope. Serialization types. |
 | `descriptions.rs` | Human-readable action descriptions grouped by category (for keybindings help overlay). |

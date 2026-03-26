@@ -1,6 +1,6 @@
 # src/ — Desktop Application
 
-Detailed module documentation lives in `src/*/CLAUDE.md` files (views, workspace, terminal, etc.).
+The main binary. Most logic has been extracted into `crates/okena-*`; the `src/` subdirectories are thin re-export modules (`pub use okena_*::*`). Real code still lives in `src/app/`, `src/views/`, `src/remote/`, and `src/keybindings/`.
 
 ## Module Structure
 
@@ -12,43 +12,21 @@ src/
 ├── process.rs            # Cross-platform subprocess spawning
 ├── macros.rs             # Shared macros (impl_focusable!)
 ├── simple_root.rs        # Linux Wayland maximize workaround
-├── app/                  # Main app entity, PTY event routing
-├── terminal/             # Terminal emulation & PTY management
-├── workspace/            # State management & persistence
-├── views/                # UI views (root, layout, panels, overlays, components)
-├── elements/             # Custom GPUI rendering (terminal grid)
-├── keybindings/          # Keyboard actions & config
-├── git/                  # Git status, diff, worktree
-├── theme/                # Theming system (built-in + custom)
-├── ui/                   # Shared UI utilities
-├── remote/               # Remote control server (HTTP/WS API)
-└── updater/              # Self-update system
+├── app/                  # Main app entity — real code (see app/CLAUDE.md)
+├── views/                # UI views — real code (overlays, chrome, panels, components)
+├── keybindings/          # Keyboard actions — real code (see keybindings/CLAUDE.md)
+├── remote/               # Remote server — real code (see remote/CLAUDE.md)
+├── terminal/             # Re-exports okena-terminal
+├── workspace/            # Re-exports okena-workspace (+ local actions/)
+├── git/                  # Re-exports okena-git + okena-views-git
+├── theme/                # Re-exports okena-theme
+├── ui/                   # Re-exports okena-ui
+├── elements/             # Re-exports okena-views-terminal elements
+├── services/             # Re-exports okena-services
+└── remote_client/        # Re-exports okena-remote-client
 ```
 
 ## Architecture
-
-### View Hierarchy
-
-```
-RootView (views/root/)
-├── TitleBar (views/chrome/)
-├── Sidebar (views/panels/sidebar/)
-├── ProjectColumn (views/panels/project_column.rs)
-│   └── LayoutContainer → TerminalPane / SplitPane / Tabs
-├── StatusBar (views/panels/status_bar.rs)
-└── Overlays (views/overlays/) — managed by OverlayManager
-```
-
-See `src/views/CLAUDE.md` for full hierarchy and file inventory.
-
-### Layout System
-
-Terminals are organized in a recursive tree structure (`LayoutNode`):
-- **Terminal** — single terminal pane
-- **Split** — horizontal/vertical split with children and ratios
-- **Tabs** — tabbed container with multiple children
-
-Path-based navigation: `Vec<usize>` indexes into the tree.
 
 ### GPUI Entities
 
@@ -59,7 +37,6 @@ Observable state with auto-notify:
 - `AppTheme` — current theme mode and colors
 - `RootView` — main view, owns SidebarController + OverlayManager
 - `OverlayManager` — centralized modal overlay lifecycle
-- `Sidebar` — sidebar project list with drag-and-drop
 
 ### Event Flow
 
@@ -96,12 +73,9 @@ Every implementation plan should include a section on which tests to add, update
 
 ### What NOT to test
 
-- Trivial getters/setters — don't test that setting a field stores the value
-- Bool toggles — `toggle_visibility`, `toggle_collapsed` are just `x = !x`
-- Simple renames — setting `.name = "new"` and asserting it's `"new"`
-- HashMap/Vec lookups — don't test that `.find(id)` returns `Some`/`None`
-- Counter increments — don't test that `version += 1` works
-- Redundant simulation tests — if a `#[gpui::test]` tests the real method, don't also write a pure test with a `simulate_*` helper that duplicates the same logic. Only write simulation-based pure tests for scenarios NOT covered by GPUI tests (e.g. position-specific insertion, cross-structure cleanup).
+- Trivial getters/setters, bool toggles, simple renames
+- HashMap/Vec lookups, counter increments
+- Redundant simulation tests — if a `#[gpui::test]` tests the real method, don't also write a pure test with a `simulate_*` helper that duplicates the same logic
 
 ### GPUI test setup
 
