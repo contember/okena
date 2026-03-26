@@ -434,9 +434,13 @@ impl CloseWorktreeDialog {
             let has_before_remove_hook =
                 project_hooks.worktree.before_remove.is_some() || global_hooks.worktree.before_remove.is_some();
 
+            // Track whether the deferred (PTY) path succeeded so we can fall
+            // through to immediate removal if the hook terminal failed to spawn.
+            let mut deferred = false;
+
             if has_before_remove_hook && runner.is_some() {
                 // Fire hook as visible PTY terminal and defer removal
-                cx.update(|cx| {
+                let ok = cx.update(|cx| {
                     let hook_results = hooks::fire_before_worktree_remove_async(
                         &project_hooks,
                         &global_hooks,
@@ -453,26 +457,35 @@ impl CloseWorktreeDialog {
 
                     let pending_terminal_id = hook_results.first().map(|r| r.terminal_id.clone());
 
-                    workspace.update(cx, |ws, cx| {
-                        ws.register_hook_results(hook_results, cx);
+                    if pending_terminal_id.is_some() {
+                        workspace.update(cx, |ws, cx| {
+                            ws.register_hook_results(hook_results, cx);
 
-                        // Register pending close — PTY exit handler will complete it
-                        if let Some(hook_terminal_id) = pending_terminal_id {
-                            ws.register_pending_worktree_close(PendingWorktreeClose {
-                                project_id: project_id.clone(),
-                                hook_terminal_id,
-                                branch: branch.clone(),
-                                main_repo_path: main_repo_path.clone(),
-                            });
-                        }
-                    });
+                            // Register pending close — PTY exit handler will complete it
+                            if let Some(hook_terminal_id) = pending_terminal_id {
+                                ws.register_pending_worktree_close(PendingWorktreeClose {
+                                    project_id: project_id.clone(),
+                                    hook_terminal_id,
+                                    branch: branch.clone(),
+                                    main_repo_path: main_repo_path.clone(),
+                                });
+                            }
+                        });
 
-                    // Close dialog — removal will happen when hook exits
-                    let _ = this.update(cx, |this, cx| {
-                        this.close(cx);
-                    });
+                        // Close dialog — removal will happen when hook exits
+                        let _ = this.update(cx, |this, cx| {
+                            this.close(cx);
+                        });
+                        true
+                    } else {
+                        log::warn!("before_worktree_remove hook terminal failed to spawn, falling through to immediate removal");
+                        false
+                    }
                 });
-            } else {
+                deferred = ok;
+            }
+
+            if !deferred {
                 // No hook or no runner — run headlessly then remove immediately
                 if has_before_remove_hook {
                     let before_remove_result = smol::unblock({
