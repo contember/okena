@@ -333,7 +333,20 @@ impl OverlayManager {
 
     /// Toggle command palette overlay.
     pub fn toggle_command_palette(&mut self, cx: &mut Context<Self>) {
-        toggle_overlay!(self, cx, CommandPalette, CommandPaletteEvent, |cx| CommandPalette::new(cx));
+        if self.is_modal::<CommandPalette>() {
+            self.close_modal(cx);
+        } else {
+            let ws = self.workspace.clone();
+            let entity = cx.new(|cx| CommandPalette::new(ws, cx));
+            cx.subscribe(&entity, |this, _, event: &CommandPaletteEvent, cx| {
+                if event.is_close() {
+                    this.close_modal(cx);
+                }
+            })
+            .detach();
+            self.open_modal(entity, cx);
+        }
+        cx.notify();
     }
 
     /// Toggle settings panel overlay.
