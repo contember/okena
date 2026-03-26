@@ -25,7 +25,7 @@ use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
 use syntax::process_file;
-use types::{DiffDisplayFile, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine, SideBySideSide};
+use types::{DiffDisplayFile, DisplayItem, FileStats, FileTreeNode, HScrollbarDrag, ScrollbarDrag, SideBySideLine, SideBySideSide};
 
 mod side_by_side;
 
@@ -278,12 +278,7 @@ impl DiffViewer {
                 this.current_file_old_content = old_content;
                 this.current_file_new_content = new_content;
                 this.line_num_width = max_line_num.to_string().len().max(3);
-                this.max_line_chars = display_file
-                    .lines
-                    .iter()
-                    .map(|l| l.plain_text.chars().count())
-                    .max()
-                    .unwrap_or(0);
+                this.max_line_chars = Self::calc_max_line_chars(&display_file);
                 this.current_file = Some(display_file);
                 this.update_side_by_side_cache();
                 cx.notify();
@@ -308,12 +303,7 @@ impl DiffViewer {
         );
 
         self.line_num_width = max_line_num.to_string().len().max(3);
-        self.max_line_chars = display_file
-            .lines
-            .iter()
-            .map(|l| l.plain_text.chars().count())
-            .max()
-            .unwrap_or(0);
+        self.max_line_chars = Self::calc_max_line_chars(&display_file);
         self.current_file = Some(display_file);
     }
 
@@ -353,7 +343,7 @@ impl DiffViewer {
     fn update_side_by_side_cache(&mut self) {
         if self.view_mode == DiffViewMode::SideBySide {
             if let Some(file) = &self.current_file {
-                self.side_by_side_lines = side_by_side::to_side_by_side(&file.lines);
+                self.side_by_side_lines = side_by_side::to_side_by_side(&file.items);
             } else {
                 self.side_by_side_lines.clear();
             }
@@ -423,11 +413,105 @@ impl DiffViewer {
         self.load_diff_async(mode, None, cx);
     }
 
+    fn calc_max_line_chars(file: &DiffDisplayFile) -> usize {
+        file.items
+            .iter()
+            .filter_map(|item| match item {
+                DisplayItem::Line(l) => Some(l.plain_text.chars().count()),
+                DisplayItem::Expander(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Expand all hidden context lines. Finds the expander by matching old/new range.
+    fn expand_context_by_range(&mut self, old_range: (usize, usize), new_range: (usize, usize), cx: &mut Context<Self>) {
+        let file = match self.current_file.as_ref() {
+            Some(f) => f,
+            None => return,
+        };
+        let item_index = file.items.iter().position(|item| {
+            matches!(item, DisplayItem::Expander(e) if e.old_range == old_range && e.new_range == new_range)
+        });
+        if let Some(idx) = item_index {
+            self.expand_context(idx, cx);
+        }
+    }
+
+    /// Expand all hidden context lines at the given item index.
+    fn expand_context(&mut self, item_index: usize, cx: &mut Context<Self>) {
+        let file = match self.current_file.as_mut() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let expander = match &file.items[item_index] {
+            DisplayItem::Expander(e) => e.clone(),
+            _ => return,
+        };
+
+        let (old_start, old_end) = expander.old_range;
+        let (new_start, new_end) = expander.new_range;
+
+        // Validate ranges
+        if new_start == 0 || new_end < new_start || old_end < old_start {
+            return;
+        }
+
+        self.selection.clear();
+        self.selection_side = None;
+
+        let old_lines: Vec<&str> = self.current_file_old_content
+            .as_deref()
+            .map(|c| c.lines().collect())
+            .unwrap_or_default();
+        let new_lines: Vec<&str> = self.current_file_new_content
+            .as_deref()
+            .map(|c| c.lines().collect())
+            .unwrap_or_default();
+
+        let count = new_end - new_start + 1;
+        let mut new_items: Vec<DisplayItem> = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let new_ln = new_start + i;
+            let old_ln = old_start + i;
+
+            let spans = file.new_highlighted.get(&new_ln)
+                .or_else(|| file.old_highlighted.get(&old_ln))
+                .cloned()
+                .unwrap_or_default();
+
+            let plain_text = new_lines.get(new_ln - 1)
+                .or_else(|| old_lines.get(old_ln - 1))
+                .unwrap_or(&"")
+                .replace('\t', "    ");
+
+            new_items.push(DisplayItem::Line(types::DisplayLine {
+                line_type: okena_git::DiffLineType::Context,
+                old_line_num: if old_ln >= 1 && old_ln <= file.old_line_count { Some(old_ln) } else { None },
+                new_line_num: if new_ln >= 1 && new_ln <= file.new_line_count { Some(new_ln) } else { None },
+                spans,
+                plain_text,
+            }));
+        }
+
+        let file = self.current_file.as_mut().unwrap();
+        file.items.splice(item_index..=item_index, new_items);
+
+        self.max_line_chars = Self::calc_max_line_chars(file);
+        self.update_side_by_side_cache();
+        cx.notify();
+    }
+
     fn get_selected_text(&self) -> Option<String> {
         if let Some(side) = self.selection_side {
             let lines = &self.side_by_side_lines;
             extract_selected_text(&self.selection, lines.len(), |i| {
                 let sbs_line = &lines[i];
+                if sbs_line.expander.is_some() {
+                    return "";
+                }
                 let content = match side {
                     SideBySideSide::Left => &sbs_line.left,
                     SideBySideSide::Right => &sbs_line.right,
@@ -436,8 +520,11 @@ impl DiffViewer {
             })
         } else {
             let file = self.current_file.as_ref()?;
-            extract_selected_text(&self.selection, file.lines.len(), |i| {
-                &file.lines[i].plain_text
+            extract_selected_text(&self.selection, file.items.len(), |i| {
+                match &file.items[i] {
+                    DisplayItem::Line(line) => &line.plain_text,
+                    DisplayItem::Expander(_) => "",
+                }
             })
         }
     }
@@ -462,11 +549,14 @@ impl DiffViewer {
         match effective_mode {
             DiffViewMode::Unified => {
                 if let Some(file) = &self.current_file {
-                    if file.lines.is_empty() {
+                    if file.items.is_empty() {
                         return;
                     }
-                    let last_line = file.lines.len() - 1;
-                    let last_col = file.lines[last_line].plain_text.len();
+                    let last_line = file.items.len() - 1;
+                    let last_col = match &file.items[last_line] {
+                        DisplayItem::Line(l) => l.plain_text.len(),
+                        DisplayItem::Expander(_) => 0,
+                    };
                     self.selection.start = Some((0, 0));
                     self.selection.end = Some((last_line, last_col));
                     self.selection_side = None;
@@ -538,7 +628,7 @@ impl Render for DiffViewer {
         let current_stats = self.file_stats.get(self.selected_file_index);
         let file_path = current_stats.map(|f| f.path.clone()).unwrap_or_default();
         let is_binary = current_stats.map(|f| f.is_binary).unwrap_or(false);
-        let line_count = self.current_file.as_ref().map(|f| f.lines.len()).unwrap_or(0);
+        let line_count = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
 
         let tree_elements = if has_files {
             self.render_tree_node(&self.file_tree.clone(), &t, cx)

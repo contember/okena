@@ -1,5 +1,7 @@
 //! Data types for the diff viewer.
 
+use std::collections::HashMap;
+
 use okena_git::{DiffLineType, FileDiff};
 pub use okena_files::syntax::HighlightedSpan;
 pub use okena_core::types::DiffViewMode;
@@ -65,6 +67,8 @@ pub struct SideBySideLine {
     pub is_header: bool,
     /// Header text content (used for context extraction in rendering).
     pub header_text: String,
+    /// If set, this row is a context expander instead of a content line.
+    pub expander: Option<ExpanderRow>,
 }
 
 /// A processed line ready for display with syntax highlighting.
@@ -82,10 +86,45 @@ pub struct DisplayLine {
     pub plain_text: String,
 }
 
-/// Processed file for display (lines with syntax highlighting).
+/// A clickable row that represents hidden context lines.
+#[derive(Clone, Debug)]
+pub struct ExpanderRow {
+    /// 1-based inclusive range of hidden old-file lines (start, end).
+    pub old_range: (usize, usize),
+    /// 1-based inclusive range of hidden new-file lines (start, end).
+    pub new_range: (usize, usize),
+}
+
+impl ExpanderRow {
+    /// Number of hidden lines (using the new-file range).
+    pub fn hidden_count(&self) -> usize {
+        if self.new_range.1 >= self.new_range.0 {
+            self.new_range.1 - self.new_range.0 + 1
+        } else {
+            0
+        }
+    }
+}
+
+/// A single item in the diff display list — either a real line or an expander.
+#[derive(Clone)]
+pub enum DisplayItem {
+    Line(DisplayLine),
+    Expander(ExpanderRow),
+}
+
+/// Processed file for display (items with syntax highlighting).
 pub struct DiffDisplayFile {
-    /// Processed lines for display.
-    pub lines: Vec<DisplayLine>,
+    /// Display items (lines and expanders).
+    pub items: Vec<DisplayItem>,
+    /// Pre-highlighted old file spans (1-based line num -> spans).
+    pub old_highlighted: HashMap<usize, Vec<HighlightedSpan>>,
+    /// Pre-highlighted new file spans (1-based line num -> spans).
+    pub new_highlighted: HashMap<usize, Vec<HighlightedSpan>>,
+    /// Total lines in the old file.
+    pub old_line_count: usize,
+    /// Total lines in the new file.
+    pub new_line_count: usize,
 }
 
 /// State for scrollbar dragging.

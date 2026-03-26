@@ -3,7 +3,7 @@
 //! Also contains shared rendering helpers, constants, and methods used by
 //! both the unified and side-by-side diff views.
 
-use super::types::{DisplayLine, HighlightedSpan};
+use super::types::{DisplayItem, DisplayLine, ExpanderRow, HighlightedSpan};
 use super::DiffViewer;
 use okena_git::DiffLineType;
 use okena_core::theme::ThemeColors;
@@ -134,6 +134,51 @@ impl DiffViewer {
                     .h(px(1.0))
                     .bg(rgba(t.diff_hunk_header_fg, 0.15))
                     .flex_shrink_0(),
+            )
+    }
+
+    /// Render a context expander row (clickable to load all hidden lines).
+    pub(super) fn render_expander_row(
+        &self,
+        idx: usize,
+        expander: &ExpanderRow,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let line_height = self.line_height();
+        let font_size = self.file_font_size;
+        let hidden = expander.hidden_count();
+
+        let old_range = expander.old_range;
+        let new_range = expander.new_range;
+
+        let label = if hidden == 1 {
+            "1 hidden line".to_string()
+        } else {
+            format!("{} hidden lines", hidden)
+        };
+
+        div()
+            .id(ElementId::Name(format!("expander-{}", idx).into()))
+            .w_full()
+            .h(px(line_height))
+            .flex()
+            .items_center()
+            .justify_center()
+            .font_family("monospace")
+            .bg(rgba(t.diff_hunk_header_bg, 0.15))
+            .border_t_1()
+            .border_color(rgba(t.border, 0.3))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgba(t.bg_hover, 0.6)))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.expand_context_by_range(old_range, new_range, cx);
+            }))
+            .child(
+                div()
+                    .text_size(px(font_size * 0.8))
+                    .text_color(rgba(t.text_muted, 0.6))
+                    .child(label),
             )
     }
 
@@ -316,7 +361,7 @@ impl DiffViewer {
             .child(self.render_scrollable_content_with_text(styled_text, line_height))
     }
 
-    /// Render visible lines for the virtualized list.
+    /// Render visible items for the virtualized list.
     pub(super) fn render_visible_lines(
         &self,
         range: std::ops::Range<usize>,
@@ -330,9 +375,14 @@ impl DiffViewer {
 
         range
             .filter_map(|i| {
-                file.lines
-                    .get(i)
-                    .map(|line| self.render_line(i, line, t, gutter_width, cx).into_any_element())
+                file.items.get(i).map(|item| match item {
+                    DisplayItem::Line(line) => {
+                        self.render_line(i, line, t, gutter_width, cx).into_any_element()
+                    }
+                    DisplayItem::Expander(expander) => {
+                        self.render_expander_row(i, expander, t, cx).into_any_element()
+                    }
+                })
             })
             .collect()
     }

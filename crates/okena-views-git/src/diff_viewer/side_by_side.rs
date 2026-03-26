@@ -1,7 +1,7 @@
 //! Side-by-side diff view transformation and rendering.
 
 use super::line_render::{rgba, ACCENT_WIDTH};
-use super::types::{ChangedRange, DisplayLine, SideBySideLine, SideBySideSide, SideContent};
+use super::types::{ChangedRange, DisplayItem, DisplayLine, SideBySideLine, SideBySideSide, SideContent};
 use super::DiffViewer;
 use okena_git::DiffLineType;
 use okena_core::theme::ThemeColors;
@@ -59,122 +59,148 @@ fn compute_changed_ranges(old: &str, new: &str) -> (Vec<ChangedRange>, Vec<Chang
     (old_ranges, new_ranges)
 }
 
-/// Transform unified diff lines into side-by-side format.
+/// Transform unified diff items into side-by-side format.
 ///
 /// Algorithm:
 /// - Context lines appear on both sides with the same content
 /// - Header lines span both sides as a separator
 /// - Removed/Added lines are paired: removed on left, added on right
 /// - If counts differ, extra lines have None on the opposite side
-pub fn to_side_by_side(lines: &[DisplayLine]) -> Vec<SideBySideLine> {
+/// - Expander items pass through as expander rows
+pub fn to_side_by_side(items: &[DisplayItem]) -> Vec<SideBySideLine> {
     let mut result = Vec::new();
     let mut i = 0;
 
-    while i < lines.len() {
-        let line = &lines[i];
+    // Helper to extract DisplayLine refs for the removed/added pairing loop
+    let get_line = |idx: usize| -> Option<&DisplayLine> {
+        match items.get(idx) {
+            Some(DisplayItem::Line(l)) => Some(l),
+            _ => None,
+        }
+    };
 
-        match line.line_type {
-            DiffLineType::Header => {
+    while i < items.len() {
+        match &items[i] {
+            DisplayItem::Expander(expander) => {
                 result.push(SideBySideLine {
                     left: None,
                     right: None,
-                    is_header: true,
-                    header_text: line.plain_text.clone(),
-                });
-                i += 1;
-            }
-            DiffLineType::Context => {
-                let content = SideContent {
-                    line_num: line.old_line_num.unwrap_or(0),
-                    line_type: DiffLineType::Context,
-                    spans: line.spans.clone(),
-                    plain_text: line.plain_text.clone(),
-                    changed_ranges: vec![],
-                };
-                result.push(SideBySideLine {
-                    left: Some(content.clone()),
-                    right: Some(SideContent {
-                        line_num: line.new_line_num.unwrap_or(0),
-                        ..content
-                    }),
                     is_header: false,
                     header_text: String::new(),
+                    expander: Some(expander.clone()),
                 });
                 i += 1;
             }
-            DiffLineType::Removed => {
-                // Collect consecutive removed lines
-                let mut removed_lines = Vec::new();
-                while i < lines.len() && lines[i].line_type == DiffLineType::Removed {
-                    removed_lines.push(&lines[i]);
-                    i += 1;
-                }
-
-                // Collect following consecutive added lines
-                let mut added_lines = Vec::new();
-                while i < lines.len() && lines[i].line_type == DiffLineType::Added {
-                    added_lines.push(&lines[i]);
-                    i += 1;
-                }
-
-                // Pair them up with word-level diff
-                let max_len = removed_lines.len().max(added_lines.len());
-                for j in 0..max_len {
-                    // Compute changed ranges if both sides exist
-                    let (old_ranges, new_ranges) =
-                        if let (Some(old_line), Some(new_line)) =
-                            (removed_lines.get(j), added_lines.get(j))
-                        {
-                            compute_changed_ranges(&old_line.plain_text, &new_line.plain_text)
-                        } else {
-                            (vec![], vec![])
+            DisplayItem::Line(line) => {
+                match line.line_type {
+                    DiffLineType::Header => {
+                        result.push(SideBySideLine {
+                            left: None,
+                            right: None,
+                            is_header: true,
+                            header_text: line.plain_text.clone(),
+                            expander: None,
+                        });
+                        i += 1;
+                    }
+                    DiffLineType::Context => {
+                        let content = SideContent {
+                            line_num: line.old_line_num.unwrap_or(0),
+                            line_type: DiffLineType::Context,
+                            spans: line.spans.clone(),
+                            plain_text: line.plain_text.clone(),
+                            changed_ranges: vec![],
                         };
+                        result.push(SideBySideLine {
+                            left: Some(content.clone()),
+                            right: Some(SideContent {
+                                line_num: line.new_line_num.unwrap_or(0),
+                                ..content
+                            }),
+                            is_header: false,
+                            header_text: String::new(),
+                            expander: None,
+                        });
+                        i += 1;
+                    }
+                    DiffLineType::Removed => {
+                        // Collect consecutive removed lines
+                        let mut removed_lines = Vec::new();
+                        while let Some(l) = get_line(i) {
+                            if l.line_type != DiffLineType::Removed { break; }
+                            removed_lines.push(l);
+                            i += 1;
+                        }
 
-                    let left = removed_lines.get(j).map(|l| SideContent {
-                        line_num: l.old_line_num.unwrap_or(0),
-                        line_type: DiffLineType::Removed,
-                        spans: l.spans.clone(),
-                        plain_text: l.plain_text.clone(),
-                        changed_ranges: old_ranges,
-                    });
-                    let right = added_lines.get(j).map(|l| SideContent {
-                        line_num: l.new_line_num.unwrap_or(0),
-                        line_type: DiffLineType::Added,
-                        spans: l.spans.clone(),
-                        plain_text: l.plain_text.clone(),
-                        changed_ranges: new_ranges,
-                    });
-                    result.push(SideBySideLine {
-                        left,
-                        right,
-                        is_header: false,
-                        header_text: String::new(),
-                    });
+                        // Collect following consecutive added lines
+                        let mut added_lines = Vec::new();
+                        while let Some(l) = get_line(i) {
+                            if l.line_type != DiffLineType::Added { break; }
+                            added_lines.push(l);
+                            i += 1;
+                        }
+
+                        // Pair them up with word-level diff
+                        let max_len = removed_lines.len().max(added_lines.len());
+                        for j in 0..max_len {
+                            let (old_ranges, new_ranges) =
+                                if let (Some(old_line), Some(new_line)) =
+                                    (removed_lines.get(j), added_lines.get(j))
+                                {
+                                    compute_changed_ranges(&old_line.plain_text, &new_line.plain_text)
+                                } else {
+                                    (vec![], vec![])
+                                };
+
+                            let left = removed_lines.get(j).map(|l| SideContent {
+                                line_num: l.old_line_num.unwrap_or(0),
+                                line_type: DiffLineType::Removed,
+                                spans: l.spans.clone(),
+                                plain_text: l.plain_text.clone(),
+                                changed_ranges: old_ranges,
+                            });
+                            let right = added_lines.get(j).map(|l| SideContent {
+                                line_num: l.new_line_num.unwrap_or(0),
+                                line_type: DiffLineType::Added,
+                                spans: l.spans.clone(),
+                                plain_text: l.plain_text.clone(),
+                                changed_ranges: new_ranges,
+                            });
+                            result.push(SideBySideLine {
+                                left,
+                                right,
+                                is_header: false,
+                                header_text: String::new(),
+                                expander: None,
+                            });
+                        }
+                    }
+                    DiffLineType::Added => {
+                        // Pure addition without preceding removal
+                        let full_range = if !line.plain_text.is_empty() {
+                            vec![ChangedRange {
+                                start: 0,
+                                end: line.plain_text.chars().count(),
+                            }]
+                        } else {
+                            vec![]
+                        };
+                        result.push(SideBySideLine {
+                            left: None,
+                            right: Some(SideContent {
+                                line_num: line.new_line_num.unwrap_or(0),
+                                line_type: DiffLineType::Added,
+                                spans: line.spans.clone(),
+                                plain_text: line.plain_text.clone(),
+                                changed_ranges: full_range,
+                            }),
+                            is_header: false,
+                            header_text: String::new(),
+                            expander: None,
+                        });
+                        i += 1;
+                    }
                 }
-            }
-            DiffLineType::Added => {
-                // Pure addition without preceding removal - highlight entire line
-                let full_range = if !line.plain_text.is_empty() {
-                    vec![ChangedRange {
-                        start: 0,
-                        end: line.plain_text.chars().count(),
-                    }]
-                } else {
-                    vec![]
-                };
-                result.push(SideBySideLine {
-                    left: None,
-                    right: Some(SideContent {
-                        line_num: line.new_line_num.unwrap_or(0),
-                        line_type: DiffLineType::Added,
-                        spans: line.spans.clone(),
-                        plain_text: line.plain_text.clone(),
-                        changed_ranges: full_range,
-                    }),
-                    is_header: false,
-                    header_text: String::new(),
-                });
-                i += 1;
             }
         }
     }
@@ -209,6 +235,10 @@ impl DiffViewer {
     ) -> impl IntoElement {
         let font_size = self.file_font_size;
         let line_height = self.line_height();
+
+        if let Some(expander) = &line.expander {
+            return self.render_expander_row(idx, expander, t, cx);
+        }
 
         if line.is_header {
             return self.render_hunk_header(&line.header_text, idx, "sbs-header", t);
