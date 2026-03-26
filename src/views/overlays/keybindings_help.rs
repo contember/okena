@@ -4,11 +4,14 @@ use crate::keybindings::{
     Cancel, KeybindingEntry, ShowKeybindings,
 };
 use crate::theme::theme;
-use crate::views::components::{modal_backdrop, modal_content, modal_header};
+use crate::views::components::{modal_backdrop, modal_content, modal_header, search_input_area};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use gpui::prelude::*;
+
+/// Characters allowed in the keybinding search query.
+const SEARCH_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_+./";
 
 /// State for the keybinding currently being recorded
 #[derive(Clone, Debug)]
@@ -35,6 +38,8 @@ pub struct KeybindingsHelp {
     pending_conflict: Option<String>,
     /// Keystroke interceptor subscription (active during recording)
     _interceptor: Option<Subscription>,
+    /// Search query for filtering keybindings
+    search_query: String,
 }
 
 impl KeybindingsHelp {
@@ -47,6 +52,7 @@ impl KeybindingsHelp {
             _chord_timer: None,
             pending_conflict: None,
             _interceptor: None,
+            search_query: String::new(),
         }
     }
 
@@ -524,6 +530,7 @@ impl Render for KeybindingsHelp {
 
         // Group bindings by category, with per-action entry details
         let descriptions = get_action_descriptions();
+        let query = self.search_query.to_lowercase();
         let mut categories: std::collections::HashMap<&str, Vec<(String, Vec<(String, usize, bool, bool)>)>> =
             std::collections::HashMap::new();
 
@@ -536,10 +543,22 @@ impl Render for KeybindingsHelp {
             }
             seen_actions.insert(action.clone());
 
-            let category = descriptions
-                .get(action.as_str())
-                .map(|d| d.category)
-                .unwrap_or("Other");
+            let desc = descriptions.get(action.as_str());
+            let category = desc.map(|d| d.category).unwrap_or("Other");
+
+            // Filter by search query: match against name, description, category, or keystroke
+            if !query.is_empty() {
+                let name = desc.map(|d| d.name).unwrap_or("");
+                let description = desc.map(|d| d.description).unwrap_or("");
+                let keystrokes_match = entries.iter().any(|e| e.keystroke.to_lowercase().contains(&query));
+                if !name.to_lowercase().contains(&query)
+                    && !description.to_lowercase().contains(&query)
+                    && !category.to_lowercase().contains(&query)
+                    && !keystrokes_match
+                {
+                    continue;
+                }
+            }
 
             let is_customized = customized.contains(action);
             let entry_details: Vec<(String, usize, bool, bool)> = entries
@@ -573,8 +592,33 @@ impl Render for KeybindingsHelp {
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 if this.editing.is_some() {
                     this.cancel_recording(cx);
+                } else if !this.search_query.is_empty() {
+                    this.search_query.clear();
+                    cx.notify();
                 } else {
                     this.close(cx);
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // Don't handle typing while recording a keybinding — the interceptor handles that
+                if this.editing.is_some() {
+                    return;
+                }
+                let key = event.keystroke.key.as_str();
+                match key {
+                    "backspace" => {
+                        if this.search_query.pop().is_some() {
+                            cx.notify();
+                        }
+                    }
+                    k if k.len() == 1 && !event.keystroke.modifiers.modified() => {
+                        let ch = k.chars().next().unwrap();
+                        if SEARCH_CHARS.contains(ch) {
+                            this.search_query.push(ch);
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _window, cx| {
@@ -597,6 +641,7 @@ impl Render for KeybindingsHelp {
                         cx,
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
+                    .child(search_input_area(&self.search_query, "Search keybindings…", &t))
                     // Conflict/info banners
                     .child(
                         div()
