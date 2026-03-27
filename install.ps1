@@ -39,13 +39,20 @@ Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath -UseBasicParsing
 Write-Host "Extracting..."
 Expand-Archive -Path $ZipPath -DestinationPath $TempDir -Force
 
+# Find the extracted executable (may be in a subdirectory)
+$ExePath = Get-ChildItem -Path $TempDir -Recurse -Filter $BinName | Select-Object -First 1
+if (-not $ExePath) {
+    Write-Error "Could not find $BinName in extracted archive."
+    exit 1
+}
+
 # Install
 Write-Host "Installing to $InstallDir..."
 if (Test-Path $InstallDir) {
     Remove-Item -Recurse -Force $InstallDir
 }
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Copy-Item -Path (Join-Path $TempDir $BinName) -Destination $InstallDir
+Copy-Item -Path $ExePath.FullName -Destination $InstallDir
 
 # Add to PATH (user scope)
 $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
