@@ -280,6 +280,14 @@ impl PtyManager {
     /// On Windows, also returns WSL distro/backend info for session persistence.
     #[cfg(unix)]
     fn build_terminal_command(&self, terminal_id: &str, cwd: &str, shell: Option<&ShellType>) -> CommandBuilder {
+        // OneShot shells bypass the session backend entirely — they need direct
+        // PTY exit code reporting (used by hook terminals with keep_alive=false).
+        if let Some(shell_type @ ShellType::OneShot { .. }) = shell {
+            let mut cmd = shell_type.build_command(cwd);
+            Self::set_terminal_env(&mut cmd, terminal_id);
+            return cmd;
+        }
+
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         // so it can be passed to the session backend
         let custom_command = match shell {
@@ -329,6 +337,13 @@ impl PtyManager {
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
+
+        // OneShot shells bypass the session backend entirely.
+        if let Some(shell_type @ ShellType::OneShot { .. }) = shell {
+            let mut cmd = shell_type.build_command(cwd);
+            Self::set_terminal_env(&mut cmd, terminal_id);
+            return (cmd, None, None);
+        }
 
         // Extract custom command from ShellType::Custom{path:<shell>, args:["-c"/"-ic", cmd]}
         let custom_command = match shell {

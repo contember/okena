@@ -611,6 +611,11 @@ impl Workspace {
     /// Remove a stale worktree project whose directory no longer exists.
     /// Does NOT fire hooks or call git worktree remove (the directory is already gone).
     pub fn remove_stale_worktree(&mut self, project_id: &str) {
+        // Skip projects that are being actively managed (hook running, being created, etc.)
+        if self.closing_projects.contains(project_id) || self.creating_projects.contains(project_id) {
+            return;
+        }
+
         // Only remove if it's actually a worktree project
         let is_worktree = self.data.projects.iter()
             .any(|p| p.id == project_id && p.worktree_info.is_some());
@@ -999,5 +1004,46 @@ mod gpui_tests {
                 _ => panic!("Expected split after add_terminal"),
             }
         });
+    }
+
+    #[test]
+    fn test_remove_stale_worktree_skips_closing_project() {
+        let mut data = make_workspace_data();
+        let wt = make_worktree_project("wt1", "parent");
+        data.projects = vec![make_project("parent"), wt];
+        data.project_order = vec!["parent".to_string()];
+        let mut ws = Workspace::new(data);
+        ws.closing_projects.insert("wt1".to_string());
+
+        ws.remove_stale_worktree("wt1");
+
+        assert!(ws.project("wt1").is_some(), "closing project should not be removed");
+    }
+
+    #[test]
+    fn test_remove_stale_worktree_skips_creating_project() {
+        let mut data = make_workspace_data();
+        let wt = make_worktree_project("wt1", "parent");
+        data.projects = vec![make_project("parent"), wt];
+        data.project_order = vec!["parent".to_string()];
+        let mut ws = Workspace::new(data);
+        ws.creating_projects.insert("wt1".to_string());
+
+        ws.remove_stale_worktree("wt1");
+
+        assert!(ws.project("wt1").is_some(), "creating project should not be removed");
+    }
+
+    #[test]
+    fn test_remove_stale_worktree_succeeds_when_not_managed() {
+        let mut data = make_workspace_data();
+        let wt = make_worktree_project("wt1", "parent");
+        data.projects = vec![make_project("parent"), wt];
+        data.project_order = vec!["parent".to_string()];
+        let mut ws = Workspace::new(data);
+
+        ws.remove_stale_worktree("wt1");
+
+        assert!(ws.project("wt1").is_none(), "unmanaged stale worktree should be removed");
     }
 }

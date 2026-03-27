@@ -129,8 +129,14 @@ impl HookRunner {
             let shell = ShellType::for_command(script);
             self.backend.create_terminal(cwd, Some(&shell))
         } else {
-            // Use sh -c so the PTY exits when the command completes.
-            let shell = ShellType::for_command(full_cmd.clone());
+            // Use OneShot so the PTY exits when the command completes and bypasses
+            // the session backend (dtach/tmux). This ensures the exit code accurately
+            // reflects the hook's result, and the PTY lifecycle is tied directly to
+            // the hook process — not to a session manager client.
+            let shell = ShellType::OneShot {
+                path: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+                args: vec!["-ic".to_string(), full_cmd.clone()],
+            };
             self.backend.create_terminal(cwd, Some(&shell))
         }.map_err(|e| format!("Failed to create hook terminal: {}", e))?;
 

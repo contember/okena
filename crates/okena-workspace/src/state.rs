@@ -619,6 +619,11 @@ impl Workspace {
         }
     }
 
+    /// Check if a project is currently being closed (hook running or removal in progress).
+    pub fn is_project_closing(&self, project_id: &str) -> bool {
+        self.closing_projects.contains(project_id)
+    }
+
     pub fn projects(&self) -> &[ProjectData] {
         &self.data.projects
     }
