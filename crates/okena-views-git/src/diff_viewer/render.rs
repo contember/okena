@@ -758,34 +758,96 @@ impl DiffViewer {
 
     pub(super) fn render_tree_node(
         &self,
-        tree: &FileTreeNode,
+        node: &FileTreeNode,
+        depth: usize,
+        parent_path: &str,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        use okena_files::file_tree::{flatten_file_tree, render_folder_row, render_file_row, FileTreeItem};
+        use okena_files::file_tree::{expandable_folder_row, expandable_file_row};
 
         let mut elements: Vec<AnyElement> = Vec::new();
-        for item in flatten_file_tree(tree, 0) {
-            match item {
-                FileTreeItem::Folder { name, depth } => {
-                    elements.push(render_folder_row(name, depth, t, cx));
-                }
-                FileTreeItem::File { index, depth } => {
-                    if let Some(file) = self.file_stats.get(index) {
-                        let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
-                        let is_selected = index == self.selected_file_index;
-                        elements.push(
-                            render_file_row(depth, filename, file.added, file.removed, file.is_new, file.is_deleted, is_selected, t, cx)
-                                .id(ElementId::Name(format!("tree-file-{}", index).into()))
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.select_file(index, cx);
-                                }))
-                                .into_any_element(),
-                        );
-                    }
-                }
+
+        for (name, child) in &node.children {
+            let folder_path = if parent_path.is_empty() {
+                name.clone()
+            } else {
+                format!("{parent_path}/{name}")
+            };
+            let is_expanded = self.expanded_folders.contains(&folder_path);
+
+            let fp = folder_path.clone();
+            elements.push(
+                expandable_folder_row(name, depth, is_expanded, t, cx)
+                    .id(ElementId::Name(format!("dv-folder-{}", folder_path).into()))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_folder(&fp, cx);
+                    }))
+                    .into_any_element(),
+            );
+
+            if is_expanded {
+                elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
             }
         }
+
+        for &file_index in &node.files {
+            if let Some(file) = self.file_stats.get(file_index) {
+                let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
+                let is_selected = file_index == self.selected_file_index;
+
+                let (status_char, status_color) = if file.is_new {
+                    ("A", t.diff_added_fg)
+                } else if file.is_deleted {
+                    ("D", t.diff_removed_fg)
+                } else {
+                    ("M", t.text_muted)
+                };
+
+                elements.push(
+                    expandable_file_row(filename, depth, t, cx)
+                        .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
+                        .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.select_file(file_index, cx);
+                        }))
+                        // Status badge
+                        .child(
+                            div()
+                                .text_size(ui_text_sm(cx))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(status_color))
+                                .flex_shrink_0()
+                                .child(status_char),
+                        )
+                        // Line counts
+                        .when(file.added > 0 || file.removed > 0, |d| {
+                            d.child(
+                                h_flex()
+                                    .gap(px(4.0))
+                                    .text_size(ui_text_ms(cx))
+                                    .flex_shrink_0()
+                                    .when(file.added > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.diff_added_fg))
+                                                .child(format!("+{}", file.added)),
+                                        )
+                                    })
+                                    .when(file.removed > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .text_color(rgb(t.diff_removed_fg))
+                                                .child(format!("-{}", file.removed)),
+                                        )
+                                    }),
+                            )
+                        })
+                        .into_any_element(),
+                );
+            }
+        }
+
         elements
     }
 }

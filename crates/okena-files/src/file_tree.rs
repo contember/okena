@@ -7,10 +7,9 @@ use std::collections::BTreeMap;
 
 use okena_core::theme::ThemeColors;
 use okena_ui::file_icon::file_icon;
-use okena_ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md};
+use okena_ui::tokens::ui_text;
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::h_flex;
 
 /// A node in the file tree.
 #[derive(Default, Clone)]
@@ -36,124 +35,6 @@ pub fn build_file_tree(paths: impl Iterator<Item = (usize, impl AsRef<str>)>) ->
         }
     }
     root
-}
-
-/// A flattened item from a file tree, ready for rendering.
-pub enum FileTreeItem<'a> {
-    Folder { name: &'a str, depth: usize },
-    File { index: usize, depth: usize },
-}
-
-/// Flatten a file tree into an ordered list of items for rendering.
-pub fn flatten_file_tree(node: &FileTreeNode, depth: usize) -> Vec<FileTreeItem<'_>> {
-    let mut items = Vec::new();
-    for (name, child) in &node.children {
-        let has_content = !child.files.is_empty() || !child.children.is_empty();
-        if has_content {
-            items.push(FileTreeItem::Folder { name, depth });
-            items.extend(flatten_file_tree(child, depth + 1));
-        }
-    }
-    for &file_index in &node.files {
-        items.push(FileTreeItem::File { index: file_index, depth });
-    }
-    items
-}
-
-/// Render a folder row in a file tree.
-pub fn render_folder_row(name: &str, depth: usize, t: &ThemeColors, cx: &App) -> AnyElement {
-    let indent = depth * 14;
-    h_flex()
-        .h(px(26.0))
-        .pl(px(indent as f32 + 12.0))
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_primary))
-                .child(format!("{}/", name)),
-        )
-        .into_any_element()
-}
-
-/// Render a file row in a file tree (without id or click handler).
-///
-/// The caller should chain `.id(...)` and `.on_click(...)` on the returned `Div`.
-pub fn render_file_row(
-    depth: usize,
-    filename: &str,
-    added: usize,
-    removed: usize,
-    is_new: bool,
-    is_deleted: bool,
-    selected: bool,
-    t: &ThemeColors,
-    cx: &App,
-) -> Div {
-    let indent = depth * 14;
-
-    let (status_char, status_color) = if is_new {
-        ("A", t.diff_added_fg)
-    } else if is_deleted {
-        ("D", t.diff_removed_fg)
-    } else {
-        ("M", t.text_muted)
-    };
-
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .h(px(26.0))
-        .pl(px(indent as f32 + 12.0))
-        .pr(px(12.0))
-        .mx(px(4.0))
-        .rounded(px(4.0))
-        .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(t.bg_selection)))
-        .hover(|s| s.bg(rgb(t.bg_hover)))
-        // Status badge
-        .child(
-            div()
-                .text_size(ui_text_sm(cx))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(status_color))
-                .child(status_char),
-        )
-        // File type icon
-        .child(file_icon(filename, t, cx))
-        // Filename
-        .child(
-            div()
-                .flex_1()
-                .text_size(ui_text_md(cx))
-                .text_color(rgb(t.text_primary))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(filename.to_string()),
-        )
-        // Line counts
-        .when(added > 0 || removed > 0, |d| {
-            d.child(
-                h_flex()
-                    .gap(px(4.0))
-                    .text_size(ui_text_ms(cx))
-                    .when(added > 0, |d| {
-                        d.child(
-                            div()
-                                .text_color(rgb(t.diff_added_fg))
-                                .child(format!("+{}", added)),
-                        )
-                    })
-                    .when(removed > 0, |d| {
-                        d.child(
-                            div()
-                                .text_color(rgb(t.diff_removed_fg))
-                                .child(format!("-{}", removed)),
-                        )
-                    }),
-            )
-        })
 }
 
 /// Base div for an expandable folder row: chevron + folder icon + name.

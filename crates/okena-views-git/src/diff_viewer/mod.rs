@@ -21,6 +21,7 @@ use okena_files::theme::theme;
 use okena_ui::modal::fullscreen_overlay;
 use gpui::prelude::*;
 use gpui::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 use syntect::parsing::SyntaxSet;
 
@@ -60,6 +61,7 @@ pub struct DiffViewer {
     /// Currently processed file with syntax highlighting (lazy loaded).
     current_file: Option<DiffDisplayFile>,
     file_tree: FileTreeNode,
+    expanded_folders: HashSet<String>,
     selected_file_index: usize,
     selection: Selection,
     scroll_handle: UniformListScrollHandle,
@@ -126,6 +128,7 @@ impl DiffViewer {
             file_stats: Vec::new(),
             current_file: None,
             file_tree: FileTreeNode::default(),
+            expanded_folders: HashSet::new(),
             selected_file_index: 0,
             selection: Selection::default(),
             scroll_handle: UniformListScrollHandle::new(),
@@ -311,6 +314,26 @@ impl DiffViewer {
         self.file_tree = build_file_tree(
             self.file_stats.iter().enumerate().map(|(i, f)| (i, &f.path))
         );
+        // Auto-expand all folders in diff view
+        self.expanded_folders.clear();
+        Self::collect_folder_paths(&self.file_tree, "", &mut self.expanded_folders);
+    }
+
+    fn collect_folder_paths(node: &FileTreeNode, parent: &str, out: &mut HashSet<String>) {
+        for (name, child) in &node.children {
+            let path = if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") };
+            out.insert(path.clone());
+            Self::collect_folder_paths(child, &path, out);
+        }
+    }
+
+    fn toggle_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        if self.expanded_folders.contains(path) {
+            self.expanded_folders.remove(path);
+        } else {
+            self.expanded_folders.insert(path.to_string());
+        }
+        cx.notify();
     }
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
@@ -631,7 +654,7 @@ impl Render for DiffViewer {
         let line_count = self.current_file.as_ref().map(|f| f.items.len()).unwrap_or(0);
 
         let tree_elements = if has_files {
-            self.render_tree_node(&self.file_tree.clone(), &t, cx)
+            self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
         } else {
             Vec::new()
         };

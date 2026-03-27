@@ -8,7 +8,7 @@ use okena_git::{
     CiStatus, CommitLogEntry, FileDiffSummary, GitStatus, GraphRow,
     PrState,
 };
-use okena_files::file_tree::{build_file_tree, flatten_file_tree, render_file_row, render_folder_row, FileTreeItem};
+use okena_files::file_tree::{build_file_tree, expandable_folder_row, expandable_file_row, FileTreeNode};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -468,58 +468,10 @@ pub fn render_commit_log_header(t: &ThemeColors, cx: &App) -> Div {
 
 // ── Diff popover file list ──────────────────────────────────────────────────
 
-/// Build the file tree elements for a diff file summary popover.
-///
-/// Each file element is a `Div` with an id like `"diff-file-{index}"`.
-/// The caller should attach `.on_click(...)` handlers to each file element.
-pub fn render_diff_file_list(
-    summaries: &[FileDiffSummary],
-    t: &ThemeColors,
-    cx: &App,
-) -> Vec<AnyElement> {
-    let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
-
-    let mut tree_elements: Vec<AnyElement> = Vec::new();
-    for item in flatten_file_tree(&tree, 0) {
-        match item {
-            FileTreeItem::Folder { name, depth } => {
-                tree_elements.push(render_folder_row(name, depth, t, cx));
-            }
-            FileTreeItem::File { index, depth } => {
-                if let Some(summary) = summaries.get(index) {
-                    let filename = summary
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&summary.path);
-                    let is_deleted = summary.removed > 0 && summary.added == 0;
-                    tree_elements.push(
-                        render_file_row(
-                            depth,
-                            filename,
-                            summary.added,
-                            summary.removed,
-                            summary.is_new,
-                            is_deleted,
-                            false,
-                            t,
-                            cx,
-                        )
-                        .id(ElementId::Name(
-                            format!("diff-file-{}", index).into(),
-                        ))
-                        .into_any_element(),
-                    );
-                }
-            }
-        }
-    }
-    tree_elements
-}
-
 /// Build the diff file tree elements with click handlers attached.
 ///
 /// `on_file_click` is called with the file path when the user clicks a file row.
+/// All folders are rendered expanded (no toggle state in popovers).
 pub fn render_diff_file_list_interactive(
     summaries: &[FileDiffSummary],
     on_file_click: impl Fn(&str, &mut Window, &mut App) + 'static,
@@ -527,49 +479,87 @@ pub fn render_diff_file_list_interactive(
     cx: &App,
 ) -> Vec<AnyElement> {
     let tree = build_file_tree(summaries.iter().enumerate().map(|(i, f)| (i, &f.path)));
-    let on_file_click = std::sync::Arc::new(on_file_click);
+    let on_file_click: Arc<dyn Fn(&str, &mut Window, &mut App)> = Arc::new(on_file_click);
+    render_diff_tree_node(&tree, 0, summaries, &on_file_click, t, cx)
+}
 
-    let mut tree_elements: Vec<AnyElement> = Vec::new();
-    for item in flatten_file_tree(&tree, 0) {
-        match item {
-            FileTreeItem::Folder { name, depth } => {
-                tree_elements.push(render_folder_row(name, depth, t, cx));
-            }
-            FileTreeItem::File { index, depth } => {
-                if let Some(summary) = summaries.get(index) {
-                    let filename = summary
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&summary.path);
-                    let is_deleted = summary.removed > 0 && summary.added == 0;
-                    let file_path = summary.path.clone();
-                    let cb = on_file_click.clone();
-                    tree_elements.push(
-                        render_file_row(
-                            depth,
-                            filename,
-                            summary.added,
-                            summary.removed,
-                            summary.is_new,
-                            is_deleted,
-                            false,
-                            t,
-                            cx,
+fn render_diff_tree_node(
+    node: &FileTreeNode,
+    depth: usize,
+    summaries: &[FileDiffSummary],
+    on_file_click: &Arc<dyn Fn(&str, &mut Window, &mut App)>,
+    t: &ThemeColors,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let mut elements: Vec<AnyElement> = Vec::new();
+
+    for (name, child) in &node.children {
+        elements.push(
+            expandable_folder_row(name, depth, true, t, cx)
+                .into_any_element(),
+        );
+        elements.extend(render_diff_tree_node(child, depth + 1, summaries, on_file_click, t, cx));
+    }
+
+    for &file_index in &node.files {
+        if let Some(summary) = summaries.get(file_index) {
+            let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
+            let is_deleted = summary.removed > 0 && summary.added == 0;
+
+            let (status_char, status_color) = if summary.is_new {
+                ("A", t.diff_added_fg)
+            } else if is_deleted {
+                ("D", t.diff_removed_fg)
+            } else {
+                ("M", t.text_muted)
+            };
+
+            let file_path = summary.path.clone();
+            let cb = on_file_click.clone();
+            elements.push(
+                expandable_file_row(filename, depth, t, cx)
+                    .id(ElementId::Name(format!("diff-file-{}", file_index).into()))
+                    .on_click(move |_, window, cx| {
+                        cb(&file_path, window, cx);
+                    })
+                    // Status badge
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(status_color))
+                            .flex_shrink_0()
+                            .child(status_char),
+                    )
+                    // Line counts
+                    .when(summary.added > 0 || summary.removed > 0, |d| {
+                        d.child(
+                            h_flex()
+                                .gap(px(4.0))
+                                .text_size(ui_text_ms(cx))
+                                .flex_shrink_0()
+                                .when(summary.added > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .text_color(rgb(t.diff_added_fg))
+                                            .child(format!("+{}", summary.added)),
+                                    )
+                                })
+                                .when(summary.removed > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .text_color(rgb(t.diff_removed_fg))
+                                            .child(format!("-{}", summary.removed)),
+                                    )
+                                }),
                         )
-                        .id(ElementId::Name(
-                            format!("diff-file-{}", index).into(),
-                        ))
-                        .on_click(move |_, window, cx| {
-                            cb(&file_path, window, cx);
-                        })
-                        .into_any_element(),
-                    );
-                }
-            }
+                    })
+                    .into_any_element(),
+            );
         }
     }
-    tree_elements
+
+    elements
 }
 
 // ── Git status bar ──────────────────────────────────────────────────────────
