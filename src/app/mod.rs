@@ -267,6 +267,11 @@ impl Okena {
                     .collect();
                 let mut known = known_project_ids.lock();
                 for (id, path, saved_terminals) in &local_projects {
+                    // Skip projects whose directory doesn't exist yet (deferred worktrees).
+                    // They'll be picked up by the observer once the directory is ready.
+                    if !std::path::Path::new(path).exists() {
+                        continue;
+                    }
                     service_manager.update(cx, |sm, cx| {
                         sm.load_project_services(id, path, saved_terminals, cx);
                     });
@@ -290,24 +295,28 @@ impl Okena {
 
                 let mut known = known_project_ids.lock();
 
-                // Load services for new projects
+                // Load services for new projects (or deferred worktrees whose directory now exists)
                 for (id, path, saved_terminals) in &local_projects {
                     if !known.contains(id) {
+                        // Skip projects whose directory doesn't exist yet (deferred worktrees).
+                        if !std::path::Path::new(path).exists() {
+                            continue;
+                        }
                         service_manager.update(cx, |sm, cx| {
                             sm.load_project_services(id, path, saved_terminals, cx);
                         });
+                        known.insert(id.clone());
                     }
                 }
 
                 // Unload services for removed projects
                 let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
-                for id in removed {
+                for id in &removed {
                     service_manager.update(cx, |sm, cx| {
-                        sm.unload_project_services(&id, cx);
+                        sm.unload_project_services(id, cx);
                     });
+                    known.remove(id);
                 }
-
-                *known = current_ids;
             })
             .detach();
         }
