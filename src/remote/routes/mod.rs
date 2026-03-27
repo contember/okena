@@ -63,6 +63,10 @@ pub fn build_router(
         .route("/v1/refresh", axum::routing::post(refresh::post_refresh))
         .route("/v1/tokens", axum::routing::get(tokens::list_tokens))
         .route("/v1/tokens/{id}", axum::routing::delete(tokens::revoke_token))
+        .route(
+            "/v1/auth/reload",
+            axum::routing::post(auth_reload::post_reload),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -71,11 +75,7 @@ pub fn build_router(
     // Public routes (no auth required)
     let public = Router::new()
         .route("/health", axum::routing::get(health::get_health))
-        .route("/v1/pair", axum::routing::post(pair::post_pair))
-        .route(
-            "/v1/auth/reload",
-            axum::routing::post(auth_reload::post_reload),
-        );
+        .route("/v1/pair", axum::routing::post(pair::post_pair));
 
     public
         .merge(protected)
