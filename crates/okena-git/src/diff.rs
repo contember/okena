@@ -393,7 +393,7 @@ fn get_untracked_files(path: &Path) -> Vec<String> {
 
 /// Create a FileDiff for an untracked file (shows entire file as added).
 fn create_untracked_file_diff(repo_path: &Path, file_path: &str) -> Option<FileDiff> {
-    let full_path = repo_path.join(file_path);
+    let full_path = safe_repo_path(repo_path, file_path)?;
 
     // Check if it's a binary file (simple heuristic)
     let content = match std::fs::read(&full_path) {
@@ -531,9 +531,23 @@ pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> O
     }
 }
 
+/// Safely join a file path to a repo root, rejecting path traversal attempts.
+///
+/// Returns `None` if the resolved path escapes the repo directory (e.g. via `../`).
+fn safe_repo_path(repo_path: &Path, file_path: &str) -> Option<PathBuf> {
+    let full_path = repo_path.join(file_path);
+    let canonical = full_path.canonicalize().ok()?;
+    let repo_canonical = repo_path.canonicalize().ok()?;
+    if canonical.starts_with(&repo_canonical) {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
 /// Get the full content of a file from the working tree (filesystem).
 pub fn get_file_from_working_tree(repo_path: &Path, file_path: &str) -> Option<String> {
-    let full_path = repo_path.join(file_path);
+    let full_path = safe_repo_path(repo_path, file_path)?;
     std::fs::read_to_string(full_path).ok()
 }
 
@@ -771,6 +785,61 @@ diff --git a/b.rs b/b.rs
             lines_removed: 0,
         };
         assert_eq!(unknown.display_name(), "unknown");
+    }
+
+    #[test]
+    fn test_safe_repo_path_normal_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src/main.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let result = safe_repo_path(dir.path(), "src/main.rs");
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with(dir.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_safe_repo_path_traversal_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a file inside the repo so the parent dirs exist
+        std::fs::write(dir.path().join("dummy.txt"), "").unwrap();
+
+        // Attempt to escape the repo via ../
+        let result = safe_repo_path(dir.path(), "../../../etc/passwd");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_safe_repo_path_absolute_outside_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absolute path outside repo
+        let result = safe_repo_path(dir.path(), "/etc/passwd");
+        // On Unix, join with an absolute path replaces the base entirely,
+        // so this should be rejected since /etc/passwd is outside the repo.
+        // On systems where /etc/passwd doesn't exist, canonicalize returns None → safe.
+        if let Some(path) = result {
+            // If it somehow resolved, it must still be inside the repo
+            assert!(path.starts_with(dir.path().canonicalize().unwrap()));
+        }
+    }
+
+    #[test]
+    fn test_get_file_from_working_tree_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "world").unwrap();
+
+        // Normal file works
+        assert_eq!(
+            get_file_from_working_tree(dir.path(), "hello.txt"),
+            Some("world".to_string())
+        );
+
+        // Traversal attempt returns None
+        assert_eq!(
+            get_file_from_working_tree(dir.path(), "../../../etc/passwd"),
+            None
+        );
     }
 
     #[test]
