@@ -677,6 +677,10 @@ fn resolve_fnm_path(home: &std::path::Path, result: &mut Vec<String>, seen: &mut
     if !fnm_dir.is_dir() {
         return;
     }
+    let fnm_canonical = match fnm_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
     // fnm aliases: default → specific version
     let default_alias = fnm_dir.join("aliases/default");
     if let Ok(version) = std::fs::read_link(&default_alias)
@@ -688,8 +692,13 @@ fn resolve_fnm_path(home: &std::path::Path, result: &mut Vec<String>, seen: &mut
         } else {
             fnm_dir.join("node-versions").join(version.to_string_lossy().trim()).join("installation/bin")
         };
-        if node_bin.is_dir() {
-            if let Some(s) = node_bin.to_str() {
+        // Validate the resolved path stays within fnm directory to prevent symlink escape
+        if let Ok(canonical_bin) = node_bin.canonicalize() {
+            if !canonical_bin.starts_with(&fnm_canonical) {
+                log::warn!("fnm alias points outside fnm directory, skipping: {:?}", node_bin);
+                return;
+            }
+            if let Some(s) = canonical_bin.to_str() {
                 if seen.insert(s.to_string()) {
                     result.push(s.to_string());
                 }
