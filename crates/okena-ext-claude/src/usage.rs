@@ -150,7 +150,7 @@ fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
 }
 
 /// Parse a simplified ISO 8601 timestamp to Unix epoch seconds.
-fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
+pub(crate) fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
     let parts: Vec<&str> = ts.split('T').collect();
     if parts.len() != 2 {
         return None;
@@ -189,18 +189,18 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 }
 
 /// Components of a broken-down time with timezone info.
-struct LocalTime {
-    year: i32,
-    month: u32,  // 1-12
-    day: u32,    // 1-31
-    hour: u32,
-    min: u32,
-    tz_abbr: String,
+pub(crate) struct LocalTime {
+    pub(crate) year: i32,
+    pub(crate) month: u32,  // 1-12
+    pub(crate) day: u32,    // 1-31
+    pub(crate) hour: u32,
+    pub(crate) min: u32,
+    pub(crate) tz_abbr: String,
 }
 
 /// Convert a UTC epoch timestamp to local time components.
 /// Returns `None` if the conversion fails, in which case callers fall back to UTC.
-fn epoch_to_local_time(epoch_secs: f64) -> Option<LocalTime> {
+pub(crate) fn epoch_to_local_time(epoch_secs: f64) -> Option<LocalTime> {
     #[cfg(unix)]
     {
         let t = epoch_secs as libc::time_t;
