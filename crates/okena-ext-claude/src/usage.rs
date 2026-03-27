@@ -97,13 +97,13 @@ fn parse_usage(resp: &serde_json::Value) -> UsageData {
     let seven_day_sonnet = parse_tier(resp, "seven_day_sonnet", true, SEVEN_DAY_SECS);
     let seven_day_opus = parse_tier(resp, "seven_day_opus", true, SEVEN_DAY_SECS);
 
-    let extra_usage = resp.get("extra_usage").and_then(|eu| {
-        Some(ExtraUsage {
+    let extra_usage = resp.get("extra_usage").map(|eu| {
+        ExtraUsage {
             is_enabled: eu["is_enabled"].as_bool().unwrap_or(false),
             monthly_limit: eu["monthly_limit"].as_f64().unwrap_or(0.0),
             used_credits: eu["used_credits"].as_f64().unwrap_or(0.0),
             utilization: eu["utilization"].as_f64().unwrap_or(0.0),
-        })
+        }
     });
 
     UsageData {
@@ -152,7 +152,7 @@ fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
 /// Parse a simplified ISO 8601 timestamp to Unix epoch seconds.
 pub(crate) fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
     let timestamp: jiff::Timestamp = ts.parse().ok()?;
-    Some(timestamp.as_second() as f64 + timestamp.subsec_nanosecond() as f64 / 1_000_000_000.0)
+    Some(timestamp.as_millisecond() as f64 / 1_000.0)
 }
 
 /// Parse an ISO 8601 timestamp to a local Zoned datetime.
@@ -166,31 +166,30 @@ pub(crate) fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
 /// Falls back to UTC display if local timezone conversion fails.
 fn format_reset_time(ts: &str, include_date: bool) -> String {
     if let Some(zoned) = parse_iso8601_to_local(ts) {
-        let tz_abbr = zoned.strftime("%Z").to_string();
-
         if include_date {
-            let now = jiff::Zoned::now();
-            let today = now.date();
+            let today = jiff::Zoned::now().date();
             let reset_date = zoned.date();
 
             let diff_days = today.until(reset_date).ok()
-                .and_then(|span| Some(span.get_days()))
+                .map(|span| span.get_days())
                 .unwrap_or(i32::MAX);
 
-            let date_label = if diff_days == 0 {
-                "today".to_string()
-            } else if diff_days == 1 {
-                "tomorrow".to_string()
-            } else if (2..=6).contains(&diff_days) {
-                zoned.strftime("%a").to_string()
-            } else {
-                zoned.strftime("%b %-d").to_string()
+            let date_label: &str = match diff_days {
+                0 => "today",
+                1 => "tomorrow",
+                _ => "",
             };
 
-            return format!("{}, {} {}", date_label, zoned.strftime("%H:%M"), tz_abbr);
+            return if !date_label.is_empty() {
+                format!("{}, {}", date_label, zoned.strftime("%H:%M %Z"))
+            } else if (2..=6).contains(&diff_days) {
+                zoned.strftime("%a, %H:%M %Z").to_string()
+            } else {
+                zoned.strftime("%b %-d, %H:%M %Z").to_string()
+            };
         }
 
-        return format!("{} {}", zoned.strftime("%H:%M"), tz_abbr);
+        return zoned.strftime("%H:%M %Z").to_string();
     }
 
     // Fallback: return as-is if we can't parse at all
