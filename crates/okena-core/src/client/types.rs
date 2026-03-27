@@ -85,8 +85,8 @@ pub enum ConnectionEvent {
     },
 }
 
-/// Token age threshold for refresh (14 days).
-pub const TOKEN_REFRESH_AGE_SECS: i64 = 14 * 24 * 3600;
+/// Token age threshold for refresh (20 hours — must be shorter than the 24h server TTL).
+pub const TOKEN_REFRESH_AGE_SECS: i64 = 20 * 3600;
 
 #[cfg(test)]
 mod tests {
