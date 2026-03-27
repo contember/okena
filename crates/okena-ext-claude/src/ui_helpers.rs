@@ -1,8 +1,8 @@
+use crate::usage::parse_iso8601_to_local;
+
 /// Format an ISO 8601 timestamp to "Mon DD, YYYY - HH:MM TZ" in local timezone.
 /// Falls back to UTC display if local timezone conversion fails.
 pub fn format_api_timestamp(ts: &str) -> String {
-    use crate::usage::parse_iso8601_to_local;
-
     if let Some(zoned) = parse_iso8601_to_local(ts) {
         return zoned.strftime("%b %-d, %Y - %H:%M %Z").to_string();
     }
