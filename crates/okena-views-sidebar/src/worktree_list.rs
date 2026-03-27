@@ -55,9 +55,7 @@ impl WorktreeListPopover {
         let subdir = project_pathbuf.strip_prefix(&git_root)
             .unwrap_or(std::path::Path::new(""))
             .to_path_buf();
-        let entries = okena_git::repository::list_git_worktrees(
-            std::path::Path::new(&project_path),
-        );
+        let entries = okena_git::repository::list_git_worktrees(&git_root);
         let focus_handle = cx.focus_handle();
         Self { workspace, project_id, entries, position, hooks, focus_handle, git_root, subdir }
     }
