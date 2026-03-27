@@ -1,26 +1,10 @@
 /// Format an ISO 8601 timestamp to "Mon DD, YYYY - HH:MM TZ" in local timezone.
 /// Falls back to UTC display if local timezone conversion fails.
 pub fn format_api_timestamp(ts: &str) -> String {
-    use crate::usage::{epoch_to_local_time, parse_iso8601_to_epoch};
+    use crate::usage::parse_iso8601_to_local;
 
-    if let Some(epoch) = parse_iso8601_to_epoch(ts) {
-        if let Some(local) = epoch_to_local_time(epoch) {
-            let tz_label = if local.tz_abbr.is_empty() {
-                "UTC".to_string()
-            } else {
-                local.tz_abbr
-            };
-            let month_name = match local.month {
-                1 => "Jan",  2 => "Feb",  3 => "Mar",  4 => "Apr",
-                5 => "May",  6 => "Jun",  7 => "Jul",  8 => "Aug",
-                9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
-                _ => "?",
-            };
-            return format!(
-                "{} {}, {} - {:02}:{:02} {}",
-                month_name, local.day, local.year, local.hour, local.min, tz_label
-            );
-        }
+    if let Some(zoned) = parse_iso8601_to_local(ts) {
+        return zoned.strftime("%b %-d, %Y - %H:%M %Z").to_string();
     }
 
     // Fallback: parse and display as UTC
@@ -103,8 +87,6 @@ mod tests {
         // Should contain date, time, and a timezone label
         assert!(result.contains("Mar"), "Expected month name, got: {}", result);
         assert!(result.contains(':'), "Expected HH:MM, got: {}", result);
-        // Should NOT end with "UTC" unless system is in UTC
-        // (we can't assert exact tz, but format should be "Mon D, YYYY - HH:MM TZ")
         assert!(result.contains(','), "Expected 'Mon D, YYYY' format, got: {}", result);
         assert!(result.contains('-'), "Expected date-time separator, got: {}", result);
     }
