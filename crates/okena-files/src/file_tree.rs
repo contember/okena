@@ -85,7 +85,7 @@ pub fn expandable_folder_row(
                 .text_color(rgb(t.text_primary))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .child(format!("{name}/")),
+                .child(name.to_string()),
         )
 }
 
