@@ -101,6 +101,7 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> Result<(), 
 /// Create a new worktree
 /// Returns Ok(()) on success, Err(error_message) on failure
 pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, create_branch: bool) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
     clean_stale_worktree_dir(repo_path, target_path)?;
 
     let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
@@ -146,6 +147,10 @@ pub fn create_worktree_with_start_point(
     target_path: &Path,
     start_branch: Option<&str>,
 ) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
+    if let Some(sb) = start_branch {
+        crate::validate_git_ref(sb)?;
+    }
     clean_stale_worktree_dir(repo_path, target_path)?;
 
     let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
@@ -447,6 +452,7 @@ pub fn get_default_branch(repo_path: &Path) -> Option<String> {
 /// Rebase the current branch onto a target branch.
 /// Automatically aborts on failure.
 pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> Result<(), String> {
+    crate::validate_git_ref(target_branch)?;
     let path_str = worktree_path.to_str().ok_or("Invalid worktree path")?;
 
     let output = command("git")
@@ -517,6 +523,7 @@ pub fn fetch_all(path: &Path) -> Result<(), String> {
 /// Merge a branch into the current branch.
 /// If `no_ff` is true, uses `--no-ff` to create a merge commit even if fast-forward is possible.
 pub fn merge_branch(repo_path: &Path, branch: &str, no_ff: bool) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
     let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
 
     let mut args = vec!["-C", path_str, "merge"];
@@ -540,9 +547,10 @@ pub fn merge_branch(repo_path: &Path, branch: &str, no_ff: bool) -> Result<(), S
 
 /// Delete a local branch (uses `-d`, fails if branch has unmerged changes).
 pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
     let path_str = repo_path.to_str().ok_or("Invalid path")?;
     let output = command("git")
-        .args(["-C", path_str, "branch", "-d", branch])
+        .args(["-C", path_str, "branch", "-d", "--", branch])
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
     if output.status.success() {
@@ -555,9 +563,10 @@ pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<(), String>
 
 /// Delete a remote branch.
 pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
     let path_str = repo_path.to_str().ok_or("Invalid path")?;
     let output = command("git")
-        .args(["-C", path_str, "push", "origin", "--delete", branch])
+        .args(["-C", path_str, "push", "origin", "--delete", "--", branch])
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
     if output.status.success() {
@@ -570,9 +579,10 @@ pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String
 
 /// Push a branch to origin.
 pub fn push_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+    crate::validate_git_ref(branch)?;
     let path_str = repo_path.to_str().ok_or("Invalid path")?;
     let output = command("git")
-        .args(["-C", path_str, "push", "origin", branch])
+        .args(["-C", path_str, "push", "origin", "--", branch])
         .output()
         .map_err(|e| format!("Failed to execute git: {}", e))?;
     if output.status.success() {
