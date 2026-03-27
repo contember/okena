@@ -4647,6 +4647,7 @@ dependencies = [
  "dirs 5.0.1",
  "gpui",
  "gpui-component",
+ "libc",
  "log",
  "okena-extensions",
  "okena-ui",
@@ -4654,6 +4655,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "smol",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

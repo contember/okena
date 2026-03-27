@@ -15,3 +15,10 @@ smol = "2.0"
 parking_lot = "0.12"
 dirs = "5.0"
 log = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+libc = "0.2"
+windows-sys = { version = "0.59", features = ["Win32_System_Time"] }
