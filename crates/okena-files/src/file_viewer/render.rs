@@ -220,7 +220,7 @@ impl FileViewer {
                 let is_selected = self.selected_file_index == Some(file_index);
 
                 elements.push(
-                    expandable_file_row(&file.filename, depth, t, cx)
+                    expandable_file_row(&file.filename, depth, None, t, cx)
                         .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
                         .on_click(cx.listener(move |this, _, _window, cx| {

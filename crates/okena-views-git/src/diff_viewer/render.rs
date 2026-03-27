@@ -796,30 +796,21 @@ impl DiffViewer {
                 let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let is_selected = file_index == self.selected_file_index;
 
-                let (status_char, status_color) = if file.is_new {
-                    ("A", t.diff_added_fg)
+                let name_color = if file.is_new {
+                    Some(t.diff_added_fg)
                 } else if file.is_deleted {
-                    ("D", t.diff_removed_fg)
+                    Some(t.diff_removed_fg)
                 } else {
-                    ("M", t.text_muted)
+                    None
                 };
 
                 elements.push(
-                    expandable_file_row(filename, depth, t, cx)
+                    expandable_file_row(filename, depth, name_color, t, cx)
                         .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.select_file(file_index, cx);
                         }))
-                        // Status badge
-                        .child(
-                            div()
-                                .text_size(ui_text_sm(cx))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(status_color))
-                                .flex_shrink_0()
-                                .child(status_char),
-                        )
                         // Line counts
                         .when(file.added > 0 || file.removed > 0, |d| {
                             d.child(

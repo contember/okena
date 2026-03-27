@@ -921,7 +921,7 @@ impl ContentSearchDialog {
                 let count = *match_count;
 
                 elements.push(
-                    expandable_file_row(&filename, depth, t, cx)
+                    expandable_file_row(&filename, depth, None, t, cx)
                         .id(ElementId::Name(format!("cs-file-{}", row_index).into()))
                         .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
                         .on_click(cx.listener(move |this, _, _window, cx| {

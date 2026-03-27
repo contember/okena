@@ -506,31 +506,22 @@ fn render_diff_tree_node(
             let filename = summary.path.rsplit('/').next().unwrap_or(&summary.path);
             let is_deleted = summary.removed > 0 && summary.added == 0;
 
-            let (status_char, status_color) = if summary.is_new {
-                ("A", t.diff_added_fg)
+            let name_color = if summary.is_new {
+                Some(t.diff_added_fg)
             } else if is_deleted {
-                ("D", t.diff_removed_fg)
+                Some(t.diff_removed_fg)
             } else {
-                ("M", t.text_muted)
+                None
             };
 
             let file_path = summary.path.clone();
             let cb = on_file_click.clone();
             elements.push(
-                expandable_file_row(filename, depth, t, cx)
+                expandable_file_row(filename, depth, name_color, t, cx)
                     .id(ElementId::Name(format!("diff-file-{}", file_index).into()))
                     .on_click(move |_, window, cx| {
                         cb(&file_path, window, cx);
                     })
-                    // Status badge
-                    .child(
-                        div()
-                            .text_size(ui_text_sm(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(status_color))
-                            .flex_shrink_0()
-                            .child(status_char),
-                    )
                     // Line counts
                     .when(summary.added > 0 || summary.removed > 0, |d| {
                         d.child(

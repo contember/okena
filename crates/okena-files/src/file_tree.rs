@@ -92,10 +92,14 @@ pub fn expandable_folder_row(
 /// Base div for an expandable file row: file icon + filename.
 ///
 /// Caller chains `.id(...)`, `.on_click(...)`, `.when(...)` for selection,
-/// and `.child(...)` for extras (e.g. match count badge).
+/// and `.child(...)` for extras (e.g. match count badge, diff stats).
+///
+/// Use `name_color` to override the filename color (e.g. for diff status).
+/// Pass `None` to use the default `text_primary`.
 pub fn expandable_file_row(
     filename: &str,
     depth: usize,
+    name_color: Option<u32>,
     t: &ThemeColors,
     cx: &App,
 ) -> Div {
@@ -103,6 +107,7 @@ pub fn expandable_file_row(
     div()
         .flex()
         .items_center()
+        .gap(px(6.0))
         .h(px(26.0))
         .pl(px(indent + 8.0 + 18.0)) // extra 18px to align past chevron
         .pr(px(12.0))
@@ -120,7 +125,7 @@ pub fn expandable_file_row(
             div()
                 .flex_1()
                 .text_size(ui_text(13.0, cx))
-                .text_color(rgb(t.text_primary))
+                .text_color(rgb(name_color.unwrap_or(t.text_primary)))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .child(filename.to_string()),
