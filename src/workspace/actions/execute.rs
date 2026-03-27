@@ -479,7 +479,9 @@ pub fn spawn_uninitialized_terminals(
 
         // Apply on_create: wrap shell to run command first, then exec into shell
         if let Some(ref cmd) = on_create_cmd {
-            shell = hooks::apply_on_create(&shell, cmd, &env);
+            if let Some(wrapped) = hooks::apply_on_create(&shell, cmd, &env) {
+                shell = wrapped;
+            }
         }
 
         match backend.create_terminal(&project_path, Some(&shell)) {
