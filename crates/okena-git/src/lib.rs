@@ -25,6 +25,17 @@ pub use repository::{
     list_branches,
 };
 
+/// Validate that a git ref (branch name, commit hash, revision) doesn't look
+/// like a command-line flag.  Returns `Ok(name)` for safe values, or an error
+/// for values starting with `-`.
+pub fn validate_git_ref(name: &str) -> Result<&str, String> {
+    if name.starts_with('-') {
+        Err(format!("Invalid git ref: '{}'", name))
+    } else {
+        Ok(name)
+    }
+}
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -342,6 +353,23 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         assert_eq!(format_relative_time(now - 86400), "1d ago");
         assert_eq!(format_relative_time(now - 259200), "3d ago");
+    }
+
+    #[test]
+    fn validate_git_ref_accepts_normal_refs() {
+        assert_eq!(validate_git_ref("main"), Ok("main"));
+        assert_eq!(validate_git_ref("feature/foo"), Ok("feature/foo"));
+        assert_eq!(validate_git_ref("abc123"), Ok("abc123"));
+        assert_eq!(validate_git_ref("HEAD"), Ok("HEAD"));
+        assert_eq!(validate_git_ref("v1.0.0"), Ok("v1.0.0"));
+    }
+
+    #[test]
+    fn validate_git_ref_rejects_flag_like_refs() {
+        assert!(validate_git_ref("--upload-pack=evil").is_err());
+        assert!(validate_git_ref("-b").is_err());
+        assert!(validate_git_ref("--exec=malicious").is_err());
+        assert!(validate_git_ref("-").is_err());
     }
 
     #[test]

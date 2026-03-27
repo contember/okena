@@ -316,10 +316,13 @@ pub fn get_diff_with_options(
         DiffMode::WorkingTree => vec!["-C", path_str, "diff", "--no-color", "--no-ext-diff"],
         DiffMode::Staged => vec!["-C", path_str, "diff", "--cached", "--no-color", "--no-ext-diff"],
         DiffMode::Commit(ref hash) => {
+            crate::validate_git_ref(hash)?;
             range_str = format!("{}^..{}", hash, hash);
             vec!["-C", path_str, "diff", &range_str, "--no-color", "--no-ext-diff"]
         }
         DiffMode::BranchCompare { ref base, ref head } => {
+            crate::validate_git_ref(base)?;
+            crate::validate_git_ref(head)?;
             // Three-dot diff: changes on head since it diverged from base
             range_str = format!("{}...{}", base, head);
             vec!["-C", path_str, "diff", &range_str, "--no-color", "--no-ext-diff"]
@@ -510,6 +513,11 @@ pub fn is_git_repo(path: &Path) -> bool {
 /// - `revision` can be "HEAD", a commit hash, or empty for the index (staged version)
 pub fn get_file_from_git(repo_path: &Path, revision: &str, file_path: &str) -> Option<String> {
     let repo_str = repo_path.to_str()?;
+
+    // Validate revision to prevent flag injection (empty is ok — means index)
+    if !revision.is_empty() {
+        crate::validate_git_ref(revision).ok()?;
+    }
 
     // Format: revision:path (e.g., "HEAD:src/main.rs")
     // For index, use ":0:path" syntax (stage 0 = normal index entry)
