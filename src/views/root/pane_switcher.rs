@@ -41,8 +41,8 @@ pub(super) struct PaneSwitcher {
 impl PaneSwitcher {
     pub fn new(workspace: Entity<Workspace>, pane_map: &PaneMap, cx: &mut Context<Self>) -> Self {
         let panes = pane_map
-            .panes()
-            .iter()
+            .sorted_by_reading_order()
+            .into_iter()
             .take(PANE_LABELS.len())
             .map(|p| (p.project_id.clone(), p.layout_path.clone(), p.bounds))
             .collect();
