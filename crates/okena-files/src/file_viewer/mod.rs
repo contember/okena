@@ -16,6 +16,7 @@ use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
 /// Maximum file size to load (5MB)
@@ -61,6 +62,8 @@ pub(super) struct FileViewerTab {
     pub source_scroll_handle: UniformListScrollHandle,
     pub scrollbar_drag: Option<ScrollbarDrag>,
     pub selected_file_index: Option<usize>,
+    /// Last known modification time of the file (for detecting external changes).
+    pub modified_at: Option<SystemTime>,
 }
 
 impl FileViewerTab {
@@ -82,6 +85,7 @@ impl FileViewerTab {
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
             selected_file_index: None,
+            modified_at: None,
         }
     }
 
@@ -113,6 +117,7 @@ impl FileViewerTab {
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
             selected_file_index: file_index,
+            modified_at: None,
         };
         tab.load_file(&file_path, syntax_set, is_dark);
         tab
@@ -224,6 +229,8 @@ pub struct FileViewer {
     pub(super) active_tab: usize,
     /// Navigation history
     pub(super) history: NavigationHistory,
+    /// Last time we checked files for external modifications
+    last_change_check: std::time::Instant,
 }
 
 impl FileViewer {
@@ -266,6 +273,7 @@ impl FileViewer {
             tabs: vec![tab],
             active_tab: 0,
             history: NavigationHistory::new(),
+            last_change_check: std::time::Instant::now(),
         }
     }
 
@@ -303,24 +311,47 @@ impl FileViewer {
             tabs: vec![FileViewerTab::new_empty()],
             active_tab: 0,
             history: NavigationHistory::new(),
+            last_change_check: std::time::Instant::now(),
         }
     }
 
     /// Update configuration (font size and dark mode) from the host app.
+    /// Also refreshes all tabs that were modified externally.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
         self.is_dark = is_dark;
-        if rehighlight {
-            for tab in &mut self.tabs {
-                if !tab.is_empty() {
-                    tab.do_highlight_content(
-                        &tab.file_path.clone(),
-                        &self.syntax_set,
-                        self.is_dark,
-                    );
-                }
+
+        for tab in &mut self.tabs {
+            if tab.is_empty() {
+                continue;
             }
+            // Reload externally modified files (also re-highlights)
+            if tab.reload_if_changed(&self.syntax_set, self.is_dark) {
+                continue;
+            }
+            // Theme changed — re-highlight without reloading
+            if rehighlight {
+                tab.do_highlight_content(
+                    &tab.file_path.clone(),
+                    &self.syntax_set,
+                    self.is_dark,
+                );
+            }
+        }
+    }
+
+    /// Check if the active tab's file was modified externally and reload if so.
+    /// Throttled to at most once per second.
+    pub(super) fn check_active_tab_freshness(&mut self) {
+        if self.last_change_check.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.last_change_check = std::time::Instant::now();
+
+        let tab = &mut self.tabs[self.active_tab];
+        if !tab.is_empty() {
+            tab.reload_if_changed(&self.syntax_set, self.is_dark);
         }
     }
 

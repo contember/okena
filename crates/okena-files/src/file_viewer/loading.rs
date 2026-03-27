@@ -30,6 +30,7 @@ impl FileViewerTab {
                     ));
                     return;
                 }
+                self.modified_at = metadata.modified().ok();
             }
             Err(e) => {
                 self.error_message = Some(format!("Cannot read file: {}", e));
@@ -63,6 +64,31 @@ impl FileViewerTab {
                 }
             }
         }
+    }
+
+    /// Check if the file was modified externally and reload if so.
+    /// Returns true if the file was reloaded.
+    pub(super) fn reload_if_changed(
+        &mut self,
+        syntax_set: &SyntaxSet,
+        is_dark: bool,
+    ) -> bool {
+        let Some(old_mtime) = self.modified_at else {
+            return false;
+        };
+        let Ok(metadata) = std::fs::metadata(&self.file_path) else {
+            return false;
+        };
+        let Ok(new_mtime) = metadata.modified() else {
+            return false;
+        };
+        if new_mtime == old_mtime {
+            return false;
+        }
+        let path = self.file_path.clone();
+        self.error_message = None;
+        self.load_file(&path, syntax_set, is_dark);
+        true
     }
 
     /// Apply syntax highlighting to the content using shared utilities.

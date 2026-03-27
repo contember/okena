@@ -498,6 +498,9 @@ impl FileViewer {
 
 impl Render for FileViewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Check for externally modified files (throttled to 1/sec)
+        self.check_active_tab_freshness();
+
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let tab = self.active_tab();
