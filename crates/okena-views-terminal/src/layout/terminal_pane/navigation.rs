@@ -45,7 +45,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             pane_map.find_prev_pane(&source)
         };
 
-        if let Some(target) = target {
+        if let Some(ref target) = target {
             self.focus_target(target, window, cx);
         }
     }

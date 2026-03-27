@@ -115,18 +115,19 @@ impl PaneMap {
             })
     }
 
-    /// Find the next pane in sequential order (cycles through all panes)
-    pub fn find_next_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
-        if self.panes.len() <= 1 {
+    /// Find the next pane in reading order (top-to-bottom, left-to-right, cycles)
+    pub fn find_next_pane(&self, source: &PaneBounds) -> Option<PaneBounds> {
+        let sorted = self.sorted_by_reading_order();
+        if sorted.len() <= 1 {
             return None;
         }
 
-        let current_idx = self.panes.iter().position(|p| {
+        let current_idx = sorted.iter().position(|p| {
             p.project_id == source.project_id && p.layout_path == source.layout_path
         })?;
 
-        let next_idx = (current_idx + 1) % self.panes.len();
-        self.panes.get(next_idx)
+        let next_idx = (current_idx + 1) % sorted.len();
+        Some(sorted[next_idx].clone())
     }
 
     /// Remove panes whose project_id is not in the given set.
@@ -156,22 +157,23 @@ impl PaneMap {
         sorted
     }
 
-    /// Find the previous pane in sequential order (cycles through all panes)
-    pub fn find_prev_pane(&self, source: &PaneBounds) -> Option<&PaneBounds> {
-        if self.panes.len() <= 1 {
+    /// Find the previous pane in reading order (top-to-bottom, left-to-right, cycles)
+    pub fn find_prev_pane(&self, source: &PaneBounds) -> Option<PaneBounds> {
+        let sorted = self.sorted_by_reading_order();
+        if sorted.len() <= 1 {
             return None;
         }
 
-        let current_idx = self.panes.iter().position(|p| {
+        let current_idx = sorted.iter().position(|p| {
             p.project_id == source.project_id && p.layout_path == source.layout_path
         })?;
 
         let prev_idx = if current_idx == 0 {
-            self.panes.len() - 1
+            sorted.len() - 1
         } else {
             current_idx - 1
         };
-        self.panes.get(prev_idx)
+        Some(sorted[prev_idx].clone())
     }
 }
 
@@ -371,5 +373,33 @@ mod tests {
         let target = map.find_nearest_in_direction(source, NavigationDirection::Right);
         assert!(target.is_some());
         assert_eq!(target.unwrap().project_id, "b");
+    }
+
+    #[test]
+    fn sequential_cycling_uses_reading_order_not_insertion_order() {
+        let mut map = PaneMap::new();
+        // Register in reverse visual order (c, a, b) to prove insertion order is ignored
+        map.register("c".into(), vec![0], make_bounds(600.0, 0.0, 300.0, 400.0), None);
+        map.register("a".into(), vec![0], make_bounds(0.0, 0.0, 300.0, 400.0), None);
+        map.register("b".into(), vec![0], make_bounds(300.0, 0.0, 300.0, 400.0), None);
+
+        // From a (leftmost), next should be b (middle), not c (which was inserted first)
+        let source_a = map.find_pane("a", &[0]).unwrap().clone();
+        let next = map.find_next_pane(&source_a).unwrap();
+        assert_eq!(next.project_id, "b");
+
+        // From b, next should be c
+        let source_b = map.find_pane("b", &[0]).unwrap().clone();
+        let next = map.find_next_pane(&source_b).unwrap();
+        assert_eq!(next.project_id, "c");
+
+        // From c (rightmost), next wraps to a
+        let source_c = map.find_pane("c", &[0]).unwrap().clone();
+        let next = map.find_next_pane(&source_c).unwrap();
+        assert_eq!(next.project_id, "a");
+
+        // Prev from a wraps to c
+        let prev = map.find_prev_pane(&source_a).unwrap();
+        assert_eq!(prev.project_id, "c");
     }
 }
