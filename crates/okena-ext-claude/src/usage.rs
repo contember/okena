@@ -149,21 +149,21 @@ fn compute_time_elapsed_pct(resets_at: &str, period_secs: f64) -> Option<f64> {
     Some((elapsed / period_secs * 100.0).clamp(0.0, 100.0))
 }
 
-/// Parse a simplified ISO 8601 timestamp to Unix epoch seconds.
-pub(crate) fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
+/// Parse an ISO 8601 timestamp (via `jiff`) to Unix epoch seconds.
+fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
     let timestamp: jiff::Timestamp = ts.parse().ok()?;
     Some(timestamp.as_millisecond() as f64 / 1_000.0)
 }
 
 /// Parse an ISO 8601 timestamp to a local Zoned datetime.
-/// Returns `None` if parsing or timezone conversion fails.
+/// Returns `None` if parsing fails.
 pub(crate) fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
     let timestamp: jiff::Timestamp = ts.parse().ok()?;
     Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
 }
 
 /// Format ISO 8601 reset time to a human-readable short form in local timezone.
-/// Falls back to UTC display if local timezone conversion fails.
+/// Falls back to UTC if local timezone is unavailable, or returns `ts` as-is if unparseable.
 fn format_reset_time(ts: &str, include_date: bool) -> String {
     if let Some(zoned) = parse_iso8601_to_local(ts) {
         if include_date {
@@ -192,7 +192,16 @@ fn format_reset_time(ts: &str, include_date: bool) -> String {
         return zoned.strftime("%H:%M %Z").to_string();
     }
 
-    // Fallback: return as-is if we can't parse at all
+    // Fallback: try UTC if the timestamp parses but local timezone failed
+    if let Ok(timestamp) = ts.parse::<jiff::Timestamp>() {
+        let utc = timestamp.to_zoned(jiff::tz::TimeZone::UTC);
+        return if include_date {
+            utc.strftime("%b %-d, %H:%M UTC").to_string()
+        } else {
+            utc.strftime("%H:%M UTC").to_string()
+        };
+    }
+
     ts.to_string()
 }
 
