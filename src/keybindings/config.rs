@@ -59,6 +59,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "FocusActiveProject".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-0", None),
+                KeybindingEntry::new("ctrl-shift-0", None),
+            ],
+        );
+        bindings.insert(
             "ShowKeybindings".to_string(),
             vec![
                 KeybindingEntry::new("cmd-k cmd-s", None),
