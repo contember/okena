@@ -84,6 +84,10 @@ pub struct RootView {
     service_manager: Option<Entity<ServiceManager>>,
     /// Last focused project ID (for scroll-to-focused detection)
     last_scroll_project: Option<String>,
+    /// Whether a project was zoomed/focused in the last observation (for detecting unfocus)
+    was_project_focused: bool,
+    /// Project ID to center-scroll to after the next layout pass
+    pending_center_scroll: Option<String>,
 }
 
 impl RootView {
@@ -199,18 +203,30 @@ impl RootView {
             pane_switch_active: false,
             pane_switcher_entity: None,
             last_scroll_project: None,
+            was_project_focused: false,
+            pending_center_scroll: None,
         };
 
         // Observe workspace to scroll focused project into view
         cx.observe(&view.workspace, |this, workspace, cx| {
-            let focused_project = workspace.read(cx)
-                .focus_manager.focused_terminal_state()
+            let ws = workspace.read(cx);
+            let is_project_focused = ws.focus_manager.focused_project_id().is_some();
+            let focused_terminal_project = ws.focus_manager
+                .focused_terminal_state()
                 .map(|f| f.project_id.clone());
 
-            if focused_project != this.last_scroll_project && focused_project.is_some() {
-                this.last_scroll_project = focused_project.clone();
-                this.scroll_to_focused_project(focused_project.as_deref(), cx);
+            // When project zoom is cleared, defer centering until after next layout pass
+            if this.was_project_focused && !is_project_focused {
+                this.last_scroll_project = focused_terminal_project.clone();
+                this.pending_center_scroll = focused_terminal_project;
             }
+            // When the active terminal changes project, ensure it's visible
+            else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
+                this.last_scroll_project = focused_terminal_project.clone();
+                this.scroll_to_focused_project(focused_terminal_project.as_deref(), false, cx);
+            }
+
+            this.was_project_focused = is_project_focused;
         }).detach();
 
         // Initialize project columns

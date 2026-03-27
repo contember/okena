@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
@@ -33,7 +33,7 @@ impl RootView {
     }
 
     /// Scroll the projects grid horizontally to ensure the focused project column is visible.
-    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, cx: &Context<Self>) {
+    pub(super) fn scroll_to_focused_project(&self, focused_id: Option<&str>, center: bool, cx: &Context<Self>) {
         let focused_id = match focused_id {
             Some(id) => id,
             None => return,
@@ -73,22 +73,24 @@ impl RootView {
         for i in 0..focused_idx {
             col_left += pixel_widths[i] + 1.0; // +1 for divider
         }
-        let col_right = col_left + pixel_widths[focused_idx];
 
-        // Current scroll viewport: offset is negative (scrolled left = more negative)
-        let current_offset = f32::from(self.projects_scroll_handle.offset().x);
-        let viewport_left = -current_offset;
-        let viewport_right = viewport_left + container_width;
-
-        // Determine if we need to scroll
-        let new_offset = if col_left < viewport_left {
-            // Column is off-screen to the left — scroll to show its left edge
-            -col_left
-        } else if col_right > viewport_right {
-            // Column is off-screen to the right — scroll to show its right edge
-            -(col_right - container_width)
+        let new_offset = if center {
+            // Center the focused column in the viewport
+            let col_center = col_left + pixel_widths[focused_idx] / 2.0;
+            -(col_center - container_width / 2.0)
         } else {
-            return; // already visible
+            let col_right = col_left + pixel_widths[focused_idx];
+            let current_offset = f32::from(self.projects_scroll_handle.offset().x);
+            let viewport_left = -current_offset;
+            let viewport_right = viewport_left + container_width;
+
+            if col_left < viewport_left {
+                -col_left
+            } else if col_right > viewport_right {
+                -(col_right - container_width)
+            } else {
+                return; // already visible
+            }
         };
 
         let max_offset = self.projects_scroll_handle.max_offset();
@@ -97,6 +99,26 @@ impl RootView {
     }
 
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Execute pending center-scroll (deferred from unfocus to let layout update first).
+        // We wait until the scroll handle reports overflow (max_offset > 0), which means
+        // the layout has been recalculated with all projects visible.
+        if let Some(project_id) = self.pending_center_scroll.take() {
+            let workspace = self.workspace.read(cx);
+            let num_visible = workspace.visible_projects().len();
+            let is_zoomed = workspace.focus_manager.focused_project_id().is_some();
+            drop(workspace);
+
+            if is_zoomed || num_visible <= 1 {
+                // Still zoomed or only one project — no centering needed
+            } else if self.projects_scroll_handle.max_offset().x > px(0.0) {
+                self.scroll_to_focused_project(Some(&project_id), true, cx);
+            } else {
+                // Layout hasn't updated yet — re-queue for next frame
+                self.pending_center_scroll = Some(project_id);
+                cx.notify();
+            }
+        }
+
         // Sync project columns to handle newly added projects
         self.sync_project_columns(cx);
 
@@ -481,6 +503,27 @@ impl Render for RootView {
                     ws.set_focused_project(None, cx);
                     ws.set_folder_filter(None, cx);
                 });
+            }))
+            // Toggle focus on the active terminal's project (zoom in / zoom out)
+            .on_action(cx.listener(|this, _: &FocusActiveProject, _window, cx| {
+                let ws = this.workspace.read(cx);
+                let is_focused = ws.focus_manager.focused_project_id().is_some();
+                drop(ws);
+                if is_focused {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project(None, cx);
+                        ws.set_folder_filter(None, cx);
+                    });
+                } else {
+                    let project_id = this.workspace.read(cx).focus_manager
+                        .focused_terminal_state()
+                        .map(|state| state.project_id);
+                    if let Some(project_id) = project_id {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(Some(project_id), cx);
+                        });
+                    }
+                }
             }))
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {

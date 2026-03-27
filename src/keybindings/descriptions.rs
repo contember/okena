@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::types::ActionDescription;
 use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
-    CreateWorktree, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
+    CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
@@ -61,6 +61,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Clear focus and show all projects",
             category: "Global",
             factory: || Box::new(ClearFocus),
+        },
+    );
+    map.insert(
+        "FocusActiveProject",
+        ActionDescription {
+            name: "Focus Active Project",
+            description: "Focus the project containing the active terminal",
+            category: "Global",
+            factory: || Box::new(FocusActiveProject),
         },
     );
 

@@ -59,6 +59,13 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "FocusActiveProject".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-0", None),
+                KeybindingEntry::new("ctrl-shift-0", None),
+            ],
+        );
+        bindings.insert(
             "ShowKeybindings".to_string(),
             vec![
                 KeybindingEntry::new("cmd-k cmd-s", None),
@@ -410,7 +417,15 @@ pub fn load_keybindings() -> KeybindingConfig {
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<KeybindingConfig>(&content) {
-                Ok(config) => {
+                Ok(mut config) => {
+                    // Merge in any new default actions missing from the saved config
+                    let defaults = KeybindingConfig::defaults();
+                    for (action, entries) in &defaults.bindings {
+                        if !config.bindings.contains_key(action) {
+                            config.bindings.insert(action.clone(), entries.clone());
+                        }
+                    }
+
                     // Check for conflicts and log warnings
                     let conflicts = config.detect_conflicts();
                     for conflict in &conflicts {
