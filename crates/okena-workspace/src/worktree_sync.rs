@@ -27,11 +27,14 @@ impl WorktreeSyncWatcher {
             loop {
                 smol::Timer::after(Duration::from_secs(30)).await;
 
-                // Collect current worktree projects
+                // Collect current worktree projects, skipping those being actively managed
                 let current_worktrees: Vec<(String, String)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
                     ws.data().projects.iter()
                         .filter(|p| p.worktree_info.is_some())
+                        .filter(|p| !ws.closing_projects.contains(&p.id))
+                        .filter(|p| !ws.creating_projects.contains(&p.id))
+                        .filter(|p| !ws.removing_worktree_paths.contains(&p.path))
                         .map(|p| (p.id.clone(), p.path.clone()))
                         .collect()
                 });
