@@ -99,6 +99,26 @@ impl RootView {
     }
 
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Execute pending center-scroll (deferred from unfocus to let layout update first).
+        // We wait until the scroll handle reports overflow (max_offset > 0), which means
+        // the layout has been recalculated with all projects visible.
+        if let Some(project_id) = self.pending_center_scroll.take() {
+            let workspace = self.workspace.read(cx);
+            let num_visible = workspace.visible_projects().len();
+            let is_zoomed = workspace.focus_manager.focused_project_id().is_some();
+            drop(workspace);
+
+            if is_zoomed || num_visible <= 1 {
+                // Still zoomed or only one project — no centering needed
+            } else if self.projects_scroll_handle.max_offset().x > px(0.0) {
+                self.scroll_to_focused_project(Some(&project_id), true, cx);
+            } else {
+                // Layout hasn't updated yet — re-queue for next frame
+                self.pending_center_scroll = Some(project_id);
+                cx.notify();
+            }
+        }
+
         // Sync project columns to handle newly added projects
         self.sync_project_columns(cx);
 
@@ -484,15 +504,25 @@ impl Render for RootView {
                     ws.set_folder_filter(None, cx);
                 });
             }))
-            // Handle focus active project action (zoom into the project of the focused terminal)
+            // Toggle focus on the active terminal's project (zoom in / zoom out)
             .on_action(cx.listener(|this, _: &FocusActiveProject, _window, cx| {
-                let project_id = this.workspace.read(cx).focus_manager
-                    .focused_terminal_state()
-                    .map(|state| state.project_id);
-                if let Some(project_id) = project_id {
+                let ws = this.workspace.read(cx);
+                let is_focused = ws.focus_manager.focused_project_id().is_some();
+                drop(ws);
+                if is_focused {
                     this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(Some(project_id), cx);
+                        ws.set_focused_project(None, cx);
+                        ws.set_folder_filter(None, cx);
                     });
+                } else {
+                    let project_id = this.workspace.read(cx).focus_manager
+                        .focused_terminal_state()
+                        .map(|state| state.project_id);
+                    if let Some(project_id) = project_id {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(Some(project_id), cx);
+                        });
+                    }
                 }
             }))
             // Handle equalize layout action

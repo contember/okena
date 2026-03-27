@@ -43,16 +43,6 @@ pub enum ShellType {
         #[serde(default)]
         args: Vec<String>,
     },
-
-    /// One-shot command that bypasses session backend (dtach/tmux/screen).
-    /// Used for hook terminals that need direct PTY exit code reporting.
-    /// The command runs directly in the PTY — when it finishes, the PTY exits
-    /// and the exit code accurately reflects the command's result.
-    OneShot {
-        path: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
 }
 
 impl Default for ShellType {
@@ -105,7 +95,7 @@ impl ShellType {
             ShellType::Wsl { distro: None } => "WSL (Default)".to_string(),
             #[cfg(windows)]
             ShellType::Wsl { distro: Some(d) } => format!("WSL ({})", d),
-            ShellType::Custom { path, .. } | ShellType::OneShot { path, .. } => {
+            ShellType::Custom { path, .. } => {
                 // Extract filename from path
                 std::path::Path::new(path)
                     .file_name()
@@ -128,7 +118,7 @@ impl ShellType {
             }
             #[cfg(windows)]
             ShellType::Wsl { .. } => "WSL",
-            ShellType::Custom { .. } | ShellType::OneShot { .. } => "Custom",
+            ShellType::Custom { .. } => "Custom",
         }
     }
 
@@ -150,7 +140,7 @@ impl ShellType {
                     None => "wsl.exe".to_string(),
                 }
             }
-            ShellType::Custom { path, args } | ShellType::OneShot { path, args } => {
+            ShellType::Custom { path, args } => {
                 if args.is_empty() {
                     shell_quote(path)
                 } else {
@@ -197,7 +187,7 @@ impl ShellType {
                 cmd.arg(&wsl_path);
                 cmd
             }
-            ShellType::Custom { path, args } | ShellType::OneShot { path, args } => {
+            ShellType::Custom { path, args } => {
                 let mut cmd = CommandBuilder::new(path);
                 for arg in args {
                     cmd.arg(arg);
