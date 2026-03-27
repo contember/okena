@@ -174,18 +174,18 @@ fn format_reset_time(ts: &str, include_date: bool) -> String {
                 .map(|span| span.get_days())
                 .unwrap_or(i32::MAX);
 
-            let date_label: &str = match diff_days {
-                0 => "today",
-                1 => "tomorrow",
-                _ => "",
+            let date_label = match diff_days {
+                0 => Some("today"),
+                1 => Some("tomorrow"),
+                _ => None,
             };
 
-            return if !date_label.is_empty() {
-                format!("{}, {}", date_label, zoned.strftime("%H:%M %Z"))
-            } else if (2..=6).contains(&diff_days) {
-                zoned.strftime("%a, %H:%M %Z").to_string()
-            } else {
-                zoned.strftime("%b %-d, %H:%M %Z").to_string()
+            return match date_label {
+                Some(label) => format!("{}, {}", label, zoned.strftime("%H:%M %Z")),
+                None if (2..=6).contains(&diff_days) => {
+                    zoned.strftime("%a, %H:%M %Z").to_string()
+                }
+                None => zoned.strftime("%b %-d, %H:%M %Z").to_string(),
             };
         }
 
@@ -762,5 +762,26 @@ mod tests {
         // Invalid input should be returned as-is
         let result = format_reset_time("garbage", false);
         assert_eq!(result, "garbage");
+    }
+
+    #[test]
+    fn test_format_reset_time_past_date() {
+        // A reset time in the past should still format with date (no panic, no special label)
+        let result = format_reset_time("2020-01-01T00:00:00.000Z", true);
+        assert!(result.contains(':'), "Expected time in result, got: {}", result);
+        assert!(result.contains(','), "Expected date with comma, got: {}", result);
+    }
+
+    #[test]
+    fn test_compute_time_elapsed_pct() {
+        // A reset 50% through a 100-second period
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset_in_50s = jiff::Timestamp::from_second((now + 50) as i64).unwrap();
+        let ts = reset_in_50s.strftime("%Y-%m-%dT%H:%M:%S.000Z").to_string();
+        let pct = compute_time_elapsed_pct(&ts, 100.0).unwrap();
+        assert!((pct - 50.0).abs() < 5.0, "Expected ~50%, got: {}", pct);
     }
 }
