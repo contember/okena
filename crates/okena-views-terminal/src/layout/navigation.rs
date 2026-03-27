@@ -142,19 +142,46 @@ impl PaneMap {
         &self.panes
     }
 
-    /// Return panes sorted by reading order: top-to-bottom, then left-to-right.
+    /// Return panes sorted by reading order: column-first (left-to-right by project),
+    /// then top-to-bottom within each column.
+    ///
+    /// Panes are grouped by `project_id` (each project is a visual column).
+    /// Groups are ordered by the leftmost X edge of any pane in the group.
+    /// Within each group, panes are sorted by center Y then center X.
     pub fn sorted_by_reading_order(&self) -> Vec<&PaneBounds> {
-        let mut sorted: Vec<&PaneBounds> = self.panes.iter().collect();
-        sorted.sort_by(|a, b| {
-            let ay = f32::from(a.bounds.center().y);
-            let by = f32::from(b.bounds.center().y);
-            let ax = f32::from(a.bounds.center().x);
-            let bx = f32::from(b.bounds.center().x);
-            ay.partial_cmp(&by)
+        use std::collections::HashMap;
+
+        // Group panes by project_id
+        let mut groups: HashMap<&str, Vec<&PaneBounds>> = HashMap::new();
+        for pane in &self.panes {
+            groups.entry(&pane.project_id).or_default().push(pane);
+        }
+
+        // Sort each group internally by center Y then center X
+        for group in groups.values_mut() {
+            group.sort_by(|a, b| {
+                let ay = f32::from(a.bounds.center().y);
+                let by = f32::from(b.bounds.center().y);
+                let ax = f32::from(a.bounds.center().x);
+                let bx = f32::from(b.bounds.center().x);
+                ay.partial_cmp(&by)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
+            });
+        }
+
+        // Sort groups by minimum origin.x, then project_id as tiebreaker
+        let mut group_entries: Vec<(&str, Vec<&PaneBounds>)> = groups.into_iter().collect();
+        group_entries.sort_by(|(id_a, panes_a), (id_b, panes_b)| {
+            let min_x_a = panes_a.iter().map(|p| f32::from(p.bounds.origin.x)).fold(f32::INFINITY, f32::min);
+            let min_x_b = panes_b.iter().map(|p| f32::from(p.bounds.origin.x)).fold(f32::INFINITY, f32::min);
+            min_x_a.partial_cmp(&min_x_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| id_a.cmp(id_b))
         });
-        sorted
+
+        // Flatten
+        group_entries.into_iter().flat_map(|(_, panes)| panes).collect()
     }
 
     /// Find the previous pane in reading order (top-to-bottom, left-to-right, cycles)
@@ -259,16 +286,42 @@ mod tests {
     #[test]
     fn sorted_by_reading_order_2x2_grid() {
         let mut map = PaneMap::new();
-        map.register("d".into(), vec![0], make_bounds(400.0, 300.0, 400.0, 300.0), None);
-        map.register("a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
-        map.register("c".into(), vec![0], make_bounds(0.0, 300.0, 400.0, 300.0), None);
-        map.register("b".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
+        // Left column (project "left") — two stacked panes
+        map.register("left".into(), vec![1], make_bounds(0.0, 300.0, 400.0, 300.0), None);
+        map.register("left".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 300.0), None);
+        // Right column (project "right") — two stacked panes
+        map.register("right".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
+        map.register("right".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
 
         let sorted = map.sorted_by_reading_order();
-        assert_eq!(sorted[0].project_id, "a");
-        assert_eq!(sorted[1].project_id, "b");
-        assert_eq!(sorted[2].project_id, "c");
-        assert_eq!(sorted[3].project_id, "d");
+        // Left column first (top then bottom), then right column
+        assert_eq!(sorted[0].project_id, "left");
+        assert_eq!(sorted[0].layout_path, vec![0]);
+        assert_eq!(sorted[1].project_id, "left");
+        assert_eq!(sorted[1].layout_path, vec![1]);
+        assert_eq!(sorted[2].project_id, "right");
+        assert_eq!(sorted[2].layout_path, vec![0]);
+        assert_eq!(sorted[3].project_id, "right");
+        assert_eq!(sorted[3].layout_path, vec![1]);
+    }
+
+    #[test]
+    fn sorted_by_reading_order_multi_column_different_heights() {
+        let mut map = PaneMap::new();
+        // Column A (left): one full-height pane, center Y=300
+        map.register("col_a".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        // Column B (right): two stacked panes, center Y=150 and Y=450
+        map.register("col_b".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
+        map.register("col_b".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
+
+        let sorted = map.sorted_by_reading_order();
+        // Column A first (leftmost), then column B top-to-bottom
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].project_id, "col_a");
+        assert_eq!(sorted[1].project_id, "col_b");
+        assert_eq!(sorted[1].layout_path, vec![0]);
+        assert_eq!(sorted[2].project_id, "col_b");
+        assert_eq!(sorted[2].layout_path, vec![1]);
     }
 
     #[test]
@@ -378,28 +431,32 @@ mod tests {
     #[test]
     fn sequential_cycling_uses_reading_order_not_insertion_order() {
         let mut map = PaneMap::new();
-        // Register in reverse visual order (c, a, b) to prove insertion order is ignored
-        map.register("c".into(), vec![0], make_bounds(600.0, 0.0, 300.0, 400.0), None);
-        map.register("a".into(), vec![0], make_bounds(0.0, 0.0, 300.0, 400.0), None);
-        map.register("b".into(), vec![0], make_bounds(300.0, 0.0, 300.0, 400.0), None);
+        // Register in non-visual order to prove insertion order is ignored
+        // Left column: one full-height pane; Right column: two stacked panes
+        map.register("right".into(), vec![1], make_bounds(400.0, 300.0, 400.0, 300.0), None);
+        map.register("left".into(), vec![0], make_bounds(0.0, 0.0, 400.0, 600.0), None);
+        map.register("right".into(), vec![0], make_bounds(400.0, 0.0, 400.0, 300.0), None);
 
-        // From a (leftmost), next should be b (middle), not c (which was inserted first)
-        let source_a = map.find_pane("a", &[0]).unwrap().clone();
-        let next = map.find_next_pane(&source_a).unwrap();
-        assert_eq!(next.project_id, "b");
+        // From left (first in reading order), next should be right[0] (top of right column)
+        let source_left = map.find_pane("left", &[0]).unwrap().clone();
+        let next = map.find_next_pane(&source_left).unwrap();
+        assert_eq!(next.project_id, "right");
+        assert_eq!(next.layout_path, vec![0]);
 
-        // From b, next should be c
-        let source_b = map.find_pane("b", &[0]).unwrap().clone();
-        let next = map.find_next_pane(&source_b).unwrap();
-        assert_eq!(next.project_id, "c");
+        // From right[0], next should be right[1]
+        let source_rt = map.find_pane("right", &[0]).unwrap().clone();
+        let next = map.find_next_pane(&source_rt).unwrap();
+        assert_eq!(next.project_id, "right");
+        assert_eq!(next.layout_path, vec![1]);
 
-        // From c (rightmost), next wraps to a
-        let source_c = map.find_pane("c", &[0]).unwrap().clone();
-        let next = map.find_next_pane(&source_c).unwrap();
-        assert_eq!(next.project_id, "a");
+        // From right[1] (last), wraps to left
+        let source_rb = map.find_pane("right", &[1]).unwrap().clone();
+        let next = map.find_next_pane(&source_rb).unwrap();
+        assert_eq!(next.project_id, "left");
 
-        // Prev from a wraps to c
-        let prev = map.find_prev_pane(&source_a).unwrap();
-        assert_eq!(prev.project_id, "c");
+        // Prev from left wraps to right[1]
+        let prev = map.find_prev_pane(&source_left).unwrap();
+        assert_eq!(prev.project_id, "right");
+        assert_eq!(prev.layout_path, vec![1]);
     }
 }
