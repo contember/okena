@@ -754,6 +754,23 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+/// Resolve the git repository root and the project subdirectory within it.
+///
+/// For a monorepo project at `/repo/packages/app`, returns
+/// `(/repo, packages/app)`. For a root-level project, subdir is empty.
+/// Both paths are normalized before `strip_prefix` to handle symlinks,
+/// trailing slashes, and `..` components.
+pub fn resolve_git_root_and_subdir(project_path: &Path) -> (PathBuf, PathBuf) {
+    let git_root = get_repo_root(project_path)
+        .unwrap_or_else(|| project_path.to_path_buf());
+    let norm_project = normalize_path(project_path);
+    let norm_root = normalize_path(&git_root);
+    let subdir = norm_project.strip_prefix(&norm_root)
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
+    (git_root, subdir)
+}
+
 /// Given a worktree checkout path and a subdir, return the project path.
 /// If subdir is empty, returns the worktree path as-is.
 pub fn project_path_in_worktree(worktree_path: &str, subdir: &Path) -> String {
