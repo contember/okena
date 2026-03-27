@@ -190,6 +190,9 @@ pub struct OverlayManager {
     // Positioned popovers (like context menus, rendered at RootView level)
     worktree_list: OverlaySlot<WorktreeListPopover>,
     color_picker: OverlaySlot<ColorPickerPopover>,
+
+    /// Cached file viewer entities per project path (survives close/reopen).
+    cached_file_viewers: std::collections::HashMap<PathBuf, Entity<FileViewer>>,
 }
 
 impl OverlayManager {
@@ -200,6 +203,7 @@ impl OverlayManager {
             request_broker,
             active_modal: None,
             modal_type_id: None,
+            cached_file_viewers: std::collections::HashMap::new(),
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
             remote_context_menu: OverlaySlot::new(),
@@ -216,6 +220,16 @@ impl OverlayManager {
 
     /// Close the active modal, restoring terminal focus if needed.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
+        if self.active_modal.is_some() {
+            self.active_modal = None;
+            self.modal_type_id = None;
+            self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+            cx.notify();
+        }
+    }
+
+    /// Hide the active modal without dropping it (used for cached overlays like FileViewer).
+    fn hide_modal(&mut self, cx: &mut Context<Self>) {
         if self.active_modal.is_some() {
             self.active_modal = None;
             self.modal_type_id = None;
@@ -1145,17 +1159,27 @@ impl OverlayManager {
     pub fn show_file_browser(&mut self, project_path: PathBuf, cx: &mut Context<Self>) {
         let font_size = crate::settings::settings_entity(cx).read(cx).settings.file_font_size;
         let is_dark = crate::theme::theme(cx).is_dark();
-        let viewer = cx.new(|cx| FileViewer::new_browse(project_path, font_size, is_dark, cx));
 
-        cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
+        // Reuse cached viewer if available
+        if let Some(viewer) = self.cached_file_viewers.get(&project_path) {
+            viewer.update(cx, |v, _cx| v.update_config(font_size, is_dark));
+            self.open_modal(viewer.clone(), cx);
+            return;
+        }
+
+        let viewer = cx.new(|cx| FileViewer::new_browse(project_path.clone(), font_size, is_dark, cx));
+
+        cx.subscribe(&viewer, move |this, _, event: &FileViewerEvent, cx| {
             match event {
                 FileViewerEvent::Close => {
-                    this.close_modal(cx);
+                    // Hide but keep cached
+                    this.hide_modal(cx);
                 }
             }
         })
         .detach();
 
+        self.cached_file_viewers.insert(project_path, viewer.clone());
         self.open_modal(viewer, cx);
         cx.notify();
     }
@@ -1164,17 +1188,30 @@ impl OverlayManager {
     pub fn show_file_viewer(&mut self, file_path: PathBuf, project_path: PathBuf, cx: &mut Context<Self>) {
         let font_size = crate::settings::settings_entity(cx).read(cx).settings.file_font_size;
         let is_dark = crate::theme::theme(cx).is_dark();
-        let viewer = cx.new(|cx| FileViewer::new(file_path, project_path, font_size, is_dark, cx));
+
+        // Reuse cached viewer if available
+        if let Some(viewer) = self.cached_file_viewers.get(&project_path) {
+            viewer.update(cx, |v, cx| {
+                v.update_config(font_size, is_dark);
+                v.open_file_in_tab(file_path.clone(), cx);
+            });
+            self.open_modal(viewer.clone(), cx);
+            return;
+        }
+
+        let viewer = cx.new(|cx| FileViewer::new(file_path, project_path.clone(), font_size, is_dark, cx));
 
         cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {
                 FileViewerEvent::Close => {
-                    this.close_modal(cx);
+                    // Hide but keep cached
+                    this.hide_modal(cx);
                 }
             }
         })
         .detach();
 
+        self.cached_file_viewers.insert(project_path, viewer.clone());
         self.open_modal(viewer, cx);
         cx.notify();
     }

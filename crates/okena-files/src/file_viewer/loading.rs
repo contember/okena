@@ -1,11 +1,12 @@
 //! File loading and syntax highlighting for the file viewer.
 
-use super::{FileViewer, MAX_FILE_SIZE, MAX_LINES};
+use super::{FileViewerTab, MAX_FILE_SIZE, MAX_LINES};
 use crate::syntax::highlight_content;
 use okena_markdown::MarkdownDocument;
 use std::path::PathBuf;
+use syntect::parsing::SyntaxSet;
 
-impl FileViewer {
+impl FileViewerTab {
     /// Check if a file is a markdown file based on extension.
     pub(super) fn is_markdown_file(path: &PathBuf) -> bool {
         path.extension()
@@ -18,7 +19,7 @@ impl FileViewer {
     }
 
     /// Load file content and apply syntax highlighting.
-    pub(super) fn load_file(&mut self, path: &PathBuf) {
+    pub(super) fn load_file(&mut self, path: &PathBuf, syntax_set: &SyntaxSet, is_dark: bool) {
         // Check file size first
         match std::fs::metadata(path) {
             Ok(metadata) => {
@@ -40,7 +41,7 @@ impl FileViewer {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 self.content = content.clone();
-                self.do_highlight_content(path);
+                self.do_highlight_content(path, syntax_set, is_dark);
                 // Parse markdown if this is a markdown file
                 if self.is_markdown {
                     self.markdown_doc = Some(MarkdownDocument::parse(&content));
@@ -65,14 +66,14 @@ impl FileViewer {
     }
 
     /// Apply syntax highlighting to the content using shared utilities.
-    pub(super) fn do_highlight_content(&mut self, path: &PathBuf) {
-        self.highlighted_lines = highlight_content(
-            &self.content,
-            path,
-            &self.syntax_set,
-            MAX_LINES,
-            self.is_dark,
-        );
+    pub(super) fn do_highlight_content(
+        &mut self,
+        path: &PathBuf,
+        syntax_set: &SyntaxSet,
+        is_dark: bool,
+    ) {
+        self.highlighted_lines =
+            highlight_content(&self.content, path, syntax_set, MAX_LINES, is_dark);
         self.line_count = self.highlighted_lines.len();
         self.line_num_width = self.line_count.to_string().len().max(3);
     }

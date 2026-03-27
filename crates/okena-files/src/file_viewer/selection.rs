@@ -1,17 +1,19 @@
 //! Selection, clipboard, scrollbar, and navigation for the file viewer.
 
-use crate::selection::{copy_to_clipboard, Selection1DExtension};
 use crate::code_view::{get_selected_text, start_scrollbar_drag, update_scrollbar_drag};
+use crate::selection::{copy_to_clipboard, Selection1DExtension};
 use gpui::*;
+
 use super::{DisplayMode, FileViewer, FileViewerEvent};
 
 impl FileViewer {
     /// Toggle between source and preview display modes.
     pub(super) fn toggle_display_mode(&mut self, cx: &mut Context<Self>) {
-        if !self.is_markdown {
+        let tab = self.active_tab_mut();
+        if !tab.is_markdown {
             return;
         }
-        self.display_mode = match self.display_mode {
+        tab.display_mode = match tab.display_mode {
             DisplayMode::Source => DisplayMode::Preview,
             DisplayMode::Preview => DisplayMode::Source,
         };
@@ -25,7 +27,8 @@ impl FileViewer {
 
     /// Get selected text using the shared utility.
     pub(super) fn get_selected_text(&self) -> Option<String> {
-        get_selected_text(&self.highlighted_lines, &self.selection)
+        let tab = self.active_tab();
+        get_selected_text(&tab.highlighted_lines, &tab.selection)
     }
 
     /// Copy selected text to clipboard.
@@ -35,20 +38,22 @@ impl FileViewer {
 
     /// Select all text.
     pub(super) fn select_all(&mut self, cx: &mut Context<Self>) {
-        if self.highlighted_lines.is_empty() {
+        let tab = self.active_tab_mut();
+        if tab.highlighted_lines.is_empty() {
             return;
         }
-        let last_line = self.highlighted_lines.len() - 1;
-        let last_col = self.highlighted_lines[last_line].plain_text.len();
-        self.selection.start = Some((0, 0));
-        self.selection.end = Some((last_line, last_col));
+        let last_line = tab.highlighted_lines.len() - 1;
+        let last_col = tab.highlighted_lines[last_line].plain_text.len();
+        tab.selection.start = Some((0, 0));
+        tab.selection.end = Some((last_line, last_col));
         cx.notify();
     }
 
     /// Get selected text from markdown preview (using character indices).
     pub(super) fn get_selected_markdown_text(&self) -> Option<String> {
-        let doc = self.markdown_doc.as_ref()?;
-        let (start, end) = self.markdown_selection.normalized_non_empty()?;
+        let tab = self.active_tab();
+        let doc = tab.markdown_doc.as_ref()?;
+        let (start, end) = tab.markdown_selection.normalized_non_empty()?;
 
         let chars: Vec<char> = doc.plain_text.chars().collect();
         let char_count = chars.len();
@@ -65,33 +70,22 @@ impl FileViewer {
 
     /// Select all markdown text (using character count).
     pub(super) fn select_all_markdown(&mut self, cx: &mut Context<Self>) {
-        if let Some(doc) = &self.markdown_doc {
-            self.markdown_selection.start = Some(0);
-            self.markdown_selection.end = Some(doc.plain_text.chars().count());
+        let tab = self.active_tab_mut();
+        if let Some(doc) = &tab.markdown_doc {
+            let count = doc.plain_text.chars().count();
+            tab.markdown_selection.start = Some(0);
+            tab.markdown_selection.end = Some(count);
             cx.notify();
         }
     }
 
-    /// Select a file from the tree and load it.
+    /// Select a file from the tree — opens in a new tab (like VS Code).
+    /// If the file is already open, switches to that tab.
+    /// If the current tab is empty (no file), replaces it instead of creating a new one.
     pub(super) fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(file) = self.files.get(index) {
-            self.selected_file_index = Some(index);
             let path = file.path.clone();
-            self.file_path = path.clone();
-            self.is_markdown = Self::is_markdown_file(&self.file_path);
-            self.display_mode = if self.is_markdown { DisplayMode::Preview } else { DisplayMode::Source };
-            self.content.clear();
-            self.highlighted_lines.clear();
-            self.line_count = 0;
-            self.error_message = None;
-            self.selection.clear();
-            self.markdown_doc = None;
-            self.markdown_selection.clear();
-            self.load_file(&path);
-            // Expand ancestors of the newly selected file
-            let expanded = Self::compute_expanded_for_path(&self.file_path, &self.project_path);
-            self.expanded_folders.extend(expanded);
-            cx.notify();
+            self.open_file_in_tab(path, cx);
         }
     }
 
@@ -109,25 +103,52 @@ impl FileViewer {
         cx.notify();
     }
 
+    /// Close the active tab.
+    pub(super) fn close_active_tab(&mut self, cx: &mut Context<Self>) {
+        let idx = self.active_tab;
+        self.close_tab(idx, cx);
+    }
+
+    /// Switch to the next tab.
+    pub(super) fn next_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() > 1 {
+            let next = (self.active_tab + 1) % self.tabs.len();
+            self.set_active_tab(next, cx);
+        }
+    }
+
+    /// Switch to the previous tab.
+    pub(super) fn prev_tab(&mut self, cx: &mut Context<Self>) {
+        if self.tabs.len() > 1 {
+            let prev = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
+            self.set_active_tab(prev, cx);
+        }
+    }
+
     // Scrollbar methods using shared utilities
 
-
     pub(super) fn start_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
-        let mut drag = start_scrollbar_drag(&self.source_scroll_handle);
+        let tab = self.active_tab_mut();
+        let mut drag = start_scrollbar_drag(&tab.source_scroll_handle);
         drag.start_y = y;
-        self.scrollbar_drag = Some(drag);
+        tab.scrollbar_drag = Some(drag);
         cx.notify();
     }
 
     pub(super) fn update_scrollbar_drag(&mut self, y: f32, cx: &mut Context<Self>) {
-        if let Some(drag) = self.scrollbar_drag {
-            update_scrollbar_drag(&self.source_scroll_handle, drag, y);
+        let tab = self.active_tab_mut();
+        if let Some(drag) = tab.scrollbar_drag {
+            update_scrollbar_drag(&tab.source_scroll_handle, drag, y);
             cx.notify();
         }
     }
 
     pub(super) fn end_scrollbar_drag(&mut self, cx: &mut Context<Self>) {
-        self.scrollbar_drag = None;
+        self.active_tab_mut().scrollbar_drag = None;
         cx.notify();
     }
 }
