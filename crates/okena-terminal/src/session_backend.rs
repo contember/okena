@@ -423,7 +423,7 @@ fn is_wsl_tool_available(distro: Option<&str>, tool: &str) -> bool {
     if let Some(d) = distro {
         cmd.args(["-d", d]);
     }
-    cmd.args(["--", "sh", "-c", &format!("command -v {}", tool)]);
+    cmd.args(["--", "sh", "-c", &format!("command -v {}", shell_escape(tool))]);
     crate::process::safe_output(&mut cmd)
         .map(|o| o.status.success())
         .unwrap_or(false)
