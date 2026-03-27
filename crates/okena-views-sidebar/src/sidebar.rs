@@ -1357,9 +1357,17 @@ pub struct SidebarProjectInfo {
 impl SidebarProjectInfo {
     pub(crate) fn from_project(project: &ProjectData) -> Self {
         let layout = project.layout.as_ref();
+        // For worktree projects, show the git branch instead of the stored name.
+        let name = if project.worktree_info.is_some() {
+            okena_git::get_git_status(std::path::Path::new(&project.path))
+                .and_then(|s| s.branch)
+                .unwrap_or_else(|| project.name.clone())
+        } else {
+            project.name.clone()
+        };
         Self {
             id: project.id.clone(),
-            name: project.name.clone(),
+            name,
             show_in_overview: project.show_in_overview,
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
