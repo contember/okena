@@ -7,7 +7,7 @@ use crate::content_search::{
     ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode, search_content,
 };
 use crate::code_view::build_styled_text_with_backgrounds;
-use crate::file_tree::{build_file_tree, FileTreeNode};
+use crate::file_tree::{build_file_tree, expandable_folder_row, expandable_file_row, FileTreeNode};
 use crate::list_overlay::ListOverlayConfig;
 use crate::syntax::{
     HighlightedLine, highlight_content, load_syntax_set,
@@ -856,7 +856,6 @@ impl ContentSearchDialog {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut elements = Vec::new();
-        let indent = depth as f32 * 14.0;
 
         for (name, child) in &node.children {
             let folder_path = if parent_path.is_empty() {
@@ -870,48 +869,12 @@ impl ContentSearchDialog {
             let fp_scope = folder_path.clone();
 
             elements.push(
-                div()
+                expandable_folder_row(name, depth, is_expanded, t, cx)
                     .id(ElementId::Name(format!("cs-folder-{}", folder_path).into()))
-                    .flex()
-                    .items_center()
-                    .h(px(26.0))
-                    .pl(px(indent + 8.0))
-                    .pr(px(12.0))
-                    .mx(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
                     .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.toggle_folder(&fp_toggle, cx);
                     }))
-                    // Chevron
-                    .child(
-                        svg()
-                            .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_muted))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    )
-                    // Folder icon
-                    .child(
-                        svg()
-                            .path("icons/folder.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(ui_text(13.0, cx))
-                            .text_color(rgb(t.text_secondary))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(format!("{name}/")),
-                    )
                     // Scope button
                     .child(
                         div()
@@ -957,20 +920,10 @@ impl ContentSearchDialog {
                 let is_scoped = self.scope_path.as_ref() == Some(&rel);
                 let count = *match_count;
 
-                let rel2 = relative_path.clone();
                 elements.push(
-                    div()
+                    expandable_file_row(&filename, depth, t, cx)
                         .id(ElementId::Name(format!("cs-file-{}", row_index).into()))
-                        .flex()
-                        .items_center()
-                        .h(px(26.0))
-                        .pl(px(indent + 8.0 + 18.0)) // align past chevron
-                        .pr(px(12.0))
-                        .mx(px(4.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
                         .when(is_scoped, |d| d.bg(rgb(t.bg_selection)))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             if this.scope_path.as_ref() == Some(&rel) {
                                 this.set_scope(None, cx);
@@ -978,19 +931,6 @@ impl ContentSearchDialog {
                                 this.set_scope(Some(rel.clone()), cx);
                             }
                         }))
-                        .child(
-                            file_icon(&filename, t, cx)
-                                .mr(px(4.0)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(ui_text(13.0, cx))
-                                .text_color(rgb(t.text_primary))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(filename),
-                        )
                         .child(
                             div()
                                 .text_size(ui_text_sm(cx))

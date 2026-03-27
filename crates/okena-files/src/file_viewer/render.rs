@@ -8,13 +8,12 @@ use crate::code_view::{
     get_scrollbar_geometry, selection_bg_ranges,
 };
 use crate::syntax::HighlightedLine;
-use crate::file_tree::FileTreeNode;
+use crate::file_tree::{FileTreeNode, expandable_folder_row, expandable_file_row};
 use okena_core::theme::ThemeColors;
 use okena_ui::code_block::code_block_container;
 use okena_ui::modal::fullscreen_overlay;
 use okena_ui::toggle::segmented_toggle;
-use okena_ui::file_icon::file_icon;
-use okena_ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl};
+use okena_ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_xl};
 use okena_markdown::RenderedNode;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
 use gpui::*;
@@ -200,47 +199,14 @@ impl FileViewer {
                 format!("{}/{}", parent_path, name)
             };
             let is_expanded = self.expanded_folders.contains(&folder_path);
-            let indent = depth * 14;
 
             let folder_path_clone = folder_path.clone();
             elements.push(
-                div()
+                expandable_folder_row(name, depth, is_expanded, t, cx)
                     .id(ElementId::Name(format!("fv-folder-{}", folder_path).into()))
-                    .flex()
-                    .items_center()
-                    .h(px(26.0))
-                    .pl(px(indent as f32 + 8.0))
-                    .pr(px(12.0))
-                    .mx(px(4.0))
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.toggle_folder(&folder_path_clone, cx);
                     }))
-                    .child(
-                        // Chevron icon
-                        svg()
-                            .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_muted))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        svg()
-                            .path("icons/folder.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        div()
-                            .text_size(ui_text_md(cx))
-                            .text_color(rgb(t.text_secondary))
-                            .child(format!("{}/", name)),
-                    )
                     .into_any_element(),
             );
 
@@ -251,37 +217,15 @@ impl FileViewer {
 
         for &file_index in &node.files {
             if let Some(file) = self.files.get(file_index) {
-                let indent = depth * 14;
                 let is_selected = self.selected_file_index == Some(file_index);
 
                 elements.push(
-                    div()
+                    expandable_file_row(&file.filename, depth, t, cx)
                         .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
-                        .flex()
-                        .items_center()
-                        .h(px(26.0))
-                        .pl(px(indent as f32 + 8.0 + 18.0)) // extra 18px to align past chevron
-                        .pr(px(12.0))
-                        .mx(px(4.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.select_file(file_index, cx);
                         }))
-                        .child(
-                            file_icon(&file.filename, t, cx)
-                                .mr(px(4.0)),
-                        )
-                        .child(
-                            div()
-                                .text_size(ui_text(13.0, cx))
-                                .text_color(rgb(t.text_primary))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(file.filename.clone()),
-                        )
                         .into_any_element(),
                 );
             }

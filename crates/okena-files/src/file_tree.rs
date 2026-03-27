@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use okena_core::theme::ThemeColors;
 use okena_ui::file_icon::file_icon;
-use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md};
+use okena_ui::tokens::{ui_text, ui_text_sm, ui_text_ms, ui_text_md};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -69,7 +69,7 @@ pub fn render_folder_row(name: &str, depth: usize, t: &ThemeColors, cx: &App) ->
         .child(
             div()
                 .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_secondary))
+                .text_color(rgb(t.text_primary))
                 .child(format!("{}/", name)),
         )
         .into_any_element()
@@ -154,6 +154,96 @@ pub fn render_file_row(
                     }),
             )
         })
+}
+
+/// Base div for an expandable folder row: chevron + folder icon + name.
+///
+/// Caller chains `.id(...)`, `.on_click(...)`, `.when(...)` for selection,
+/// and `.child(...)` for extras (e.g. scope button).
+pub fn expandable_folder_row(
+    name: &str,
+    depth: usize,
+    is_expanded: bool,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    let indent = depth as f32 * 14.0;
+    div()
+        .flex()
+        .items_center()
+        .h(px(26.0))
+        .pl(px(indent + 8.0))
+        .pr(px(12.0))
+        .mx(px(4.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        // Chevron
+        .child(
+            svg()
+                .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                .size(px(14.0))
+                .text_color(rgb(t.text_muted))
+                .mr(px(4.0))
+                .flex_shrink_0(),
+        )
+        // Folder icon
+        .child(
+            svg()
+                .path("icons/folder.svg")
+                .size(px(14.0))
+                .text_color(rgb(t.text_secondary))
+                .mr(px(4.0))
+                .flex_shrink_0(),
+        )
+        // Folder name
+        .child(
+            div()
+                .flex_1()
+                .text_size(ui_text(13.0, cx))
+                .text_color(rgb(t.text_primary))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(format!("{name}/")),
+        )
+}
+
+/// Base div for an expandable file row: file icon + filename.
+///
+/// Caller chains `.id(...)`, `.on_click(...)`, `.when(...)` for selection,
+/// and `.child(...)` for extras (e.g. match count badge).
+pub fn expandable_file_row(
+    filename: &str,
+    depth: usize,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    let indent = depth as f32 * 14.0;
+    div()
+        .flex()
+        .items_center()
+        .h(px(26.0))
+        .pl(px(indent + 8.0 + 18.0)) // extra 18px to align past chevron
+        .pr(px(12.0))
+        .mx(px(4.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        // File icon
+        .child(
+            file_icon(filename, t, cx)
+                .mr(px(4.0)),
+        )
+        // Filename
+        .child(
+            div()
+                .flex_1()
+                .text_size(ui_text(13.0, cx))
+                .text_color(rgb(t.text_primary))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(filename.to_string()),
+        )
 }
 
 #[cfg(test)]
