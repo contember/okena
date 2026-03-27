@@ -32,6 +32,10 @@ pub struct WorktreeListPopover {
     position: Point<Pixels>,
     hooks: HooksConfig,
     focus_handle: FocusHandle,
+    /// Git repository root for the parent project (may differ from project path in monorepos).
+    git_root: std::path::PathBuf,
+    /// Subdirectory within the git repo (empty for non-monorepo projects).
+    subdir: std::path::PathBuf,
 }
 
 impl WorktreeListPopover {
@@ -45,11 +49,17 @@ impl WorktreeListPopover {
         let project_path = workspace.read(cx).project(&project_id)
             .map(|p| p.path.clone())
             .unwrap_or_default();
+        let project_pathbuf = std::path::PathBuf::from(&project_path);
+        let git_root = okena_git::get_repo_root(&project_pathbuf)
+            .unwrap_or_else(|| project_pathbuf.clone());
+        let subdir = project_pathbuf.strip_prefix(&git_root)
+            .unwrap_or(std::path::Path::new(""))
+            .to_path_buf();
         let entries = okena_git::repository::list_git_worktrees(
             std::path::Path::new(&project_path),
         );
         let focus_handle = cx.focus_handle();
-        Self { workspace, project_id, entries, position, hooks, focus_handle }
+        Self { workspace, project_id, entries, position, hooks, focus_handle, git_root, subdir }
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -67,28 +77,30 @@ impl Render for WorktreeListPopover {
 
         let ws = self.workspace.read(cx);
         let project_id = &self.project_id;
+        let subdir = &self.subdir;
 
-        // Get parent project path (for normalization comparison)
-        let project_path = ws.project(project_id)
-            .map(|p| p.path.clone())
-            .unwrap_or_default();
-
-        // Build set of worktree paths already tracked in workspace
-        let tracked_wt_paths: std::collections::HashSet<String> = ws.data().projects.iter()
+        // Build set of project paths already tracked in workspace for this parent.
+        // This contains the full project path (which may include a monorepo subdir).
+        let tracked_project_paths: std::collections::HashSet<String> = ws.data().projects.iter()
             .filter(|p| p.worktree_info.as_ref()
                 .map_or(false, |wt| wt.parent_project_id == *project_id))
             .map(|p| p.path.clone())
             .collect();
 
-        // Filter: skip the main repo itself
+        // Filter: skip the main repo itself (compare worktree root against git root,
+        // not against the project path which may be a subdirectory in monorepos).
+        let norm_git_root = okena_git::repository::normalize_path(&self.git_root);
         let worktrees: Vec<(String, String, bool)> = self.entries.iter()
             .filter(|(wt_path, _)| {
                 let norm_wt = okena_git::repository::normalize_path(std::path::Path::new(wt_path));
-                let norm_proj = okena_git::repository::normalize_path(std::path::Path::new(&project_path));
-                norm_wt != norm_proj
+                norm_wt != norm_git_root
             })
             .map(|(wt_path, branch)| {
-                let is_tracked = tracked_wt_paths.contains(wt_path);
+                // Compute the expected project path (worktree root + monorepo subdir)
+                let expected_path = okena_git::repository::project_path_in_worktree(wt_path, subdir);
+                // Check both the expected path and bare worktree root for backwards compat
+                let is_tracked = tracked_project_paths.contains(&expected_path)
+                    || tracked_project_paths.contains(wt_path);
                 (wt_path.clone(), branch.clone(), is_tracked)
             })
             .collect();
@@ -131,10 +143,16 @@ impl Render for WorktreeListPopover {
                     .hover(|s| s.bg(rgb(t.bg_hover)))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if is_tracked {
+                            // Find the tracked project by matching both the expected
+                            // project path (with subdir) and the bare worktree root.
+                            let expected_path = okena_git::repository::project_path_in_worktree(
+                                &wt_path_clone, &this.subdir,
+                            );
                             let ws = this.workspace.read(cx);
                             let wt_project_id = ws.data().projects.iter()
-                                .find(|p| p.path == wt_path_clone && p.worktree_info.as_ref()
-                                    .map_or(false, |wt| wt.parent_project_id == project_id))
+                                .find(|p| (p.path == expected_path || p.path == wt_path_clone)
+                                    && p.worktree_info.as_ref()
+                                        .map_or(false, |wt| wt.parent_project_id == project_id))
                                 .map(|p| p.id.clone());
                             if let Some(id) = wt_project_id {
                                 this.workspace.update(cx, |ws, cx| {
@@ -142,6 +160,11 @@ impl Render for WorktreeListPopover {
                                 });
                             }
                         } else {
+                            // add_discovered_worktree computes the correct project
+                            // path (worktree root + monorepo subdir) internally.
+                            let expected_path = okena_git::repository::project_path_in_worktree(
+                                &wt_path_clone, &this.subdir,
+                            );
                             this.workspace.update(cx, |ws, cx| {
                                 ws.add_discovered_worktree(
                                     &wt_path_clone,
@@ -150,7 +173,7 @@ impl Render for WorktreeListPopover {
                                     "",
                                 );
                                 let new_id = ws.data().projects.iter()
-                                    .find(|p| p.path == wt_path_clone)
+                                    .find(|p| p.path == expected_path || p.path == wt_path_clone)
                                     .map(|p| p.id.clone());
                                 if let Some(new_id) = new_id {
                                     ws.add_to_worktree_ids(&project_id, &new_id);

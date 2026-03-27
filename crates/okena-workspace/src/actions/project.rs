@@ -542,8 +542,25 @@ impl Workspace {
         parent_id: &str,
         _main_repo_path: &str,
     ) {
-        // Double-check it's not already tracked
-        if self.data.projects.iter().any(|p| p.path == wt_path) {
+        // For monorepo projects the parent path may be a subdirectory inside
+        // the git repo (e.g. /repo/packages/app). Discovered worktrees from
+        // `git worktree list` are always the worktree root. We need to append
+        // the same subdirectory so terminals start in the right place.
+        let project_path = {
+            let parent_path = self.project(parent_id)
+                .map(|p| p.path.clone())
+                .unwrap_or_default();
+            let parent_pathbuf = std::path::PathBuf::from(&parent_path);
+            let git_root = okena_git::get_repo_root(&parent_pathbuf)
+                .unwrap_or_else(|| parent_pathbuf.clone());
+            let subdir = parent_pathbuf.strip_prefix(&git_root)
+                .unwrap_or(std::path::Path::new(""));
+            okena_git::repository::project_path_in_worktree(wt_path, subdir)
+        };
+
+        // Double-check it's not already tracked (check both full project path
+        // and bare worktree root for backwards compatibility)
+        if self.data.projects.iter().any(|p| p.path == project_path || p.path == wt_path) {
             return;
         }
 
@@ -557,7 +574,7 @@ impl Workspace {
         let project = ProjectData {
             id: id.clone(),
             name: project_name,
-            path: wt_path.to_string(),
+            path: project_path,
             show_in_overview: false,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
