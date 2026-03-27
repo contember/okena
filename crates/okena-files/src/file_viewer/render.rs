@@ -368,19 +368,14 @@ impl FileViewer {
                         div()
                             .id(ElementId::Name(format!("fv-tab-close-{}", i).into()))
                             .cursor_pointer()
-                            .ml(px(6.0))
-                            .w(px(20.0))
-                            .h(px(20.0))
+                            .ml(px(4.0))
+                            .w(px(16.0))
+                            .h(px(16.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.0))
-                            .hover(|s| s.bg(Rgba {
-                                r: 0xf1 as f32 / 255.0,
-                                g: 0x4c as f32 / 255.0,
-                                b: 0x4c as f32 / 255.0,
-                                a: 0.6,
-                            }))
+                            .rounded(px(3.0))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.close_tab(i, cx);
                             }))
