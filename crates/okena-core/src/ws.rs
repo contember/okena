@@ -59,6 +59,11 @@ pub enum WsOutbound {
     GitStatusChanged {
         projects: std::collections::HashMap<String, ApiGitStatus>,
     },
+    TerminalResized {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 // ── Binary frame protocol ──────────────────────────────────────────────────
@@ -170,6 +175,11 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+            },
+            WsOutbound::TerminalResized {
+                terminal_id: "t1".into(),
+                cols: 120,
+                rows: 40,
             },
         ];
         for msg in messages {

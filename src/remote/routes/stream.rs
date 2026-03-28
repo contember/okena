@@ -203,23 +203,52 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                     Ok(event) => {
                         // Start a batch with the first event
                         let mut batch: HashMap<u32, Vec<u8>> = HashMap::new();
-                        if let Some(&stream_id) = subscribed_ids.get(&event.terminal_id) {
-                            batch.entry(stream_id).or_default().extend_from_slice(&event.data);
+                        let mut resize_msgs: Vec<WsOutbound> = Vec::new();
+
+                        match &event {
+                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
+                                if let Some(&stream_id) = subscribed_ids.get(terminal_id) {
+                                    batch.entry(stream_id).or_default().extend_from_slice(data);
+                                }
+                            }
+                            crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows } => {
+                                if subscribed_ids.contains_key(terminal_id) {
+                                    resize_msgs.push(WsOutbound::TerminalResized {
+                                        terminal_id: terminal_id.clone(),
+                                        cols: *cols,
+                                        rows: *rows,
+                                    });
+                                }
+                            }
                         }
 
                         // Drain additional pending events (coalescing)
                         let mut channel_closed = false;
                         loop {
                             match pty_rx.try_recv() {
-                                Ok(ev) => {
-                                    if let Some(&sid) = subscribed_ids.get(&ev.terminal_id) {
-                                        batch.entry(sid).or_default().extend_from_slice(&ev.data);
+                                Ok(ev) => match &ev {
+                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Output { terminal_id, data } => {
+                                        if let Some(&sid) = subscribed_ids.get(terminal_id) {
+                                            batch.entry(sid).or_default().extend_from_slice(data);
+                                        }
                                     }
-                                }
+                                    crate::remote::pty_broadcaster::PtyBroadcastEvent::Resized { terminal_id, cols, rows } => {
+                                        if subscribed_ids.contains_key(terminal_id) {
+                                            // Keep only the latest resize per terminal
+                                            resize_msgs.retain(|m| !matches!(m, WsOutbound::TerminalResized { terminal_id: id, .. } if id == terminal_id));
+                                            resize_msgs.push(WsOutbound::TerminalResized {
+                                                terminal_id: terminal_id.clone(),
+                                                cols: *cols,
+                                                rows: *rows,
+                                            });
+                                        }
+                                    }
+                                },
                                 Err(broadcast::error::TryRecvError::Empty) => break,
                                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
                                     // Batch is stale — clear it and send snapshots instead
                                     batch.clear();
+                                    resize_msgs.clear();
                                     let resp = serde_json::to_string(&WsOutbound::Dropped { count: n })
                                         .expect("BUG: WsOutbound must serialize");
                                     if out_tx.send(Message::Text(resp.into())).await.is_err() {
@@ -244,7 +273,19 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                             break;
                         }
 
-                        // Send coalesced frames
+                        // Send resize notifications first (so client updates grid before PTY data)
+                        for msg in resize_msgs {
+                            let resp = serde_json::to_string(&msg).expect("BUG: WsOutbound must serialize");
+                            if out_tx.send(Message::Text(resp.into())).await.is_err() {
+                                channel_closed = true;
+                                break;
+                            }
+                        }
+                        if channel_closed {
+                            break;
+                        }
+
+                        // Send coalesced PTY frames
                         for (stream_id, data) in batch {
                             let frame = build_pty_frame(stream_id, &data);
                             if out_tx.send(Message::Binary(frame.into())).await.is_err() {

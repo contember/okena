@@ -1,11 +1,13 @@
 use okena_terminal::pty_manager::PtyOutputSink;
 use tokio::sync::broadcast;
 
-/// A PTY output event for broadcast to WebSocket subscribers.
+/// A PTY broadcast event for WebSocket subscribers.
 #[derive(Clone, Debug)]
-pub struct PtyBroadcastEvent {
-    pub terminal_id: String,
-    pub data: Vec<u8>,
+pub enum PtyBroadcastEvent {
+    /// Terminal output data.
+    Output { terminal_id: String, data: Vec<u8> },
+    /// Terminal was resized (server-side).
+    Resized { terminal_id: String, cols: u16, rows: u16 },
 }
 
 /// Fan-out PTY events to WebSocket subscribers.
@@ -25,8 +27,12 @@ impl PtyBroadcaster {
 
     /// Publish a PTY output event. Non-blocking; drops if no subscribers.
     pub fn publish(&self, terminal_id: String, data: Vec<u8>) {
-        // Ignore send error (means no active subscribers)
-        let _ = self.tx.send(PtyBroadcastEvent { terminal_id, data });
+        let _ = self.tx.send(PtyBroadcastEvent::Output { terminal_id, data });
+    }
+
+    /// Publish a terminal resize event. Non-blocking; drops if no subscribers.
+    pub fn publish_resize(&self, terminal_id: String, cols: u16, rows: u16) {
+        let _ = self.tx.send(PtyBroadcastEvent::Resized { terminal_id, cols, rows });
     }
 
     /// Create a new subscriber receiver.
@@ -38,5 +44,9 @@ impl PtyBroadcaster {
 impl PtyOutputSink for PtyBroadcaster {
     fn publish(&self, terminal_id: String, data: Vec<u8>) {
         self.publish(terminal_id, data);
+    }
+
+    fn publish_resize(&self, terminal_id: String, cols: u16, rows: u16) {
+        self.publish_resize(terminal_id, cols, rows);
     }
 }

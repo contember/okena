@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 /// Implementations must be thread-safe as this is called from PTY reader threads.
 pub trait PtyOutputSink: Send + Sync {
     fn publish(&self, terminal_id: String, data: Vec<u8>);
+    fn publish_resize(&self, _terminal_id: String, _cols: u16, _rows: u16) {}
 }
 
 /// Events from PTY processes
@@ -514,6 +515,10 @@ impl PtyManager {
             }) {
                 log::error!("Failed to resize PTY: {}", e);
             }
+        }
+        // Notify remote clients about the resize so they can update their grids
+        if let Some(sink) = self.output_sink.lock().as_ref() {
+            sink.publish_resize(terminal_id.to_string(), cols, rows);
         }
     }
 
