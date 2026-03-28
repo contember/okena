@@ -221,6 +221,15 @@ pub enum ActionRequest {
         #[serde(default)]
         mode: DiffMode,
     },
+    GitCommitGraph {
+        project_id: String,
+        count: usize,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    GitListBranches {
+        project_id: String,
+    },
     AddProject {
         name: String,
         path: String,
@@ -265,7 +274,35 @@ pub enum ActionRequest {
         #[serde(default)]
         create_branch: bool,
     },
+    ListFiles {
+        project_id: String,
+    },
+    ReadFile {
+        project_id: String,
+        relative_path: String,
+    },
+    FileSize {
+        project_id: String,
+        relative_path: String,
+    },
+    SearchContent {
+        project_id: String,
+        query: String,
+        #[serde(default)]
+        case_sensitive: bool,
+        #[serde(default = "default_search_mode")]
+        mode: String,
+        #[serde(default = "default_max_results")]
+        max_results: usize,
+        #[serde(default)]
+        file_glob: Option<String>,
+        #[serde(default)]
+        context_lines: usize,
+    },
 }
+
+fn default_search_mode() -> String { "literal".to_string() }
+fn default_max_results() -> usize { 1000 }
 
 /// POST /v1/pair request
 #[derive(Serialize, Deserialize)]

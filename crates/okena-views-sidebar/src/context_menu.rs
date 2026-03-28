@@ -24,7 +24,7 @@ pub enum ContextMenuEvent {
     ReloadServices { project_id: String },
     FocusParent { project_id: String },
     CopyPath { path: String },
-    BrowseFiles { project_path: String },
+    BrowseFiles { project_id: String },
     ShowDiff { project_id: String },
     FocusProject { project_id: String },
     HideProject { project_id: String },
@@ -134,8 +134,8 @@ impl ContextMenu {
         cx.emit(ContextMenuEvent::Close);
     }
 
-    fn browse_files(&self, project_path: String, cx: &mut Context<Self>) {
-        cx.emit(ContextMenuEvent::BrowseFiles { project_path });
+    fn browse_files(&self, project_id: String, cx: &mut Context<Self>) {
+        cx.emit(ContextMenuEvent::BrowseFiles { project_id });
     }
 
     fn show_diff(&self, cx: &mut Context<Self>) {
@@ -214,9 +214,9 @@ impl Render for ContextMenu {
                     .child(
                         menu_item("context-menu-browse-files", "icons/file.svg", "Browse Files", &t)
                             .on_click(cx.listener({
-                                let project_path = project_path.clone();
+                                let project_id = self.request.project_id.clone();
                                 move |this, _, _window, cx| {
-                                    this.browse_files(project_path.clone(), cx);
+                                    this.browse_files(project_id.clone(), cx);
                                 }
                             })),
                     )

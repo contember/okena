@@ -31,6 +31,61 @@ impl RootView {
             service_manager: self.service_manager.clone(),
         })
     }
+
+    /// Resolve remote connection parameters for a remote project.
+    /// Returns (host, port, token, actual_project_id) or None if unavailable.
+    fn remote_params(
+        &self,
+        project_id: &str,
+        connection_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<(String, u16, String, String)> {
+        let rm = self.remote_manager.as_ref()?.read(cx);
+        let connections = rm.connections();
+        let (config, _, _) = connections.iter().find(|(c, _, _)| c.id == connection_id)?;
+        let token = config.saved_token.as_ref()?.clone();
+        let actual_id = okena_core::client::strip_prefix(project_id, connection_id);
+        Some((config.host.clone(), config.port, token, actual_id))
+    }
+
+    /// Build a GitProvider for the given project (local or remote).
+    pub(super) fn build_git_provider(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::views::overlays::diff_viewer::provider::GitProvider>> {
+        use crate::views::overlays::diff_viewer::provider::{LocalGitProvider, RemoteGitProvider};
+        let ws = self.workspace.read(cx);
+        let project = ws.project(project_id)?;
+        if project.is_remote {
+            let conn_id = project.connection_id.as_ref()?;
+            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+            Some(std::sync::Arc::new(RemoteGitProvider::new(host, port, token, actual_id)))
+        } else {
+            Some(std::sync::Arc::new(LocalGitProvider::new(project.path.clone())))
+        }
+    }
+
+    /// Build a ProjectFs provider for the given project (local or remote).
+    fn build_project_fs(
+        &self,
+        project_id: &str,
+        cx: &Context<Self>,
+    ) -> Option<std::sync::Arc<dyn okena_files::project_fs::ProjectFs>> {
+        let ws = self.workspace.read(cx);
+        let project = ws.project(project_id)?;
+        if project.is_remote {
+            let conn_id = project.connection_id.as_ref()?;
+            let (host, port, token, actual_id) = self.remote_params(project_id, conn_id, cx)?;
+            Some(std::sync::Arc::new(okena_files::project_fs::RemoteProjectFs::new(
+                host, port, token, actual_id, project.name.clone(),
+            )))
+        } else {
+            Some(std::sync::Arc::new(okena_files::project_fs::LocalProjectFs::new(
+                project.path.clone(),
+            )))
+        }
+    }
 }
 
 impl RootView {
@@ -331,28 +386,7 @@ impl RootView {
                     });
                 }
                 OverlayRequest::DiffViewer { project_id, file, mode, commit_message, commits, commit_index } => {
-                    use crate::views::overlays::diff_viewer::provider::{DiffProvider, LocalDiffProvider, RemoteDiffProvider};
-                    let ws = self.workspace.read(cx);
-                    if let Some(project) = ws.project(&project_id) {
-                        let provider: std::sync::Arc<dyn DiffProvider> = if project.is_remote {
-                            if let Some(conn_id) = &project.connection_id {
-                                if let Some(ref rm) = self.remote_manager {
-                                    let rm = rm.read(cx);
-                                    if let Some((config, _, _)) = rm.connections().iter()
-                                        .find(|(c, _, _)| c.id == *conn_id) {
-                                        if let Some(token) = &config.saved_token {
-                                            let actual_id = okena_core::client::strip_prefix(&project_id, conn_id);
-                                            std::sync::Arc::new(RemoteDiffProvider::new(
-                                                config.host.clone(), config.port,
-                                                token.clone(), actual_id,
-                                            ))
-                                        } else { continue; }
-                                    } else { continue; }
-                                } else { continue; }
-                            } else { continue; }
-                        } else {
-                            std::sync::Arc::new(LocalDiffProvider::new(project.path.clone()))
-                        };
+                    if let Some(provider) = self.build_git_provider(&project_id, cx) {
                         self.overlay_manager.update(cx, |om, cx| {
                             om.show_diff_viewer(provider, file, mode, commit_message, commits, commit_index, cx);
                         });
@@ -393,21 +427,27 @@ impl RootView {
                         });
                     }
                 }
-                OverlayRequest::FileSearch { project_path } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_file_search(std::path::PathBuf::from(project_path), cx);
-                    });
+                OverlayRequest::FileSearch { project_id } => {
+                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.toggle_file_search(fs, cx);
+                        });
+                    }
                 }
-                OverlayRequest::ContentSearch { project_path } => {
-                    let is_dark = crate::theme::theme(cx).is_dark();
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.toggle_content_search(std::path::PathBuf::from(project_path), is_dark, cx);
-                    });
+                OverlayRequest::ContentSearch { project_id } => {
+                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                        let is_dark = crate::theme::theme(cx).is_dark();
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.toggle_content_search(fs, is_dark, cx);
+                        });
+                    }
                 }
-                OverlayRequest::FileBrowser { project_path } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_file_browser(std::path::PathBuf::from(project_path), cx);
-                    });
+                OverlayRequest::FileBrowser { project_id } => {
+                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_file_browser(fs, cx);
+                        });
+                    }
                 }
                 OverlayRequest::ColorPicker { project_id, position } => {
                     self.overlay_manager.update(cx, |om, cx| {

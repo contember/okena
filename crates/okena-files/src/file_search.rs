@@ -33,7 +33,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
 const MAX_FILES: usize = 10000;
 
 /// A file entry in the search list
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileEntry {
     /// Full path to the file
     pub path: PathBuf,
@@ -62,22 +62,22 @@ pub struct FileSearchDialog {
     files: Vec<FileEntry>,
     filtered_files: Vec<(usize, Vec<usize>)>,
     selected_index: usize,
-    project_path: PathBuf,
+    project_name: String,
     config: ListOverlayConfig,
     show_ignored: bool,
     show_hidden: bool,
     filter_popover_open: bool,
     filter_button_bounds: Option<Bounds<Pixels>>,
-    scanning: bool,
-    #[allow(dead_code)]
-    scan_task: Option<Task<()>>,
+    loading: bool,
 }
 
 impl FileSearchDialog {
     /// Create a new file search dialog, restoring the last query if available.
-    pub fn new(project_path: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
+
+        let project_name = fs.project_name();
 
         let config = ListOverlayConfig::new("Go to File")
             .searchable("Type to search files...")
@@ -108,65 +108,39 @@ impl FileSearchDialog {
         })
         .detach();
 
-        let mut dialog = Self {
+        // Load files asynchronously to avoid blocking the UI thread (important for remote projects)
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { fs.list_files() })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.files = files;
+                this.loading = false;
+                this.filter_files(cx);
+                if restored_index < this.filtered_files.len() {
+                    this.selected_index = restored_index;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+
+        Self {
             focus_handle,
             scroll_handle,
             search_input,
-            files: vec![],
+            files: Vec::new(),
             filtered_files: vec![],
             selected_index: 0,
-            project_path,
+            project_name,
             config,
             show_ignored,
             show_hidden,
             filter_popover_open: false,
             filter_button_bounds: None,
-            scanning: true,
-            scan_task: None,
-        };
-
-        dialog.start_scan(cx);
-
-        // Restore selected index after scan completes — store for later
-        if restored_index > 0 {
-            // Will be clamped after scan finishes in start_scan callback
-            dialog.selected_index = restored_index;
+            loading: true,
         }
-
-        dialog
-    }
-
-    /// Start an async file scan on the background executor.
-    fn start_scan(&mut self, cx: &mut Context<Self>) {
-        self.scanning = true;
-        self.files.clear();
-        self.filtered_files.clear();
-        cx.notify();
-
-        let project_path = self.project_path.clone();
-        let show_ignored = self.show_ignored;
-        let show_hidden = self.show_hidden;
-
-        self.scan_task = Some(cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
-                .background_executor()
-                .spawn(async move {
-                    Self::scan_files(&project_path, show_ignored, show_hidden)
-                })
-                .await;
-
-            entity
-                .update(cx, |this, cx| {
-                    this.files = files;
-                    this.scanning = false;
-                    this.filter_files(cx);
-                    if this.selected_index >= this.filtered_files.len() {
-                        this.selected_index = 0;
-                    }
-                    cx.notify();
-                })
-                .ok();
-        }));
     }
 
     /// Scan files in the project directory using the `ignore` crate.
@@ -240,7 +214,8 @@ impl FileSearchDialog {
             "hidden" => self.show_hidden = !self.show_hidden,
             _ => {}
         }
-        self.start_scan(cx);
+        // TODO: re-scan with filter options (requires ProjectFs enhancement for remote support)
+        cx.notify();
     }
 
     /// Close the dialog, saving state for next open.
@@ -526,10 +501,7 @@ impl Render for FileSearchDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let project_name = self.project_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Project".to_string());
+        let project_name = self.project_name.clone();
 
         // Focus search input on first render
         let input_focus = self.search_input.read(cx).focus_handle(cx);
@@ -582,10 +554,10 @@ impl Render for FileSearchDialog {
                     ))
                     .child(crate::list_overlay::search_input_row(&self.search_input, &t, cx))
                     .child(self.render_filter_bar(cx))
-                    .child(if self.scanning {
+                    .child(if self.loading {
                         div()
                             .flex_1()
-                            .child(empty_state("Scanning files...", &t, cx))
+                            .child(empty_state("Loading files…", &t, cx))
                             .into_any_element()
                     } else if self.filtered_files.is_empty() {
                         div()

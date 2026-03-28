@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A single search match within a file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContentMatch {
     /// 1-based line number.
     pub line_number: usize,
@@ -74,7 +74,7 @@ fn expand_tabs_simple(text: &str) -> String {
 }
 
 /// Search results grouped by file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileSearchResult {
     pub file_path: PathBuf,
     pub relative_path: String,

@@ -564,5 +564,35 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branch,
             create_branch,
         },
+        ActionRequest::GitCommitGraph { project_id, count, branch } => ActionRequest::GitCommitGraph {
+            project_id: s(&project_id),
+            count,
+            branch,
+        },
+        ActionRequest::GitListBranches { project_id } => ActionRequest::GitListBranches {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ListFiles { project_id } => ActionRequest::ListFiles {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ReadFile { project_id, relative_path } => ActionRequest::ReadFile {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::FileSize { project_id, relative_path } => ActionRequest::FileSize {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
+            ActionRequest::SearchContent {
+                project_id: s(&project_id),
+                query,
+                case_sensitive,
+                mode,
+                max_results,
+                file_glob,
+                context_lines,
+            }
+        }
     }
 }

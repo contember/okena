@@ -150,7 +150,7 @@ impl GitStatus {
 }
 
 /// A single commit entry for the commit log popover.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CommitLogEntry {
     /// Short hash (7 chars)
     pub hash: String,
@@ -170,7 +170,7 @@ pub struct CommitLogEntry {
 }
 
 /// A row in the commit graph — either a commit or a graph connector line.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GraphRow {
     Commit(CommitLogEntry),
     /// Graph-only connector line (e.g. "|\ ", "|/ ")

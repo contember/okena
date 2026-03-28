@@ -233,11 +233,12 @@ impl FileViewer {
     }
 
     fn update_expanded_after_rename(&mut self, old_path: &Path, new_path: &Path) {
-        let old_rel = match old_path.strip_prefix(&self.project_path) {
+        let project_path = PathBuf::from(self.project_fs.project_id());
+        let old_rel = match old_path.strip_prefix(&project_path) {
             Ok(p) => p.to_string_lossy().to_string(),
             Err(_) => return,
         };
-        let new_rel = match new_path.strip_prefix(&self.project_path) {
+        let new_rel = match new_path.strip_prefix(&project_path) {
             Ok(p) => p.to_string_lossy().to_string(),
             Err(_) => return,
         };

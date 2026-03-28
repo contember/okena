@@ -51,7 +51,7 @@ pub struct DiffViewer {
     /// Ignore whitespace changes in diff.
     ignore_whitespace: bool,
     /// Provider for fetching diff data (local or remote).
-    provider: Arc<dyn provider::DiffProvider>,
+    provider: Arc<dyn provider::GitProvider>,
     /// Whether diff data is currently being loaded.
     loading: bool,
     /// Raw diff data for all files (not syntax highlighted).
@@ -102,7 +102,7 @@ pub struct DiffViewer {
 impl DiffViewer {
     /// Create a new diff viewer with the given provider, optionally selecting a specific file, mode, commit message, and commit navigation list.
     pub fn new(
-        provider: Arc<dyn provider::DiffProvider>,
+        provider: Arc<dyn provider::GitProvider>,
         select_file: Option<String>,
         mode: Option<DiffMode>,
         commit_message: Option<String>,

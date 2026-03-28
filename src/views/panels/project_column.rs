@@ -56,6 +56,7 @@ impl ProjectColumn {
         terminals: TerminalsRegistry,
         active_drag: ActiveDrag,
         git_watcher: Option<Entity<GitStatusWatcher>>,
+        git_provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
         // Observe git watcher for re-renders (replaces per-column polling)
@@ -69,7 +70,7 @@ impl ProjectColumn {
         let git_header = {
             let pid = project_id.clone();
             let rb = request_broker.clone();
-            cx.new(move |cx| GitHeader::new(pid, rb, cx))
+            cx.new(move |cx| GitHeader::new(pid, rb, git_provider, cx))
         };
         // Observe git_header so ProjectColumn re-renders when popovers change
         cx.observe(&git_header, |_, _, cx| cx.notify()).detach();
@@ -341,8 +342,6 @@ impl ProjectColumn {
                 })
             });
 
-        let project_path = project.path.clone();
-
         v_flex()
             // Colored accent bar
             .child(
@@ -413,7 +412,7 @@ impl ProjectColumn {
                             project.name.clone()
                         };
                         let path_for_tooltip = project.path.clone();
-                        let path_for_click = project.path.clone();
+                        let project_id_for_click = self.project_id.clone();
                         let request_broker_for_click = self.request_broker.clone();
                         div()
                             .id("project-name")
@@ -433,7 +432,7 @@ impl ProjectColumn {
                             .on_click(move |_, _, cx| {
                                 request_broker_for_click.update(cx, |broker, cx| {
                                     broker.push_overlay_request(
-                                        OverlayRequest::FileBrowser { project_path: path_for_click.clone() },
+                                        OverlayRequest::FileBrowser { project_id: project_id_for_click.clone() },
                                         cx,
                                     );
                                 });
@@ -445,7 +444,6 @@ impl ProjectColumn {
                     .child({
                         self.git_header.update(cx, |gh, cx| {
                             gh.render_git_status(
-                                &project_path,
                                 git_status,
                                 &t,
                                 cx,
