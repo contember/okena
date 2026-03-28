@@ -924,6 +924,16 @@ impl<H: ConnectionHandler> RemoteClient<H> {
                                         })
                                         .await;
                                 }
+                                "terminal_resized" => {
+                                    if let (Some(terminal_id), Some(cols), Some(rows)) = (
+                                        value.get("terminal_id").and_then(|v| v.as_str()),
+                                        value.get("cols").and_then(|v| v.as_u64()),
+                                        value.get("rows").and_then(|v| v.as_u64()),
+                                    ) {
+                                        let prefixed = make_prefixed_id(&config_id, terminal_id);
+                                        handler_clone.resize_terminal(&prefixed, cols as u16, rows as u16);
+                                    }
+                                }
                                 "git_status_changed" => {
                                     if let Some(projects) = value.get("projects") {
                                         if let Ok(statuses) = serde_json::from_value::<
