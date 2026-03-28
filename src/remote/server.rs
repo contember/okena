@@ -3,9 +3,10 @@ use crate::remote::bridge::BridgeSender;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::routes;
 use okena_core::api::ApiGitStatus;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, RwLock};
 use tokio::sync::watch;
 
 /// Handle to a running remote control server.
@@ -28,6 +29,8 @@ impl RemoteServer {
         state_version: Arc<watch::Sender<u64>>,
         bind_addr: IpAddr,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+        remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+        next_connection_id: Arc<AtomicU64>,
     ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -74,6 +77,8 @@ impl RemoteServer {
                 state_version,
                 start_time,
                 git_status,
+                remote_subscribed_terminals,
+                next_connection_id,
             );
 
             axum::serve(

@@ -8,7 +8,8 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use tokio::sync::{broadcast, mpsc};
 
 #[derive(serde::Deserialize)]
@@ -73,6 +74,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
     let mut subscribed_ids: HashMap<String, u32> = HashMap::new(); // terminal_id -> stream_id
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
+    let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
 
     // Subscribe to state_version and git status changes
     let mut state_rx = state.state_version.subscribe();
@@ -97,6 +99,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                         reverse_stream_map.insert(sid, id.clone());
                                         next_stream_id += 1;
                                     }
+                                }
+                                // Sync to shared state for git polling
+                                if let Ok(mut map) = state.remote_subscribed_terminals.write() {
+                                    map.insert(connection_id, subscribed_ids.keys().cloned().collect());
                                 }
                                 let mappings: HashMap<String, u32> = terminal_ids
                                     .iter()
@@ -139,6 +145,14 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                                 for id in &terminal_ids {
                                     if let Some(sid) = subscribed_ids.remove(id) {
                                         reverse_stream_map.remove(&sid);
+                                    }
+                                }
+                                // Sync to shared state for git polling
+                                if let Ok(mut map) = state.remote_subscribed_terminals.write() {
+                                    if subscribed_ids.is_empty() {
+                                        map.remove(&connection_id);
+                                    } else {
+                                        map.insert(connection_id, subscribed_ids.keys().cloned().collect());
                                     }
                                 }
                             }
@@ -349,6 +363,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                 break;
             }
         }
+    }
+
+    // Cleanup: remove this connection's subscribed terminals from shared state
+    if let Ok(mut map) = state.remote_subscribed_terminals.write() {
+        map.remove(&connection_id);
     }
 
     // Shutdown: dropping out_tx closes the writer's channel → writer exits.

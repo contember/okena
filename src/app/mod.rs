@@ -107,6 +107,8 @@ pub struct Okena {
     #[allow(dead_code)]
     worktree_sync: Entity<WorktreeSyncWatcher>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
+    remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
+    next_remote_connection_id: Arc<AtomicU64>,
     // ── Remote control fields ───────────────────────────────────────────
     remote_server: Option<RemoteServer>,
     pub auth_store: Arc<AuthStore>,
@@ -236,10 +238,14 @@ impl Okena {
         // ── Git status watcher ─────────────────────────────────────────
         let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
         let git_status_tx = Arc::new(git_status_tx);
+        let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let next_remote_connection_id = Arc::new(AtomicU64::new(0));
         let git_watcher = cx.new({
             let workspace = workspace.clone();
             let git_status_tx = git_status_tx.clone();
-            |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
+            let remote_subscribed_terminals = remote_subscribed_terminals.clone();
+            |cx| GitStatusWatcher::new(workspace, git_status_tx, remote_subscribed_terminals, cx)
         });
 
         // ── Worktree sync watcher ─────────────────────────────────────
@@ -284,6 +290,8 @@ impl Okena {
             git_watcher,
             worktree_sync,
             git_status_tx: git_status_tx.clone(),
+            remote_subscribed_terminals: remote_subscribed_terminals.clone(),
+            next_remote_connection_id: next_remote_connection_id.clone(),
             remote_server: None,
             auth_store: auth_store.clone(),
             pty_broadcaster: pty_broadcaster.clone(),
@@ -391,6 +399,8 @@ impl Okena {
             self.state_version.clone(),
             self.listen_addr,
             self.git_status_tx.clone(),
+            self.remote_subscribed_terminals.clone(),
+            self.next_remote_connection_id.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();
