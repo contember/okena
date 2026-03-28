@@ -362,7 +362,7 @@ impl RemoteConnectionManager {
     }
 
     /// Start a periodic token refresh task.
-    /// Checks every 10 minutes and refreshes tokens older than 20 hours.
+    /// Checks every 10 minutes and refreshes tokens older than 3 days.
     pub fn start_token_refresh_task(&self, cx: &mut Context<Self>) {
         let event_tx = self.event_tx.clone();
         let runtime = self.runtime.clone();
