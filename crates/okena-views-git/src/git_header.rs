@@ -11,6 +11,7 @@ use okena_git::{
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::requests::OverlayRequest;
 
+use crate::diff_viewer::provider::GitProvider;
 use crate::project_header;
 
 use gpui::prelude::*;
@@ -42,6 +43,7 @@ enum BranchPickerTarget {
 pub struct GitHeader {
     project_id: String,
     request_broker: Entity<RequestBroker>,
+    git_provider: Arc<dyn GitProvider>,
 
     /// Current branch from git watcher (updated externally before rendering).
     current_branch: Option<String>,
@@ -49,7 +51,6 @@ pub struct GitHeader {
     // ── Diff popover state ──────────────────────────────────────────
     diff_popover_visible: bool,
     diff_file_summaries: Vec<FileDiffSummary>,
-    diff_popover_project_path: String,
     hover_token: Arc<AtomicU64>,
     diff_stats_bounds: Bounds<Pixels>,
 
@@ -59,7 +60,6 @@ pub struct GitHeader {
     commit_log_loading: bool,
     commit_log_bounds: Bounds<Pixels>,
     commit_log_count: usize,
-    commit_log_project_path: String,
     commit_log_has_more: bool,
     commit_log_scroll: ScrollHandle,
     commit_log_branch: Option<String>,
@@ -78,15 +78,16 @@ impl GitHeader {
     pub fn new(
         project_id: String,
         request_broker: Entity<RequestBroker>,
+        git_provider: Arc<dyn GitProvider>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             project_id,
             request_broker,
+            git_provider,
             current_branch: None,
             diff_popover_visible: false,
             diff_file_summaries: Vec::new(),
-            diff_popover_project_path: String::new(),
             hover_token: Arc::new(AtomicU64::new(0)),
             diff_stats_bounds: Bounds::default(),
             commit_log_visible: false,
@@ -94,7 +95,6 @@ impl GitHeader {
             commit_log_loading: false,
             commit_log_bounds: Bounds::default(),
             commit_log_count: 0,
-            commit_log_project_path: String::new(),
             commit_log_has_more: false,
             commit_log_scroll: ScrollHandle::new(),
             commit_log_branch: None,
@@ -115,13 +115,14 @@ impl GitHeader {
 
     // ── Diff popover ────────────────────────────────────────────────
 
-    fn show_diff_popover(&mut self, project_path: String, cx: &mut Context<Self>) {
+    fn show_diff_popover(&mut self, cx: &mut Context<Self>) {
         if self.diff_popover_visible {
             return;
         }
 
         let token = self.hover_token.fetch_add(1, Ordering::SeqCst) + 1;
         let hover_token = self.hover_token.clone();
+        let provider = self.git_provider.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             smol::Timer::after(Duration::from_millis(HOVER_DELAY_MS)).await;
@@ -130,12 +131,11 @@ impl GitHeader {
                 return;
             }
 
-            let summaries = git::get_diff_file_summary(std::path::Path::new(&project_path));
+            let summaries = smol::unblock(move || provider.get_diff_file_summary()).await;
 
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token && !summaries.is_empty() {
                     this.diff_file_summaries = summaries;
-                    this.diff_popover_project_path = project_path;
                     this.diff_popover_visible = true;
                     cx.notify();
                 }
@@ -172,7 +172,7 @@ impl GitHeader {
 
     // ── Commit log ──────────────────────────────────────────────────
 
-    fn toggle_commit_log(&mut self, project_path: String, cx: &mut Context<Self>) {
+    fn toggle_commit_log(&mut self, cx: &mut Context<Self>) {
         if self.commit_log_visible {
             self.commit_log_visible = false;
             cx.notify();
@@ -184,7 +184,6 @@ impl GitHeader {
         self.commit_log_loading = true;
         self.commit_log_entries.clear();
         self.commit_log_count = 0;
-        self.commit_log_project_path = project_path.clone();
         self.commit_log_has_more = false;
         self.commit_log_branch = None;
         self.commit_log_branch_picker = false;
@@ -196,11 +195,11 @@ impl GitHeader {
         cx.notify();
 
         let page = COMMIT_PAGE_SIZE;
-        let path_for_branches = project_path.clone();
+        let provider = self.git_provider.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let (entries, branches) = smol::unblock(move || {
-                let entries = git::get_commit_graph(std::path::Path::new(&project_path), page, None);
-                let branches = git::list_branches(std::path::Path::new(&path_for_branches));
+                let entries = provider.get_commit_graph(page, None);
+                let branches = provider.list_branches();
                 (entries, branches)
             })
             .await;
@@ -228,16 +227,12 @@ impl GitHeader {
         self.commit_log_has_more = false;
         cx.notify();
 
-        let project_path = self.commit_log_project_path.clone();
+        let provider = self.git_provider.clone();
         let page = COMMIT_PAGE_SIZE;
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let entries = smol::unblock(move || {
-                git::get_commit_graph(
-                    std::path::Path::new(&project_path),
-                    page,
-                    branch.as_deref(),
-                )
+                provider.get_commit_graph(page, branch.as_deref())
             })
             .await;
 
@@ -261,7 +256,7 @@ impl GitHeader {
         self.commit_log_loading = true;
         cx.notify();
 
-        let project_path = self.commit_log_project_path.clone();
+        let provider = self.git_provider.clone();
         let branch = self.commit_log_branch.clone();
         let already_loaded = self.commit_log_count;
         let page = COMMIT_PAGE_SIZE;
@@ -269,7 +264,7 @@ impl GitHeader {
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let entries = smol::unblock(move || {
-                git::get_commit_graph(std::path::Path::new(&project_path), new_total, branch.as_deref())
+                provider.get_commit_graph(new_total, branch.as_deref())
             })
             .await;
 
@@ -300,7 +295,6 @@ impl GitHeader {
     /// (passed in because the watcher lives in the main app).
     pub fn render_git_status(
         &self,
-        project_path: &str,
         status: Option<GitStatus>,
         t: &ThemeColors,
         cx: &mut Context<Self>,
@@ -313,7 +307,6 @@ impl GitHeader {
                 let lines_added = status.lines_added;
                 let lines_removed = status.lines_removed;
                 let project_id = self.project_id.clone();
-                let project_path_for_hover = project_path.to_string();
 
                 h_flex()
                     .flex_shrink_0()
@@ -335,7 +328,6 @@ impl GitHeader {
                     })
                     // Commit log button
                     .child({
-                        let project_path_for_log = project_path.to_string();
                         let entity_for_bounds = entity_handle.clone();
                         div()
                             .id(ElementId::Name(format!("commit-log-btn-{}", project_id).into()))
@@ -353,7 +345,7 @@ impl GitHeader {
                             })
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 cx.stop_propagation();
-                                this.toggle_commit_log(project_path_for_log.clone(), cx);
+                                this.toggle_commit_log(cx);
                             }))
                             .child(
                                 svg()
@@ -390,7 +382,7 @@ impl GitHeader {
                                 })
                                 .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                                     if *hovered {
-                                        this.show_diff_popover(project_path_for_hover.clone(), cx);
+                                        this.show_diff_popover(cx);
                                     } else {
                                         this.hide_diff_popover(cx);
                                     }

@@ -41,11 +41,11 @@ impl FileViewerTab {
         // Read file content
         match std::fs::read_to_string(path) {
             Ok(content) => {
-                self.content = content.clone();
+                self.content = content;
                 self.do_highlight_content(path, syntax_set, is_dark);
                 // Parse markdown if this is a markdown file
                 if self.is_markdown {
-                    self.markdown_doc = Some(MarkdownDocument::parse(&content));
+                    self.markdown_doc = Some(MarkdownDocument::parse(&self.content));
                 }
             }
             Err(e) => {
@@ -62,6 +62,50 @@ impl FileViewerTab {
                         self.error_message = Some(format!("Cannot read file: {}", e));
                     }
                 }
+            }
+        }
+    }
+
+    /// Load file content via a ProjectFs provider (for remote files).
+    pub(super) fn load_file_via_provider(
+        &mut self,
+        relative_path: &str,
+        provider: &dyn crate::project_fs::ProjectFs,
+        syntax_set: &SyntaxSet,
+        is_dark: bool,
+    ) {
+        // Check file size
+        match provider.file_size(relative_path) {
+            Ok(size) => {
+                if size > MAX_FILE_SIZE {
+                    self.error_message = Some(format!(
+                        "File too large ({:.1} MB). Maximum size is 5 MB.",
+                        size as f64 / 1024.0 / 1024.0
+                    ));
+                    return;
+                }
+            }
+            Err(e) => {
+                self.error_message = Some(e);
+                return;
+            }
+        }
+
+        match provider.read_file(relative_path) {
+            Ok(content) => {
+                self.content = content;
+                self.do_highlight_content(&self.file_path.clone(), syntax_set, is_dark);
+                if self.is_markdown {
+                    self.markdown_doc = Some(MarkdownDocument::parse(&self.content));
+                }
+                // Try to get mtime for local files (enables reload_if_changed);
+                // harmlessly fails for remote files where file_path is a remote path.
+                self.modified_at = std::fs::metadata(&self.file_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
+            }
+            Err(e) => {
+                self.error_message = Some(e);
             }
         }
     }

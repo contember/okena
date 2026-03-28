@@ -1,26 +1,29 @@
-//! DiffProvider trait and implementations for local and remote git diffs.
+//! GitProvider trait and implementations for local and remote git operations.
 
-use okena_git::{DiffMode, DiffResult};
+use okena_git::{DiffMode, DiffResult, FileDiffSummary, GraphRow};
 
-/// Provides git diff data from either local git commands or a remote server.
-pub trait DiffProvider: Send + Sync + 'static {
+/// Provides git data from either local git commands or a remote server.
+pub trait GitProvider: Send + Sync + 'static {
     fn is_git_repo(&self) -> bool;
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String>;
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>);
+    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary>;
+    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<GraphRow>;
+    fn list_branches(&self) -> Vec<String>;
 }
 
-/// Local diff provider — wraps existing git functions.
-pub struct LocalDiffProvider {
+/// Local git provider — wraps existing git functions.
+pub struct LocalGitProvider {
     path: String,
 }
 
-impl LocalDiffProvider {
+impl LocalGitProvider {
     pub fn new(path: String) -> Self {
         Self { path }
     }
 }
 
-impl DiffProvider for LocalDiffProvider {
+impl GitProvider for LocalGitProvider {
     fn is_git_repo(&self) -> bool {
         okena_git::is_git_repo(std::path::Path::new(&self.path))
     }
@@ -32,50 +35,40 @@ impl DiffProvider for LocalDiffProvider {
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>) {
         okena_git::get_file_contents_for_diff(std::path::Path::new(&self.path), file_path, mode)
     }
+
+    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary> {
+        okena_git::get_diff_file_summary(std::path::Path::new(&self.path))
+    }
+
+    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<GraphRow> {
+        okena_git::get_commit_graph(std::path::Path::new(&self.path), count, branch)
+    }
+
+    fn list_branches(&self) -> Vec<String> {
+        okena_git::list_branches(std::path::Path::new(&self.path))
+    }
 }
 
-/// Remote diff provider — fetches diff data via HTTP from a remote server.
-pub struct RemoteDiffProvider {
+/// Remote git provider — fetches git data via HTTP from a remote server.
+pub struct RemoteGitProvider {
     host: String,
     port: u16,
     token: String,
     project_id: String,
 }
 
-impl RemoteDiffProvider {
+impl RemoteGitProvider {
     pub fn new(host: String, port: u16, token: String, project_id: String) -> Self {
         Self { host, port, token, project_id }
     }
 
     fn post_action(&self, action: okena_core::api::ActionRequest) -> Result<Option<serde_json::Value>, String> {
-        let url = format!("http://{}:{}/v1/actions", self.host, self.port);
-        let client = reqwest::blocking::Client::new();
-        let resp = client
-            .post(&url)
-            .bearer_auth(&self.token)
-            .json(&action)
-            .send()
-            .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            return Err(format!("Server returned {}: {}", status, body));
-        }
-
-        let body: serde_json::Value = resp.json().map_err(|e| format!("Failed to parse response: {}", e))?;
-
-        if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
-            return Err(error.to_string());
-        }
-
-        Ok(body.get("result").cloned())
+        okena_core::remote_action::post_action(&self.host, self.port, &self.token, action)
     }
 }
 
-impl DiffProvider for RemoteDiffProvider {
+impl GitProvider for RemoteGitProvider {
     fn is_git_repo(&self) -> bool {
-        // Remote projects with git status are always repos
         true
     }
 
@@ -105,6 +98,47 @@ impl DiffProvider for RemoteDiffProvider {
                 (old, new)
             }
             _ => (None, None),
+        }
+    }
+
+    fn get_diff_file_summary(&self) -> Vec<FileDiffSummary> {
+        let action = okena_core::api::ActionRequest::GitDiffSummary {
+            project_id: self.project_id.clone(),
+        };
+        match self.post_action(action) {
+            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize diff summary: {}", e);
+                Vec::new()
+            }),
+            _ => Vec::new(),
+        }
+    }
+
+    fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<GraphRow> {
+        let action = okena_core::api::ActionRequest::GitCommitGraph {
+            project_id: self.project_id.clone(),
+            count,
+            branch: branch.map(String::from),
+        };
+        match self.post_action(action) {
+            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize commit graph: {}", e);
+                Vec::new()
+            }),
+            _ => Vec::new(),
+        }
+    }
+
+    fn list_branches(&self) -> Vec<String> {
+        let action = okena_core::api::ActionRequest::GitListBranches {
+            project_id: self.project_id.clone(),
+        };
+        match self.post_action(action) {
+            Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
+                log::warn!("Failed to deserialize branch list: {}", e);
+                Vec::new()
+            }),
+            _ => Vec::new(),
         }
     }
 }

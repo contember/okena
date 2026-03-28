@@ -9,7 +9,7 @@ mod render;
 mod selection;
 
 use crate::code_view::ScrollbarDrag;
-use crate::file_search::{FileEntry, FileSearchDialog};
+use crate::file_search::FileEntry;
 use crate::file_tree::{build_file_tree, FileTreeNode};
 use crate::selection::SelectionState;
 use crate::syntax::{load_syntax_set, HighlightedLine};
@@ -17,7 +17,7 @@ use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
@@ -94,7 +94,9 @@ impl FileViewerTab {
     /// Create a new tab with a file loaded.
     fn new_with_file(
         file_path: PathBuf,
+        relative_path: Option<&str>,
         file_index: Option<usize>,
+        provider: &dyn crate::project_fs::ProjectFs,
         syntax_set: &SyntaxSet,
         is_dark: bool,
     ) -> Self {
@@ -121,7 +123,11 @@ impl FileViewerTab {
             selected_file_index: file_index,
             modified_at: None,
         };
-        tab.load_file(&file_path, syntax_set, is_dark);
+        if let Some(rel) = relative_path {
+            tab.load_file_via_provider(rel, provider, syntax_set, is_dark);
+        } else {
+            tab.load_file(&file_path, syntax_set, is_dark);
+        }
         tab
     }
 
@@ -206,7 +212,7 @@ impl NavigationHistory {
 /// File viewer overlay for displaying file contents.
 pub struct FileViewer {
     focus_handle: FocusHandle,
-    project_path: PathBuf,
+    project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
     /// Syntax set for highlighting
     syntax_set: SyntaxSet,
     /// File font size from settings
@@ -215,6 +221,8 @@ pub struct FileViewer {
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting)
     is_dark: bool,
+    /// Whether files are still loading
+    loading: bool,
     /// All files in the project (from file search scan)
     files: Vec<FileEntry>,
     /// File tree for sidebar navigation
@@ -253,36 +261,68 @@ impl FileViewer {
     /// Create a new file viewer for the given file path.
     pub fn new(
         file_path: PathBuf,
-        project_path: PathBuf,
+        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         font_size: f32,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Scan project files and build tree
-        let files = FileSearchDialog::scan_files(&project_path, false, false);
-        let file_tree = build_file_tree(
-            files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (i, f.relative_path.as_str())),
-        );
-        let file_index = files.iter().position(|f| f.path == file_path);
-        let expanded_folders = Self::compute_expanded_for_path(&file_path, &project_path);
+        // Compute relative path and expanded folders from the file_path itself
+        // (the file list may not be loaded yet for remote projects).
+        let rel_str = file_path.to_string_lossy();
+        let expanded_folders = Self::compute_expanded_for_relative(&rel_str);
 
         let syntax_set = load_syntax_set();
-        let tab = FileViewerTab::new_with_file(file_path, file_index, &syntax_set, is_dark);
+
+        // For the initial tab, use the file_path as the relative path hint.
+        // This works for remote (where file_path IS the relative path from the caller)
+        // and for local (where load_file falls back to absolute path reading).
+        let relative_hint = rel_str.to_string();
+        let tab = FileViewerTab::new_with_file(
+            file_path.clone(), Some(&relative_hint), None, project_fs.as_ref(), &syntax_set, is_dark,
+        );
+
+        // Load file list asynchronously to avoid blocking the UI thread
+        let fs_clone = project_fs.clone();
+        let file_path_clone = file_path;
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { fs_clone.list_files() })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                let file_index = files.iter().position(|f| f.path == file_path_clone);
+                if let Some(idx) = file_index {
+                    if let Some(tab) = this.tabs.first_mut() {
+                        tab.selected_file_index = Some(idx);
+                    }
+                }
+                // Recompute expanded folders using the actual relative path from the file list
+                if let Some(entry) = files.iter().find(|f| f.path == file_path_clone) {
+                    let expanded = Self::compute_expanded_for_relative(&entry.relative_path);
+                    this.expanded_folders.extend(expanded);
+                }
+                this.file_tree = build_file_tree(
+                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
+                );
+                this.files = files;
+                this.loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
 
         Self {
             focus_handle,
-            project_path,
+            project_fs,
             syntax_set,
             file_font_size: font_size,
             measured_char_width: font_size * 0.6,
             is_dark,
-            files,
-            file_tree,
+            loading: true,
+            files: Vec::new(),
+            file_tree: FileTreeNode::default(),
             expanded_folders,
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -304,30 +344,41 @@ impl FileViewer {
     ///
     /// Opens the sidebar file tree with no file loaded.
     pub fn new_browse(
-        project_path: PathBuf,
+        project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         font_size: f32,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        let files = FileSearchDialog::scan_files(&project_path, false, false);
-        let file_tree = build_file_tree(
-            files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (i, f.relative_path.as_str())),
-        );
+        // Load file list asynchronously to avoid blocking the UI thread
+        let fs_clone = project_fs.clone();
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { fs_clone.list_files() })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.file_tree = build_file_tree(
+                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
+                );
+                this.files = files;
+                this.loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
 
         Self {
             focus_handle,
-            project_path,
+            project_fs,
             syntax_set: load_syntax_set(),
             file_font_size: font_size,
             measured_char_width: font_size * 0.6,
             is_dark,
-            files,
-            file_tree,
+            loading: true,
+            files: Vec::new(),
+            file_tree: FileTreeNode::default(),
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -377,7 +428,7 @@ impl FileViewer {
     /// Rescan the project directory and rebuild the file tree.
     /// Preserves expanded folders and updates file indices on open tabs.
     fn refresh_file_tree(&mut self) {
-        let files = FileSearchDialog::scan_files(&self.project_path, self.show_ignored, self.show_hidden);
+        let files = self.project_fs.list_files();
         let file_tree = build_file_tree(
             files
                 .iter()
@@ -433,18 +484,25 @@ impl FileViewer {
                 self.active_tab = idx;
             }
             // Expand ancestors so sidebar highlights this file
-            let expanded = Self::compute_expanded_for_path(&file_path, &self.project_path);
+            let expanded = Self::compute_expanded_for_relative(
+                &self.relative_path_for(&file_path)
+                    .unwrap_or_else(|| file_path.to_string_lossy().to_string()),
+            );
             self.expanded_folders.extend(expanded);
             cx.notify();
             return;
         }
 
         let file_index = self.files.iter().position(|f| f.path == file_path);
-        let expanded = Self::compute_expanded_for_path(&file_path, &self.project_path);
+        let relative = self.relative_path_for(&file_path);
+        let expanded = Self::compute_expanded_for_relative(
+            relative.as_deref().unwrap_or(&file_path.to_string_lossy()),
+        );
         self.expanded_folders.extend(expanded);
 
-        let new_tab =
-            FileViewerTab::new_with_file(file_path, file_index, &self.syntax_set, self.is_dark);
+        let new_tab = FileViewerTab::new_with_file(
+            file_path, relative.as_deref(), file_index, self.project_fs.as_ref(), &self.syntax_set, self.is_dark,
+        );
 
         // If current tab is empty (no file loaded), replace it
         if self.active_tab().is_empty() {
@@ -499,9 +557,10 @@ impl FileViewer {
             self.history.push(&current_file);
             self.active_tab = index;
             // Update expanded folders to reveal active tab's file
-            let expanded = Self::compute_expanded_for_path(
-                &self.tabs[self.active_tab].file_path,
-                &self.project_path,
+            let tab_path = self.tabs[self.active_tab].file_path.clone();
+            let expanded = Self::compute_expanded_for_relative(
+                &self.relative_path_for(&tab_path)
+                    .unwrap_or_else(|| tab_path.to_string_lossy().to_string()),
             );
             self.expanded_folders.extend(expanded);
             cx.notify();
@@ -535,30 +594,36 @@ impl FileViewer {
 
         // Replace the current tab with a new one for the target file
         let file_index = self.files.iter().position(|f| f.path == file_path);
-        let expanded = Self::compute_expanded_for_path(&file_path, &self.project_path);
+        let relative = self.relative_path_for(&file_path);
+        let expanded = Self::compute_expanded_for_relative(
+            relative.as_deref().unwrap_or(&file_path.to_string_lossy()),
+        );
         self.expanded_folders.extend(expanded);
 
-        let new_tab =
-            FileViewerTab::new_with_file(file_path, file_index, &self.syntax_set, self.is_dark);
+        let new_tab = FileViewerTab::new_with_file(
+            file_path, relative.as_deref(), file_index, self.project_fs.as_ref(), &self.syntax_set, self.is_dark,
+        );
         self.tabs[self.active_tab] = new_tab;
         cx.notify();
     }
 
+    /// Look up the relative path for a file by its absolute path.
+    fn relative_path_for(&self, file_path: &Path) -> Option<String> {
+        self.files.iter().find(|f| f.path == *file_path).map(|f| f.relative_path.clone())
+    }
+
     /// Compute which folder paths should be expanded to reveal a file.
-    fn compute_expanded_for_path(file_path: &PathBuf, project_path: &PathBuf) -> HashSet<String> {
+    fn compute_expanded_for_relative(relative_path: &str) -> HashSet<String> {
         let mut expanded = HashSet::new();
-        if let Ok(relative) = file_path.strip_prefix(project_path) {
-            let rel_str = relative.to_string_lossy();
-            let parts: Vec<&str> = rel_str.split('/').collect();
-            // Expand all ancestor directories (not the file itself)
-            let mut path_so_far = String::new();
-            for part in &parts[..parts.len().saturating_sub(1)] {
-                if !path_so_far.is_empty() {
-                    path_so_far.push('/');
-                }
-                path_so_far.push_str(part);
-                expanded.insert(path_so_far.clone());
+        let parts: Vec<&str> = relative_path.split('/').collect();
+        // Expand all ancestor directories (not the file itself)
+        let mut path_so_far = String::new();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            if !path_so_far.is_empty() {
+                path_so_far.push('/');
             }
+            path_so_far.push_str(part);
+            expanded.insert(path_so_far.clone());
         }
         expanded
     }
@@ -593,27 +658,27 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_compute_expanded_root_file() {
-        let project = PathBuf::from("/projects/myapp");
-        let file = PathBuf::from("/projects/myapp/README.md");
-        let expanded = FileViewer::compute_expanded_for_path(&file, &project);
+        let expanded = FileViewer::compute_expanded_for_relative("README.md");
         assert!(expanded.is_empty());
     }
 
     #[::core::prelude::v1::test]
     fn test_compute_expanded_nested_file() {
-        let project = PathBuf::from("/projects/myapp");
-        let file = PathBuf::from("/projects/myapp/src/views/mod.rs");
-        let expanded = FileViewer::compute_expanded_for_path(&file, &project);
+        let expanded = FileViewer::compute_expanded_for_relative("src/views/mod.rs");
         assert_eq!(expanded.len(), 2);
         assert!(expanded.contains("src"));
         assert!(expanded.contains("src/views"));
     }
 
     #[::core::prelude::v1::test]
-    fn test_compute_expanded_outside_project() {
-        let project = PathBuf::from("/projects/myapp");
-        let file = PathBuf::from("/other/place/file.rs");
-        let expanded = FileViewer::compute_expanded_for_path(&file, &project);
+    fn test_compute_expanded_empty_string() {
+        let expanded = FileViewer::compute_expanded_for_relative("");
+        assert!(expanded.is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_compute_expanded_no_slash() {
+        let expanded = FileViewer::compute_expanded_for_relative("Cargo.toml");
         assert!(expanded.is_empty());
     }
 

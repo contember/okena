@@ -807,48 +807,44 @@ impl Render for RootView {
             }))
             // Handle show file search action
             .on_action(cx.listener({
-                let overlay_manager = overlay_manager.clone();
                 let workspace = workspace.clone();
-                move |_this, _: &ShowFileSearch, _window, cx| {
-                    // Get the focused or first visible project path
-                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                move |this, _: &ShowFileSearch, _window, cx| {
+                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
                         .map(|f| f.project_id.clone())
                         .or_else(|| {
                             workspace.read(cx).visible_projects()
                                 .first()
                                 .map(|p| p.id.clone())
-                        })
-                        .and_then(|id| {
-                            workspace.read(cx).project(&id).map(|p| p.path.clone())
                         });
 
-                    if let Some(path) = project_path {
-                        overlay_manager.update(cx, |om, cx| {
-                            om.toggle_file_search(std::path::PathBuf::from(path), cx);
+                    if let Some(project_id) = project_id {
+                        this.request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(
+                                OverlayRequest::FileSearch { project_id },
+                                cx,
+                            );
                         });
                     }
                 }
             }))
             // Handle show content search action
             .on_action(cx.listener({
-                let overlay_manager = overlay_manager.clone();
                 let workspace = workspace.clone();
-                move |_this, _: &ShowContentSearch, _window, cx| {
-                    let project_path = workspace.read(cx).focus_manager.focused_terminal_state()
+                move |this, _: &ShowContentSearch, _window, cx| {
+                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
                         .map(|f| f.project_id.clone())
                         .or_else(|| {
                             workspace.read(cx).visible_projects()
                                 .first()
                                 .map(|p| p.id.clone())
-                        })
-                        .and_then(|id| {
-                            workspace.read(cx).project(&id).map(|p| p.path.clone())
                         });
 
-                    if let Some(path) = project_path {
-                        let is_dark = crate::theme::theme(cx).is_dark();
-                        overlay_manager.update(cx, |om, cx| {
-                            om.toggle_content_search(std::path::PathBuf::from(path), is_dark, cx);
+                    if let Some(project_id) = project_id {
+                        this.request_broker.update(cx, |broker, cx| {
+                            broker.push_overlay_request(
+                                OverlayRequest::ContentSearch { project_id },
+                                cx,
+                            );
                         });
                     }
                 }

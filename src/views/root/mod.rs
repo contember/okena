@@ -657,6 +657,8 @@ impl RootView {
         });
         let ws_for_observe = self.workspace.clone();
 
+        let git_provider = self.build_git_provider(project_id, cx)?;
+
         Some(cx.new(move |cx| {
             let mut col = ProjectColumn::new(
                 workspace_clone,
@@ -666,6 +668,7 @@ impl RootView {
                 terminals_clone,
                 active_drag_clone,
                 None, // remote projects don't get git watcher
+                git_provider,
                 cx,
             );
             col.set_action_dispatcher(action_dispatcher);
@@ -693,6 +696,17 @@ impl RootView {
         let terminals_for_dispatch = self.terminals.clone();
         let git_watcher = self.git_watcher.clone();
 
+        let git_provider = match self.build_git_provider(project_id, cx) {
+            Some(p) => p,
+            None => {
+                log::warn!("Cannot build git provider for project {}", project_id);
+                let path = self.workspace.read(cx).project(project_id)
+                    .map(|p| p.path.clone())
+                    .unwrap_or_default();
+                Arc::new(okena_views_git::diff_viewer::provider::LocalGitProvider::new(path))
+            }
+        };
+
         let entity = cx.new(move |cx| {
             let mut col = ProjectColumn::new(
                 workspace_clone,
@@ -702,6 +716,7 @@ impl RootView {
                 terminals_clone,
                 active_drag_clone,
                 git_watcher,
+                git_provider,
                 cx,
             );
             col.set_action_dispatcher(Some(

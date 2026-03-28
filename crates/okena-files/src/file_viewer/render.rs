@@ -13,6 +13,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::theme::ThemeColors;
+use std::path::PathBuf;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
 use okena_ui::modal::fullscreen_overlay;
@@ -297,7 +298,7 @@ impl FileViewer {
             } else {
                 let folder_path_clone = folder_path.clone();
                 let folder_path_for_ctx = folder_path.clone();
-                let abs_path_for_ctx = self.project_path.join(&folder_path);
+                let abs_path_for_ctx = PathBuf::from(self.project_fs.project_id()).join(&folder_path);
 
                 elements.push(
                     expandable_folder_row(name, depth, is_expanded, t, cx)
@@ -663,11 +664,10 @@ impl Render for FileViewer {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "File".to_string());
 
-        let relative_path = tab
-            .file_path
-            .strip_prefix(&self.project_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| tab.file_path.to_string_lossy().to_string());
+        let relative_path = self.files.iter()
+            .find(|f| f.path == tab.file_path)
+            .map(|f| f.relative_path.clone())
+            .unwrap_or_else(|| tab.file_path.to_string_lossy().to_string());
 
         // Measure actual monospace character width from font metrics
         let font = Font {

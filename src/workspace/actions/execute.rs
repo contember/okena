@@ -310,6 +310,109 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
             }
         }
+        ActionRequest::GitCommitGraph { project_id, count, branch } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    let entries = crate::git::get_commit_graph(
+                        std::path::Path::new(&path),
+                        count,
+                        branch.as_deref(),
+                    );
+                    ActionResult::Ok(Some(serde_json::to_value(entries).expect("BUG: GraphRow must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::GitListBranches { project_id } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = p.path.clone();
+                    let branches = crate::git::list_branches(std::path::Path::new(&path));
+                    ActionResult::Ok(Some(serde_json::to_value(branches).expect("BUG: branches must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::ListFiles { project_id } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = match std::path::Path::new(&p.path).canonicalize() {
+                        Ok(c) => c,
+                        Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
+                    };
+                    let files = okena_files::file_search::FileSearchDialog::scan_files(&path, false, false);
+                    ActionResult::Ok(Some(serde_json::to_value(files).expect("BUG: FileEntry must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::ReadFile { project_id, relative_path } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let canonical = match resolve_project_file(&p.path, &relative_path) {
+                        Ok(c) => c,
+                        Err(e) => return ActionResult::Err(e),
+                    };
+                    match std::fs::read_to_string(&canonical) {
+                        Ok(content) => ActionResult::Ok(Some(serde_json::json!({ "content": content }))),
+                        Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
+                    }
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::FileSize { project_id, relative_path } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let canonical = match resolve_project_file(&p.path, &relative_path) {
+                        Ok(c) => c,
+                        Err(e) => return ActionResult::Err(e),
+                    };
+                    match std::fs::metadata(&canonical) {
+                        Ok(m) => ActionResult::Ok(Some(serde_json::json!({ "size": m.len() }))),
+                        Err(e) => ActionResult::Err(format!("Cannot read file: {}", e)),
+                    }
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
+        ActionRequest::SearchContent { project_id, query, case_sensitive, mode, max_results, file_glob, context_lines } => {
+            if let Some(ref glob) = file_glob {
+                if glob.contains("..") || glob.starts_with('/') {
+                    return ActionResult::Err("file_glob must not contain '..' or start with '/'".to_string());
+                }
+            }
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = match std::path::Path::new(&p.path).canonicalize() {
+                        Ok(c) => c,
+                        Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
+                    };
+                    let search_mode = match mode.as_str() {
+                        "regex" => okena_files::content_search::SearchMode::Regex,
+                        "fuzzy" => okena_files::content_search::SearchMode::Fuzzy,
+                        _ => okena_files::content_search::SearchMode::Literal,
+                    };
+                    let config = okena_files::content_search::ContentSearchConfig {
+                        case_sensitive,
+                        mode: search_mode,
+                        max_results,
+                        file_glob,
+                        context_lines,
+                        show_ignored: false,
+                        show_hidden: false,
+                    };
+                    let cancelled = std::sync::atomic::AtomicBool::new(false);
+                    let mut results = Vec::new();
+                    okena_files::content_search::search_content(
+                        &path, &query, &config, &cancelled, &mut |result| results.push(result),
+                    );
+                    ActionResult::Ok(Some(serde_json::to_value(results).expect("BUG: FileSearchResult must serialize")))
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
         ActionRequest::AddProject { name, path } => {
             let project_id = ws.add_project(name, path, true, &settings(cx).hooks, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
@@ -564,6 +667,22 @@ pub fn find_terminal_path(
         .layout
         .as_ref()?
         .find_terminal_path(terminal_id)
+}
+
+/// Canonicalize a relative path within a project directory and verify it doesn't
+/// escape the project root (path traversal protection).
+fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+    let full_path = std::path::Path::new(project_path).join(relative_path);
+    let canonical = full_path
+        .canonicalize()
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let project_root = std::path::Path::new(project_path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project path: {}", e))?;
+    if !canonical.starts_with(&project_root) {
+        return Err("path traversal not allowed".to_string());
+    }
+    Ok(canonical)
 }
 
 /// Recursively collect paths to all Terminal nodes with `terminal_id: None`.

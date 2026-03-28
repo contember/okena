@@ -4,7 +4,7 @@
 //! with syntax-highlighted results grouped by file.
 
 use crate::content_search::{
-    ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode, search_content,
+    ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode,
 };
 use crate::code_view::build_styled_text_with_backgrounds;
 use crate::file_tree::{build_file_tree, expandable_folder_row, expandable_file_row, FileTreeNode};
@@ -74,7 +74,7 @@ pub struct ContentSearchDialog {
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
     search_input: Entity<SimpleInputState>,
-    project_path: PathBuf,
+    project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
     config: ListOverlayConfig,
     /// Flattened result rows for display.
     rows: Vec<ResultRow>,
@@ -119,7 +119,7 @@ pub struct ContentSearchDialog {
 }
 
 impl ContentSearchDialog {
-    pub fn new(project_path: PathBuf, is_dark: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>, is_dark: bool, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
         let syntax_set = load_syntax_set();
@@ -189,7 +189,7 @@ impl ContentSearchDialog {
             focus_handle,
             scroll_handle,
             search_input,
-            project_path,
+            project_fs,
             config,
             rows: Vec::new(),
             selected_index: 0,
@@ -325,7 +325,7 @@ impl ContentSearchDialog {
             show_hidden: self.show_hidden,
         };
 
-        let project_path = self.project_path.clone();
+        let project_fs = self.project_fs.clone();
         let cancelled = handle.flag();
 
         cx.spawn(async move |entity: WeakEntity<ContentSearchDialog>, cx| {
@@ -333,8 +333,7 @@ impl ContentSearchDialog {
                 .background_executor()
                 .spawn(async move {
                     let mut results: Vec<FileSearchResult> = Vec::new();
-                    search_content(
-                        &project_path,
+                    project_fs.search_content(
                         &query,
                         &config,
                         &cancelled,
@@ -602,7 +601,8 @@ impl ContentSearchDialog {
 
         // Ensure file is in highlight cache
         if !self.highlight_cache.contains_key(&file_path) {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
+            let fp_str = file_path.to_string_lossy();
+            if let Ok(content) = self.project_fs.read_file(&fp_str) {
                 let lines = highlight_content(
                     &content,
                     &file_path,
@@ -639,10 +639,7 @@ impl ContentSearchDialog {
             })
             .collect();
 
-        let relative_path = file_path
-            .strip_prefix(&self.project_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
+        let relative_path = file_path.to_string_lossy().to_string();
 
         // Scroll to the match line
         let scroll_to = match_line.saturating_sub(5); // 5 lines above for context
@@ -1137,11 +1134,7 @@ impl Render for ContentSearchDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
-        let project_name = self
-            .project_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Project".to_string());
+        let project_name = self.project_fs.project_name();
 
         // Focus search input on first render
         let search_input_focus = self.search_input.read(cx).focus_handle(cx);
