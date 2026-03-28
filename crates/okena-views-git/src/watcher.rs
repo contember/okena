@@ -3,9 +3,9 @@ use okena_workspace::state::Workspace;
 use gpui::prelude::*;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// How often to poll git status (seconds)
@@ -19,7 +19,7 @@ const CI_SETTLED_POLL_EVERY_N_CYCLES: u64 = 12;
 
 /// Centralized git status poller.
 ///
-/// Polls git status for all visible (non-remote) projects every 5 seconds.
+/// Polls git status for all locally visible and remotely subscribed (non-remote) projects every 5 seconds.
 /// Polls PR URLs less frequently (~60 seconds).
 /// Pushes changes to:
 /// - Local UI via `cx.notify()` (ProjectColumn observes this entity)
@@ -35,12 +35,15 @@ pub struct GitStatusWatcher {
     any_pending_ci: bool,
     /// Watch channel sender for remote WS push
     remote_tx: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Per-connection set of subscribed terminal IDs from remote clients
+    remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
 }
 
 impl GitStatusWatcher {
     pub fn new(
         workspace: Entity<Workspace>,
         remote_tx: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+        remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut watcher = Self {
@@ -50,6 +53,7 @@ impl GitStatusWatcher {
             ci_checks: HashMap::new(),
             any_pending_ci: false,
             remote_tx,
+            remote_subscribed_terminals,
         };
         watcher.spawn_refresh(cx);
         watcher
@@ -63,16 +67,39 @@ impl GitStatusWatcher {
     /// Spawn the async polling loop.
     fn spawn_refresh(&mut self, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let remote_subscribed_terminals = self.remote_subscribed_terminals.clone();
 
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut cycle: u64 = 0;
             loop {
-                // Collect visible non-remote projects
+                // Collect locally visible + remotely subscribed non-remote projects
                 let projects: Vec<(String, String)> = cx.update(|cx| {
                     let ws = workspace.read(cx);
-                    ws.visible_projects()
+
+                    // Start with locally visible projects
+                    let mut project_ids: HashSet<String> = ws.visible_projects()
                         .iter()
                         .filter(|p| !p.is_remote)
+                        .map(|p| p.id.clone())
+                        .collect();
+
+                    // Add projects with remotely subscribed terminals
+                    if let Ok(remote_terminals) = remote_subscribed_terminals.read() {
+                        for terminal_ids in remote_terminals.values() {
+                            for tid in terminal_ids {
+                                if let Some(p) = ws.find_project_for_terminal(tid) {
+                                    if !p.is_remote {
+                                        project_ids.insert(p.id.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Resolve to (id, path) pairs
+                    ws.projects()
+                        .iter()
+                        .filter(|p| project_ids.contains(&p.id))
                         .map(|p| (p.id.clone(), p.path.clone()))
                         .collect()
                 });

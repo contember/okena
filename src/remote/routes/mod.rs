@@ -18,8 +18,9 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use okena_core::api::ApiGitStatus;
 use rust_embed::RustEmbed;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 #[derive(RustEmbed)]
@@ -35,6 +36,10 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Per-connection set of subscribed terminal IDs (connection_id → terminal_ids).
+    /// Used by GitStatusWatcher to poll git for projects visible on remote clients.
+    pub remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    pub next_connection_id: Arc<AtomicU64>,
 }
 
 /// Build the complete axum router.
@@ -45,6 +50,8 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
+    next_connection_id: Arc<AtomicU64>,
 ) -> Router {
     let state = AppState {
         bridge_tx,
@@ -53,6 +60,8 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
+        remote_subscribed_terminals,
+        next_connection_id,
     };
 
     // Routes that require auth

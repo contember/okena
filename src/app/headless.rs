@@ -40,6 +40,8 @@ pub struct HeadlessApp {
     pty_broadcaster: Arc<PtyBroadcaster>,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
+    remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>>,
+    next_remote_connection_id: Arc<AtomicU64>,
     #[allow(dead_code)]
     git_watcher: Entity<GitStatusWatcher>,
     #[allow(dead_code)]
@@ -119,10 +121,14 @@ impl HeadlessApp {
         // Git status watcher
         let (git_status_tx, _) = tokio_watch::channel(HashMap::new());
         let git_status_tx = Arc::new(git_status_tx);
+        let remote_subscribed_terminals: Arc<std::sync::RwLock<HashMap<u64, HashSet<String>>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let next_remote_connection_id = Arc::new(AtomicU64::new(0));
         let git_watcher = cx.new({
             let workspace = workspace.clone();
             let git_status_tx = git_status_tx.clone();
-            |cx| GitStatusWatcher::new(workspace, git_status_tx, cx)
+            let remote_subscribed_terminals = remote_subscribed_terminals.clone();
+            |cx| GitStatusWatcher::new(workspace, git_status_tx, remote_subscribed_terminals, cx)
         });
 
         // Create service manager for project-scoped background processes
@@ -182,6 +188,8 @@ impl HeadlessApp {
             pty_broadcaster: pty_broadcaster.clone(),
             state_version: state_version.clone(),
             git_status_tx: git_status_tx.clone(),
+            remote_subscribed_terminals: remote_subscribed_terminals.clone(),
+            next_remote_connection_id: next_remote_connection_id.clone(),
             git_watcher,
             save_pending,
             service_manager: service_manager.clone(),
@@ -228,6 +236,8 @@ impl HeadlessApp {
             self.state_version.clone(),
             listen_addr,
             self.git_status_tx.clone(),
+            self.remote_subscribed_terminals.clone(),
+            self.next_remote_connection_id.clone(),
         ) {
             Ok(server) => {
                 let port = server.port();
