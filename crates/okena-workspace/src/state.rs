@@ -354,11 +354,13 @@ impl Workspace {
         &self.data
     }
 
-    /// Notify that persistent data changed. Bumps version and calls cx.notify().
+    /// Notify that persistent data changed. Bumps version, calls cx.notify(),
+    /// and refreshes all windows to bypass `.cached()` view wrappers.
     /// Use this instead of cx.notify() when mutating `self.data`.
     pub fn notify_data(&mut self, cx: &mut Context<Self>) {
         self.data_version += 1;
         cx.notify();
+        cx.refresh_windows();
     }
 
     /// Replace workspace data wholesale (e.g. from disk reload).

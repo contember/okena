@@ -422,7 +422,7 @@ impl Render for RootView {
             .on_mouse_move(cx.listener({
                 let active_drag = active_drag.clone();
                 let workspace = workspace.clone();
-                move |this, event: &MouseMoveEvent, _window, cx| {
+                move |this, event: &MouseMoveEvent, window, cx| {
                     // Handle resize drag
                     if let Some(ref state) = *active_drag.borrow() {
                         match state {
@@ -449,6 +449,9 @@ impl Render for RootView {
                             _ => {
                                 // Handle split and project column resize
                                 compute_resize(event.position, state, &workspace, cx);
+                                // Bypass all .cached() views so terminal elements
+                                // repaint with new bounds during drag.
+                                window.refresh();
                             }
                         }
                     }
