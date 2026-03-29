@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart' show Uint64List;
 import 'package:provider/provider.dart';
 
 import '../providers/connection_provider.dart';
@@ -10,8 +11,21 @@ import '../widgets/project_drawer.dart';
 import '../widgets/key_toolbar.dart';
 import '../widgets/terminal_view.dart';
 
-class WorkspaceScreen extends StatelessWidget {
+class WorkspaceScreen extends StatefulWidget {
   const WorkspaceScreen({super.key});
+
+  @override
+  State<WorkspaceScreen> createState() => _WorkspaceScreenState();
+}
+
+class _WorkspaceScreenState extends State<WorkspaceScreen> {
+  final KeyModifiers _modifiers = KeyModifiers();
+
+  @override
+  void dispose() {
+    _modifiers.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -79,15 +93,85 @@ class WorkspaceScreen extends StatelessWidget {
                 }
               },
             ),
+          // More actions (split, minimize, new terminal)
           if (connId != null && project != null)
-            IconButton(
-              icon: const Icon(Icons.add),
-              tooltip: 'New Terminal',
-              onPressed: () {
-                state_ffi.createTerminal(
-                  connId: connId,
-                  projectId: project.id,
-                );
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.add, size: 22),
+              tooltip: 'Terminal actions',
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(
+                  value: 'new',
+                  child: ListTile(
+                    leading: Icon(Icons.add, size: 20),
+                    title: Text('New Terminal'),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                if (selectedTerminalId != null) ...[
+                  const PopupMenuItem(
+                    value: 'split_vertical',
+                    child: ListTile(
+                      leading: Icon(Icons.vertical_split, size: 20),
+                      title: Text('Split Vertical'),
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'split_horizontal',
+                    child: ListTile(
+                      leading: Icon(Icons.horizontal_split, size: 20),
+                      title: Text('Split Horizontal'),
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'minimize',
+                    child: ListTile(
+                      leading: Icon(Icons.minimize, size: 20),
+                      title: Text('Minimize'),
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
+              ],
+              onSelected: (value) {
+                switch (value) {
+                  case 'new':
+                    state_ffi.createTerminal(
+                      connId: connId,
+                      projectId: project.id,
+                    );
+                    break;
+                  case 'split_vertical':
+                    state_ffi.splitTerminal(
+                      connId: connId,
+                      projectId: project.id,
+                      path: Uint64List.fromList([]),
+                      direction: 'vertical',
+                    );
+                    break;
+                  case 'split_horizontal':
+                    state_ffi.splitTerminal(
+                      connId: connId,
+                      projectId: project.id,
+                      path: Uint64List.fromList([]),
+                      direction: 'horizontal',
+                    );
+                    break;
+                  case 'minimize':
+                    if (selectedTerminalId != null) {
+                      state_ffi.toggleMinimized(
+                        connId: connId,
+                        projectId: project.id,
+                        terminalId: selectedTerminalId,
+                      );
+                    }
+                    break;
+                }
               },
             ),
         ],
@@ -133,22 +217,13 @@ class WorkspaceScreen extends StatelessWidget {
                       child: TerminalView(
                         connId: connId,
                         terminalId: selectedTerminalId,
-                        onTerminalSwipe: (direction) {
-                          final ids = project.terminalIds;
-                          if (ids.length <= 1) return;
-                          final idx = ids.indexOf(selectedTerminalId);
-                          if (idx < 0) return;
-                          final newIdx =
-                              (idx + direction).clamp(0, ids.length - 1);
-                          if (newIdx != idx) {
-                            workspace.selectTerminal(ids[newIdx]);
-                          }
-                        },
+                        modifiers: _modifiers,
                       ),
                     ),
                     KeyToolbar(
                       connId: connId,
                       terminalId: selectedTerminalId,
+                      modifiers: _modifiers,
                     ),
                   ],
                 ),
@@ -342,6 +417,44 @@ class _TerminalTabBar extends StatelessWidget {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.vertical_split),
+              title: const Text('Split Vertical'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                state_ffi.splitTerminal(
+                  connId: connId,
+                  projectId: projectId,
+                  path: Uint64List.fromList([]),
+                  direction: 'vertical',
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.horizontal_split),
+              title: const Text('Split Horizontal'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                state_ffi.splitTerminal(
+                  connId: connId,
+                  projectId: projectId,
+                  path: Uint64List.fromList([]),
+                  direction: 'horizontal',
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.minimize),
+              title: const Text('Minimize'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                state_ffi.toggleMinimized(
+                  connId: connId,
+                  projectId: projectId,
+                  terminalId: terminalId,
+                );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.close, color: Colors.redAccent),
               title: const Text('Close',
                   style: TextStyle(color: Colors.redAccent)),
@@ -488,15 +601,26 @@ class _GitSheet extends StatefulWidget {
   State<_GitSheet> createState() => _GitSheetState();
 }
 
-class _GitSheetState extends State<_GitSheet> {
+class _GitSheetState extends State<_GitSheet> with SingleTickerProviderStateMixin {
   String? _diffSummary;
   String? _branches;
+  String? _gitStatus;
+  String? _workingTreeDiff;
+  String? _stagedDiff;
   bool _loading = true;
+  late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 4, vsync: this);
     _loadData();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -506,11 +630,20 @@ class _GitSheetState extends State<_GitSheet> {
             connId: widget.connId, projectId: widget.project.id),
         state_ffi.gitBranches(
             connId: widget.connId, projectId: widget.project.id),
+        state_ffi.gitStatus(
+            connId: widget.connId, projectId: widget.project.id),
+        state_ffi.gitDiff(
+            connId: widget.connId, projectId: widget.project.id, mode: 'working_tree'),
+        state_ffi.gitDiff(
+            connId: widget.connId, projectId: widget.project.id, mode: 'staged'),
       ]);
       if (mounted) {
         setState(() {
           _diffSummary = results[0];
           _branches = results[1];
+          _gitStatus = results[2];
+          _workingTreeDiff = results[3];
+          _stagedDiff = results[4];
           _loading = false;
         });
       }
@@ -577,27 +710,63 @@ class _GitSheetState extends State<_GitSheet> {
             ],
           ),
         ),
-        const Divider(),
+        // Tab bar
+        TabBar(
+          controller: _tabController,
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          labelStyle: const TextStyle(fontSize: 13),
+          tabs: const [
+            Tab(text: 'Changes'),
+            Tab(text: 'Diff'),
+            Tab(text: 'Staged'),
+            Tab(text: 'Branches'),
+          ],
+        ),
         Expanded(
           child: _loading
               ? const Center(child: CircularProgressIndicator())
-              : ListView(
-                  controller: widget.scrollController,
-                  padding: const EdgeInsets.all(16),
+              : TabBarView(
+                  controller: _tabController,
                   children: [
-                    if (_diffSummary != null) ...[
-                      Text('Changes',
-                          style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 8),
-                      _DiffSummaryView(json: _diffSummary!),
-                      const SizedBox(height: 16),
-                    ],
-                    if (_branches != null) ...[
-                      Text('Branches',
-                          style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 8),
-                      _BranchesView(json: _branches!),
-                    ],
+                    // Changes tab
+                    ListView(
+                      controller: widget.scrollController,
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        if (_diffSummary != null)
+                          _DiffSummaryView(
+                            json: _diffSummary!,
+                            connId: widget.connId,
+                            projectId: widget.project.id,
+                          ),
+                        if (_gitStatus != null) ...[
+                          const SizedBox(height: 16),
+                          Text('Status',
+                              style: Theme.of(context).textTheme.titleSmall),
+                          const SizedBox(height: 8),
+                          _GitStatusView(json: _gitStatus!),
+                        ],
+                      ],
+                    ),
+                    // Working tree diff tab
+                    _DiffContentView(
+                      diff: _workingTreeDiff,
+                      scrollController: widget.scrollController,
+                    ),
+                    // Staged diff tab
+                    _DiffContentView(
+                      diff: _stagedDiff,
+                      scrollController: widget.scrollController,
+                    ),
+                    // Branches tab
+                    ListView(
+                      controller: widget.scrollController,
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        if (_branches != null) _BranchesView(json: _branches!),
+                      ],
+                    ),
                   ],
                 ),
         ),
@@ -606,10 +775,137 @@ class _GitSheetState extends State<_GitSheet> {
   }
 }
 
-class _DiffSummaryView extends StatelessWidget {
+/// Renders git status JSON.
+class _GitStatusView extends StatelessWidget {
   final String json;
 
-  const _DiffSummaryView({required this.json});
+  const _GitStatusView({required this.json});
+
+  @override
+  Widget build(BuildContext context) {
+    try {
+      final data = jsonDecode(json);
+      if (data is Map) {
+        final entries = <Widget>[];
+
+        void addSection(String title, dynamic files) {
+          if (files is List && files.isNotEmpty) {
+            entries.add(Padding(
+              padding: const EdgeInsets.only(top: 8, bottom: 4),
+              child: Text(
+                title,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[400],
+                ),
+              ),
+            ));
+            for (final f in files) {
+              final path = f is String ? f : (f is Map ? f['path'] as String? ?? '' : f.toString());
+              entries.add(Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(
+                  path,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'JetBrainsMono',
+                  ),
+                ),
+              ));
+            }
+          }
+        }
+
+        addSection('Staged', data['staged']);
+        addSection('Modified', data['modified'] ?? data['unstaged']);
+        addSection('Untracked', data['untracked']);
+
+        if (entries.isEmpty) {
+          return Text('Clean working tree',
+              style: TextStyle(color: Colors.grey[500]));
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: entries,
+        );
+      }
+      return Text(json,
+          style: const TextStyle(fontSize: 12, fontFamily: 'JetBrainsMono'));
+    } catch (_) {
+      return Text(json,
+          style: const TextStyle(fontSize: 12, fontFamily: 'JetBrainsMono'));
+    }
+  }
+}
+
+/// Full diff content viewer with syntax-colored diff lines.
+class _DiffContentView extends StatelessWidget {
+  final String? diff;
+  final ScrollController scrollController;
+
+  const _DiffContentView({
+    required this.diff,
+    required this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (diff == null || diff!.isEmpty) {
+      return Center(
+        child: Text('No changes', style: TextStyle(color: Colors.grey[500])),
+      );
+    }
+
+    final lines = diff!.split('\n');
+    return ListView.builder(
+      controller: scrollController,
+      itemCount: lines.length,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      itemBuilder: (context, index) {
+        final line = lines[index];
+        Color? bgColor;
+        Color textColor = Colors.grey[300]!;
+
+        if (line.startsWith('+')) {
+          bgColor = Colors.green.withValues(alpha: 0.1);
+          textColor = Colors.green[300]!;
+        } else if (line.startsWith('-')) {
+          bgColor = Colors.red.withValues(alpha: 0.1);
+          textColor = Colors.red[300]!;
+        } else if (line.startsWith('@@')) {
+          textColor = Colors.cyan[300]!;
+        } else if (line.startsWith('diff ') || line.startsWith('index ')) {
+          textColor = Colors.grey[500]!;
+        }
+
+        return Container(
+          color: bgColor,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+          child: Text(
+            line,
+            style: TextStyle(
+              fontSize: 11,
+              fontFamily: 'JetBrainsMono',
+              color: textColor,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DiffSummaryView extends StatelessWidget {
+  final String json;
+  final String? connId;
+  final String? projectId;
+
+  const _DiffSummaryView({
+    required this.json,
+    this.connId,
+    this.projectId,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -645,30 +941,35 @@ class _DiffSummaryView extends StatelessWidget {
                 iconColor = Colors.orange;
             }
 
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 2),
-              child: Row(
-                children: [
-                  Icon(icon, size: 16, color: iconColor),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      path,
-                      style: const TextStyle(
-                          fontSize: 12, fontFamily: 'JetBrainsMono'),
-                      overflow: TextOverflow.ellipsis,
+            return InkWell(
+              onTap: connId != null && projectId != null
+                  ? () => _showFileContents(context, path)
+                  : null,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Icon(icon, size: 16, color: iconColor),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        path,
+                        style: const TextStyle(
+                            fontSize: 12, fontFamily: 'JetBrainsMono'),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
-                  if (added > 0)
-                    Text('+$added',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.green[400])),
-                  if (added > 0 && removed > 0) const SizedBox(width: 4),
-                  if (removed > 0)
-                    Text('-$removed',
-                        style:
-                            TextStyle(fontSize: 11, color: Colors.red[400])),
-                ],
+                    if (added > 0)
+                      Text('+$added',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.green[400])),
+                    if (added > 0 && removed > 0) const SizedBox(width: 4),
+                    if (removed > 0)
+                      Text('-$removed',
+                          style:
+                              TextStyle(fontSize: 11, color: Colors.red[400])),
+                  ],
+                ),
               ),
             );
           }).toList(),
@@ -681,6 +982,145 @@ class _DiffSummaryView extends StatelessWidget {
       return Text(json,
           style: const TextStyle(fontSize: 12, fontFamily: 'JetBrainsMono'));
     }
+  }
+
+  void _showFileContents(BuildContext context, String filePath) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.8,
+        minChildSize: 0.3,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (ctx, scrollController) => _FileContentsSheet(
+          connId: connId!,
+          projectId: projectId!,
+          filePath: filePath,
+          scrollController: scrollController,
+        ),
+      ),
+    );
+  }
+}
+
+class _FileContentsSheet extends StatefulWidget {
+  final String connId;
+  final String projectId;
+  final String filePath;
+  final ScrollController scrollController;
+
+  const _FileContentsSheet({
+    required this.connId,
+    required this.projectId,
+    required this.filePath,
+    required this.scrollController,
+  });
+
+  @override
+  State<_FileContentsSheet> createState() => _FileContentsSheetState();
+}
+
+class _FileContentsSheetState extends State<_FileContentsSheet> {
+  String? _contents;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadContents();
+  }
+
+  Future<void> _loadContents() async {
+    try {
+      final contents = await state_ffi.gitFileContents(
+        connId: widget.connId,
+        projectId: widget.projectId,
+        filePath: widget.filePath,
+        mode: 'working_tree',
+      );
+      if (mounted) {
+        setState(() {
+          _contents = contents;
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          margin: const EdgeInsets.only(top: 12, bottom: 8),
+          width: 32,
+          height: 4,
+          decoration: BoxDecoration(
+            color: Colors.grey[600],
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.description, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.filePath,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontFamily: 'JetBrainsMono',
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : _error != null
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(
+                          _error!,
+                          style: TextStyle(color: Colors.red[400]),
+                        ),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      controller: widget.scrollController,
+                      scrollDirection: Axis.horizontal,
+                      child: SingleChildScrollView(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text(
+                            _contents ?? '',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontFamily: 'JetBrainsMono',
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+        ),
+      ],
+    );
   }
 }
 
