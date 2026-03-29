@@ -46,6 +46,13 @@ class ProjectDrawer extends StatelessWidget {
             ),
           ),
           const Divider(height: 1),
+          // Add Project button
+          if (connection.connId != null)
+            ListTile(
+              leading: const Icon(Icons.create_new_folder),
+              title: const Text('Add Project'),
+              onTap: () => _showAddProjectDialog(context, connection.connId!),
+            ),
           ListTile(
             leading: const Icon(Icons.link_off),
             title: const Text('Disconnect'),
@@ -53,6 +60,52 @@ class ProjectDrawer extends StatelessWidget {
               Navigator.of(context).pop();
               connection.disconnect();
             },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAddProjectDialog(BuildContext context, String connId) {
+    final nameController = TextEditingController();
+    final pathController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add Project'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Name'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pathController,
+              decoration: const InputDecoration(
+                labelText: 'Path',
+                hintText: '/home/user/project',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              final path = pathController.text.trim();
+              if (name.isNotEmpty && path.isNotEmpty) {
+                Navigator.of(ctx).pop();
+                state_ffi.addProject(connId: connId, name: name, path: path);
+              }
+            },
+            child: const Text('Add'),
           ),
         ],
       ),
@@ -132,6 +185,13 @@ class _ProjectList extends StatelessWidget {
   }
 }
 
+// ── Color constants ────────────────────────────────────────────────────
+
+const _colorOptions = [
+  'red', 'orange', 'yellow', 'lime', 'green',
+  'teal', 'cyan', 'blue', 'purple', 'pink',
+];
+
 Color _folderColorToColor(String colorName) {
   switch (colorName) {
     case 'red':
@@ -159,6 +219,60 @@ Color _folderColorToColor(String colorName) {
   }
 }
 
+/// Color picker for projects and folders.
+void _showColorPicker({
+  required BuildContext context,
+  required String currentColor,
+  required ValueChanged<String> onSelect,
+}) {
+  showModalBottomSheet(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Choose Color',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: _colorOptions.map((name) {
+                final color = _folderColorToColor(name);
+                final isSelected = name == currentColor;
+                return GestureDetector(
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    onSelect(name);
+                  },
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: isSelected
+                          ? Border.all(color: Colors.white, width: 3)
+                          : null,
+                    ),
+                    child: isSelected
+                        ? const Icon(Icons.check, size: 20, color: Colors.white)
+                        : null,
+                  ),
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _FolderTile extends StatelessWidget {
   final state_ffi.FolderInfo folder;
   final List<state_ffi.ProjectInfo> projects;
@@ -178,33 +292,96 @@ class _FolderTile extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 4),
-          child: Row(
-            children: [
-              Icon(Icons.folder, size: 18, color: color),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  folder.name,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: color,
-                    letterSpacing: 0.5,
+        GestureDetector(
+          onLongPress: () {
+            final connId = connection.connId;
+            if (connId != null) {
+              _showColorPicker(
+                context: context,
+                currentColor: folder.folderColor,
+                onSelect: (newColor) {
+                  state_ffi.setFolderColor(
+                    connId: connId,
+                    folderId: folder.id,
+                    color: newColor,
+                  );
+                },
+              );
+            }
+          },
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 4),
+            child: Row(
+              children: [
+                Icon(Icons.folder, size: 18, color: color),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    folder.name,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                      letterSpacing: 0.5,
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
-        ...projects.map((p) => _ProjectTile(
-              project: p,
+        ...projects.asMap().entries.map((entry) => _ReorderableProjectTile(
+              key: ValueKey('folder-${folder.id}-${entry.value.id}'),
+              project: entry.value,
               workspace: workspace,
               connection: connection,
-              indent: true,
+              folderId: folder.id,
+              index: entry.key,
+              totalCount: projects.length,
             )),
       ],
+    );
+  }
+}
+
+class _ReorderableProjectTile extends StatelessWidget {
+  final state_ffi.ProjectInfo project;
+  final WorkspaceProvider workspace;
+  final ConnectionProvider connection;
+  final String folderId;
+  final int index;
+  final int totalCount;
+
+  const _ReorderableProjectTile({
+    super.key,
+    required this.project,
+    required this.workspace,
+    required this.connection,
+    required this.folderId,
+    required this.index,
+    required this.totalCount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _ProjectTile(
+      project: project,
+      workspace: workspace,
+      connection: connection,
+      indent: true,
+      onReorder: totalCount > 1 ? (newIndex) {
+        final connId = connection.connId;
+        if (connId != null) {
+          state_ffi.reorderProjectInFolder(
+            connId: connId,
+            folderId: folderId,
+            projectId: project.id,
+            newIndex: BigInt.from(newIndex),
+          );
+        }
+      } : null,
+      reorderIndex: index,
+      reorderTotal: totalCount,
     );
   }
 }
@@ -214,12 +391,18 @@ class _ProjectTile extends StatelessWidget {
   final WorkspaceProvider workspace;
   final ConnectionProvider connection;
   final bool indent;
+  final void Function(int newIndex)? onReorder;
+  final int? reorderIndex;
+  final int? reorderTotal;
 
   const _ProjectTile({
     required this.project,
     required this.workspace,
     required this.connection,
     this.indent = false,
+    this.onReorder,
+    this.reorderIndex,
+    this.reorderTotal,
   });
 
   @override
@@ -244,6 +427,60 @@ class _ProjectTile extends StatelessWidget {
           onTap: () {
             workspace.selectProject(project.id);
           },
+          onLongPress: () {
+            if (onReorder != null) {
+              _showReorderMenu(context);
+            } else {
+              // Show color picker for standalone projects
+              final connId = connection.connId;
+              if (connId != null) {
+                _showColorPicker(
+                  context: context,
+                  currentColor: project.folderColor,
+                  onSelect: (newColor) {
+                    state_ffi.setProjectColor(
+                      connId: connId,
+                      projectId: project.id,
+                      color: newColor,
+                    );
+                  },
+                );
+              }
+            }
+          },
+          trailing: onReorder != null
+              ? SizedBox(
+                  width: 64,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (reorderIndex != null && reorderIndex! > 0)
+                        SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            iconSize: 16,
+                            icon: const Icon(Icons.arrow_upward, size: 16),
+                            onPressed: () => onReorder!(reorderIndex! - 1),
+                          ),
+                        ),
+                      if (reorderIndex != null && reorderTotal != null &&
+                          reorderIndex! < reorderTotal! - 1)
+                        SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            iconSize: 16,
+                            icon: const Icon(Icons.arrow_downward, size: 16),
+                            onPressed: () => onReorder!(reorderIndex! + 1),
+                          ),
+                        ),
+                    ],
+                  ),
+                )
+              : null,
         ),
         if (isSelected) ...[
           // Git status
@@ -292,6 +529,12 @@ class _ProjectTile extends StatelessWidget {
               ),
               onTap: () {
                 workspace.selectTerminal(tid);
+                // Also focus the terminal on the server
+                state_ffi.focusTerminal(
+                  connId: connection.connId!,
+                  projectId: project.id,
+                  terminalId: tid,
+                );
                 Navigator.of(context).pop();
               },
               onLongPress: () {
@@ -335,6 +578,82 @@ class _ProjectTile extends StatelessWidget {
             ),
         ],
       ],
+    );
+  }
+
+  void _showReorderMenu(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(project.name,
+                  style: Theme.of(context).textTheme.titleMedium),
+            ),
+            // Color picker option
+            if (connection.connId != null)
+              ListTile(
+                leading: const Icon(Icons.palette),
+                title: const Text('Change Color'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showColorPicker(
+                    context: context,
+                    currentColor: project.folderColor,
+                    onSelect: (newColor) {
+                      state_ffi.setProjectColor(
+                        connId: connection.connId!,
+                        projectId: project.id,
+                        color: newColor,
+                      );
+                    },
+                  );
+                },
+              ),
+            if (reorderIndex != null && reorderIndex! > 0)
+              ListTile(
+                leading: const Icon(Icons.arrow_upward),
+                title: const Text('Move Up'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onReorder!(reorderIndex! - 1);
+                },
+              ),
+            if (reorderIndex != null && reorderTotal != null &&
+                reorderIndex! < reorderTotal! - 1)
+              ListTile(
+                leading: const Icon(Icons.arrow_downward),
+                title: const Text('Move Down'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onReorder!(reorderIndex! + 1);
+                },
+              ),
+            if (reorderIndex != null && reorderIndex! > 0)
+              ListTile(
+                leading: const Icon(Icons.vertical_align_top),
+                title: const Text('Move to Top'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onReorder!(0);
+                },
+              ),
+            if (reorderIndex != null && reorderTotal != null &&
+                reorderIndex! < reorderTotal! - 1)
+              ListTile(
+                leading: const Icon(Icons.vertical_align_bottom),
+                title: const Text('Move to Bottom'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  onReorder!(reorderTotal! - 1);
+                },
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -386,6 +705,18 @@ class _ProjectTile extends StatelessWidget {
                     projectId: projectId,
                     terminalId: terminalId,
                     currentName: name);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.minimize),
+              title: const Text('Minimize'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                state_ffi.toggleMinimized(
+                  connId: connId,
+                  projectId: projectId,
+                  terminalId: terminalId,
+                );
               },
             ),
             ListTile(
