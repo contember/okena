@@ -48,6 +48,17 @@ pub struct ApiProject {
     pub folder_color: FolderColor,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ApiServiceInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_info: Option<ApiWorktreeMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worktree_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiWorktreeMetadata {
+    pub parent_project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_override: Option<FolderColor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -386,6 +397,8 @@ mod tests {
                 git_status: None,
                 folder_color: FolderColor::Blue,
                 services: vec![],
+                worktree_info: None,
+                worktree_ids: vec![],
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,

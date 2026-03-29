@@ -397,44 +397,42 @@ impl RootView {
 
         for snap in &snapshots {
             let conn_id = &snap.config.id;
-            let folder_id = format!("remote-folder:{}", conn_id);
 
             if let Some(ref state) = snap.state {
-                // Build folder_project_ids using server's order when available
-                let folder_project_ids: Vec<String> = if !state.project_order.is_empty() {
-                    // New server: walk project_order, expand folder entries via state.folders
-                    let server_folder_map: std::collections::HashMap<&str, &okena_core::api::ApiFolder> =
-                        state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
-                    let mut ordered = Vec::new();
-                    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                // Build the server folder lookup
+                let server_folder_map: std::collections::HashMap<&str, &okena_core::api::ApiFolder> =
+                    state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
+
+                // Build prefixed project_order and folder entries that mirror the server structure
+                let mut remote_order: Vec<String> = Vec::new();
+                let mut remote_folders: Vec<FolderData> = Vec::new();
+
+                if !state.project_order.is_empty() {
                     for order_id in &state.project_order {
                         if let Some(sf) = server_folder_map.get(order_id.as_str()) {
-                            for pid in &sf.project_ids {
-                                let prefixed = format!("remote:{}:{}", conn_id, pid);
-                                if seen_ids.insert(prefixed.clone()) {
-                                    ordered.push(prefixed);
-                                }
-                            }
+                            // This is a folder — create a prefixed FolderData
+                            let prefixed_folder_id = format!("remote:{}:{}", conn_id, sf.id);
+                            let prefixed_project_ids: Vec<String> = sf.project_ids.iter()
+                                .map(|pid| format!("remote:{}:{}", conn_id, pid))
+                                .collect();
+                            remote_folders.push(FolderData {
+                                id: prefixed_folder_id.clone(),
+                                name: sf.name.clone(),
+                                project_ids: prefixed_project_ids,
+                                collapsed: false,
+                                folder_color: sf.folder_color,
+                            });
+                            remote_order.push(prefixed_folder_id);
                         } else {
-                            let prefixed = format!("remote:{}:{}", conn_id, order_id);
-                            if seen_ids.insert(prefixed.clone()) {
-                                ordered.push(prefixed);
-                            }
+                            // This is a top-level project
+                            remote_order.push(format!("remote:{}:{}", conn_id, order_id));
                         }
                     }
-                    // Append orphans not in order
-                    for api_project in &state.projects {
-                        let prefixed = format!("remote:{}:{}", conn_id, api_project.id);
-                        if seen_ids.insert(prefixed.clone()) {
-                            ordered.push(prefixed);
-                        }
-                    }
-                    ordered
                 } else {
-                    // Old server: fall back to state.projects Vec order
-                    state.projects.iter()
-                        .map(|p| format!("remote:{}:{}", conn_id, p.id))
-                        .collect()
+                    // Old server without project_order: put all projects as top-level
+                    for api_project in &state.projects {
+                        remote_order.push(format!("remote:{}:{}", conn_id, api_project.id));
+                    }
                 };
 
                 for api_project in &state.projects {
@@ -478,9 +476,33 @@ impl RootView {
                             existing.remote_services = remote_services;
                             existing.remote_host = remote_host;
                             existing.remote_git_status = api_project.git_status.clone();
+                            existing.worktree_info = api_project.worktree_info.as_ref().map(|wt| {
+                                crate::workspace::state::WorktreeMetadata {
+                                    parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
+                                    color_override: wt.color_override,
+                                    main_repo_path: String::new(),
+                                    worktree_path: String::new(),
+                                    branch_name: String::new(),
+                                }
+                            });
+                            existing.worktree_ids = api_project.worktree_ids.iter()
+                                .map(|id| format!("remote:{}:{}", conn_id, id))
+                                .collect();
                             // Don't overwrite show_in_overview — it's client-side state
                             // (the user may have toggled visibility locally).
                         } else {
+                            let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
+                                crate::workspace::state::WorktreeMetadata {
+                                    parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
+                                    color_override: wt.color_override,
+                                    main_repo_path: String::new(),
+                                    worktree_path: String::new(),
+                                    branch_name: String::new(),
+                                }
+                            });
+                            let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
+                                .map(|id| format!("remote:{}:{}", conn_id, id))
+                                .collect();
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
                                 name: api_project.name.clone(),
@@ -489,8 +511,8 @@ impl RootView {
                                 layout,
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
-                                worktree_info: None,
-                                worktree_ids: Vec::new(),
+                                worktree_info,
+                                worktree_ids,
                                 folder_color: project_color,
                                 hooks: HooksConfig::default(),
                                 is_remote: true,
@@ -506,32 +528,30 @@ impl RootView {
                     });
                 }
 
-                let folder_name = snap.config.name.clone();
+                // Sync remote folders and project_order into workspace
+                let remote_prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
-                    if let Some(folder) = ws.data.folders.iter_mut().find(|f| f.id == folder_id) {
-                        folder.name = folder_name;
-                        folder.project_ids = folder_project_ids;
-                    } else {
-                        ws.data.folders.push(FolderData {
-                            id: folder_id.clone(),
-                            name: folder_name,
-                            project_ids: folder_project_ids,
-                            collapsed: false,
-                            folder_color: FolderColor::default(),
-                        });
+                    // Remove old remote folders for this connection
+                    ws.data.folders.retain(|f| !f.id.starts_with(&remote_prefix));
+                    // Remove old remote entries from project_order for this connection
+                    ws.data.project_order.retain(|id| !id.starts_with(&remote_prefix));
+
+                    // Add new remote folders
+                    for rf in remote_folders {
+                        // Preserve collapsed state from previous sync
+                        ws.data.folders.push(rf);
                     }
-                    if !ws.data.project_order.contains(&folder_id) {
-                        ws.data.project_order.push(folder_id.clone());
-                    }
+
+                    // Add new remote project_order entries
+                    ws.data.project_order.extend(remote_order);
                 });
             } else {
-                // No state (disconnected/connecting) — remove materialized projects
+                // No state (disconnected/connecting) — remove materialized projects and folders
                 let prefix = format!("remote:{}:", conn_id);
                 workspace.update(cx, |ws, _cx| {
                     ws.data.projects.retain(|p| !p.id.starts_with(&prefix));
-                    if let Some(folder) = ws.data.folders.iter_mut().find(|f| f.id == folder_id) {
-                        folder.project_ids.clear();
-                    }
+                    ws.data.folders.retain(|f| !f.id.starts_with(&prefix));
+                    ws.data.project_order.retain(|id| !id.starts_with(&prefix));
                 });
             }
         }
@@ -546,8 +566,11 @@ impl RootView {
                 }
             });
             ws.data.folders.retain(|f| {
-                if f.id.starts_with("remote-folder:") {
-                    let conn_id = f.id.strip_prefix("remote-folder:").unwrap_or("");
+                if f.id.starts_with("remote:") {
+                    // Remote folder IDs are "remote:{conn_id}:{folder_id}"
+                    // Extract conn_id (second segment)
+                    let rest = f.id.strip_prefix("remote:").unwrap_or("");
+                    let conn_id = rest.split(':').next().unwrap_or("");
                     active_conn_ids.contains(conn_id)
                 } else {
                     true

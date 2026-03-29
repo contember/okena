@@ -162,6 +162,8 @@ mod tests {
             git_status: None,
             folder_color: Default::default(),
             services: vec![],
+            worktree_info: None,
+            worktree_ids: vec![],
         }
     }
 
