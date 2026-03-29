@@ -1,15 +1,17 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile/src/models/layout_node.dart';
 
 void main() {
   group('LayoutNode.fromJson', () {
     test('parses terminal node', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'terminal',
         'terminal_id': 't1',
         'minimized': false,
         'detached': false,
-      });
+      }));
 
       expect(node, isA<TerminalNode>());
       final t = node as TerminalNode;
@@ -19,19 +21,19 @@ void main() {
     });
 
     test('parses terminal node with null id', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'terminal',
         'terminal_id': null,
         'minimized': true,
         'detached': true,
-      });
+      }));
 
       expect(node, isA<TerminalNode>());
       expect((node as TerminalNode).terminalId, isNull);
     });
 
     test('parses split node', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'split',
         'direction': 'horizontal',
         'sizes': [50.0, 50.0],
@@ -39,11 +41,11 @@ void main() {
           {'type': 'terminal', 'terminal_id': 't1', 'minimized': false, 'detached': false},
           {'type': 'terminal', 'terminal_id': 't2', 'minimized': false, 'detached': false},
         ],
-      });
+      }));
 
       expect(node, isA<SplitNode>());
       final s = node as SplitNode;
-      expect(s.direction, 'horizontal');
+      expect(s.direction, SplitDirection.horizontal);
       expect(s.sizes, [50.0, 50.0]);
       expect(s.children.length, 2);
       expect((s.children[0] as TerminalNode).terminalId, 't1');
@@ -51,14 +53,14 @@ void main() {
     });
 
     test('parses tabs node', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'tabs',
         'active_tab': 1,
         'children': [
           {'type': 'terminal', 'terminal_id': 'a', 'minimized': false, 'detached': false},
           {'type': 'terminal', 'terminal_id': 'b', 'minimized': false, 'detached': false},
         ],
-      });
+      }));
 
       expect(node, isA<TabsNode>());
       final t = node as TabsNode;
@@ -67,7 +69,7 @@ void main() {
     });
 
     test('parses nested split with tabs', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'split',
         'direction': 'vertical',
         'sizes': [30.0, 70.0],
@@ -82,7 +84,7 @@ void main() {
             ],
           },
         ],
-      });
+      }));
 
       expect(node, isA<SplitNode>());
       final s = node as SplitNode;
@@ -92,23 +94,22 @@ void main() {
       expect(tabs.children.length, 2);
     });
 
-    test('unknown type falls back to empty terminal', () {
-      final node = LayoutNode.fromJson({
+    test('unknown type returns null', () {
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'unknown_future_type',
-      });
+      }));
 
-      expect(node, isA<TerminalNode>());
-      expect((node as TerminalNode).terminalId, isNull);
+      expect(node, isNull);
     });
 
     test('handles missing optional fields with defaults', () {
-      final node = LayoutNode.fromJson({
+      final node = LayoutNode.fromJson(jsonEncode({
         'type': 'split',
-      });
+      }));
 
       expect(node, isA<SplitNode>());
       final s = node as SplitNode;
-      expect(s.direction, 'horizontal');
+      expect(s.direction, SplitDirection.horizontal);
       expect(s.sizes, isEmpty);
       expect(s.children, isEmpty);
     });
