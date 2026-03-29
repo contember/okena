@@ -561,3 +561,173 @@ pub async fn set_folder_color(
     )
     .await
 }
+
+/// Reorder a project within a folder.
+pub async fn reorder_project_in_folder(
+    conn_id: String,
+    folder_id: String,
+    project_id: String,
+    new_index: usize,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::ReorderProjectInFolder {
+            folder_id,
+            project_id,
+            new_index,
+        },
+    )
+    .await
+}
+
+// ── Layout actions ─────────────────────────────────────────────────
+
+/// Update split sizes for a split pane.
+pub async fn update_split_sizes(
+    conn_id: String,
+    project_id: String,
+    path: Vec<usize>,
+    sizes: Vec<f32>,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::UpdateSplitSizes {
+            project_id,
+            path,
+            sizes,
+        },
+    )
+    .await
+}
+
+/// Add a new tab to a tab group.
+pub async fn add_tab(
+    conn_id: String,
+    project_id: String,
+    path: Vec<usize>,
+    in_group: bool,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::AddTab {
+            project_id,
+            path,
+            in_group,
+        },
+    )
+    .await
+}
+
+/// Set the active tab in a tab group.
+pub async fn set_active_tab(
+    conn_id: String,
+    project_id: String,
+    path: Vec<usize>,
+    index: usize,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::SetActiveTab {
+            project_id,
+            path,
+            index,
+        },
+    )
+    .await
+}
+
+/// Move a tab within a tab group.
+pub async fn move_tab(
+    conn_id: String,
+    project_id: String,
+    path: Vec<usize>,
+    from_index: usize,
+    to_index: usize,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::MoveTab {
+            project_id,
+            path,
+            from_index,
+            to_index,
+        },
+    )
+    .await
+}
+
+/// Move a terminal into a tab group.
+pub async fn move_terminal_to_tab_group(
+    conn_id: String,
+    project_id: String,
+    terminal_id: String,
+    target_path: Vec<usize>,
+    position: Option<usize>,
+    target_project_id: Option<String>,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::MoveTerminalToTabGroup {
+            project_id,
+            terminal_id,
+            target_path,
+            position,
+            target_project_id,
+        },
+    )
+    .await
+}
+
+/// Move a pane to a drop zone relative to another terminal.
+pub async fn move_pane_to(
+    conn_id: String,
+    project_id: String,
+    terminal_id: String,
+    target_project_id: String,
+    target_terminal_id: String,
+    zone: String,
+) -> anyhow::Result<()> {
+    let mgr = ConnectionManager::get();
+    mgr.send_action(
+        &conn_id,
+        ActionRequest::MovePaneTo {
+            project_id,
+            terminal_id,
+            target_project_id,
+            target_terminal_id,
+            zone,
+        },
+    )
+    .await
+}
+
+// ── Additional git actions ─────────────────────────────────────────
+
+/// Get file contents from git (working tree or staged).
+pub async fn git_file_contents(
+    conn_id: String,
+    project_id: String,
+    file_path: String,
+    mode: String,
+) -> anyhow::Result<String> {
+    let diff_mode = match mode.as_str() {
+        "staged" => okena_core::types::DiffMode::Staged,
+        _ => okena_core::types::DiffMode::WorkingTree,
+    };
+    let mgr = ConnectionManager::get();
+    mgr.send_action_with_response(
+        &conn_id,
+        ActionRequest::GitFileContents {
+            project_id,
+            file_path,
+            mode: diff_mode,
+        },
+    )
+    .await
+}

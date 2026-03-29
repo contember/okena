@@ -300,6 +300,120 @@ Future<void> setFolderColor({
   color: color,
 );
 
+/// Reorder a project within a folder.
+Future<void> reorderProjectInFolder({
+  required String connId,
+  required String folderId,
+  required String projectId,
+  required BigInt newIndex,
+}) => RustLib.instance.api.crateApiStateReorderProjectInFolder(
+  connId: connId,
+  folderId: folderId,
+  projectId: projectId,
+  newIndex: newIndex,
+);
+
+/// Update split sizes for a split pane.
+Future<void> updateSplitSizes({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required List<double> sizes,
+}) => RustLib.instance.api.crateApiStateUpdateSplitSizes(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  sizes: sizes,
+);
+
+/// Add a new tab to a tab group.
+Future<void> addTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required bool inGroup,
+}) => RustLib.instance.api.crateApiStateAddTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  inGroup: inGroup,
+);
+
+/// Set the active tab in a tab group.
+Future<void> setActiveTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required BigInt index,
+}) => RustLib.instance.api.crateApiStateSetActiveTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  index: index,
+);
+
+/// Move a tab within a tab group.
+Future<void> moveTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required BigInt fromIndex,
+  required BigInt toIndex,
+}) => RustLib.instance.api.crateApiStateMoveTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  fromIndex: fromIndex,
+  toIndex: toIndex,
+);
+
+/// Move a terminal into a tab group.
+Future<void> moveTerminalToTabGroup({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+  required Uint64List targetPath,
+  BigInt? position,
+  String? targetProjectId,
+}) => RustLib.instance.api.crateApiStateMoveTerminalToTabGroup(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+  targetPath: targetPath,
+  position: position,
+  targetProjectId: targetProjectId,
+);
+
+/// Move a pane to a drop zone relative to another terminal.
+Future<void> movePaneTo({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+  required String targetProjectId,
+  required String targetTerminalId,
+  required String zone,
+}) => RustLib.instance.api.crateApiStateMovePaneTo(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+  targetProjectId: targetProjectId,
+  targetTerminalId: targetTerminalId,
+  zone: zone,
+);
+
+/// Get file contents from git (working tree or staged).
+Future<String> gitFileContents({
+  required String connId,
+  required String projectId,
+  required String filePath,
+  required String mode,
+}) => RustLib.instance.api.crateApiStateGitFileContents(
+  connId: connId,
+  projectId: projectId,
+  filePath: filePath,
+  mode: mode,
+);
+
 /// FFI-friendly folder info.
 class FolderInfo {
   final String id;
