@@ -163,6 +163,13 @@ pub(crate) async fn remote_command_loop(
                             git_status,
                             folder_color: p.folder_color,
                             services,
+                            worktree_info: p.worktree_info.as_ref().map(|wt| {
+                                okena_core::api::ApiWorktreeMetadata {
+                                    parent_project_id: wt.parent_project_id.clone(),
+                                    color_override: wt.color_override,
+                                }
+                            }),
+                            worktree_ids: p.worktree_ids.clone(),
                         }
                     };
 

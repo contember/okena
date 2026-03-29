@@ -16,7 +16,7 @@ use okena_workspace::state::FolderData;
 
 impl Sidebar {
     /// Send a reorder action to the remote server when a project is reordered
-    /// within a "remote-folder:{conn_id}" on the client.
+    /// within a remote folder on the client.
     fn send_remote_reorder(this: &mut Self, conn_id: &str, prefixed_project_id: &str, new_index: usize, cx: &mut App) {
         let server_project_id = okena_core::client::strip_prefix(prefixed_project_id, conn_id);
 
@@ -283,9 +283,12 @@ impl Sidebar {
                                 ws.move_project_to_folder(&drag.project_id, &folder_id, Some(pos), cx);
                             });
                             // Send reorder to server for remote folders
-                            if folder_id.starts_with("remote-folder:") {
-                                if let Some(conn_id) = folder_id.strip_prefix("remote-folder:") {
-                                    Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
+                            if folder_id.starts_with("remote:") {
+                                // Folder ID is "remote:{conn_id}:{folder_id}" — extract conn_id
+                                if let Some(rest) = folder_id.strip_prefix("remote:") {
+                                    if let Some(conn_id) = rest.split(':').next() {
+                                        Self::send_remote_reorder(this, conn_id, &drag.project_id, pos, cx);
+                                    }
                                 }
                             }
                         }

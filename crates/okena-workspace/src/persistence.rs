@@ -796,9 +796,9 @@ mod tests {
 
         let mut data = make_workspace(
             vec![local, remote1, remote2],
-            vec!["local1", "remote-folder:conn1"],
+            vec!["local1", "remote:conn1:folder1"],
             vec![FolderData {
-                id: "remote-folder:conn1".to_string(),
+                id: "remote:conn1:folder1".to_string(),
                 name: "Server 1".to_string(),
                 project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
                 collapsed: false,

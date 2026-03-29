@@ -66,7 +66,7 @@ impl WorkspaceData {
             version: self.version,
             projects: self.projects.iter().filter(|p| !p.is_remote).cloned().collect(),
             project_order: self.project_order.iter()
-                .filter(|id| !id.starts_with("remote-folder:") && !remote_ids.contains(id.as_str()))
+                .filter(|id| !id.starts_with("remote:") && !remote_ids.contains(id.as_str()))
                 .cloned().collect(),
             project_widths: self.project_widths.iter()
                 .filter(|(id, _)| !remote_ids.contains(id.as_str()))
@@ -78,7 +78,7 @@ impl WorkspaceData {
                 .filter(|(id, _)| !remote_ids.contains(id.as_str()))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
             folders: self.folders.iter()
-                .filter(|f| !f.id.starts_with("remote-folder:"))
+                .filter(|f| !f.id.starts_with("remote:"))
                 .cloned().collect(),
         }
     }
@@ -848,17 +848,16 @@ impl Workspace {
     /// Remove all remote projects (and their folder) for a given connection_id.
     #[allow(dead_code)]
     pub fn remove_remote_projects(&mut self, connection_id: &str, cx: &mut Context<Self>) {
-        let folder_id = format!("remote-folder:{}", connection_id);
         let prefix = format!("remote:{}:", connection_id);
 
         // Remove projects
         self.data.projects.retain(|p| !p.id.starts_with(&prefix));
 
-        // Remove folder
-        self.data.folders.retain(|f| f.id != folder_id);
+        // Remove folders
+        self.data.folders.retain(|f| !f.id.starts_with(&prefix));
 
         // Remove from project_order
-        self.data.project_order.retain(|id| *id != folder_id && !id.starts_with(&prefix));
+        self.data.project_order.retain(|id| !id.starts_with(&prefix));
 
         // Remove from project_widths
         self.data.project_widths.retain(|id, _| !id.starts_with(&prefix));
@@ -3566,17 +3565,17 @@ mod gpui_tests {
 
         let mut data = make_workspace_data(
             vec![local, remote1, remote2, remote3],
-            vec!["local1", "remote-folder:conn1", "remote-folder:conn2"],
+            vec!["local1", "remote:conn1:folder1", "remote:conn2:folder2"],
         );
         data.folders.push(FolderData {
-            id: "remote-folder:conn1".to_string(),
+            id: "remote:conn1:folder1".to_string(),
             name: "Server 1".to_string(),
             project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
             collapsed: false,
             folder_color: FolderColor::default(),
         });
         data.folders.push(FolderData {
-            id: "remote-folder:conn2".to_string(),
+            id: "remote:conn2:folder2".to_string(),
             name: "Server 2".to_string(),
             project_ids: vec!["remote:conn2:p1".to_string()],
             collapsed: false,
@@ -3599,11 +3598,11 @@ mod gpui_tests {
 
             // conn1 folder removed, conn2 folder remains
             assert_eq!(ws.data.folders.len(), 1);
-            assert_eq!(ws.data.folders[0].id, "remote-folder:conn2");
+            assert_eq!(ws.data.folders[0].id, "remote:conn2:folder2");
 
             // project_order cleaned
-            assert!(!ws.data.project_order.contains(&"remote-folder:conn1".to_string()));
-            assert!(ws.data.project_order.contains(&"remote-folder:conn2".to_string()));
+            assert!(!ws.data.project_order.contains(&"remote:conn1:folder1".to_string()));
+            assert!(ws.data.project_order.contains(&"remote:conn2:folder2".to_string()));
         });
     }
 
@@ -3619,10 +3618,10 @@ mod gpui_tests {
 
         let mut data = make_workspace_data(
             vec![local, remote1, remote2],
-            vec!["local1", "remote-folder:conn1"],
+            vec!["local1", "remote:conn1:folder1"],
         );
         data.folders.push(FolderData {
-            id: "remote-folder:conn1".to_string(),
+            id: "remote:conn1:folder1".to_string(),
             name: "Server 1".to_string(),
             project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
             collapsed: false,
