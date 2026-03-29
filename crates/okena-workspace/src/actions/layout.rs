@@ -287,6 +287,28 @@ impl Workspace {
         });
     }
 
+    /// Update split sizes without bumping data_version (UI-only notify).
+    /// Use during interactive drag to avoid auto-save spam; call `update_split_sizes`
+    /// on mouse-up to persist the final sizes.
+    pub fn update_split_sizes_ui_only(
+        &mut self,
+        project_id: &str,
+        path: &[usize],
+        new_sizes: Vec<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project_mut(project_id) {
+            if let Some(ref mut layout) = project.layout {
+                if let Some(node) = layout.get_at_path_mut(path) {
+                    if let LayoutNode::Split { sizes, .. } = node {
+                        *sizes = new_sizes;
+                        self.notify_ui_only(cx);
+                    }
+                }
+            }
+        }
+    }
+
     /// Set active tab in a tabs container
     pub fn set_active_tab(
         &mut self,

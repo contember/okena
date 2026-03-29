@@ -40,6 +40,9 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) empty_area_click_detector: ClickDetector<()>,
     pub(super) tab_rename_state: Option<RenameState<String>>,
     pub(super) action_dispatcher: Option<D>,
+    /// Cached normalized split sizes from last render, used to detect size changes
+    /// and invalidate child container caches.
+    last_split_sizes: Vec<f32>,
 }
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
@@ -74,6 +77,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
             action_dispatcher,
+            last_split_sizes: Vec::new(),
         }
     }
 
@@ -429,6 +433,17 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         } else {
             vec![100.0 / visible_children_info.len().max(1) as f32; visible_children_info.len()]
         };
+
+        // When split sizes change, notify child containers so their GPUI cached
+        // views get invalidated. Without this, the `.cached()` wrapper may reuse
+        // stale layout/paint from the previous frame because the child's own bounds
+        // (size_full) haven't changed from its perspective.
+        if self.last_split_sizes != normalized_sizes {
+            self.last_split_sizes = normalized_sizes.clone();
+            for child_container in self.child_containers.values() {
+                child_container.update(cx, |_, cx| cx.notify());
+            }
+        }
 
         let mut elements: Vec<AnyElement> = Vec::new();
 

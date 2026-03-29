@@ -128,8 +128,10 @@ pub fn compute_resize(
                     sizes: new_sizes,
                 }, cx);
             } else {
+                // Use UI-only notify during drag to avoid auto-save spam;
+                // final sizes are persisted on mouse-up via notify_data.
                 workspace.update(cx, |ws, cx| {
-                    ws.update_split_sizes(&project_id, &layout_path, new_sizes, cx);
+                    ws.update_split_sizes_ui_only(&project_id, &layout_path, new_sizes, cx);
                 });
             }
         }

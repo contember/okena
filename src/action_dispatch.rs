@@ -165,8 +165,10 @@ impl ActionDispatcher {
                         let pid = project_id.clone();
                         let p = path.clone();
                         let s = sizes.clone();
+                        // Use UI-only notify during drag to avoid auto-save spam;
+                        // final sizes are persisted on mouse-up.
                         workspace.update(cx, |ws, cx| {
-                            ws.update_split_sizes(&pid, &p, s, cx);
+                            ws.update_split_sizes_ui_only(&pid, &p, s, cx);
                         });
                         return;
                     }

@@ -214,6 +214,9 @@ pub struct ResizeState {
     pending_pty_resize: Option<(u16, u16)>,
     /// True when a background flush timer is scheduled to send the pending resize.
     flush_timer_active: bool,
+    /// Timestamp of the last local resize (from TerminalElement::paint).
+    /// Used to suppress redundant server resize echoes in remote mode.
+    pub last_local_resize: std::time::Instant,
 }
 
 /// A terminal instance wrapping alacritty_terminal
@@ -283,6 +286,7 @@ impl Terminal {
                 last_pty_resize: std::time::Instant::now() - std::time::Duration::from_secs(1),
                 flush_timer_active: false,
                 pending_pty_resize: None,
+                last_local_resize: std::time::Instant::now() - std::time::Duration::from_secs(1),
             })),
             transport,
             selection_state: Mutex::new(SelectionState::default()),
@@ -425,7 +429,11 @@ impl Terminal {
         let debounce_ms = self.transport.resize_debounce_ms();
 
         // Always update local size immediately (optimistic UI)
-        self.resize_state.lock().size = new_size;
+        {
+            let mut rs = self.resize_state.lock();
+            rs.size = new_size;
+            rs.last_local_resize = std::time::Instant::now();
+        }
 
         // Resize terminal grid immediately (independent mutex)
         let mut term = self.term.lock();
@@ -473,8 +481,18 @@ impl Terminal {
 
     /// Resize only the local alacritty grid, without sending resize to PTY/transport.
     /// Used by remote clients to pre-resize the grid to match server dimensions before snapshot.
+    ///
+    /// Skips the resize if the client recently performed a local resize (within 200ms)
+    /// to avoid redundant grid reflows from server echo during active resize drag.
     pub fn resize_grid_only(&self, cols: u16, rows: u16) {
         let rs = self.resize_state.lock();
+        // Skip if we recently resized locally — the server is echoing back our own resize
+        if rs.last_local_resize.elapsed().as_millis() < 200 {
+            // Still accept if the size actually differs (e.g. server-initiated resize)
+            if rs.size.cols == cols && rs.size.rows == rows {
+                return;
+            }
+        }
         let size = TerminalSize {
             cols,
             rows,

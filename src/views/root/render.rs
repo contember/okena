@@ -470,11 +470,17 @@ impl Render for RootView {
                 {
                     let active_drag = active_drag.clone();
                     let terminals = self.terminals.clone();
+                    let workspace = workspace.clone();
                     move |_bounds, _prepaint, window, _cx| {
                         let active_drag = active_drag.clone();
                         let terminals = terminals.clone();
-                        window.on_mouse_event(move |e: &MouseUpEvent, phase, _window, _cx| {
+                        let workspace = workspace.clone();
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, _window, cx| {
                             if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                                let was_split_drag = matches!(
+                                    *active_drag.borrow(),
+                                    Some(DragState::Split { .. })
+                                );
                                 let was_dragging = active_drag.borrow().is_some();
                                 *active_drag.borrow_mut() = None;
 
@@ -483,6 +489,13 @@ impl Render for RootView {
                                     for terminal in terminals_guard.values() {
                                         terminal.flush_pending_resize();
                                     }
+                                }
+
+                                // Persist final split sizes (drag used ui_only notify)
+                                if was_split_drag {
+                                    workspace.update(cx, |ws, cx| {
+                                        ws.notify_data(cx);
+                                    });
                                 }
                             }
                         });
