@@ -1,288 +1,455 @@
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/connection_provider.dart';
 import '../providers/workspace_provider.dart';
 import '../rust/api/state.dart' as state_ffi;
-import '../theme/app_theme.dart';
 import 'status_indicator.dart';
 
-Color _folderColorToColor(String colorName) {
-  return switch (colorName) {
-    'red' => const Color(0xFFEF4444),
-    'orange' => const Color(0xFFF97316),
-    'yellow' => const Color(0xFFEAB308),
-    'lime' => const Color(0xFF84CC16),
-    'green' => const Color(0xFF22C55E),
-    'teal' => const Color(0xFF14B8A6),
-    'cyan' => const Color(0xFF06B6D4),
-    'blue' => const Color(0xFF3B82F6),
-    'indigo' => const Color(0xFF6366F1),
-    'purple' => const Color(0xFFA855F7),
-    'pink' => const Color(0xFFEC4899),
-    _ => OkenaColors.textTertiary,
-  };
-}
-
-/// Bottom sheet for project selection (replaces old Drawer).
-class ProjectSheet extends StatelessWidget {
-  const ProjectSheet({super.key});
-
-  static void show(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.6,
-        minChildSize: 0.3,
-        maxChildSize: 0.9,
-        snap: true,
-        snapSizes: const [0.3, 0.6, 0.9],
-        builder: (context, scrollController) => _SheetContent(
-          scrollController: scrollController,
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return const SizedBox.shrink();
-  }
-}
-
-class _SheetContent extends StatelessWidget {
-  final ScrollController scrollController;
-
-  const _SheetContent({required this.scrollController});
+class ProjectDrawer extends StatelessWidget {
+  const ProjectDrawer({super.key});
 
   @override
   Widget build(BuildContext context) {
     final workspace = context.watch<WorkspaceProvider>();
     final connection = context.watch<ConnectionProvider>();
 
-    return Container(
-      decoration: const BoxDecoration(
-        color: OkenaColors.surface,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+    return Drawer(
       child: Column(
         children: [
-          // Drag handle
-          Center(
-            child: Container(
-              width: 36,
-              height: 4,
-              margin: const EdgeInsets.only(top: 10, bottom: 16),
-              decoration: BoxDecoration(
-                color: OkenaColors.textTertiary.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(2),
-              ),
+          DrawerHeader(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
             ),
-          ),
-          // Header
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Projects', style: OkenaTypography.title),
-                      if (connection.activeServer != null) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          connection.activeServer!.displayName,
-                          style: OkenaTypography.caption2.copyWith(
-                            color: OkenaColors.textTertiary,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+                Text(
+                  'Okena',
+                  style: Theme.of(context).textTheme.headlineSmall,
                 ),
+                const SizedBox(height: 4),
+                if (connection.activeServer != null)
+                  Text(
+                    connection.activeServer!.displayName,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                const Spacer(),
                 StatusIndicator(status: connection.status),
               ],
             ),
           ),
-          // Divider
-          Container(
-            height: 0.5,
-            color: OkenaColors.border,
-          ),
-          // Project list
           Expanded(
             child: _ProjectList(
               workspace: workspace,
-              scrollController: scrollController,
+              connection: connection,
             ),
           ),
-          // Disconnect footer
-          Container(
-            decoration: const BoxDecoration(
-              border: Border(
-                top: BorderSide(color: OkenaColors.border, width: 0.5),
-              ),
-            ),
-            child: SafeArea(
-              top: false,
-              child: InkWell(
-                onTap: () {
-                  HapticFeedback.mediumImpact();
-                  Navigator.of(context).pop();
-                  connection.disconnect();
-                },
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.link_off_rounded,
-                        color: OkenaColors.error.withOpacity(0.7),
-                        size: 16,
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Disconnect',
-                        style: OkenaTypography.callout.copyWith(
-                          color: OkenaColors.error.withOpacity(0.8),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.link_off),
+            title: const Text('Disconnect'),
+            onTap: () {
+              Navigator.of(context).pop();
+              connection.disconnect();
+            },
           ),
         ],
       ),
     );
   }
 }
-
-// ── Project list with folder grouping ──────────────────────────────
 
 class _ProjectList extends StatelessWidget {
   final WorkspaceProvider workspace;
-  final ScrollController scrollController;
+  final ConnectionProvider connection;
 
-  const _ProjectList({
+  const _ProjectList({required this.workspace, required this.connection});
+
+  @override
+  Widget build(BuildContext context) {
+    final folders = workspace.folders;
+    final projectOrder = workspace.projectOrder;
+    final projects = workspace.projects;
+
+    // Build ordered list: folders and standalone projects
+    final List<Widget> items = [];
+
+    if (projectOrder.isNotEmpty || folders.isNotEmpty) {
+      // Use project_order to display in correct order
+      final folderMap = {for (final f in folders) f.id: f};
+      final projectMap = {for (final p in projects) p.id: p};
+      final displayedProjectIds = <String>{};
+
+      for (final entryId in projectOrder) {
+        final folder = folderMap[entryId];
+        if (folder != null) {
+          items.add(_FolderTile(
+            folder: folder,
+            projects: folder.projectIds
+                .map((pid) => projectMap[pid])
+                .whereType<state_ffi.ProjectInfo>()
+                .toList(),
+            workspace: workspace,
+            connection: connection,
+          ));
+          displayedProjectIds.addAll(folder.projectIds);
+        } else {
+          final project = projectMap[entryId];
+          if (project != null) {
+            items.add(_ProjectTile(
+              project: project,
+              workspace: workspace,
+              connection: connection,
+            ));
+            displayedProjectIds.add(entryId);
+          }
+        }
+      }
+
+      // Add any projects not in the order
+      for (final p in projects) {
+        if (!displayedProjectIds.contains(p.id)) {
+          items.add(_ProjectTile(
+            project: p,
+            workspace: workspace,
+            connection: connection,
+          ));
+        }
+      }
+    } else {
+      // No ordering info — just list projects
+      for (final p in projects) {
+        items.add(_ProjectTile(
+          project: p,
+          workspace: workspace,
+          connection: connection,
+        ));
+      }
+    }
+
+    return ListView(children: items);
+  }
+}
+
+Color _folderColorToColor(String colorName) {
+  switch (colorName) {
+    case 'red':
+      return Colors.red;
+    case 'orange':
+      return Colors.orange;
+    case 'yellow':
+      return Colors.yellow;
+    case 'lime':
+      return Colors.lime;
+    case 'green':
+      return Colors.green;
+    case 'teal':
+      return Colors.teal;
+    case 'cyan':
+      return Colors.cyan;
+    case 'blue':
+      return Colors.blue;
+    case 'purple':
+      return Colors.purple;
+    case 'pink':
+      return Colors.pink;
+    default:
+      return Colors.grey;
+  }
+}
+
+class _FolderTile extends StatelessWidget {
+  final state_ffi.FolderInfo folder;
+  final List<state_ffi.ProjectInfo> projects;
+  final WorkspaceProvider workspace;
+  final ConnectionProvider connection;
+
+  const _FolderTile({
+    required this.folder,
+    required this.projects,
     required this.workspace,
-    required this.scrollController,
+    required this.connection,
   });
 
   @override
   Widget build(BuildContext context) {
-    final projectMap = {for (final p in workspace.projects) p.id: p};
-    final folderMap = {for (final f in workspace.folders) f.id: f};
-    final projectOrder = workspace.projectOrder;
-
-    // If no project_order, fall back to flat list
-    if (projectOrder.isEmpty) {
-      return ListView.builder(
-        controller: scrollController,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        itemCount: workspace.projects.length,
-        itemBuilder: (context, index) {
-          final project = workspace.projects[index];
-          return _buildProjectTile(context, project);
-        },
-      );
-    }
-
-    // Build ordered items: folders expand to header + children, standalone projects inline
-    final widgets = <Widget>[];
-    for (final id in projectOrder) {
-      final folder = folderMap[id];
-      if (folder != null) {
-        // Folder header
-        widgets.add(_FolderHeader(
-          name: folder.name,
-          folderColor: _folderColorToColor(folder.folderColor),
-        ));
-        // Folder's projects
-        for (final pid in folder.projectIds) {
-          final project = projectMap[pid];
-          if (project != null) {
-            widgets.add(Padding(
-              padding: const EdgeInsets.only(left: 16),
-              child: _buildProjectTile(context, project),
-            ));
-          }
-        }
-      } else {
-        final project = projectMap[id];
-        if (project != null) {
-          widgets.add(_buildProjectTile(context, project));
-        }
-      }
-    }
-
-    return ListView(
-      controller: scrollController,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      children: widgets,
-    );
-  }
-
-  Widget _buildProjectTile(BuildContext context, state_ffi.ProjectInfo project) {
-    final isSelected = project.id == workspace.selectedProjectId;
-    return _ProjectTile(
-      name: project.name,
-      path: project.path,
-      isSelected: isSelected,
-      folderColor: _folderColorToColor(project.folderColor),
-      onTap: () {
-        HapticFeedback.selectionClick();
-        workspace.selectProject(project.id);
-        Navigator.of(context).pop();
-      },
+    final color = _folderColorToColor(folder.folderColor);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 16, right: 16, top: 12, bottom: 4),
+          child: Row(
+            children: [
+              Icon(Icons.folder, size: 18, color: color),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  folder.name,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: color,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        ...projects.map((p) => _ProjectTile(
+              project: p,
+              workspace: workspace,
+              connection: connection,
+              indent: true,
+            )),
+      ],
     );
   }
 }
 
-// ── Folder header ──────────────────────────────────────────────────
+class _ProjectTile extends StatelessWidget {
+  final state_ffi.ProjectInfo project;
+  final WorkspaceProvider workspace;
+  final ConnectionProvider connection;
+  final bool indent;
 
-class _FolderHeader extends StatelessWidget {
-  final String name;
-  final Color folderColor;
-
-  const _FolderHeader({
-    required this.name,
-    required this.folderColor,
+  const _ProjectTile({
+    required this.project,
+    required this.workspace,
+    required this.connection,
+    this.indent = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 14, 12, 6),
-      child: Row(
-        children: [
-          Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(
-              color: folderColor == OkenaColors.textTertiary
-                  ? OkenaColors.textTertiary
-                  : folderColor.withOpacity(0.8),
-              shape: BoxShape.circle,
-            ),
+    final isSelected = project.id == workspace.selectedProjectId;
+    final folderColor = _folderColorToColor(project.folderColor);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ListTile(
+          contentPadding: EdgeInsets.only(left: indent ? 32 : 16, right: 16),
+          leading: Icon(
+            Icons.folder,
+            color: isSelected
+                ? Theme.of(context).colorScheme.primary
+                : folderColor,
           ),
-          const SizedBox(width: 8),
-          Text(
-            name.toUpperCase(),
-            style: TextStyle(
-              color: folderColor == OkenaColors.textTertiary
-                  ? OkenaColors.textTertiary
-                  : folderColor.withOpacity(0.7),
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.0,
+          title: Text(project.name),
+          subtitle: _buildSubtitle(context),
+          selected: isSelected,
+          onTap: () {
+            workspace.selectProject(project.id);
+          },
+        ),
+        if (isSelected) ...[
+          // Git status
+          if (project.gitBranch != null)
+            _GitStatusRow(project: project),
+          // Services
+          if (project.services.isNotEmpty)
+            ...project.services.map((s) => _ServiceRow(
+                  service: s,
+                  project: project,
+                  connection: connection,
+                )),
+          // Terminals
+          ...project.terminalIds.asMap().entries.map((entry) {
+            final idx = entry.key;
+            final tid = entry.value;
+            final isTerminalSelected = tid == workspace.selectedTerminalId;
+            final name =
+                project.terminalNames[tid] ?? 'Terminal ${idx + 1}';
+            return ListTile(
+              contentPadding:
+                  const EdgeInsets.only(left: 56, right: 8),
+              leading: Icon(
+                Icons.terminal,
+                size: 20,
+                color: isTerminalSelected
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
+              title: Text(
+                name,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: isTerminalSelected
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                ),
+              ),
+              selected: isTerminalSelected,
+              dense: true,
+              trailing: _TerminalActions(
+                connId: connection.connId!,
+                projectId: project.id,
+                terminalId: tid,
+                name: name,
+              ),
+              onTap: () {
+                workspace.selectTerminal(tid);
+                Navigator.of(context).pop();
+              },
+              onLongPress: () {
+                _showTerminalMenu(
+                  context,
+                  connId: connection.connId!,
+                  projectId: project.id,
+                  terminalId: tid,
+                  name: name,
+                );
+              },
+            );
+          }),
+          if (connection.connId != null)
+            ListTile(
+              contentPadding:
+                  const EdgeInsets.only(left: 56, right: 16),
+              leading: Icon(
+                Icons.add,
+                size: 20,
+                color:
+                    Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+              title: Text(
+                'New Terminal',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurfaceVariant,
+                ),
+              ),
+              dense: true,
+              onTap: () {
+                state_ffi.createTerminal(
+                  connId: connection.connId!,
+                  projectId: project.id,
+                );
+                Navigator.of(context).pop();
+              },
             ),
+        ],
+      ],
+    );
+  }
+
+  Widget? _buildSubtitle(BuildContext context) {
+    final parts = <Widget>[];
+    if (project.gitBranch != null) {
+      parts.add(Icon(Icons.commit, size: 12, color: Colors.grey[500]));
+      parts.add(const SizedBox(width: 2));
+      parts.add(Text(
+        project.gitBranch!,
+        style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+      ));
+    }
+    final runningServices =
+        project.services.where((s) => s.status == 'running').length;
+    if (runningServices > 0) {
+      if (parts.isNotEmpty) parts.add(const SizedBox(width: 8));
+      parts.add(Icon(Icons.dns, size: 12, color: Colors.green[400]));
+      parts.add(const SizedBox(width: 2));
+      parts.add(Text(
+        '$runningServices',
+        style: TextStyle(fontSize: 11, color: Colors.green[400]),
+      ));
+    }
+    if (parts.isEmpty) return null;
+    return Row(children: parts);
+  }
+
+  void _showTerminalMenu(
+    BuildContext context, {
+    required String connId,
+    required String projectId,
+    required String terminalId,
+    required String name,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('Rename'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _showRenameDialog(context,
+                    connId: connId,
+                    projectId: projectId,
+                    terminalId: terminalId,
+                    currentName: name);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.close, color: Colors.redAccent),
+              title:
+                  const Text('Close', style: TextStyle(color: Colors.redAccent)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                Navigator.of(context).pop();
+                state_ffi.closeTerminal(
+                  connId: connId,
+                  projectId: projectId,
+                  terminalId: terminalId,
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showRenameDialog(
+    BuildContext context, {
+    required String connId,
+    required String projectId,
+    required String terminalId,
+    required String currentName,
+  }) {
+    final controller = TextEditingController(text: currentName);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename Terminal'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (_) {
+            Navigator.of(ctx).pop();
+            state_ffi.renameTerminal(
+              connId: connId,
+              projectId: projectId,
+              terminalId: terminalId,
+              name: controller.text,
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              state_ffi.renameTerminal(
+                connId: connId,
+                projectId: projectId,
+                terminalId: terminalId,
+                name: controller.text,
+              );
+            },
+            child: const Text('Rename'),
           ),
         ],
       ),
@@ -290,102 +457,204 @@ class _FolderHeader extends StatelessWidget {
   }
 }
 
-// ── Project tile ──────────────────────────────────────────────────────
-
-class _ProjectTile extends StatelessWidget {
+class _TerminalActions extends StatelessWidget {
+  final String connId;
+  final String projectId;
+  final String terminalId;
   final String name;
-  final String path;
-  final bool isSelected;
-  final Color folderColor;
-  final VoidCallback onTap;
 
-  const _ProjectTile({
+  const _TerminalActions({
+    required this.connId,
+    required this.projectId,
+    required this.terminalId,
     required this.name,
-    required this.path,
-    required this.isSelected,
-    required this.folderColor,
-    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        iconSize: 16,
+        icon: const Icon(Icons.close, size: 16),
+        onPressed: () {
+          Navigator.of(context).pop();
+          state_ffi.closeTerminal(
+            connId: connId,
+            projectId: projectId,
+            terminalId: terminalId,
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _GitStatusRow extends StatelessWidget {
+  final state_ffi.ProjectInfo project;
+
+  const _GitStatusRow({required this.project});
+
+  @override
+  Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 1),
-      child: Material(
-        color: isSelected ? OkenaColors.surfaceOverlay : Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          splashColor: OkenaColors.accent.withOpacity(0.08),
-          highlightColor: OkenaColors.accent.withOpacity(0.04),
-          onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: isSelected
-                ? BoxDecoration(
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border(
-                      left: BorderSide(
-                        color: OkenaColors.accent,
-                        width: 3,
-                      ),
-                    ),
-                  )
-                : null,
-            child: Row(
-              children: [
-                // Letter avatar
-                Container(
-                  width: 24,
-                  height: 24,
-                  decoration: BoxDecoration(
-                    color: (isSelected ? OkenaColors.accent : folderColor)
-                        .withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    name.isNotEmpty ? name[0].toUpperCase() : '?',
-                    style: TextStyle(
-                      color: isSelected ? OkenaColors.accent : folderColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        name,
-                        style: OkenaTypography.callout.copyWith(
-                          color: isSelected
-                              ? OkenaColors.textPrimary
-                              : OkenaColors.textSecondary,
-                          fontWeight:
-                              isSelected ? FontWeight.w600 : FontWeight.w400,
-                        ),
-                      ),
-                      const SizedBox(height: 1),
-                      Text(
-                        path,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: OkenaTypography.caption2.copyWith(
-                          fontFamily: 'JetBrainsMono',
-                          fontSize: 10,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+      padding: const EdgeInsets.only(left: 56, right: 16, bottom: 4),
+      child: Row(
+        children: [
+          Icon(Icons.commit, size: 16, color: Colors.grey[400]),
+          const SizedBox(width: 6),
+          Text(
+            project.gitBranch ?? '',
+            style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+          ),
+          const Spacer(),
+          if (project.gitLinesAdded > 0) ...[
+            Text(
+              '+${project.gitLinesAdded}',
+              style: TextStyle(fontSize: 11, color: Colors.green[400]),
+            ),
+            const SizedBox(width: 4),
+          ],
+          if (project.gitLinesRemoved > 0)
+            Text(
+              '-${project.gitLinesRemoved}',
+              style: TextStyle(fontSize: 11, color: Colors.red[400]),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ServiceRow extends StatelessWidget {
+  final state_ffi.ServiceInfo service;
+  final state_ffi.ProjectInfo project;
+  final ConnectionProvider connection;
+
+  const _ServiceRow({
+    required this.service,
+    required this.project,
+    required this.connection,
+  });
+
+  Color _statusColor() {
+    switch (service.status) {
+      case 'running':
+        return Colors.green;
+      case 'stopped':
+        return Colors.grey;
+      case 'crashed':
+        return Colors.red;
+      case 'starting':
+      case 'restarting':
+        return Colors.orange;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  IconData _statusIcon() {
+    switch (service.status) {
+      case 'running':
+        return Icons.check_circle;
+      case 'stopped':
+        return Icons.stop_circle;
+      case 'crashed':
+        return Icons.error;
+      case 'starting':
+      case 'restarting':
+        return Icons.hourglass_top;
+      default:
+        return Icons.help;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final connId = connection.connId;
+    final color = _statusColor();
+
+    return ListTile(
+      contentPadding: const EdgeInsets.only(left: 56, right: 8),
+      leading: Icon(_statusIcon(), size: 18, color: color),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              service.name,
+              style: const TextStyle(fontSize: 13),
             ),
           ),
-        ),
+          if (service.ports.isNotEmpty)
+            Text(
+              service.ports.map((p) => ':$p').join(' '),
+              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            ),
+        ],
       ),
+      dense: true,
+      trailing: _ServiceActionButton(
+        service: service,
+        connId: connId,
+        projectId: project.id,
+      ),
+    );
+  }
+}
+
+class _ServiceActionButton extends StatelessWidget {
+  final state_ffi.ServiceInfo service;
+  final String? connId;
+  final String projectId;
+
+  const _ServiceActionButton({
+    required this.service,
+    required this.connId,
+    required this.projectId,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (connId == null) return const SizedBox.shrink();
+
+    return PopupMenuButton<String>(
+      padding: EdgeInsets.zero,
+      iconSize: 20,
+      itemBuilder: (ctx) => [
+        if (service.status == 'stopped' || service.status == 'crashed')
+          const PopupMenuItem(value: 'start', child: Text('Start')),
+        if (service.status == 'running')
+          const PopupMenuItem(value: 'stop', child: Text('Stop')),
+        if (service.status == 'running')
+          const PopupMenuItem(value: 'restart', child: Text('Restart')),
+      ],
+      onSelected: (action) {
+        switch (action) {
+          case 'start':
+            state_ffi.startService(
+              connId: connId!,
+              projectId: projectId,
+              serviceName: service.name,
+            );
+            break;
+          case 'stop':
+            state_ffi.stopService(
+              connId: connId!,
+              projectId: projectId,
+              serviceName: service.name,
+            );
+            break;
+          case 'restart':
+            state_ffi.restartService(
+              connId: connId!,
+              projectId: projectId,
+              serviceName: service.name,
+            );
+            break;
+        }
+      },
     );
   }
 }
