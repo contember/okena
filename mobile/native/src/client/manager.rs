@@ -263,6 +263,16 @@ impl ConnectionManager {
         conn_id: &str,
         action: ActionRequest,
     ) -> anyhow::Result<()> {
+        self.send_action_with_response(conn_id, action).await?;
+        Ok(())
+    }
+
+    /// Send an action to the remote server and return the response body.
+    pub async fn send_action_with_response(
+        &self,
+        conn_id: &str,
+        action: ActionRequest,
+    ) -> anyhow::Result<String> {
         let (host, port, token) = {
             let connections = self.connections.read();
             let conn = connections
@@ -291,7 +301,8 @@ impl ConnectionManager {
             anyhow::bail!("Action failed ({}): {}", status, body);
         }
 
-        Ok(())
+        let body = resp.text().await.unwrap_or_default();
+        Ok(body)
     }
 
     /// Background task that drains the event channel and updates connection state.
