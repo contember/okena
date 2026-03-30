@@ -10,6 +10,8 @@ pub use repository::{
     get_available_branches_for_worktree,
     get_repo_root,
     resolve_git_root_and_subdir,
+    compute_target_paths,
+    project_path_in_worktree,
     has_uncommitted_changes,
     get_current_branch,
     get_default_branch,

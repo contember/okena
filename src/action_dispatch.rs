@@ -564,5 +564,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ReloadServices { project_id } => ActionRequest::ReloadServices {
             project_id: s(&project_id),
         },
+        ActionRequest::CreateWorktree {
+            project_id,
+            branch,
+            create_branch,
+        } => ActionRequest::CreateWorktree {
+            project_id: s(&project_id),
+            branch,
+            create_branch,
+        },
     }
 }
