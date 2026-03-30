@@ -493,6 +493,7 @@ pub fn spawn_uninitialized_terminals(
     let folder_name = folder.map(|f| f.name.as_str());
     let env = hooks::terminal_hook_env(project_id, &project_name, &project_path, is_worktree, folder_id, folder_name);
 
+    let mut spawned_ids = Vec::new();
     for (path, shell_type) in uninitialized {
         let mut shell = match shell_type {
             ShellType::Default => project_default_shell
@@ -521,7 +522,8 @@ pub fn spawn_uninitialized_terminals(
                     project_path.clone(),
                 ));
 
-                terminals.lock().insert(terminal_id, terminal);
+                terminals.lock().insert(terminal_id.clone(), terminal);
+                spawned_ids.push(terminal_id);
             }
             Err(e) => {
                 log::error!(
@@ -534,7 +536,11 @@ pub fn spawn_uninitialized_terminals(
         }
     }
 
-    ActionResult::Ok(None)
+    if spawned_ids.is_empty() {
+        ActionResult::Ok(None)
+    } else {
+        ActionResult::Ok(Some(serde_json::json!({ "terminal_ids": spawned_ids })))
+    }
 }
 
 /// Find the first terminal_id in a layout tree (depth-first).
