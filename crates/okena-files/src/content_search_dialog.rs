@@ -102,8 +102,8 @@ pub struct ContentSearchDialog {
     expanded: bool,
     /// Cached syntax-highlighted lines per file path.
     highlight_cache: HashMap<PathBuf, Vec<HighlightedLine>>,
-    /// File currently being loaded for preview (to avoid duplicate loads).
-    preview_loading: Option<PathBuf>,
+    /// Files currently being loaded for highlighting (to avoid duplicate loads).
+    loading_files: HashSet<PathBuf>,
     /// Shared syntax set.
     syntax_set: SyntaxSet,
     /// Whether the theme is dark.
@@ -210,7 +210,7 @@ impl ContentSearchDialog {
             glob_editing: false,
             expanded,
             highlight_cache: HashMap::new(),
-            preview_loading: None,
+            loading_files: HashSet::new(),
             syntax_set,
             is_dark,
             debounce_task: None,
@@ -359,6 +359,8 @@ impl ContentSearchDialog {
                     {
                         this.apply_results(results);
                         this.searching = false;
+                        // Preload highlighting for files in search results
+                        this.preload_result_files(cx);
                         cx.notify();
                     }
                 })
@@ -395,27 +397,68 @@ impl ContentSearchDialog {
         self.selected_index = if self.rows.is_empty() { 0 } else { 1.min(self.rows.len() - 1) };
     }
 
-    /// Get or compute syntax-highlighted lines for a file.
+    /// Get syntax-highlighted line for a file. Returns None if not yet cached
+    /// (caller falls back to plain text rendering).
     fn get_highlighted_line(
-        &mut self,
+        &self,
         file_path: &Path,
         line_number: usize,
     ) -> Option<HighlightedLine> {
-        if !self.highlight_cache.contains_key(file_path) {
-            let content = std::fs::read_to_string(file_path).ok()?;
-            let lines = highlight_content(
-                &content,
-                file_path,
-                &self.syntax_set,
-                5000, // skip syntax highlighting for very large files
-                self.is_dark,
-            );
-            self.highlight_cache.insert(file_path.to_path_buf(), lines);
-        }
-
         let lines = self.highlight_cache.get(file_path)?;
         // line_number is 1-based
         lines.get(line_number.saturating_sub(1)).cloned()
+    }
+
+    /// Preload highlighting for the first few unique files in search results.
+    fn preload_result_files(&mut self, cx: &mut Context<Self>) {
+        let mut seen = HashSet::new();
+        let paths: Vec<PathBuf> = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                ResultRow::FileHeader { file_path, .. } if seen.insert(file_path.clone()) => {
+                    Some(file_path.clone())
+                }
+                _ => None,
+            })
+            .take(5)
+            .collect();
+        for fp in paths {
+            self.ensure_file_in_cache(&fp, cx);
+        }
+    }
+
+    /// Kick off an async load of a file into the highlight cache (if not already loading).
+    fn ensure_file_in_cache(&mut self, file_path: &Path, cx: &mut Context<Self>) {
+        let key = file_path.to_path_buf();
+        if self.highlight_cache.contains_key(&key) || self.loading_files.contains(&key) {
+            return;
+        }
+        self.loading_files.insert(key.clone());
+        let fs = self.project_fs.clone();
+        let fp = key;
+        let fp_str = file_path.to_string_lossy().to_string();
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { fs.read_file(&fp_str) })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.loading_files.remove(&fp);
+                if let Ok(content) = result {
+                    let lines = highlight_content(
+                        &content,
+                        &fp,
+                        &this.syntax_set,
+                        5000,
+                        this.is_dark,
+                    );
+                    this.highlight_cache.insert(fp, lines);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Render a file header row.
@@ -604,36 +647,7 @@ impl ContentSearchDialog {
 
         // Ensure file is in highlight cache — load asynchronously if needed
         if !self.highlight_cache.contains_key(&file_path) {
-            if self.preview_loading.as_ref() != Some(&file_path) {
-                // Start loading this file in the background
-                self.preview_loading = Some(file_path.clone());
-                let fs = self.project_fs.clone();
-                let fp = file_path.clone();
-                let fp_str = file_path.to_string_lossy().to_string();
-                cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move { fs.read_file(&fp_str) })
-                        .await;
-                    let _ = entity.update(cx, |this, cx| {
-                        if this.preview_loading.as_ref() == Some(&fp) {
-                            this.preview_loading = None;
-                        }
-                        if let Ok(content) = result {
-                            let lines = highlight_content(
-                                &content,
-                                &fp,
-                                &this.syntax_set,
-                                5000,
-                                this.is_dark,
-                            );
-                            this.highlight_cache.insert(fp, lines);
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
+            self.ensure_file_in_cache(&file_path.clone(), cx);
             // Show loading state while file is being fetched
             return div()
                 .flex_1()
