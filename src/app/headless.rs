@@ -4,6 +4,7 @@ use crate::remote::bridge;
 use crate::remote::pty_broadcaster::PtyBroadcaster;
 use crate::remote::server::RemoteServer;
 use crate::remote::{GlobalRemoteInfo, RemoteInfo};
+use super::observe_project_services;
 use crate::services::manager::ServiceManager;
 use crate::terminal::backend::TerminalBackend;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
@@ -139,66 +140,7 @@ impl HeadlessApp {
         .detach();
 
         // Observe workspace to load/unload service configs when projects change
-        {
-            let service_manager = service_manager.clone();
-            let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
-                Arc::new(parking_lot::Mutex::new(HashSet::new()));
-
-            // Initial load of services for projects that already exist at startup
-            {
-                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
-                    .read(cx)
-                    .data()
-                    .projects
-                    .iter()
-                    .filter(|p| !p.is_remote)
-                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
-                    .collect();
-                let mut known = known_project_ids.lock();
-                for (id, path, saved_terminals) in &local_projects {
-                    service_manager.update(cx, |sm, cx| {
-                        sm.load_project_services(id, path, saved_terminals, cx);
-                    });
-                    known.insert(id.clone());
-                }
-            }
-
-            cx.observe(&workspace, move |_this, workspace, cx| {
-                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
-                    .read(cx)
-                    .data()
-                    .projects
-                    .iter()
-                    .filter(|p| !p.is_remote)
-                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
-                    .collect();
-
-                let current_ids: HashSet<String> =
-                    local_projects.iter().map(|(id, _, _)| id.clone()).collect();
-
-                let mut known = known_project_ids.lock();
-
-                // Load services for new projects
-                for (id, path, saved_terminals) in &local_projects {
-                    if !known.contains(id) {
-                        service_manager.update(cx, |sm, cx| {
-                            sm.load_project_services(id, path, saved_terminals, cx);
-                        });
-                    }
-                }
-
-                // Unload services for removed projects
-                let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
-                for id in removed {
-                    service_manager.update(cx, |sm, cx| {
-                        sm.unload_project_services(&id, cx);
-                    });
-                }
-
-                *known = current_ids;
-            })
-            .detach();
-        }
+        observe_project_services(&workspace, &service_manager, cx);
 
         // Observe service manager to sync terminal IDs back to workspace for persistence
         {

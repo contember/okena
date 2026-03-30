@@ -27,6 +27,65 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
 
+/// Set up an observer that loads/unloads service configs when projects change.
+/// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
+pub(crate) fn observe_project_services<T: 'static>(
+    workspace: &Entity<Workspace>,
+    service_manager: &Entity<ServiceManager>,
+    cx: &mut Context<T>,
+) {
+    let service_manager = service_manager.clone();
+    let known: Arc<parking_lot::Mutex<HashSet<String>>> =
+        Arc::new(parking_lot::Mutex::new(HashSet::new()));
+
+    // Initial load
+    {
+        let data = workspace.read(cx).data().clone();
+        sync_services(&data, &mut known.lock(), &service_manager, cx);
+    }
+
+    let known_for_observer = known.clone();
+    cx.observe(workspace, move |_this, workspace: Entity<Workspace>, cx| {
+        let data = workspace.read(cx).data().clone();
+        sync_services(&data, &mut known_for_observer.lock(), &service_manager, cx);
+    })
+    .detach();
+}
+
+fn sync_services(
+    data: &WorkspaceData,
+    known: &mut HashSet<String>,
+    service_manager: &Entity<ServiceManager>,
+    cx: &mut impl AppContext,
+) {
+    let current_ids: HashSet<String> = data.projects.iter()
+        .filter(|p| !p.is_remote)
+        .map(|p| p.id.clone())
+        .collect();
+
+    for p in &data.projects {
+        if p.is_remote || known.contains(&p.id) {
+            continue;
+        }
+        // Skip projects whose directory doesn't exist yet (deferred worktrees).
+        if !std::path::Path::new(&p.path).exists() {
+            continue;
+        }
+        service_manager.update(cx, |sm, cx| {
+            sm.load_project_services(&p.id, &p.path, &p.service_terminals, cx);
+        });
+        known.insert(p.id.clone());
+    }
+
+    let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
+    for id in &removed {
+        service_manager.update(cx, |sm, cx| {
+            sm.unload_project_services(id, cx);
+        });
+        known.remove(id);
+    }
+}
+
 /// Main application state and view
 pub struct Okena {
     root_view: Entity<RootView>,
@@ -250,76 +309,7 @@ impl Okena {
         .detach();
 
         // Observe workspace to load/unload service configs when projects change
-        {
-            let service_manager = service_manager.clone();
-            let known_project_ids: Arc<parking_lot::Mutex<HashSet<String>>> =
-                Arc::new(parking_lot::Mutex::new(HashSet::new()));
-
-            // Initial load of services for projects that already exist at startup
-            {
-                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
-                    .read(cx)
-                    .data()
-                    .projects
-                    .iter()
-                    .filter(|p| !p.is_remote)
-                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
-                    .collect();
-                let mut known = known_project_ids.lock();
-                for (id, path, saved_terminals) in &local_projects {
-                    // Skip projects whose directory doesn't exist yet (deferred worktrees).
-                    // They'll be picked up by the observer once the directory is ready.
-                    if !std::path::Path::new(path).exists() {
-                        continue;
-                    }
-                    service_manager.update(cx, |sm, cx| {
-                        sm.load_project_services(id, path, saved_terminals, cx);
-                    });
-                    known.insert(id.clone());
-                }
-            }
-
-            cx.observe(&workspace, move |_this, workspace, cx| {
-                // Snapshot project info to avoid borrow conflicts with service_manager.update()
-                let local_projects: Vec<(String, String, HashMap<String, String>)> = workspace
-                    .read(cx)
-                    .data()
-                    .projects
-                    .iter()
-                    .filter(|p| !p.is_remote)
-                    .map(|p| (p.id.clone(), p.path.clone(), p.service_terminals.clone()))
-                    .collect();
-
-                let current_ids: HashSet<String> =
-                    local_projects.iter().map(|(id, _, _)| id.clone()).collect();
-
-                let mut known = known_project_ids.lock();
-
-                // Load services for new projects (or deferred worktrees whose directory now exists)
-                for (id, path, saved_terminals) in &local_projects {
-                    if !known.contains(id) {
-                        // Skip projects whose directory doesn't exist yet (deferred worktrees).
-                        if !std::path::Path::new(path).exists() {
-                            continue;
-                        }
-                        service_manager.update(cx, |sm, cx| {
-                            sm.load_project_services(id, path, saved_terminals, cx);
-                        });
-                        known.insert(id.clone());
-                    }
-                }
-
-                // Unload services for removed projects
-                let removed: Vec<String> = known.difference(&current_ids).cloned().collect();
-                for id in &removed {
-                    service_manager.update(cx, |sm, cx| {
-                        sm.unload_project_services(id, cx);
-                    });
-                    known.remove(id);
-                }
-            })
-            .detach();
-        }
+        observe_project_services(&workspace, &service_manager, cx);
 
         // Observe service manager to sync terminal IDs back to workspace for persistence
         {
