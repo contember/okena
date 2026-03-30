@@ -39,11 +39,33 @@ impl Workspace {
     ) {
         log::info!("Workspace::split_terminal called for project {} at path {:?}", project_id, path);
 
+        // If the target node is inside a Tabs container, split the Tabs container
+        // instead of splitting inside the tab. This avoids nested splits within tabs
+        // which creates a clunky UI.
+        let split_path = if let Some(project) = self.project(project_id) {
+            if let Some(ref layout) = project.layout {
+                if path.len() >= 1 {
+                    let parent_path = &path[..path.len() - 1];
+                    if let Some(LayoutNode::Tabs { .. }) = layout.get_at_path(parent_path) {
+                        parent_path.to_vec()
+                    } else {
+                        path.to_vec()
+                    }
+                } else {
+                    path.to_vec()
+                }
+            } else {
+                path.to_vec()
+            }
+        } else {
+            path.to_vec()
+        };
+
         // Perform the split and find the new terminal's path after normalization.
         let new_path = if let Some(project) = self.project_mut(project_id) {
             if let Some(ref mut layout) = project.layout {
-                if let Some(node) = layout.get_at_path_mut(path) {
-                    log::info!("Found node at path, splitting...");
+                if let Some(node) = layout.get_at_path_mut(&split_path) {
+                    log::info!("Found node at path {:?}, splitting...", split_path);
                     let old_node = node.clone();
                     *node = LayoutNode::Split {
                         direction,
