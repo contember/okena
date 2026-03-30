@@ -368,6 +368,35 @@ pub fn execute_action(
         | ActionRequest::ReloadServices { .. } => {
             ActionResult::Err("service actions must be handled via ServiceManager".to_string())
         }
+        ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
+            let project = match ws.project(&project_id) {
+                Some(p) => p,
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let project_path = std::path::PathBuf::from(&project.path);
+            let (git_root, subdir) = okena_git::resolve_git_root_and_subdir(&project_path);
+            let path_template = settings(cx).worktree.path_template.clone();
+            let (worktree_path, wt_project_path) = okena_git::compute_target_paths(&git_root, &subdir, &path_template, &branch);
+            let global_hooks = settings(cx).hooks.clone();
+
+            match ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &wt_project_path, create_branch, &global_hooks, cx) {
+                Ok(new_project_id) => {
+                    let result = spawn_uninitialized_terminals(ws, &new_project_id, backend, terminals, cx);
+                    let terminal_id = ws.project(&new_project_id)
+                        .and_then(|p| p.layout.as_ref())
+                        .and_then(|l| find_first_terminal_id(l));
+                    match result {
+                        ActionResult::Ok(_) => ActionResult::Ok(Some(serde_json::json!({
+                            "project_id": new_project_id,
+                            "terminal_id": terminal_id,
+                            "path": wt_project_path,
+                        }))),
+                        err => err,
+                    }
+                }
+                Err(e) => ActionResult::Err(e),
+            }
+        }
     }
 }
 
@@ -506,6 +535,16 @@ pub fn spawn_uninitialized_terminals(
     }
 
     ActionResult::Ok(None)
+}
+
+/// Find the first terminal_id in a layout tree (depth-first).
+fn find_first_terminal_id(node: &LayoutNode) -> Option<String> {
+    match node {
+        LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+        LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+            children.iter().find_map(find_first_terminal_id)
+        }
+    }
 }
 
 /// Find the layout path for a terminal within a project.

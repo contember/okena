@@ -259,6 +259,12 @@ pub enum ActionRequest {
     ReloadServices {
         project_id: String,
     },
+    CreateWorktree {
+        project_id: String,
+        branch: String,
+        #[serde(default)]
+        create_branch: bool,
+    },
 }
 
 /// POST /v1/pair request
