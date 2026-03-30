@@ -99,17 +99,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .child(
                 header_button_base(HeaderAction::SplitVertical, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
-                        let child_path = if ctx_split_v.standalone {
-                            ctx_split_v.layout_path.clone()
-                        } else {
-                            let mut p = ctx_split_v.layout_path.clone();
-                            p.push(ctx_split_v.active_tab);
-                            p
-                        };
                         if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
                             dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_v.project_id.clone(),
-                                path: child_path,
+                                path: ctx_split_v.layout_path.clone(),
                                 direction: SplitDirection::Vertical,
                             }, cx);
                         }
@@ -118,17 +111,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .child(
                 header_button_base(HeaderAction::SplitHorizontal, &id_suffix, ButtonSize::COMPACT, &t, None, None)
                     .on_click(move |_, _window, cx| {
-                        let child_path = if ctx_split_h.standalone {
-                            ctx_split_h.layout_path.clone()
-                        } else {
-                            let mut p = ctx_split_h.layout_path.clone();
-                            p.push(ctx_split_h.active_tab);
-                            p
-                        };
                         if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
                             dispatcher.dispatch(okena_core::api::ActionRequest::SplitTerminal {
                                 project_id: ctx_split_h.project_id.clone(),
-                                path: child_path,
+                                path: ctx_split_h.layout_path.clone(),
                                 direction: SplitDirection::Horizontal,
                             }, cx);
                         }
