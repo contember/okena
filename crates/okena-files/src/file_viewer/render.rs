@@ -650,6 +650,7 @@ impl Render for FileViewer {
         let t = theme(cx);
         let focus_handle = self.focus_handle.clone();
         let tab = self.active_tab();
+        let tab_loading = tab.loading;
         let has_error = tab.error_message.is_some();
         let error_message = tab.error_message.clone();
         let is_markdown = tab.is_markdown;
@@ -798,8 +799,7 @@ impl Render for FileViewer {
                         this.close_active_tab(cx);
                     }
                     "r" if !modifiers.platform && !modifiers.control => {
-                        this.refresh_file_tree();
-                        cx.notify();
+                        this.refresh_file_tree_async(cx);
                     }
                     "left" if modifiers.alt => {
                         this.go_back(cx);
@@ -936,7 +936,22 @@ impl Render for FileViewer {
                             .min_w_0()
                             // Tab bar (above editor, not above sidebar)
                             .when_some(tab_bar, |d, tab_bar| d.child(tab_bar))
-                            .when(has_error, |d| {
+                            .when(tab_loading, |d| {
+                                d.child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .text_size(ui_text_sm(cx))
+                                                .text_color(rgb(t.text_muted))
+                                                .child("Loading…"),
+                                        ),
+                                )
+                            })
+                            .when(!tab_loading && has_error, |d| {
                                 d.child(
                                     div()
                                         .flex_1()
@@ -951,7 +966,7 @@ impl Render for FileViewer {
                                         ),
                                 )
                             })
-                            .when(!has_error && !is_preview_mode, |d| {
+                            .when(!tab_loading && !has_error && !is_preview_mode, |d| {
                                 let tc = theme_colors.clone();
                                 let view_clone = view.clone();
                                 d.child(
@@ -991,7 +1006,7 @@ impl Render for FileViewer {
                                         }),
                                 )
                             })
-                            .when(!has_error && is_preview_mode, |d| {
+                            .when(!tab_loading && !has_error && is_preview_mode, |d| {
                                 let mut content_children: Vec<AnyElement> = Vec::new();
                                 let mut node_idx = 0usize;
 

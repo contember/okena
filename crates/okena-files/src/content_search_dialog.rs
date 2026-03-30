@@ -102,6 +102,8 @@ pub struct ContentSearchDialog {
     expanded: bool,
     /// Cached syntax-highlighted lines per file path.
     highlight_cache: HashMap<PathBuf, Vec<HighlightedLine>>,
+    /// File currently being loaded for preview (to avoid duplicate loads).
+    preview_loading: Option<PathBuf>,
     /// Shared syntax set.
     syntax_set: SyntaxSet,
     /// Whether the theme is dark.
@@ -208,6 +210,7 @@ impl ContentSearchDialog {
             glob_editing: false,
             expanded,
             highlight_cache: HashMap::new(),
+            preview_loading: None,
             syntax_set,
             is_dark,
             debounce_task: None,
@@ -599,19 +602,52 @@ impl ContentSearchDialog {
                 );
         };
 
-        // Ensure file is in highlight cache
+        // Ensure file is in highlight cache — load asynchronously if needed
         if !self.highlight_cache.contains_key(&file_path) {
-            let fp_str = file_path.to_string_lossy();
-            if let Ok(content) = self.project_fs.read_file(&fp_str) {
-                let lines = highlight_content(
-                    &content,
-                    &file_path,
-                    &self.syntax_set,
-                    5000,
-                    self.is_dark,
-                );
-                self.highlight_cache.insert(file_path.clone(), lines);
+            if self.preview_loading.as_ref() != Some(&file_path) {
+                // Start loading this file in the background
+                self.preview_loading = Some(file_path.clone());
+                let fs = self.project_fs.clone();
+                let fp = file_path.clone();
+                let fp_str = file_path.to_string_lossy().to_string();
+                cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { fs.read_file(&fp_str) })
+                        .await;
+                    let _ = entity.update(cx, |this, cx| {
+                        if this.preview_loading.as_ref() == Some(&fp) {
+                            this.preview_loading = None;
+                        }
+                        if let Ok(content) = result {
+                            let lines = highlight_content(
+                                &content,
+                                &fp,
+                                &this.syntax_set,
+                                5000,
+                                this.is_dark,
+                            );
+                            this.highlight_cache.insert(fp, lines);
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
+            // Show loading state while file is being fetched
+            return div()
+                .flex_1()
+                .h_full()
+                .bg(rgb(t.bg_primary))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Loading…"),
+                );
         }
 
         let lines = self.highlight_cache.get(&file_path).cloned().unwrap_or_default();
