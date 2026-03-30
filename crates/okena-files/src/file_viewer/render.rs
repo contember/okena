@@ -638,6 +638,10 @@ impl Render for FileViewer {
                     "w" if modifiers.platform || modifiers.control => {
                         this.close_active_tab(cx);
                     }
+                    "r" if !modifiers.platform && !modifiers.control => {
+                        this.refresh_file_tree();
+                        cx.notify();
+                    }
                     "left" if modifiers.alt => {
                         this.go_back(cx);
                     }
