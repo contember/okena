@@ -316,11 +316,14 @@ impl FileViewer {
     }
 
     /// Update configuration (font size and dark mode) from the host app.
-    /// Also refreshes all tabs that were modified externally.
+    /// Also refreshes the file tree and all tabs that were modified externally.
     pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
         self.is_dark = is_dark;
+
+        // Rescan project files so the sidebar reflects added/removed files
+        self.refresh_file_tree();
 
         for tab in &mut self.tabs {
             if tab.is_empty() {
@@ -339,6 +342,28 @@ impl FileViewer {
                 );
             }
         }
+    }
+
+    /// Rescan the project directory and rebuild the file tree.
+    /// Preserves expanded folders and updates file indices on open tabs.
+    fn refresh_file_tree(&mut self) {
+        let files = FileSearchDialog::scan_files(&self.project_path);
+        let file_tree = build_file_tree(
+            files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (i, f.relative_path.as_str())),
+        );
+
+        // Update file indices on open tabs to match the new file list
+        for tab in &mut self.tabs {
+            if !tab.is_empty() {
+                tab.selected_file_index = files.iter().position(|f| f.path == tab.file_path);
+            }
+        }
+
+        self.files = files;
+        self.file_tree = file_tree;
     }
 
     /// Check if the active tab's file was modified externally and reload if so.
