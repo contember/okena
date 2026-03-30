@@ -64,31 +64,35 @@ pub struct ClaudeUsage {
 }
 
 fn read_access_token() -> Option<String> {
+    fn extract_token(json_str: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+        v["claudeAiOauth"]["accessToken"].as_str().map(String::from)
+    }
+
+    // Try credentials file first
     let home = dirs::home_dir()?;
-    let content = std::fs::read_to_string(home.join(".claude/.credentials.json"))
+    if let Some(token) = std::fs::read_to_string(home.join(".claude/.credentials.json"))
         .ok()
-        .or_else(|| {
-            // macOS: credentials stored in Keychain
-            #[cfg(target_os = "macos")]
-            {
-                let user = std::env::var("USER").ok()?;
-                let output = std::process::Command::new("security")
-                    .args(["find-generic-password", "-s", "Claude Code-credentials", "-a", &user, "-w"])
-                    .output()
-                    .ok()?;
-                if output.status.success() {
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                None
-            }
-        })?;
-    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    v["claudeAiOauth"]["accessToken"].as_str().map(String::from)
+        .and_then(|content| extract_token(&content))
+    {
+        return Some(token);
+    }
+
+    // macOS: fall back to Keychain
+    #[cfg(target_os = "macos")]
+    {
+        let user = std::env::var("USER").ok()?;
+        let output = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", "Claude Code-credentials", "-a", &user, "-w"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return extract_token(&content);
+        }
+    }
+
+    None
 }
 
 fn parse_usage(resp: &serde_json::Value) -> UsageData {
