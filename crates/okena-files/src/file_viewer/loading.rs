@@ -66,40 +66,22 @@ impl FileViewerTab {
         }
     }
 
-    /// Load file content via a ProjectFs provider (for remote files).
-    pub(super) fn load_file_via_provider(
+    /// Apply content that was loaded asynchronously in the background.
+    pub(super) fn apply_loaded_content(
         &mut self,
-        relative_path: &str,
-        provider: &dyn crate::project_fs::ProjectFs,
+        result: Result<String, String>,
         syntax_set: &SyntaxSet,
         is_dark: bool,
     ) {
-        // Check file size
-        match provider.file_size(relative_path) {
-            Ok(size) => {
-                if size > MAX_FILE_SIZE {
-                    self.error_message = Some(format!(
-                        "File too large ({:.1} MB). Maximum size is 5 MB.",
-                        size as f64 / 1024.0 / 1024.0
-                    ));
-                    return;
-                }
-            }
-            Err(e) => {
-                self.error_message = Some(e);
-                return;
-            }
-        }
-
-        match provider.read_file(relative_path) {
+        self.loading = false;
+        match result {
             Ok(content) => {
                 self.content = content;
                 self.do_highlight_content(&self.file_path.clone(), syntax_set, is_dark);
                 if self.is_markdown {
                     self.markdown_doc = Some(MarkdownDocument::parse(&self.content));
                 }
-                // Try to get mtime for local files (enables reload_if_changed);
-                // harmlessly fails for remote files where file_path is a remote path.
+                // Try to get mtime for local files; harmlessly fails for remote files.
                 self.modified_at = std::fs::metadata(&self.file_path)
                     .ok()
                     .and_then(|m| m.modified().ok());

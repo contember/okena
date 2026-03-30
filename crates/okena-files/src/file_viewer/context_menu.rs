@@ -171,7 +171,7 @@ impl FileViewer {
         self.update_tabs_after_rename(&old_path, &new_path);
         self.update_expanded_after_rename(&old_path, &new_path);
 
-        self.refresh_file_tree();
+        self.refresh_file_tree_async(cx);
         cx.notify();
     }
 
@@ -293,7 +293,7 @@ impl FileViewer {
 
         self.close_tabs_for_deleted(&confirm.target, cx);
 
-        self.refresh_file_tree();
+        self.refresh_file_tree_async(cx);
         cx.notify();
     }
 

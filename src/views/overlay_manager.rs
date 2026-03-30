@@ -1165,7 +1165,7 @@ impl OverlayManager {
 
         // Reuse cached viewer if available
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
-            viewer.update(cx, |v, _cx| v.update_config(font_size, is_dark));
+            viewer.update(cx, |v, cx| v.update_config(font_size, is_dark, cx));
             self.open_modal(viewer.clone(), cx);
             return;
         }
@@ -1196,7 +1196,7 @@ impl OverlayManager {
         // Reuse cached viewer if available
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
             viewer.update(cx, |v, cx| {
-                v.update_config(font_size, is_dark);
+                v.update_config(font_size, is_dark, cx);
                 v.open_file_in_tab(PathBuf::from(&relative_path), cx);
             });
             self.open_modal(viewer.clone(), cx);

@@ -67,6 +67,8 @@ pub(super) struct FileViewerTab {
     pub selected_file_index: Option<usize>,
     /// Last known modification time of the file (for detecting external changes).
     pub modified_at: Option<SystemTime>,
+    /// Whether the tab content is still being loaded asynchronously.
+    pub loading: bool,
 }
 
 impl FileViewerTab {
@@ -89,21 +91,15 @@ impl FileViewerTab {
             scrollbar_drag: None,
             selected_file_index: None,
             modified_at: None,
+            loading: false,
         }
     }
 
-    /// Create a new tab with a file loaded.
-    fn new_with_file(
-        file_path: PathBuf,
-        relative_path: Option<&str>,
-        file_index: Option<usize>,
-        provider: &dyn crate::project_fs::ProjectFs,
-        syntax_set: &SyntaxSet,
-        is_dark: bool,
-    ) -> Self {
+    /// Create a tab in loading state (content will be filled asynchronously).
+    fn new_loading(file_path: PathBuf, file_index: Option<usize>) -> Self {
         let is_markdown = Self::is_markdown_file(&file_path);
-        let mut tab = Self {
-            file_path: file_path.clone(),
+        Self {
+            file_path,
             content: String::new(),
             highlighted_lines: Vec::new(),
             line_count: 0,
@@ -123,13 +119,8 @@ impl FileViewerTab {
             scrollbar_drag: None,
             selected_file_index: file_index,
             modified_at: None,
-        };
-        if let Some(rel) = relative_path {
-            tab.load_file_via_provider(rel, provider, syntax_set, is_dark);
-        } else {
-            tab.load_file(&file_path, syntax_set, is_dark);
+            loading: true,
         }
-        tab
     }
 
     /// Get the filename for display in the tab bar.
@@ -280,17 +271,13 @@ impl FileViewer {
 
         let syntax_set = load_syntax_set();
 
-        // For the initial tab, use the file_path as the relative path hint.
-        // This works for remote (where file_path IS the relative path from the caller)
-        // and for local (where load_file falls back to absolute path reading).
+        // Create tab in loading state; content will be loaded in background.
         let relative_hint = rel_str.to_string();
-        let tab = FileViewerTab::new_with_file(
-            file_path.clone(), Some(&relative_hint), None, project_fs.as_ref(), &syntax_set, is_dark,
-        );
+        let tab = FileViewerTab::new_loading(file_path.clone(), None);
 
         // Load file list asynchronously to avoid blocking the UI thread
         let fs_clone = project_fs.clone();
-        let file_path_clone = file_path;
+        let file_path_clone = file_path.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
@@ -317,6 +304,35 @@ impl FileViewer {
             });
         })
         .detach();
+
+        // Load the initial tab content in the background
+        {
+            let fs = project_fs.clone();
+            let rel = relative_hint;
+            let target = file_path;
+            cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+                let result: Result<String, String> = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let size = fs.file_size(&rel)?;
+                        if size > MAX_FILE_SIZE {
+                            return Err(format!(
+                                "File too large ({:.1} MB). Maximum size is 5 MB.",
+                                size as f64 / 1024.0 / 1024.0
+                            ));
+                        }
+                        fs.read_file(&rel)
+                    })
+                    .await;
+                let _ = entity.update(cx, |this, cx| {
+                    if let Some(tab) = this.tabs.iter_mut().find(|t| t.file_path == target) {
+                        tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
 
         Self {
             focus_handle,
@@ -407,13 +423,13 @@ impl FileViewer {
 
     /// Update configuration (font size and dark mode) from the host app.
     /// Also refreshes the file tree and all tabs that were modified externally.
-    pub fn update_config(&mut self, font_size: f32, is_dark: bool) {
+    pub fn update_config(&mut self, font_size: f32, is_dark: bool, cx: &mut Context<Self>) {
         let rehighlight = is_dark != self.is_dark;
         self.file_font_size = font_size;
         self.is_dark = is_dark;
 
         // Rescan project files so the sidebar reflects added/removed files
-        self.refresh_file_tree();
+        self.refresh_file_tree_async(cx);
 
         for tab in &mut self.tabs {
             if tab.is_empty() {
@@ -434,26 +450,29 @@ impl FileViewer {
         }
     }
 
-    /// Rescan the project directory and rebuild the file tree.
+    /// Rescan the project directory and rebuild the file tree asynchronously.
     /// Preserves expanded folders and updates file indices on open tabs.
-    fn refresh_file_tree(&mut self) {
-        let files = self.project_fs.list_files();
-        let file_tree = build_file_tree(
-            files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (i, f.relative_path.as_str())),
-        );
-
-        // Update file indices on open tabs to match the new file list
-        for tab in &mut self.tabs {
-            if !tab.is_empty() {
-                tab.selected_file_index = files.iter().position(|f| f.path == tab.file_path);
-            }
-        }
-
-        self.files = files;
-        self.file_tree = file_tree;
+    fn refresh_file_tree_async(&mut self, cx: &mut Context<Self>) {
+        let fs = self.project_fs.clone();
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { fs.list_files() })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.file_tree = build_file_tree(
+                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
+                );
+                for tab in &mut this.tabs {
+                    if !tab.is_empty() {
+                        tab.selected_file_index = files.iter().position(|f| f.path == tab.file_path);
+                    }
+                }
+                this.files = files;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Check if the active tab's file was modified externally and reload if so.
@@ -509,13 +528,12 @@ impl FileViewer {
         );
         self.expanded_folders.extend(expanded);
 
-        let new_tab = FileViewerTab::new_with_file(
-            file_path, relative.as_deref(), file_index, self.project_fs.as_ref(), &self.syntax_set, self.is_dark,
-        );
+        let new_tab = FileViewerTab::new_loading(file_path.clone(), file_index);
 
         // If current tab is empty (no file loaded), replace it
         if self.active_tab().is_empty() {
             self.tabs[self.active_tab] = new_tab;
+            self.spawn_tab_load(file_path, relative, cx);
             cx.notify();
             return;
         }
@@ -534,6 +552,7 @@ impl FileViewer {
             self.active_tab = insert_at;
         }
 
+        self.spawn_tab_load(file_path, relative, cx);
         cx.notify();
     }
 
@@ -632,11 +651,46 @@ impl FileViewer {
         );
         self.expanded_folders.extend(expanded);
 
-        let new_tab = FileViewerTab::new_with_file(
-            file_path, relative.as_deref(), file_index, self.project_fs.as_ref(), &self.syntax_set, self.is_dark,
-        );
+        let new_tab = FileViewerTab::new_loading(file_path.clone(), file_index);
         self.tabs[self.active_tab] = new_tab;
+        self.spawn_tab_load(file_path, relative, cx);
         cx.notify();
+    }
+
+    /// Spawn a background task to load file content for a tab.
+    /// The tab is identified by `file_path` to be resilient to index changes.
+    fn spawn_tab_load(
+        &self,
+        file_path: PathBuf,
+        relative_path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let fs = self.project_fs.clone();
+        let rel = relative_path
+            .unwrap_or_else(|| file_path.to_string_lossy().to_string());
+        let target = file_path;
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let result: Result<String, String> = cx
+                .background_executor()
+                .spawn(async move {
+                    let size = fs.file_size(&rel)?;
+                    if size > MAX_FILE_SIZE {
+                        return Err(format!(
+                            "File too large ({:.1} MB). Maximum size is 5 MB.",
+                            size as f64 / 1024.0 / 1024.0
+                        ));
+                    }
+                    fs.read_file(&rel)
+                })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                if let Some(tab) = this.tabs.iter_mut().find(|t| t.file_path == target) {
+                    tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Look up the relative path for a file by its absolute path.
