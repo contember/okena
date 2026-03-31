@@ -432,12 +432,7 @@ impl Sidebar {
     }
 
     pub(crate) fn is_group_collapsed(&self, project_id: &str, group: &GroupKind) -> bool {
-        let key = (project_id.to_string(), group.clone());
-        match group {
-            // Hooks are collapsed by default — only open if explicitly expanded
-            GroupKind::Hooks => !self.collapsed_groups.contains(&key),
-            _ => self.collapsed_groups.contains(&key),
-        }
+        self.collapsed_groups.contains(&(project_id.to_string(), group.clone()))
     }
 
     /// Render expanded children (terminals group + services group) for a project.
