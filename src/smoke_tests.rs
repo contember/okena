@@ -108,6 +108,7 @@ mod tests {
                 project_widths: Default::default(),
                 folders: vec![],
                 service_panel_heights: Default::default(),
+                hook_panel_heights: Default::default(),
             })
         });
     }

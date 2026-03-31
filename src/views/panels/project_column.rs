@@ -19,6 +19,7 @@ use std::sync::Arc;
 use okena_core::api::ActionRequest;
 use okena_workspace::requests::OverlayRequest;
 use okena_views_services::service_panel::ServicePanel;
+use crate::views::panels::hook_panel::HookPanel;
 use crate::views::root::TerminalsRegistry;
 
 /// A single project column with header and layout
@@ -42,6 +43,8 @@ pub struct ProjectColumn {
     git_header: Entity<GitHeader>,
     /// Self-contained service panel entity
     service_panel: Entity<ServicePanel<ActionDispatcher>>,
+    /// Self-contained hook panel entity
+    hook_panel: Entity<HookPanel>,
 }
 
 impl ProjectColumn {
@@ -85,6 +88,22 @@ impl ProjectColumn {
         // Observe service_panel so ProjectColumn re-renders when panel state changes
         cx.observe(&service_panel, |_, _, cx| cx.notify()).detach();
 
+        let initial_hook_height = workspace.read(cx).data.hook_panel_heights
+            .get(&project_id).copied().unwrap_or(200.0);
+
+        let hook_panel = {
+            let pid = project_id.clone();
+            let ws = workspace.clone();
+            let rb = request_broker.clone();
+            let be = backend.clone();
+            let ts = terminals.clone();
+            let ad = active_drag.clone();
+            cx.new(move |cx| {
+                HookPanel::new(pid, ws, rb, be, ts, ad, initial_hook_height, cx)
+            })
+        };
+        cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
+
         Self {
             workspace,
             request_broker,
@@ -97,6 +116,7 @@ impl ProjectColumn {
             action_dispatcher: None,
             git_header,
             service_panel,
+            hook_panel,
         }
     }
 
@@ -151,6 +171,21 @@ impl ProjectColumn {
     pub fn close_service_panel(&mut self, cx: &mut Context<Self>) {
         self.service_panel.update(cx, |sp, cx| {
             sp.close(cx);
+        });
+    }
+
+    /// Show a hook terminal in the hook panel.
+    pub fn show_hook_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
+        let tid = terminal_id.to_string();
+        self.hook_panel.update(cx, |hp, cx| {
+            hp.show_hook(&tid, cx);
+        });
+    }
+
+    /// Set the hook panel height (called during drag resize).
+    pub fn set_hook_panel_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        self.hook_panel.update(cx, |hp, cx| {
+            hp.set_panel_height(height, cx);
         });
     }
 
@@ -486,6 +521,12 @@ impl ProjectColumn {
                                     .tooltip(|_window, cx| Tooltip::new("Focus Project").build(_window, cx)),
                             ),
                     )
+                    // Hook indicator (delegated to HookPanel entity)
+                    .child({
+                        self.hook_panel.update(cx, |hp, cx| {
+                            hp.render_hook_indicator(&t, cx)
+                        })
+                    })
                     // Service indicator (delegated to ServicePanel entity)
                     .child({
                         self.service_panel.update(cx, |sp, cx| {
@@ -659,6 +700,12 @@ impl Render for ProjectColumn {
                     .bg(bg_color)
                     .child(self.render_header(&project, cx))
                     .child(content)
+                    // Hook panel (delegated to HookPanel entity)
+                    .child({
+                        self.hook_panel.update(cx, |hp, cx| {
+                            hp.render_panel(&t, cx)
+                        })
+                    })
                     // Service panel (delegated to ServicePanel entity)
                     .child({
                         self.service_panel.update(cx, |sp, cx| {

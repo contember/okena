@@ -125,7 +125,10 @@ impl HookRunner {
                 script.push_str(&format!("export {}='{}'; ", k, escaped_v));
             }
             script.push_str(command);
-            script.push_str("; exec \"${SHELL:-sh}\"");
+            // Capture exit code and report it via OSC title before exec-ing
+            // into the interactive shell. The PTY event loop detects titles
+            // matching __okena_hook_exit:<code> and updates hook status.
+            script.push_str("; __okena_rc=$?; printf '\\033]0;__okena_hook_exit:%d\\007' \"$__okena_rc\"; exec \"${SHELL:-sh}\"");
             let shell = ShellType::for_command(script);
             self.backend.create_terminal(cwd, Some(&shell))
         } else {

@@ -577,6 +577,43 @@ impl Okena {
                         }
                     }
 
+                    // Check if any hook terminal reported its exit code via
+                    // OSC title (__okena_hook_exit:<code>). This happens when
+                    // keep_alive hooks finish their command but the PTY stays
+                    // alive as an interactive shell.
+                    if !dirty_terminal_ids.is_empty() {
+                        let terminals_guard = this.terminals.lock();
+                        let ws = this.workspace.read(cx);
+                        let mut status_updates: Vec<(String, crate::workspace::state::HookTerminalStatus)> = Vec::new();
+                        for tid in &dirty_terminal_ids {
+                            if ws.is_hook_terminal(tid).is_none() {
+                                continue;
+                            }
+                            if let Some(terminal) = terminals_guard.get(tid) {
+                                if let Some(title) = terminal.title() {
+                                    if let Some(code_str) = title.strip_prefix("__okena_hook_exit:") {
+                                        let exit_code = code_str.parse::<i32>().unwrap_or(-1);
+                                        let status = if exit_code == 0 {
+                                            crate::workspace::state::HookTerminalStatus::Succeeded
+                                        } else {
+                                            crate::workspace::state::HookTerminalStatus::Failed { exit_code }
+                                        };
+                                        status_updates.push((tid.clone(), status));
+                                    }
+                                }
+                            }
+                        }
+                        drop(terminals_guard);
+                        drop(ws);
+                        if !status_updates.is_empty() {
+                            this.workspace.update(cx, |ws, cx| {
+                                for (tid, status) in status_updates {
+                                    ws.update_hook_terminal_status(&tid, status, cx);
+                                }
+                            });
+                        }
+                    }
+
                     if !exit_events.is_empty() {
                         this.root_view.update(cx, |_, cx| cx.notify());
                     }

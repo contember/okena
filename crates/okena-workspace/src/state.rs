@@ -44,6 +44,9 @@ pub struct WorkspaceData {
     /// Service panel heights in pixels (project_id -> height)
     #[serde(default)]
     pub service_panel_heights: HashMap<String, f32>,
+    /// Hook panel heights in pixels (project_id -> height)
+    #[serde(default)]
+    pub hook_panel_heights: HashMap<String, f32>,
 }
 
 impl WorkspaceData {
@@ -69,6 +72,9 @@ impl WorkspaceData {
                 .filter(|(id, _)| !remote_ids.contains(id.as_str()))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
             service_panel_heights: self.service_panel_heights.iter()
+                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
+                .map(|(k, v)| (k.clone(), *v)).collect(),
+            hook_panel_heights: self.hook_panel_heights.iter()
                 .filter(|(id, _)| !remote_ids.contains(id.as_str()))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
             folders: self.folders.iter()
@@ -424,63 +430,8 @@ impl Workspace {
             let label = entry.label.clone();
             project.hook_terminals.insert(terminal_id.to_string(), entry);
 
-            // Add the hook terminal to the project's layout so it renders in a pane.
-            // If there are already hook terminals, group them in Tabs to avoid nested splits
-            // that progressively shrink the main terminal area.
-            let hook_node = LayoutNode::Terminal {
-                terminal_id: Some(terminal_id.to_string()),
-                minimized: false,
-                detached: false,
-                shell_type: okena_terminal::shell_config::ShellType::Default,
-                zoom_level: 1.0,
-            };
-            if let Some(ref mut existing) = project.layout {
-                // Check if the layout is already a horizontal split with hook terminals
-                // on the right side — if so, add to existing Tabs group.
-                let added_to_existing = if let LayoutNode::Split {
-                    direction: SplitDirection::Horizontal,
-                    children, ..
-                } = existing {
-                    if children.len() == 2 {
-                        match &mut children[1] {
-                            LayoutNode::Tabs { children: tab_children, active_tab } => {
-                                // Already a Tabs group — append and switch to new tab
-                                tab_children.push(hook_node.clone());
-                                *active_tab = tab_children.len() - 1;
-                                true
-                            }
-                            other @ LayoutNode::Terminal { .. } => {
-                                // Single hook terminal — convert to Tabs for the new one.
-                                // Check layout structure directly instead of relying on
-                                // hook_terminals count which can be stale after removals.
-                                let prev = other.clone();
-                                *other = LayoutNode::Tabs {
-                                    children: vec![prev, hook_node.clone()],
-                                    active_tab: 1,
-                                };
-                                true
-                            }
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !added_to_existing {
-                    let existing = existing.clone();
-                    project.layout = Some(LayoutNode::Split {
-                        direction: SplitDirection::Horizontal,
-                        children: vec![existing, hook_node],
-                        sizes: vec![0.7, 0.3],
-                    });
-                }
-            } else {
-                project.layout = Some(hook_node);
-            }
-            // Set the terminal name to the hook label
+            // Hook terminals are displayed in the dedicated HookPanel (not in the layout tree).
+            // Set the terminal name so the panel can display it.
             project.terminal_names.insert(terminal_id.to_string(), label);
 
             self.notify_data(cx);
@@ -2686,6 +2637,7 @@ mod workspace_tests {
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: Vec::new(),
         }
     }
@@ -3474,6 +3426,7 @@ mod gpui_tests {
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }
@@ -3710,14 +3663,17 @@ mod gpui_tests {
             ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
         });
 
+        // Hook terminals are stored in hook_terminals, NOT in the layout tree
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            assert!(matches!(layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
+            let p = ws.project("p1").unwrap();
+            assert!(p.layout.is_none()); // Layout unchanged
+            assert!(p.hook_terminals.contains_key("hook-1"));
+            assert!(p.terminal_names.contains_key("hook-1"));
         });
     }
 
     #[gpui::test]
-    fn test_register_hook_terminal_creates_split(cx: &mut gpui::TestAppContext) {
+    fn test_register_hook_terminal_does_not_modify_layout(cx: &mut gpui::TestAppContext) {
         let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -3725,56 +3681,19 @@ mod gpui_tests {
             ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
         });
 
+        // Layout should remain a single terminal (unchanged)
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            match layout {
-                LayoutNode::Split { direction, children, sizes } => {
-                    assert_eq!(*direction, SplitDirection::Horizontal);
-                    assert_eq!(children.len(), 2);
-                    assert!((sizes[0] - 0.7).abs() < 0.01);
-                    assert!((sizes[1] - 0.3).abs() < 0.01);
-                    // Original terminal on left
-                    assert!(matches!(&children[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "term_p1"));
-                    // Hook terminal on right
-                    assert!(matches!(&children[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
-                }
-                _ => panic!("Expected horizontal split, got {:?}", layout),
-            }
+            let p = ws.project("p1").unwrap();
+            let layout = p.layout.as_ref().unwrap();
+            // Original terminal still there, no split created
+            assert!(matches!(layout, LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "term_p1"));
+            // Hook is in hook_terminals
+            assert!(p.hook_terminals.contains_key("hook-1"));
         });
     }
 
     #[gpui::test]
-    fn test_register_second_hook_creates_tabs(cx: &mut gpui::TestAppContext) {
-        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
-            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            match layout {
-                LayoutNode::Split { children, .. } => {
-                    assert_eq!(children.len(), 2);
-                    match &children[1] {
-                        LayoutNode::Tabs { children: tabs, active_tab } => {
-                            assert_eq!(tabs.len(), 2);
-                            assert_eq!(*active_tab, 1);
-                            assert!(matches!(&tabs[0], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-1"));
-                            assert!(matches!(&tabs[1], LayoutNode::Terminal { terminal_id: Some(id), .. } if id == "hook-2"));
-                        }
-                        _ => panic!("Expected Tabs node for second hook"),
-                    }
-                }
-                _ => panic!("Expected split layout"),
-            }
-        });
-    }
-
-    #[gpui::test]
-    fn test_register_third_hook_appends_to_tabs(cx: &mut gpui::TestAppContext) {
+    fn test_register_multiple_hooks_stored_in_hashmap(cx: &mut gpui::TestAppContext) {
         let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
@@ -3785,36 +3704,26 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            match layout {
-                LayoutNode::Split { children, .. } => {
-                    match &children[1] {
-                        LayoutNode::Tabs { children: tabs, active_tab } => {
-                            assert_eq!(tabs.len(), 3);
-                            assert_eq!(*active_tab, 2);
-                        }
-                        _ => panic!("Expected Tabs"),
-                    }
-                }
-                _ => panic!("Expected split layout"),
-            }
+            let p = ws.project("p1").unwrap();
+            assert_eq!(p.hook_terminals.len(), 3);
+            assert!(p.hook_terminals.contains_key("hook-1"));
+            assert!(p.hook_terminals.contains_key("hook-2"));
+            assert!(p.hook_terminals.contains_key("hook-3"));
+            // Layout should be unchanged (single terminal)
+            assert!(matches!(p.layout.as_ref().unwrap(), LayoutNode::Terminal { .. }));
         });
     }
 
     #[gpui::test]
-    fn test_remove_hook_terminal_cleans_layout(cx: &mut gpui::TestAppContext) {
-        let mut p = make_project("p1");
-        p.layout = None;
-        let data = make_workspace_data(vec![p], vec!["p1"]);
+    fn test_remove_hook_terminal_cleans_hashmap(cx: &mut gpui::TestAppContext) {
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
             ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
         });
 
-        // Verify terminal is there
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.project("p1").unwrap().layout.is_some());
             assert!(ws.project("p1").unwrap().hook_terminals.contains_key("hook-1"));
         });
 
@@ -3824,7 +3733,6 @@ mod gpui_tests {
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             let p = ws.project("p1").unwrap();
-            assert!(p.layout.is_none());
             assert!(p.hook_terminals.is_empty());
             assert!(!p.terminal_names.contains_key("hook-1"));
         });
@@ -3873,37 +3781,9 @@ mod gpui_tests {
             let entry = project.hook_terminals.get("hook-1-new").unwrap();
             assert_eq!(entry.status, HookTerminalStatus::Running);
             assert_eq!(entry.hook_type, "on_project_open");
-            // Layout updated
-            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1").is_none());
-            assert!(project.layout.as_ref().unwrap().find_terminal_path("hook-1-new").is_some());
-        });
-    }
-
-    #[gpui::test]
-    fn test_replace_terminal_id_in_layout(cx: &mut gpui::TestAppContext) {
-        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
-        let workspace = cx.new(|_cx| Workspace::new(data));
-
-        // Register two hook terminals to get them into layout as tabs
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.register_hook_terminal("p1", "hook-1", make_hook_entry("on_project_open"), cx);
-            ws.register_hook_terminal("p1", "hook-2", make_hook_entry("pre_merge"), cx);
-        });
-
-        // Replace hook-1 with hook-1-new in the layout tree directly
-        workspace.update(cx, |ws: &mut Workspace, cx| {
-            if let Some(ref mut layout) = ws.data.projects.iter_mut().find(|p| p.id == "p1").unwrap().layout {
-                layout.replace_terminal_id("hook-1", "hook-1-new");
-            }
-            cx.notify();
-        });
-
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let layout = ws.project("p1").unwrap().layout.as_ref().unwrap();
-            assert!(layout.find_terminal_path("hook-1").is_none());
-            assert!(layout.find_terminal_path("hook-1-new").is_some());
-            // Other terminals unaffected
-            assert!(layout.find_terminal_path("hook-2").is_some());
+            // Terminal name updated
+            assert!(!project.terminal_names.contains_key("hook-1"));
+            assert!(project.terminal_names.contains_key("hook-1-new"));
         });
     }
 

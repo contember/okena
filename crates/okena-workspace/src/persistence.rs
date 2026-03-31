@@ -464,6 +464,7 @@ pub fn default_workspace() -> WorkspaceData {
         project_order: vec![project_id],
         project_widths: HashMap::new(),
         service_panel_heights: HashMap::new(),
+        hook_panel_heights: HashMap::new(),
         folders: Vec::new(),
     }
 }
@@ -504,6 +505,7 @@ mod tests {
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+        hook_panel_heights: HashMap::new(),
             folders,
         }
     }
@@ -686,6 +688,7 @@ mod tests {
             project_order: vec![],
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+        hook_panel_heights: HashMap::new(),
             folders: vec![],
         };
         let migrated = migrate_workspace(data);
@@ -700,6 +703,7 @@ mod tests {
             project_order: vec![],
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+        hook_panel_heights: HashMap::new(),
             folders: vec![],
         };
         let migrated = migrate_workspace(data);

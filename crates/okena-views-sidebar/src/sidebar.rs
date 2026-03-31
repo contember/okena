@@ -139,9 +139,6 @@ pub struct Sidebar {
     pub service_manager: Option<Entity<ServiceManager>>,
     /// Collapsed state for group headers (Terminals/Services) per project
     pub(crate) collapsed_groups: HashSet<(String, GroupKind)>,
-    /// Project IDs that have been auto-expanded due to hook terminals.
-    /// Tracked so we only auto-expand once (user can collapse afterward).
-    pub(crate) hook_auto_expanded: HashSet<String>,
     /// Parent project IDs with in-flight worktree creation (debounce guard)
     pub(crate) creating_worktree: HashSet<String>,
     /// Callback to get settings
@@ -170,27 +167,8 @@ impl Sidebar {
             cx.notify();
         }).detach();
 
-        // Auto-expand projects that gain hook terminals (outside of render).
-        // Tracked in hook_auto_expanded so we only expand once per project
-        // (user can collapse afterward without it re-expanding).
-        cx.observe(&workspace, |this, workspace, cx| {
-            let ws = workspace.read(cx);
-            let mut changed = false;
-            for project in &ws.data().projects {
-                // Auto-expand projects with hook terminals
-                if !project.hook_terminals.is_empty() && this.hook_auto_expanded.insert(project.id.clone()) {
-                    this.expanded_projects.insert(project.id.clone());
-                    changed = true;
-                }
-            }
-            let before_len = this.hook_auto_expanded.len();
-            this.hook_auto_expanded.retain(|id| {
-                ws.data().projects.iter().any(|p| p.id == *id && !p.hook_terminals.is_empty())
-            });
-            if changed || this.hook_auto_expanded.len() != before_len {
-                cx.notify();
-            }
-        }).detach();
+        // Hook terminals are displayed in the dedicated HookPanel, so we no
+        // longer auto-expand the sidebar project when hooks appear.
 
         Self {
             workspace,
@@ -213,7 +191,6 @@ impl Sidebar {
             dispatch_action: None,
             service_manager: None,
             collapsed_groups: HashSet::new(),
-            hook_auto_expanded: HashSet::new(),
             creating_worktree: HashSet::new(),
             get_settings: None,
             get_remote_connections: None,
@@ -455,7 +432,12 @@ impl Sidebar {
     }
 
     pub(crate) fn is_group_collapsed(&self, project_id: &str, group: &GroupKind) -> bool {
-        self.collapsed_groups.contains(&(project_id.to_string(), group.clone()))
+        let key = (project_id.to_string(), group.clone());
+        match group {
+            // Hooks are collapsed by default — only open if explicitly expanded
+            GroupKind::Hooks => !self.collapsed_groups.contains(&key),
+            _ => self.collapsed_groups.contains(&key),
+        }
     }
 
     /// Render expanded children (terminals group + services group) for a project.

@@ -53,6 +53,7 @@ pub enum OverlayRequest {
         position: gpui::Point<gpui::Pixels>,
     },
     ShowServiceLog { project_id: String, service_name: String },
+    ShowHookTerminal { project_id: String, terminal_id: String },
     FileSearch { project_path: String },
     ContentSearch { project_path: String },
     FileBrowser { project_path: String },
