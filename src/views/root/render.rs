@@ -446,6 +446,16 @@ impl Render for RootView {
                                     });
                                 }
                             }
+                            DragState::HookPanel { project_id, initial_mouse_y, initial_height } => {
+                                let delta = initial_mouse_y - f32::from(event.position.y);
+                                let new_height = initial_height + delta;
+                                let project_id = project_id.clone();
+                                if let Some(col) = this.project_columns.get(&project_id).cloned() {
+                                    col.update(cx, |col, cx| {
+                                        col.set_hook_panel_height(new_height, cx);
+                                    });
+                                }
+                            }
                             _ => {
                                 // Handle split and project column resize
                                 compute_resize(event.position, state, &workspace, cx);

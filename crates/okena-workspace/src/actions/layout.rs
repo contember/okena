@@ -1414,6 +1414,7 @@ mod gpui_tests {
             project_order: order.into_iter().map(String::from).collect(),
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }

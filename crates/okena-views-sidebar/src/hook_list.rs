@@ -76,8 +76,14 @@ impl Sidebar {
                 let terminal_id = terminal_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.focus_terminal_by_id(&project_id, &terminal_id, cx);
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            okena_workspace::requests::OverlayRequest::ShowHookTerminal {
+                                project_id: project_id.clone(),
+                                terminal_id: terminal_id.clone(),
+                            },
+                            cx,
+                        );
                     });
                 }
             }))

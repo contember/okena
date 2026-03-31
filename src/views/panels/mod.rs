@@ -5,6 +5,7 @@
 //! - Project columns for multi-project workspace
 //! - Status bar at the bottom
 
+pub mod hook_panel;
 pub mod project_column;
 pub mod sidebar;
 pub mod status_bar;

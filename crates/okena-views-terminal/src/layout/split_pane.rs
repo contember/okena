@@ -40,6 +40,12 @@ pub enum DragState {
         initial_mouse_y: f32,
         initial_height: f32,
     },
+    /// Resizing per-project hook panel height
+    HookPanel {
+        project_id: String,
+        initial_mouse_y: f32,
+        initial_height: f32,
+    },
 }
 
 /// Trait object wrapper for ActionDispatch in DragState (needs Clone).
@@ -166,7 +172,7 @@ pub fn compute_resize(
                 ws.update_project_widths(new_widths, cx);
             });
         }
-        DragState::Sidebar | DragState::ServicePanel { .. } => {
+        DragState::Sidebar | DragState::ServicePanel { .. } | DragState::HookPanel { .. } => {
             // Handled directly in RootView's on_mouse_move
         }
     }

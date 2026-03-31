@@ -337,6 +337,12 @@ impl Workspace {
         self.notify_data(cx);
     }
 
+    /// Update hook panel height for a project
+    pub fn update_hook_panel_height(&mut self, project_id: &str, height: f32, cx: &mut Context<Self>) {
+        self.data.hook_panel_heights.insert(project_id.to_string(), height);
+        self.notify_data(cx);
+    }
+
     /// Get project width or default equal distribution
     pub fn get_project_width(&self, project_id: &str, visible_count: usize) -> f32 {
         self.data.project_widths
@@ -735,6 +741,7 @@ mod tests {
             project_order: vec![],
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }
@@ -829,6 +836,7 @@ mod gpui_tests {
             project_order: vec![],
             project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
         }
     }
