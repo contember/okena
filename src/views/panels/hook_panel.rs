@@ -33,6 +33,9 @@ pub struct HookPanel {
 
     /// Whether the hook panel is open.
     panel_open: bool,
+    /// Whether the panel was auto-opened by a new hook appearing.
+    /// Only auto-close on all-succeeded when this is true.
+    auto_opened: bool,
     /// Currently active hook terminal ID.
     active_terminal_id: Option<String>,
     /// Terminal pane showing the active hook's output.
@@ -74,9 +77,10 @@ impl HookPanel {
                             .cloned()
                     })
                 {
+                    this.auto_opened = true;
                     this.show_hook(&newest_tid, cx);
                 }
-            } else if this.panel_open && current_count > 0 {
+            } else if this.panel_open && this.auto_opened && current_count > 0 {
                 // Auto-close when all hooks succeeded (stay open on failures)
                 let all_succeeded = project
                     .map(|p| p.hook_terminals.values()
@@ -99,6 +103,7 @@ impl HookPanel {
             terminals,
             active_drag,
             panel_open: false,
+            auto_opened: false,
             active_terminal_id: None,
             terminal_pane: None,
             panel_height: initial_height,
@@ -169,6 +174,7 @@ impl HookPanel {
     /// Close the hook panel.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.panel_open = false;
+        self.auto_opened = false;
         self.terminal_pane = None;
         self.active_terminal_id = None;
         cx.notify();
