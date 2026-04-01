@@ -53,8 +53,9 @@ impl ConnectionHandler for DesktopConnectionHandler {
     }
 
     fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
-        if let Some(terminal) = self.terminals.lock().get(prefixed_id) {
-            terminal.process_output(data);
+        let terminal = self.terminals.lock().get(prefixed_id).cloned();
+        if let Some(terminal) = terminal {
+            terminal.enqueue_output(data);
         }
     }
 

@@ -232,6 +232,11 @@ pub struct Terminal {
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag (set when terminal receives bell, cleared on focus)
     has_bell: Arc<Mutex<bool>>,
+    /// Pending output from remote connections, drained before rendering.
+    /// Decouples the tokio reader thread from the GPUI render thread so that
+    /// `process_output` (which holds `term.lock()`) never runs on the tokio
+    /// thread, avoiding lock contention that freezes the UI.
+    pending_output: Mutex<Vec<u8>>,
     /// Dirty flag - set when terminal content changes, cleared after render
     dirty: AtomicBool,
     /// Content generation counter - incremented on each process_output call.
@@ -293,6 +298,7 @@ impl Terminal {
             scroll_offset: Mutex::new(0),
             title,
             has_bell,
+            pending_output: Mutex::new(Vec::new()),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
             resize_owner: Mutex::new(ResizeOwner::Local),
@@ -314,6 +320,34 @@ impl Terminal {
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
+    }
+
+    /// Enqueue output data for deferred processing.
+    ///
+    /// Used by the remote client's tokio reader thread so it never holds
+    /// `term.lock()`. The pending data is drained and parsed on the GPUI
+    /// thread just before rendering (see `with_content`).
+    pub fn enqueue_output(&self, data: &[u8]) {
+        self.pending_output.lock().extend_from_slice(data);
+        self.dirty.store(true, Ordering::Relaxed);
+        *self.last_output_time.lock() = Instant::now();
+    }
+
+    /// Drain all pending output and feed it into the terminal emulator.
+    ///
+    /// Called automatically by `with_content` before rendering.
+    fn drain_pending_output(&self) {
+        let data = {
+            let mut pending = self.pending_output.lock();
+            if pending.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *pending)
+        };
+        let mut term = self.term.lock();
+        let mut processor = self.processor.lock();
+        processor.advance(&mut *term, &data);
+        self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Check if terminal has pending changes (and clear the flag).
@@ -534,8 +568,13 @@ impl Terminal {
         }
     }
 
-    /// Access the terminal content for rendering
+    /// Access the terminal content for rendering.
+    ///
+    /// Drains any pending output (enqueued by remote clients) before
+    /// handing the content to the callback, so the rendered frame is
+    /// always up-to-date.
     pub fn with_content<R>(&self, f: impl FnOnce(&Term<ZedEventListener>) -> R) -> R {
+        self.drain_pending_output();
         let term = self.term.lock();
         f(&*term)
     }
