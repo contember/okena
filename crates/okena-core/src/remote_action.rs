@@ -6,7 +6,13 @@ use crate::api::ActionRequest;
 fn shared_client() -> &'static reqwest::blocking::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::blocking::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build HTTP client")
+    })
 }
 
 /// Post an action request to a remote server and return the JSON response body.

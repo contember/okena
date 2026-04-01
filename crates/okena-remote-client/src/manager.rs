@@ -115,9 +115,13 @@ impl RemoteConnectionManager {
         if let Some(mut conn) = self.connections.remove(connection_id) {
             conn.disconnect();
         }
-        // Remove from saved settings
+        // Remove from saved settings (off GPUI thread)
         let id = connection_id.to_string();
-        let _ = update_remote_connections(|conns| conns.retain(|c| c.id != id));
+        cx.background_executor()
+            .spawn(async move {
+                let _ = update_remote_connections(|conns| conns.retain(|c| c.id != id));
+            })
+            .detach();
         cx.notify();
     }
 
@@ -287,15 +291,19 @@ impl RemoteConnectionManager {
                     conn.config_mut().saved_token = Some(token.clone());
                     conn.config_mut().token_obtained_at = Some(now);
                 }
-                // Persist token to settings (atomic update)
+                // Persist token to settings (off GPUI thread)
                 let cid = connection_id.clone();
                 let tok = token.clone();
-                let _ = update_remote_connections(|conns| {
-                    if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
-                        saved.saved_token = Some(tok);
-                        saved.token_obtained_at = Some(now);
-                    }
-                });
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = update_remote_connections(|conns| {
+                            if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
+                                saved.saved_token = Some(tok);
+                                saved.token_obtained_at = Some(now);
+                            }
+                        });
+                    })
+                    .detach();
                 cx.notify();
             }
             ConnectionEvent::StateReceived {
@@ -351,12 +359,16 @@ impl RemoteConnectionManager {
                 }
                 let cid = connection_id.clone();
                 let tok = token.clone();
-                let _ = update_remote_connections(|conns| {
-                    if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
-                        saved.saved_token = Some(tok);
-                        saved.token_obtained_at = Some(now);
-                    }
-                });
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = update_remote_connections(|conns| {
+                            if let Some(saved) = conns.iter_mut().find(|c| c.id == cid) {
+                                saved.saved_token = Some(tok);
+                                saved.token_obtained_at = Some(now);
+                            }
+                        });
+                    })
+                    .detach();
             }
         }
     }
