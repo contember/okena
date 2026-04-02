@@ -474,7 +474,6 @@ impl FileSearchDialog {
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
         let active_count = self.show_ignored as u8 + self.show_hidden as u8;
-        let is_open = self.filter_popover_open;
 
         let entity = cx.entity().downgrade();
         let entity2 = entity.clone();
@@ -505,27 +504,6 @@ impl FileSearchDialog {
                     },
                 )
             )
-            .when(is_open && self.filter_button_bounds.is_some(), |d| {
-                let bounds = self.filter_button_bounds.unwrap();
-                let close_entity = cx.entity().downgrade();
-                let toggle_entity = cx.entity().downgrade();
-                d.child(crate::list_overlay::file_filter_popover(
-                    bounds, self.show_ignored, self.show_hidden, &t, cx,
-                    move |_, cx| {
-                        if let Some(e) = close_entity.upgrade() {
-                            e.update(cx, |this, cx| {
-                                this.filter_popover_open = false;
-                                cx.notify();
-                            });
-                        }
-                    },
-                    move |filter, _, cx| {
-                        if let Some(e) = toggle_entity.upgrade() {
-                            e.update(cx, |this, cx| this.toggle_filter(filter, cx));
-                        }
-                    },
-                ))
-            })
     }
 }
 
@@ -592,6 +570,7 @@ impl Render for FileSearchDialog {
             )
             .child(
                 modal_content("file-search-modal", &t)
+                    .relative()
                     .w(px(self.config.width))
                     .h(px(self.config.max_height))
                     .child(modal_header(
@@ -660,7 +639,32 @@ impl Render for FileSearchDialog {
                                     .text_color(rgb(t.text_muted))
                                     .child(format!("{} files", self.files.len())),
                             ),
-                    ),
+                    )
+                    // Filter popover backdrop + overlay (at modal level, like settings dropdowns)
+                    .when(self.filter_popover_open, |modal| {
+                        modal.child(
+                            div()
+                                .id("filter-popover-backdrop")
+                                .absolute()
+                                .inset_0()
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                    this.filter_popover_open = false;
+                                    cx.notify();
+                                }))
+                        )
+                    })
+                    .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |modal| {
+                        let bounds = self.filter_button_bounds.unwrap();
+                        let entity = cx.entity().downgrade();
+                        modal.child(crate::list_overlay::file_filter_popover(
+                            bounds, self.show_ignored, self.show_hidden, &t, cx,
+                            move |filter, _, cx| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(cx, |this, cx| this.toggle_filter(filter, cx));
+                                }
+                            },
+                        ))
+                    }),
             )
     }
 }

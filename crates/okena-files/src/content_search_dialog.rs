@@ -1092,62 +1092,29 @@ impl ContentSearchDialog {
             .child(label.to_string())
     }
 
-    fn render_file_filter_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_file_filter_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
         let active_count = self.show_ignored as u8 + self.show_hidden as u8;
-        let is_open = self.filter_popover_open;
 
         let entity = cx.entity().downgrade();
         let entity2 = entity.clone();
 
-        div()
-            .child(
-                crate::list_overlay::file_filter_button(
-                    "cs-filter-btn", active_count, &t, cx,
-                    move |_, _, cx| {
-                        if let Some(e) = entity.upgrade() {
-                            e.update(cx, |this, cx| {
-                                this.filter_popover_open = !this.filter_popover_open;
-                                cx.notify();
-                            });
-                        }
-                    },
-                    move |bounds, _, cx| {
-                        if let Some(e) = entity2.upgrade() {
-                            e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
-                        }
-                    },
-                ),
-            )
-            .when(is_open && self.filter_button_bounds.is_some(), |d| {
-                let bounds = self.filter_button_bounds.unwrap();
-                let close_entity = cx.entity().downgrade();
-                let toggle_entity = cx.entity().downgrade();
-                d.child(crate::list_overlay::file_filter_popover(
-                    bounds, self.show_ignored, self.show_hidden, &t, cx,
-                    move |_, cx| {
-                        if let Some(e) = close_entity.upgrade() {
-                            e.update(cx, |this, cx| {
-                                this.filter_popover_open = false;
-                                cx.notify();
-                            });
-                        }
-                    },
-                    move |filter, _, cx| {
-                        if let Some(e) = toggle_entity.upgrade() {
-                            e.update(cx, |this, cx| {
-                                match filter {
-                                    "ignored" => this.show_ignored = !this.show_ignored,
-                                    "hidden" => this.show_hidden = !this.show_hidden,
-                                    _ => {}
-                                }
-                                this.trigger_search(cx);
-                                cx.notify();
-                            });
-                        }
-                    },
-                ))
-            })
+        crate::list_overlay::file_filter_button(
+            "cs-filter-btn", active_count, &t, cx,
+            move |_, _, cx| {
+                if let Some(e) = entity.upgrade() {
+                    e.update(cx, |this, cx| {
+                        this.filter_popover_open = !this.filter_popover_open;
+                        cx.notify();
+                    });
+                }
+            },
+            move |bounds, _, cx| {
+                if let Some(e) = entity2.upgrade() {
+                    e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                }
+            },
+        )
     }
 }
 
@@ -1339,6 +1306,7 @@ impl Render for ContentSearchDialog {
             let preview = self.render_preview_panel(cx);
 
             fullscreen_overlay("content-search-fullscreen", &t)
+                .relative()
                 .track_focus(&focus_handle)
                 .key_context(self.config.key_context.as_str())
                 .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
@@ -1366,6 +1334,38 @@ impl Render for ContentSearchDialog {
                         )
                         .child(preview),
                 )
+                .when(self.filter_popover_open, |d| {
+                    d.child(
+                        div()
+                            .id("cs-filter-popover-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.filter_popover_open = false;
+                                cx.notify();
+                            }))
+                    )
+                })
+                .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |d| {
+                    let bounds = self.filter_button_bounds.unwrap();
+                    let entity = cx.entity().downgrade();
+                    d.child(crate::list_overlay::file_filter_popover(
+                        bounds, self.show_ignored, self.show_hidden, &t, cx,
+                        move |filter, _, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| {
+                                    match filter {
+                                        "ignored" => this.show_ignored = !this.show_ignored,
+                                        "hidden" => this.show_hidden = !this.show_hidden,
+                                        _ => {}
+                                    }
+                                    this.trigger_search(cx);
+                                    cx.notify();
+                                });
+                            }
+                        },
+                    ))
+                })
                 .into_any_element()
         } else {
             // Compact modal mode
@@ -1382,6 +1382,7 @@ impl Render for ContentSearchDialog {
                 )
                 .child(
                     modal_content("content-search-modal", &t)
+                        .relative()
                         .w(px(self.config.width))
                         .h(px(self.config.max_height))
                         .child(header)
@@ -1389,7 +1390,39 @@ impl Render for ContentSearchDialog {
                         .child(toggles)
                         .children(glob_row)
                         .child(results_area)
-                        .child(footer),
+                        .child(footer)
+                        .when(self.filter_popover_open, |modal| {
+                            modal.child(
+                                div()
+                                    .id("cs-filter-popover-backdrop-compact")
+                                    .absolute()
+                                    .inset_0()
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        this.filter_popover_open = false;
+                                        cx.notify();
+                                    }))
+                            )
+                        })
+                        .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |modal| {
+                            let bounds = self.filter_button_bounds.unwrap();
+                            let entity = cx.entity().downgrade();
+                            modal.child(crate::list_overlay::file_filter_popover(
+                                bounds, self.show_ignored, self.show_hidden, &t, cx,
+                                move |filter, _, cx| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(cx, |this, cx| {
+                                            match filter {
+                                                "ignored" => this.show_ignored = !this.show_ignored,
+                                                "hidden" => this.show_hidden = !this.show_hidden,
+                                                _ => {}
+                                            }
+                                            this.trigger_search(cx);
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            ))
+                        }),
                 )
                 .into_any_element()
         }
