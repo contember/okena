@@ -7,6 +7,7 @@
 //! - Shell selector (no search)
 //! - File search (fuzzy search with scoring)
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 /// Configuration for a list overlay.
@@ -387,4 +388,118 @@ where
         })
         .map(|(i, _)| FilterResult::new(i))
         .collect()
+}
+
+/// Render a "filters" toggle button that opens a popover.
+///
+/// `on_click` is called when the button is clicked (to toggle popover open state).
+/// `on_bounds` is called during paint with the button's window-absolute bounds.
+pub fn file_filter_button(
+    id: impl Into<SharedString>,
+    active_count: u8,
+    t: &okena_core::theme::ThemeColors,
+    cx: &App,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    on_bounds: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    use okena_ui::tokens::ui_text_sm;
+
+    div()
+        .id(ElementId::Name(id.into()))
+        .cursor_pointer()
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .text_size(ui_text_sm(cx))
+        .font_weight(FontWeight::MEDIUM)
+        .when(active_count > 0, |d: Stateful<Div>| {
+            d.bg(rgb(t.border_active))
+                .text_color(rgb(t.text_primary))
+        })
+        .when(active_count == 0, |d: Stateful<Div>| {
+            d.bg(rgb(t.bg_secondary))
+                .text_color(rgb(t.text_muted))
+        })
+        .hover(|s: StyleRefinement| s.bg(rgb(t.bg_hover)))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(if active_count > 0 {
+            format!("filters ({})", active_count)
+        } else {
+            "filters".to_string()
+        })
+        .child(canvas(on_bounds, |_, _, _, _| {}).absolute().size_full())
+}
+
+/// Render a file filter popover with "Include ignored" and "Include hidden" options.
+///
+/// `on_toggle` is called with `"ignored"` or `"hidden"` when an option is clicked.
+pub fn file_filter_popover(
+    bounds: Bounds<Pixels>,
+    show_ignored: bool,
+    show_hidden: bool,
+    t: &okena_core::theme::ThemeColors,
+    cx: &App,
+    on_toggle: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+) -> Deferred {
+    use okena_ui::tokens::ui_text_sm;
+
+    let on_toggle2 = on_toggle.clone();
+    deferred(
+        anchored()
+            .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
+            .snap_to_window()
+            .child(
+                div()
+                    .occlude()
+                    .min_w(px(180.0))
+                    .bg(rgb(t.bg_primary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .rounded(px(6.0))
+                    .shadow_lg()
+                    .py(px(4.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        file_filter_option("ignored", "Include ignored", show_ignored, t, cx,
+                            move |_, window, cx| on_toggle("ignored", window, cx))
+                    )
+                    .child(
+                        file_filter_option("hidden", "Include hidden", show_hidden, t, cx,
+                            move |_, window, cx| on_toggle2("hidden", window, cx))
+                    )
+            ),
+    )
+}
+
+fn file_filter_option(
+    id: &str,
+    label: &str,
+    active: bool,
+    t: &okena_core::theme::ThemeColors,
+    cx: &App,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    use okena_ui::tokens::ui_text_sm;
+
+    div()
+        .id(ElementId::Name(format!("filter-{}", id).into()))
+        .px(px(10.0))
+        .py(px(6.0))
+        .cursor_pointer()
+        .text_size(ui_text_sm(cx))
+        .text_color(rgb(t.text_primary))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(label.to_string())
+        .when(active, |d: Stateful<Div>| {
+            d.child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.border_active))
+                    .child("✓"),
+            )
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
 }

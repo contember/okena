@@ -59,8 +59,10 @@ pub struct ContentSearchConfig {
     pub file_glob: Option<String>,
     /// Number of context lines before/after each match (0 = no context).
     pub context_lines: usize,
-    /// When true, include gitignored and hidden files in search.
+    /// When true, include gitignored files in search.
     pub show_ignored: bool,
+    /// When true, include hidden (dot) files in search.
+    pub show_hidden: bool,
 }
 
 impl Default for ContentSearchConfig {
@@ -72,6 +74,7 @@ impl Default for ContentSearchConfig {
             file_glob: None,
             context_lines: 0,
             show_ignored: false,
+            show_hidden: false,
         }
     }
 }
@@ -95,18 +98,16 @@ pub const ALWAYS_IGNORE: &[&str] = &[
 fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Walk {
     let mut walk_builder = WalkBuilder::new(project_path);
     walk_builder
-        .hidden(!config.show_ignored)
+        .hidden(!config.show_hidden)
         .git_ignore(!config.show_ignored)
         .git_global(!config.show_ignored)
         .git_exclude(!config.show_ignored)
         .max_depth(Some(20));
 
-    // Build overrides: always-ignore dirs (unless showing ignored) + optional user glob filter
+    // Build overrides: always-ignore dirs + optional user glob filter
     let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
-    if !config.show_ignored {
-        for pattern in ALWAYS_IGNORE {
-            let _ = override_builder.add(pattern);
-        }
+    for pattern in ALWAYS_IGNORE {
+        let _ = override_builder.add(pattern);
     }
     if let Some(ref glob) = config.file_glob {
         let _ = override_builder.add(glob);

@@ -103,9 +103,13 @@ impl FileViewer {
         cx.notify();
     }
 
-    /// Toggle showing gitignored/hidden files in the file tree.
-    pub(super) fn toggle_show_ignored(&mut self, cx: &mut Context<Self>) {
-        self.show_ignored = !self.show_ignored;
+    /// Toggle a file filter option and refresh the tree.
+    pub(super) fn toggle_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
+        match filter {
+            "ignored" => self.show_ignored = !self.show_ignored,
+            "hidden" => self.show_hidden = !self.show_hidden,
+            _ => {}
+        }
         self.refresh_file_tree();
         cx.notify();
     }

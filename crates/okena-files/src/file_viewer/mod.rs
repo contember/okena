@@ -231,8 +231,14 @@ pub struct FileViewer {
     pub(super) history: NavigationHistory,
     /// Last time we checked files for external modifications
     last_change_check: std::time::Instant,
-    /// Whether to include gitignored/hidden files in the file tree
+    /// Whether to include gitignored files in the file tree
     pub(super) show_ignored: bool,
+    /// Whether to include hidden (dot) files in the file tree
+    pub(super) show_hidden: bool,
+    /// Whether the filter popover is open
+    pub(super) filter_popover_open: bool,
+    /// Bounds of the filter button for popover positioning
+    pub(super) filter_button_bounds: Option<Bounds<Pixels>>,
 }
 
 impl FileViewer {
@@ -247,7 +253,7 @@ impl FileViewer {
         let focus_handle = cx.focus_handle();
 
         // Scan project files and build tree
-        let files = FileSearchDialog::scan_files(&project_path, false);
+        let files = FileSearchDialog::scan_files(&project_path, false, false);
         let file_tree = build_file_tree(
             files
                 .iter()
@@ -277,6 +283,9 @@ impl FileViewer {
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
             show_ignored: false,
+            show_hidden: false,
+            filter_popover_open: false,
+            filter_button_bounds: None,
         }
     }
 
@@ -291,7 +300,7 @@ impl FileViewer {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        let files = FileSearchDialog::scan_files(&project_path, false);
+        let files = FileSearchDialog::scan_files(&project_path, false, false);
         let file_tree = build_file_tree(
             files
                 .iter()
@@ -316,6 +325,9 @@ impl FileViewer {
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
             show_ignored: false,
+            show_hidden: false,
+            filter_popover_open: false,
+            filter_button_bounds: None,
         }
     }
 
@@ -351,7 +363,7 @@ impl FileViewer {
     /// Rescan the project directory and rebuild the file tree.
     /// Preserves expanded folders and updates file indices on open tabs.
     fn refresh_file_tree(&mut self) {
-        let files = FileSearchDialog::scan_files(&self.project_path, self.show_ignored);
+        let files = FileSearchDialog::scan_files(&self.project_path, self.show_ignored, self.show_hidden);
         let file_tree = build_file_tree(
             files
                 .iter()

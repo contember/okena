@@ -42,6 +42,7 @@ struct ContentSearchMemory {
     glob_input: String,
     expanded: bool,
     show_ignored: bool,
+    show_hidden: bool,
 }
 
 impl Global for ContentSearchMemory {}
@@ -89,6 +90,9 @@ pub struct ContentSearchDialog {
     regex_mode: bool,
     fuzzy_mode: bool,
     show_ignored: bool,
+    show_hidden: bool,
+    filter_popover_open: bool,
+    filter_button_bounds: Option<Bounds<Pixels>>,
     file_glob: Option<String>,
     /// Glob filter input entity.
     glob_input: Entity<SimpleInputState>,
@@ -127,7 +131,7 @@ impl ContentSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<ContentSearchMemory>();
-        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored) =
+        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored, show_hidden) =
             memory
                 .map(|m| {
                     (
@@ -139,6 +143,7 @@ impl ContentSearchDialog {
                         m.glob_input.clone(),
                         m.expanded,
                         m.show_ignored,
+                        m.show_hidden,
                     )
                 })
                 .unwrap_or_default();
@@ -195,6 +200,9 @@ impl ContentSearchDialog {
             regex_mode,
             fuzzy_mode,
             show_ignored,
+            show_hidden,
+            filter_popover_open: false,
+            filter_button_bounds: None,
             file_glob,
             glob_input,
             glob_editing: false,
@@ -228,6 +236,7 @@ impl ContentSearchDialog {
             glob_input: self.glob_input.read(cx).value().to_string(),
             expanded: self.expanded,
             show_ignored: self.show_ignored,
+            show_hidden: self.show_hidden,
         });
     }
 
@@ -313,6 +322,7 @@ impl ContentSearchDialog {
             file_glob: self.file_glob.clone(),
             context_lines: 0,
             show_ignored: self.show_ignored,
+            show_hidden: self.show_hidden,
         };
 
         let project_path = self.project_path.clone();
@@ -971,7 +981,7 @@ impl ContentSearchDialog {
             .child(self.render_toggle_button("Aa", self.case_sensitive, "Case Sensitive", "case", cx))
             .child(self.render_toggle_button(".*", self.regex_mode, "Regular Expression", "regex", cx))
             .child(self.render_toggle_button("~", self.fuzzy_mode, "Fuzzy Match", "fuzzy", cx))
-            .child(self.render_toggle_button("ignored", self.show_ignored, "Include Git-Ignored Files", "ignored", cx))
+            .child(self.render_file_filter_button(cx))
             // Glob filter input
             .child(
                 div()
@@ -1073,7 +1083,6 @@ impl ContentSearchDialog {
                             this.fuzzy_mode = !this.fuzzy_mode;
                             if this.fuzzy_mode { this.regex_mode = false; }
                         }
-                        "ignored" => this.show_ignored = !this.show_ignored,
                         _ => {}
                     }
                     this.trigger_search(cx);
@@ -1081,6 +1090,55 @@ impl ContentSearchDialog {
                 }),
             )
             .child(label.to_string())
+    }
+
+    fn render_file_filter_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme(cx);
+        let active_count = self.show_ignored as u8 + self.show_hidden as u8;
+        let is_open = self.filter_popover_open;
+
+        let entity = cx.entity().downgrade();
+        let entity2 = entity.clone();
+
+        div()
+            .child(
+                crate::list_overlay::file_filter_button(
+                    "cs-filter-btn", active_count, &t, cx,
+                    move |_, _, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                this.filter_popover_open = !this.filter_popover_open;
+                                cx.notify();
+                            });
+                        }
+                    },
+                    move |bounds, _, cx| {
+                        if let Some(e) = entity2.upgrade() {
+                            e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                        }
+                    },
+                ),
+            )
+            .when(is_open && self.filter_button_bounds.is_some(), |d| {
+                let bounds = self.filter_button_bounds.unwrap();
+                let entity = cx.entity().downgrade();
+                d.child(crate::list_overlay::file_filter_popover(
+                    bounds, self.show_ignored, self.show_hidden, &t, cx,
+                    move |filter, _, cx| {
+                        if let Some(e) = entity.upgrade() {
+                            e.update(cx, |this, cx| {
+                                match filter {
+                                    "ignored" => this.show_ignored = !this.show_ignored,
+                                    "hidden" => this.show_hidden = !this.show_hidden,
+                                    _ => {}
+                                }
+                                this.trigger_search(cx);
+                                cx.notify();
+                            });
+                        }
+                    },
+                ))
+            })
     }
 }
 

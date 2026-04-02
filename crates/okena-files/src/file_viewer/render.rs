@@ -19,7 +19,6 @@ use okena_ui::modal::fullscreen_overlay;
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
-use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
@@ -164,8 +163,8 @@ impl FileViewer {
         tree_elements: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let show_ignored = self.show_ignored;
-        let tooltip_text: SharedString = "Show Git-Ignored Files".into();
+        let active_count = self.show_ignored as u8 + self.show_hidden as u8;
+        let is_open = self.filter_popover_open;
 
         div()
             .w(px(SIDEBAR_WIDTH))
@@ -192,33 +191,38 @@ impl FileViewer {
                             .line_height(px(11.0))
                             .child("Files"),
                     )
-                    .child(
-                        div()
-                            .id("fv-toggle-ignored")
-                            .cursor_pointer()
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .text_size(ui_text_sm(cx))
-                            .font_weight(FontWeight::MEDIUM)
-                            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
-                            .when(show_ignored, |d: Stateful<Div>| {
-                                d.bg(rgb(t.border_active))
-                                    .text_color(rgb(t.text_primary))
-                            })
-                            .when(!show_ignored, |d: Stateful<Div>| {
-                                d.bg(rgb(t.bg_secondary))
-                                    .text_color(rgb(t.text_muted))
-                            })
-                            .hover(|s: StyleRefinement| s.bg(rgb(t.bg_hover)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _window, cx| {
-                                    this.toggle_show_ignored(cx);
-                                }),
-                            )
-                            .child("ignored"),
-                    ),
+                    .child({
+                        let entity = cx.entity().downgrade();
+                        let entity2 = entity.clone();
+                        crate::list_overlay::file_filter_button(
+                            "fv-filter-btn", active_count, t, cx,
+                            move |_, _, cx| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(cx, |this, cx| {
+                                        this.filter_popover_open = !this.filter_popover_open;
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                            move |bounds, _, cx| {
+                                if let Some(e) = entity2.upgrade() {
+                                    e.update(cx, |this, _| this.filter_button_bounds = Some(bounds));
+                                }
+                            },
+                        )
+                    })
+                    .when(is_open && self.filter_button_bounds.is_some(), |d| {
+                        let bounds = self.filter_button_bounds.unwrap();
+                        let entity = cx.entity().downgrade();
+                        d.child(crate::list_overlay::file_filter_popover(
+                            bounds, self.show_ignored, self.show_hidden, t, cx,
+                            move |filter, _, cx| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(cx, |this, cx| this.toggle_filter(filter, cx));
+                                }
+                            },
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -230,6 +234,7 @@ impl FileViewer {
                     .children(tree_elements),
             )
     }
+
 
     /// Recursively render file tree nodes with expand/collapse.
     pub(super) fn render_tree_node(
