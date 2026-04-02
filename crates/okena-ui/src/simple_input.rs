@@ -388,7 +388,7 @@ impl SimpleInputState {
         }
     }
 
-    fn select_all(&mut self, cx: &mut Context<Self>) {
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
         let char_count = self.value.chars().count();
         if char_count > 0 {
             self.selection = Some(0..char_count);

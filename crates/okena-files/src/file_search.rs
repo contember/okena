@@ -88,6 +88,7 @@ impl FileSearchDialog {
                 .placeholder("Type to search files...");
             if !query.is_empty() {
                 input.set_value(&query, cx);
+                input.select_all(cx);
             }
             input
         });

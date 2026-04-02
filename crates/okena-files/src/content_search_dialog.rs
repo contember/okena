@@ -146,6 +146,7 @@ impl ContentSearchDialog {
                 .placeholder("Search file contents...");
             if !query.is_empty() {
                 input.set_value(&query, cx);
+                input.select_all(cx);
             }
             input
         });
