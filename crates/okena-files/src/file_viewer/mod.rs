@@ -245,7 +245,7 @@ impl FileViewer {
         let focus_handle = cx.focus_handle();
 
         // Scan project files and build tree
-        let files = FileSearchDialog::scan_files(&project_path);
+        let files = FileSearchDialog::scan_files(&project_path, false);
         let file_tree = build_file_tree(
             files
                 .iter()
@@ -288,7 +288,7 @@ impl FileViewer {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        let files = FileSearchDialog::scan_files(&project_path);
+        let files = FileSearchDialog::scan_files(&project_path, false);
         let file_tree = build_file_tree(
             files
                 .iter()
@@ -347,7 +347,7 @@ impl FileViewer {
     /// Rescan the project directory and rebuild the file tree.
     /// Preserves expanded folders and updates file indices on open tabs.
     fn refresh_file_tree(&mut self) {
-        let files = FileSearchDialog::scan_files(&self.project_path);
+        let files = FileSearchDialog::scan_files(&self.project_path, false);
         let file_tree = build_file_tree(
             files
                 .iter()

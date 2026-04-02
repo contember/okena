@@ -41,6 +41,7 @@ struct ContentSearchMemory {
     file_glob: Option<String>,
     glob_input: String,
     expanded: bool,
+    show_ignored: bool,
 }
 
 impl Global for ContentSearchMemory {}
@@ -87,6 +88,7 @@ pub struct ContentSearchDialog {
     case_sensitive: bool,
     regex_mode: bool,
     fuzzy_mode: bool,
+    show_ignored: bool,
     file_glob: Option<String>,
     /// Glob filter input entity.
     glob_input: Entity<SimpleInputState>,
@@ -125,7 +127,7 @@ impl ContentSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<ContentSearchMemory>();
-        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded) =
+        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored) =
             memory
                 .map(|m| {
                     (
@@ -136,6 +138,7 @@ impl ContentSearchDialog {
                         m.file_glob.clone(),
                         m.glob_input.clone(),
                         m.expanded,
+                        m.show_ignored,
                     )
                 })
                 .unwrap_or_default();
@@ -191,6 +194,7 @@ impl ContentSearchDialog {
             case_sensitive,
             regex_mode,
             fuzzy_mode,
+            show_ignored,
             file_glob,
             glob_input,
             glob_editing: false,
@@ -223,6 +227,7 @@ impl ContentSearchDialog {
             file_glob: self.file_glob.clone(),
             glob_input: self.glob_input.read(cx).value().to_string(),
             expanded: self.expanded,
+            show_ignored: self.show_ignored,
         });
     }
 
@@ -307,6 +312,7 @@ impl ContentSearchDialog {
             max_results: 1000,
             file_glob: self.file_glob.clone(),
             context_lines: 0,
+            show_ignored: self.show_ignored,
         };
 
         let project_path = self.project_path.clone();
@@ -965,6 +971,7 @@ impl ContentSearchDialog {
             .child(self.render_toggle_button("Aa", self.case_sensitive, "Case Sensitive", "case", cx))
             .child(self.render_toggle_button(".*", self.regex_mode, "Regular Expression", "regex", cx))
             .child(self.render_toggle_button("~", self.fuzzy_mode, "Fuzzy Match", "fuzzy", cx))
+            .child(self.render_toggle_button("ignored", self.show_ignored, "Include Git-Ignored Files", "ignored", cx))
             // Glob filter input
             .child(
                 div()
@@ -1066,6 +1073,7 @@ impl ContentSearchDialog {
                             this.fuzzy_mode = !this.fuzzy_mode;
                             if this.fuzzy_mode { this.regex_mode = false; }
                         }
+                        "ignored" => this.show_ignored = !this.show_ignored,
                         _ => {}
                     }
                     this.trigger_search(cx);

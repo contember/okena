@@ -5,8 +5,10 @@
 
 use crate::list_overlay::ListOverlayConfig;
 use crate::theme::theme;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::h_flex;
+use gpui_component::tooltip::Tooltip;
 use ignore::WalkBuilder;
 use okena_ui::badge::keyboard_hint;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text};
@@ -47,6 +49,7 @@ pub struct FileEntry {
 struct FileSearchMemory {
     query: String,
     selected_index: usize,
+    show_ignored: bool,
 }
 
 impl Global for FileSearchMemory {}
@@ -61,6 +64,10 @@ pub struct FileSearchDialog {
     selected_index: usize,
     project_path: PathBuf,
     config: ListOverlayConfig,
+    show_ignored: bool,
+    scanning: bool,
+    #[allow(dead_code)]
+    scan_task: Option<Task<()>>,
 }
 
 impl FileSearchDialog {
@@ -69,8 +76,6 @@ impl FileSearchDialog {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
 
-        let files = Self::scan_files(&project_path);
-
         let config = ListOverlayConfig::new("Go to File")
             .searchable("Type to search files...")
             .size(650.0, 550.0)
@@ -78,8 +83,8 @@ impl FileSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<FileSearchMemory>();
-        let (query, restored_index) = memory
-            .map(|m| (m.query.clone(), m.selected_index))
+        let (query, restored_index, show_ignored) = memory
+            .map(|m| (m.query.clone(), m.selected_index, m.show_ignored))
             .unwrap_or_default();
 
         // Create search input entity
@@ -104,41 +109,82 @@ impl FileSearchDialog {
             focus_handle,
             scroll_handle,
             search_input,
-            files,
+            files: vec![],
             filtered_files: vec![],
             selected_index: 0,
             project_path,
             config,
+            show_ignored,
+            scanning: true,
+            scan_task: None,
         };
 
-        dialog.filter_files(cx);
-        if restored_index < dialog.filtered_files.len() {
+        dialog.start_scan(cx);
+
+        // Restore selected index after scan completes — store for later
+        if restored_index > 0 {
+            // Will be clamped after scan finishes in start_scan callback
             dialog.selected_index = restored_index;
         }
 
         dialog
     }
 
-    /// Scan files in the project directory using the `ignore` crate
-    /// (respects .gitignore, hidden files, etc.).
-    pub fn scan_files(project_path: &PathBuf) -> Vec<FileEntry> {
+    /// Start an async file scan on the background executor.
+    fn start_scan(&mut self, cx: &mut Context<Self>) {
+        self.scanning = true;
+        self.files.clear();
+        self.filtered_files.clear();
+        cx.notify();
+
+        let project_path = self.project_path.clone();
+        let show_ignored = self.show_ignored;
+
+        self.scan_task = Some(cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move {
+                    Self::scan_files(&project_path, show_ignored)
+                })
+                .await;
+
+            entity
+                .update(cx, |this, cx| {
+                    this.files = files;
+                    this.scanning = false;
+                    this.filter_files(cx);
+                    if this.selected_index >= this.filtered_files.len() {
+                        this.selected_index = 0;
+                    }
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+
+    /// Scan files in the project directory using the `ignore` crate.
+    /// When `show_ignored` is false, respects .gitignore and hides hidden files.
+    /// When `show_ignored` is true, includes gitignored and hidden files.
+    pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
         let mut files = Vec::new();
 
         let mut walk_builder = WalkBuilder::new(project_path);
         walk_builder
-            .hidden(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            .hidden(!show_ignored)
+            .git_ignore(!show_ignored)
+            .git_global(!show_ignored)
+            .git_exclude(!show_ignored)
             .max_depth(Some(15));
 
         // Always ignore common non-source directories even without .gitignore
-        let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
-        for pattern in crate::content_search::ALWAYS_IGNORE {
-            let _ = override_builder.add(pattern);
-        }
-        if let Ok(overrides) = override_builder.build() {
-            walk_builder.overrides(overrides);
+        if !show_ignored {
+            let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
+            for pattern in crate::content_search::ALWAYS_IGNORE {
+                let _ = override_builder.add(pattern);
+            }
+            if let Ok(overrides) = override_builder.build() {
+                walk_builder.overrides(overrides);
+            }
         }
 
         let walker = walk_builder.build();
@@ -179,7 +225,14 @@ impl FileSearchDialog {
         cx.set_global(FileSearchMemory {
             query: self.search_input.read(cx).value().to_string(),
             selected_index: self.selected_index,
+            show_ignored: self.show_ignored,
         });
+    }
+
+    /// Toggle showing ignored files and re-scan.
+    fn toggle_show_ignored(&mut self, cx: &mut Context<Self>) {
+        self.show_ignored = !self.show_ignored;
+        self.start_scan(cx);
     }
 
     /// Close the dialog, saving state for next open.
@@ -409,6 +462,48 @@ impl FileSearchDialog {
                     ),
             )
     }
+
+    fn render_toggles(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = theme(cx);
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(12.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .child({
+                let active = self.show_ignored;
+                let tooltip_text: SharedString = "Show Git-Ignored Files".into();
+                div()
+                    .id("toggle-ignored")
+                    .cursor_pointer()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .text_size(ui_text_sm(cx))
+                    .font_weight(FontWeight::MEDIUM)
+                    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+                    .when(active, |d: Stateful<Div>| {
+                        d.bg(rgb(t.border_active))
+                            .text_color(rgb(t.text_primary))
+                    })
+                    .when(!active, |d: Stateful<Div>| {
+                        d.bg(rgb(t.bg_secondary))
+                            .text_color(rgb(t.text_muted))
+                    })
+                    .hover(|s: StyleRefinement| s.bg(rgb(t.bg_hover)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            this.toggle_show_ignored(cx);
+                        }),
+                    )
+                    .child("ignored")
+            })
+    }
 }
 
 /// Events emitted by the file search dialog.
@@ -484,7 +579,13 @@ impl Render for FileSearchDialog {
                         cx.listener(|this, _, _window, cx| this.close(cx)),
                     ))
                     .child(crate::list_overlay::search_input_row(&self.search_input, &t, cx))
-                    .child(if self.filtered_files.is_empty() {
+                    .child(self.render_toggles(cx))
+                    .child(if self.scanning {
+                        div()
+                            .flex_1()
+                            .child(empty_state("Scanning files...", &t, cx))
+                            .into_any_element()
+                    } else if self.filtered_files.is_empty() {
                         div()
                             .flex_1()
                             .child(empty_state(
