@@ -432,6 +432,8 @@ pub fn file_filter_button(
 
 /// Render a file filter popover with "Include ignored" and "Include hidden" options.
 ///
+/// Uses `context_menu_backdrop` for outside-click dismissal and `popover_panel` for styling.
+/// `on_close` is called when the backdrop is clicked (to set popover_open = false).
 /// `on_toggle` is called with `"ignored"` or `"hidden"` when an option is clicked.
 pub fn file_filter_popover(
     bounds: Bounds<Pixels>,
@@ -439,36 +441,38 @@ pub fn file_filter_popover(
     show_hidden: bool,
     t: &okena_core::theme::ThemeColors,
     cx: &App,
+    on_close: impl Fn(&mut Window, &mut App) + 'static,
     on_toggle: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
-) -> Deferred {
-    use okena_ui::tokens::ui_text_sm;
+) -> Div {
+    use okena_ui::context_menu_backdrop::context_menu_backdrop;
+    use okena_ui::popover::popover_panel;
 
     let on_toggle2 = on_toggle.clone();
-    deferred(
-        anchored()
-            .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
-            .snap_to_window()
-            .child(
-                div()
-                    .occlude()
-                    .min_w(px(180.0))
-                    .bg(rgb(t.bg_primary))
-                    .border_1()
-                    .border_color(rgb(t.border))
-                    .rounded(px(6.0))
-                    .shadow_lg()
-                    .py(px(4.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        file_filter_option("ignored", "Include ignored", show_ignored, t, cx,
-                            move |_, window, cx| on_toggle("ignored", window, cx))
-                    )
-                    .child(
-                        file_filter_option("hidden", "Include hidden", show_hidden, t, cx,
-                            move |_, window, cx| on_toggle2("hidden", window, cx))
-                    )
-            ),
-    )
+    let on_close = std::rc::Rc::new(on_close);
+    div()
+        .child(
+            context_menu_backdrop("filter-popover-backdrop", move |_, window, cx| {
+                on_close(window, cx);
+            })
+        )
+        .child(deferred(
+            anchored()
+                .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
+                .snap_to_window()
+                .child(
+                    popover_panel("filter-popover", t)
+                        .min_w(px(180.0))
+                        .py(px(4.0))
+                        .child(
+                            file_filter_option("ignored", "Include ignored", show_ignored, t, cx,
+                                move |_, window, cx| on_toggle("ignored", window, cx))
+                        )
+                        .child(
+                            file_filter_option("hidden", "Include hidden", show_hidden, t, cx,
+                                move |_, window, cx| on_toggle2("hidden", window, cx))
+                        )
+                ),
+        ))
 }
 
 fn file_filter_option(
