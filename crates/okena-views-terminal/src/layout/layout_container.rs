@@ -40,6 +40,8 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) empty_area_click_detector: ClickDetector<()>,
     pub(super) tab_rename_state: Option<RenameState<String>>,
     pub(super) action_dispatcher: Option<D>,
+    pub(super) tab_scroll_handle: ScrollHandle,
+    pub(super) last_scrolled_to_tab: Option<usize>,
 }
 
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
@@ -74,6 +76,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             empty_area_click_detector: ClickDetector::new(),
             tab_rename_state: None,
             action_dispatcher,
+            tab_scroll_handle: ScrollHandle::new(),
+            last_scrolled_to_tab: None,
         }
     }
 

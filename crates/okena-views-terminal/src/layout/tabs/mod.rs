@@ -393,6 +393,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 .id(ElementId::Name(format!("tab-{}-{:?}", i, layout_path).into()))
                 .cursor_pointer()
                 .relative()
+                .flex_shrink_0()
+                .max_w(px(200.0))
+                .overflow_hidden()
                 .px(px(8.0))
                 .pt(px(4.0))
                 .pb(px(4.0))
@@ -460,7 +463,9 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                         let icon_color = if is_hook { rgb(t.term_yellow) } else if is_waiting { rgb(t.border_idle) } else if is_active { rgb(t.success) } else { rgb(t.text_muted) };
                         h_flex()
                             .gap(px(6.0))
-                            .child(svg().path("icons/terminal.svg").size(px(12.0)).text_color(icon_color))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(svg().path("icons/terminal.svg").size(px(12.0)).flex_shrink_0().text_color(icon_color))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())
@@ -636,6 +641,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let mut end_drop_zone = div()
             .id(ElementId::Name(format!("tab-end-drop-{:?}", self.layout_path).into()))
             .flex_1()
+            .flex_shrink_0()
             .h_full()
             .min_w(px(20.0))
             .on_click(cx.listener(move |this, _, _window, cx| {
@@ -729,6 +735,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let show_shell = terminal_view_settings(cx).show_shell_selector && !self.backend.is_remote();
 
+        if self.last_scrolled_to_tab != Some(active_tab) {
+            self.tab_scroll_handle.scroll_to_item(active_tab);
+            self.last_scrolled_to_tab = Some(active_tab);
+        }
+
         div()
             .group("tab-bar-row")
             .h(px(28.0))
@@ -737,10 +748,21 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             .items_center()
             .gap(px(0.0))
             .bg(rgb(if is_pane_focused { t.term_background_unfocused } else { t.bg_header }))
-            .children(tab_elements)
-            .child(end_drop_zone)
+            .child(
+                div()
+                    .id(ElementId::Name(format!("tab-scroll-{:?}", self.layout_path).into()))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.tab_scroll_handle)
+                    .children(tab_elements)
+                    .child(end_drop_zone),
+            )
             .child(
                 h_flex()
+                    .flex_shrink_0()
                     .opacity(0.0)
                     .group_hover("tab-bar-row", |s| s.opacity(1.0))
                     .when(show_shell, |el| {
