@@ -231,6 +231,8 @@ pub struct FileViewer {
     pub(super) history: NavigationHistory,
     /// Last time we checked files for external modifications
     last_change_check: std::time::Instant,
+    /// Whether to include gitignored/hidden files in the file tree
+    pub(super) show_ignored: bool,
 }
 
 impl FileViewer {
@@ -274,6 +276,7 @@ impl FileViewer {
             active_tab: 0,
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
+            show_ignored: false,
         }
     }
 
@@ -312,6 +315,7 @@ impl FileViewer {
             active_tab: 0,
             history: NavigationHistory::new(),
             last_change_check: std::time::Instant::now(),
+            show_ignored: false,
         }
     }
 
@@ -347,7 +351,7 @@ impl FileViewer {
     /// Rescan the project directory and rebuild the file tree.
     /// Preserves expanded folders and updates file indices on open tabs.
     fn refresh_file_tree(&mut self) {
-        let files = FileSearchDialog::scan_files(&self.project_path, false);
+        let files = FileSearchDialog::scan_files(&self.project_path, self.show_ignored);
         let file_tree = build_file_tree(
             files
                 .iter()

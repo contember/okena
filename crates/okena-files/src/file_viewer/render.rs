@@ -19,6 +19,7 @@ use okena_ui::modal::fullscreen_overlay;
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
+use gpui_component::tooltip::Tooltip;
 use std::sync::Arc;
 
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
@@ -161,8 +162,11 @@ impl FileViewer {
         &self,
         t: &ThemeColors,
         tree_elements: Vec<AnyElement>,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let show_ignored = self.show_ignored;
+        let tooltip_text: SharedString = "Show Git-Ignored Files".into();
+
         div()
             .w(px(SIDEBAR_WIDTH))
             .h_full()
@@ -173,15 +177,48 @@ impl FileViewer {
             .flex_col()
             .child(
                 div()
-                    .px(px(16.0))
+                    .px(px(12.0))
                     .py(px(10.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    .text_size(ui_text_ms(cx))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(t.text_secondary))
-                    .line_height(px(11.0))
-                    .child("Files"),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(t.text_secondary))
+                            .line_height(px(11.0))
+                            .child("Files"),
+                    )
+                    .child(
+                        div()
+                            .id("fv-toggle-ignored")
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .text_size(ui_text_sm(cx))
+                            .font_weight(FontWeight::MEDIUM)
+                            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+                            .when(show_ignored, |d: Stateful<Div>| {
+                                d.bg(rgb(t.border_active))
+                                    .text_color(rgb(t.text_primary))
+                            })
+                            .when(!show_ignored, |d: Stateful<Div>| {
+                                d.bg(rgb(t.bg_secondary))
+                                    .text_color(rgb(t.text_muted))
+                            })
+                            .hover(|s: StyleRefinement| s.bg(rgb(t.bg_hover)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| {
+                                    this.toggle_show_ignored(cx);
+                                }),
+                            )
+                            .child("ignored"),
+                    ),
             )
             .child(
                 div()
