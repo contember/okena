@@ -94,50 +94,41 @@ impl ActionDispatcher {
                 if let Some(sm) = service_manager {
                     match &action {
                         ActionRequest::StartService { project_id, service_name } => {
-                            let pid = project_id.clone();
-                            let sn = service_name.clone();
                             sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&pid).cloned() {
-                                    sm.start_service(&pid, &sn, &path, cx);
+                                if let Some(path) = sm.project_path(project_id).cloned() {
+                                    sm.start_service(project_id, service_name, &path, cx);
                                 }
                             });
                             return;
                         }
                         ActionRequest::StopService { project_id, service_name } => {
-                            let pid = project_id.clone();
-                            let sn = service_name.clone();
-                            sm.update(cx, |sm, cx| sm.stop_service(&pid, &sn, cx));
+                            sm.update(cx, |sm, cx| sm.stop_service(project_id, service_name, cx));
                             return;
                         }
                         ActionRequest::RestartService { project_id, service_name } => {
-                            let pid = project_id.clone();
-                            let sn = service_name.clone();
                             sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&pid).cloned() {
-                                    sm.restart_service(&pid, &sn, &path, cx);
+                                if let Some(path) = sm.project_path(project_id).cloned() {
+                                    sm.restart_service(project_id, service_name, &path, cx);
                                 }
                             });
                             return;
                         }
                         ActionRequest::StartAllServices { project_id } => {
-                            let pid = project_id.clone();
                             sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&pid).cloned() {
-                                    sm.start_all(&pid, &path, cx);
+                                if let Some(path) = sm.project_path(project_id).cloned() {
+                                    sm.start_all(project_id, &path, cx);
                                 }
                             });
                             return;
                         }
                         ActionRequest::StopAllServices { project_id } => {
-                            let pid = project_id.clone();
-                            sm.update(cx, |sm, cx| sm.stop_all(&pid, cx));
+                            sm.update(cx, |sm, cx| sm.stop_all(project_id, cx));
                             return;
                         }
                         ActionRequest::ReloadServices { project_id } => {
-                            let pid = project_id.clone();
                             sm.update(cx, |sm, cx| {
-                                if let Some(path) = sm.project_path(&pid).cloned() {
-                                    sm.reload_project_services(&pid, &path, cx);
+                                if let Some(path) = sm.project_path(project_id).cloned() {
+                                    sm.reload_project_services(project_id, &path, cx);
                                 }
                             });
                             return;
