@@ -21,6 +21,7 @@ use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use std::sync::Arc;
 
+use super::context_menu::TreeNodeTarget;
 use super::{DisplayMode, FileViewer, SIDEBAR_WIDTH};
 
 /// Helper to create rgba from u32 color and alpha.
@@ -249,18 +250,85 @@ impl FileViewer {
                 format!("{}/{}", parent_path, name)
             };
             let is_expanded = self.expanded_folders.contains(&folder_path);
+            let is_renaming = self.is_renaming_folder(&folder_path);
+            let is_ctx_target = self.is_context_menu_target_folder(&folder_path);
 
-            let folder_path_clone = folder_path.clone();
-            elements.push(
-                expandable_folder_row(name, depth, is_expanded, t, cx)
+            let indent = depth as f32 * 14.0;
+
+            if is_renaming {
+                // Build folder row with inline rename input instead of name label
+                let mut row = div()
                     .id(ElementId::Name(
-                        format!("fv-folder-{}", folder_path).into(),
+                        format!("fv-folder-{}-rename", folder_path).into(),
                     ))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_folder(&folder_path_clone, cx);
-                    }))
-                    .into_any_element(),
-            );
+                    .flex()
+                    .items_center()
+                    .h(px(26.0))
+                    .pl(px(indent + 8.0))
+                    .pr(px(12.0))
+                    .mx(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_selection))
+                    .child(
+                        svg()
+                            .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_muted))
+                            .mr(px(4.0))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        svg()
+                            .path("icons/folder.svg")
+                            .size(px(14.0))
+                            .text_color(rgb(t.text_secondary))
+                            .mr(px(4.0))
+                            .flex_shrink_0(),
+                    );
+                if let Some(input) = self.render_rename_input(t, cx) {
+                    row = row.child(input);
+                }
+                row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key.as_str() == "enter" {
+                        this.finish_rename(cx);
+                    }
+                }));
+                elements.push(row.into_any_element());
+            } else {
+                let folder_path_clone = folder_path.clone();
+                let folder_path_for_ctx = folder_path.clone();
+                let abs_path_for_ctx = self.project_path.join(&folder_path);
+
+                elements.push(
+                    expandable_folder_row(name, depth, is_expanded, t, cx)
+                        .id(ElementId::Name(
+                            format!("fv-folder-{}", folder_path).into(),
+                        ))
+                        .when(is_ctx_target, |d| d.bg(rgb(t.bg_selection)))
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.toggle_folder(&folder_path_clone, cx);
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener({
+                                let folder_path = folder_path_for_ctx;
+                                let abs_path = abs_path_for_ctx;
+                                move |this, event: &MouseDownEvent, _, cx| {
+                                    this.open_context_menu(
+                                        event.position,
+                                        TreeNodeTarget::Folder {
+                                            folder_path: folder_path.clone(),
+                                            abs_path: abs_path.clone(),
+                                        },
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }
+                            }),
+                        )
+                        .into_any_element(),
+                );
+            }
 
             if is_expanded {
                 elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
@@ -271,19 +339,66 @@ impl FileViewer {
             if let Some(file) = self.files.get(file_index) {
                 let is_active = active_file_index == Some(file_index);
                 let is_open = open_file_indices.contains(&file_index);
+                let is_renaming = self.is_renaming_file(&file.path);
+                let is_ctx_target = self.is_context_menu_target_file(&file.path);
 
-                elements.push(
-                    expandable_file_row(&file.filename, depth, None, t, cx)
-                        .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
-                        .when(is_active, |d| d.bg(rgb(t.bg_selection)))
-                        .when(!is_active && is_open, |d| {
-                            d.bg(rgba(t.bg_selection, 0.4))
-                        })
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.select_file(file_index, cx);
-                        }))
-                        .into_any_element(),
-                );
+                let highlight = is_active || is_ctx_target;
+                let indent = depth as f32 * 14.0;
+
+                if is_renaming {
+                    // Build file row with inline rename input instead of name label
+                    let mut row = div()
+                        .id(ElementId::Name(format!("fv-file-{}-rename", file_index).into()))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(26.0))
+                        .pl(px(indent + 8.0 + 18.0))
+                        .pr(px(12.0))
+                        .mx(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(t.bg_selection))
+                        .child(file_icon(&file.filename, t, cx).mr(px(4.0)));
+                    if let Some(input) = self.render_rename_input(t, cx) {
+                        row = row.child(input);
+                    }
+                    row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.key.as_str() == "enter" {
+                            this.finish_rename(cx);
+                        }
+                    }));
+                    elements.push(row.into_any_element());
+                } else {
+                    let file_path_for_ctx = file.path.clone();
+                    elements.push(
+                        expandable_file_row(&file.filename, depth, None, t, cx)
+                            .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
+                            .when(highlight, |d| d.bg(rgb(t.bg_selection)))
+                            .when(!highlight && is_open, |d| {
+                                d.bg(rgba(t.bg_selection, 0.4))
+                            })
+                            .on_click(cx.listener(move |this, _, _window, cx| {
+                                this.select_file(file_index, cx);
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener({
+                                    let path = file_path_for_ctx;
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        this.open_context_menu(
+                                            event.position,
+                                            TreeNodeTarget::File {
+                                                path: path.clone(),
+                                            },
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }
+                                }),
+                            )
+                            .into_any_element(),
+                    );
+                }
             }
         }
 
@@ -605,8 +720,8 @@ impl Render for FileViewer {
             None
         };
 
-        // Focus on first render
-        if !focus_handle.is_focused(window) {
+        // Focus on first render, but not when inline rename input is active
+        if self.rename_state.is_none() && !focus_handle.is_focused(window) {
             window.focus(&focus_handle, cx);
         }
 
@@ -619,6 +734,20 @@ impl Render for FileViewer {
             .key_context("FileViewer")
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                // Dismiss overlays in priority order before default close behavior
+                if this.context_menu.is_some() {
+                    this.close_context_menu(cx);
+                    return;
+                }
+                if this.rename_state.is_some() {
+                    this.cancel_rename(cx);
+                    return;
+                }
+                if this.delete_confirm.is_some() {
+                    this.cancel_delete(cx);
+                    return;
+                }
+
                 let tab = this.active_tab();
                 let is_preview = tab.display_mode == DisplayMode::Preview;
                 if is_preview && tab.markdown_selection.normalized_non_empty().is_some() {
@@ -1260,5 +1389,7 @@ impl Render for FileViewer {
                     },
                 ))
             })
+            .when_some(self.render_context_menu(&t, cx), |d, menu| d.child(menu))
+            .when_some(self.render_delete_confirm(&t, cx), |d, dialog| d.child(dialog))
     }
 }

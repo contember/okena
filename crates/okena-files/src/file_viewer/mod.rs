@@ -3,6 +3,7 @@
 //! Provides a read-only view of files with syntax highlighting via syntect.
 //! Markdown files can be viewed in rendered preview mode.
 
+mod context_menu;
 mod loading;
 mod render;
 mod selection;
@@ -12,6 +13,7 @@ use crate::file_search::{FileEntry, FileSearchDialog};
 use crate::file_tree::{build_file_tree, FileTreeNode};
 use crate::selection::SelectionState;
 use crate::syntax::{load_syntax_set, HighlightedLine};
+use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::HashSet;
@@ -68,7 +70,7 @@ pub(super) struct FileViewerTab {
 
 impl FileViewerTab {
     /// Create a new tab for browsing (no file loaded).
-    fn new_empty() -> Self {
+    pub(super) fn new_empty() -> Self {
         Self {
             file_path: PathBuf::new(),
             content: String::new(),
@@ -239,6 +241,12 @@ pub struct FileViewer {
     pub(super) filter_popover_open: bool,
     /// Bounds of the filter button for popover positioning
     pub(super) filter_button_bounds: Option<Bounds<Pixels>>,
+    /// Context menu state for file tree right-click
+    pub(super) context_menu: Option<FileTreeContextMenu>,
+    /// Inline rename state
+    pub(super) rename_state: Option<FileRenameState>,
+    /// Delete confirmation dialog state
+    pub(super) delete_confirm: Option<DeleteConfirmState>,
 }
 
 impl FileViewer {
@@ -286,6 +294,9 @@ impl FileViewer {
             show_hidden: false,
             filter_popover_open: false,
             filter_button_bounds: None,
+            context_menu: None,
+            rename_state: None,
+            delete_confirm: None,
         }
     }
 
@@ -328,6 +339,9 @@ impl FileViewer {
             show_hidden: false,
             filter_popover_open: false,
             filter_button_bounds: None,
+            context_menu: None,
+            rename_state: None,
+            delete_confirm: None,
         }
     }
 
