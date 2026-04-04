@@ -309,6 +309,14 @@ fn main() {
     }
     builder.init();
 
+    // Log panics to okena.log (otherwise they only go to stderr which is lost)
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("PANIC: {}\n{}", info, backtrace);
+        default_hook(info);
+    }));
+
     let args: Vec<String> = std::env::args().collect();
 
     // Parse --remote and --listen flags
