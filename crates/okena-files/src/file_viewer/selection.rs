@@ -110,7 +110,7 @@ impl FileViewer {
             "hidden" => self.show_hidden = !self.show_hidden,
             _ => {}
         }
-        self.refresh_file_tree();
+        self.refresh_file_tree_async(cx);
         cx.notify();
     }
 
