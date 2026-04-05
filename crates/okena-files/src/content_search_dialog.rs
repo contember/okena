@@ -1306,7 +1306,6 @@ impl Render for ContentSearchDialog {
             let preview = self.render_preview_panel(cx);
 
             fullscreen_overlay("content-search-fullscreen", &t)
-                .relative()
                 .track_focus(&focus_handle)
                 .key_context(self.config.key_context.as_str())
                 .on_action(cx.listener(|this, _: &Cancel, _window, cx| this.close(cx)))
