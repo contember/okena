@@ -58,6 +58,12 @@ pub(crate) struct FileTreeContextMenu {
     pub target: TreeNodeTarget,
 }
 
+/// Tab context menu state (right-click on a file viewer tab).
+pub(crate) struct TabContextMenu {
+    pub position: Point<Pixels>,
+    pub tab_index: usize,
+}
+
 /// Inline rename state wrapping the reusable RenameState.
 pub(crate) struct FileRenameState {
     pub target: TreeNodeTarget,
@@ -373,6 +379,74 @@ impl FileViewer {
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.start_delete(cx);
+                                })),
+                            ),
+                    ),
+                ))
+                .into_any_element(),
+        )
+    }
+
+    pub(super) fn render_tab_context_menu(
+        &self,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.tab_context_menu.as_ref()?;
+        let position = menu.position;
+        let tab_index = menu.tab_index;
+
+        Some(
+            div()
+                .id("fv-tab-context-menu-backdrop")
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.tab_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, _, cx| {
+                        this.tab_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .child(deferred(
+                    anchored().position(position).snap_to_window().child(
+                        context_menu_panel("fv-tab-context-menu", t)
+                            .child(
+                                menu_item("fv-tab-ctx-close", "icons/close.svg", "Close", t)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.tab_context_menu = None;
+                                        this.close_tab(tab_index, cx);
+                                    })),
+                            )
+                            .child(
+                                menu_item(
+                                    "fv-tab-ctx-close-others",
+                                    "icons/close.svg",
+                                    "Close Others",
+                                    t,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.tab_context_menu = None;
+                                    this.close_other_tabs(tab_index, cx);
+                                })),
+                            )
+                            .child(
+                                menu_item(
+                                    "fv-tab-ctx-close-all",
+                                    "icons/close.svg",
+                                    "Close All",
+                                    t,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.tab_context_menu = None;
+                                    this.close_all_tabs(cx);
                                 })),
                             ),
                     ),

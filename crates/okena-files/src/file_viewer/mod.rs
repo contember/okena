@@ -13,7 +13,7 @@ use crate::file_search::{FileEntry, FileSearchDialog};
 use crate::file_tree::{build_file_tree, FileTreeNode};
 use crate::selection::SelectionState;
 use crate::syntax::{load_syntax_set, HighlightedLine};
-use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu};
+use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, TabContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
 use std::collections::HashSet;
@@ -243,6 +243,8 @@ pub struct FileViewer {
     pub(super) filter_button_bounds: Option<Bounds<Pixels>>,
     /// Context menu state for file tree right-click
     pub(super) context_menu: Option<FileTreeContextMenu>,
+    /// Context menu state for tab right-click
+    pub(super) tab_context_menu: Option<TabContextMenu>,
     /// Inline rename state
     pub(super) rename_state: Option<FileRenameState>,
     /// Delete confirmation dialog state
@@ -295,6 +297,7 @@ impl FileViewer {
             filter_popover_open: false,
             filter_button_bounds: None,
             context_menu: None,
+            tab_context_menu: None,
             rename_state: None,
             delete_confirm: None,
         }
@@ -340,6 +343,7 @@ impl FileViewer {
             filter_popover_open: false,
             filter_button_bounds: None,
             context_menu: None,
+            tab_context_menu: None,
             rename_state: None,
             delete_confirm: None,
         }
@@ -490,6 +494,22 @@ impl FileViewer {
         // If closed tab was after active tab, active_tab stays the same
 
         cx.notify();
+    }
+
+    /// Close all tabs except the one at `index`.
+    pub(super) fn close_other_tabs(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            let kept = self.tabs.remove(index);
+            self.tabs.clear();
+            self.tabs.push(kept);
+            self.active_tab = 0;
+            cx.notify();
+        }
+    }
+
+    /// Close all tabs (emits Close to dismiss the viewer).
+    pub(super) fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
+        cx.emit(FileViewerEvent::Close);
     }
 
     /// Switch to a tab by index.

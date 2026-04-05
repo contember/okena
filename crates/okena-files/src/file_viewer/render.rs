@@ -468,6 +468,7 @@ impl FileViewer {
                 div()
                     .id(ElementId::Name(format!("fv-tab-{}", i).into()))
                     .h(px(28.0))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .px(px(8.0))
@@ -490,6 +491,17 @@ impl FileViewer {
                         MouseButton::Middle,
                         cx.listener(move |this, _, _window, cx| {
                             this.close_tab(i, cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                            this.tab_context_menu =
+                                Some(super::context_menu::TabContextMenu {
+                                    position: event.position,
+                                    tab_index: i,
+                                });
+                            cx.notify();
                         }),
                     )
                     .child(
@@ -536,8 +548,11 @@ impl FileViewer {
         }
 
         h_flex()
+            .id("fv-tabs-scroll")
             .h(px(28.0))
             .flex_shrink_0()
+            .min_w_0()
+            .overflow_x_scroll()
             .bg(rgb(t.bg_header))
             .border_b_1()
             .border_color(rgb(t.border))
@@ -735,6 +750,11 @@ impl Render for FileViewer {
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
                 // Dismiss overlays in priority order before default close behavior
+                if this.tab_context_menu.is_some() {
+                    this.tab_context_menu = None;
+                    cx.notify();
+                    return;
+                }
                 if this.context_menu.is_some() {
                     this.close_context_menu(cx);
                     return;
@@ -1390,6 +1410,7 @@ impl Render for FileViewer {
                 ))
             })
             .when_some(self.render_context_menu(&t, cx), |d, menu| d.child(menu))
+            .when_some(self.render_tab_context_menu(&t, cx), |d, menu| d.child(menu))
             .when_some(self.render_delete_confirm(&t, cx), |d, dialog| d.child(dialog))
     }
 }
