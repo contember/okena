@@ -507,9 +507,12 @@ impl FileViewer {
         }
     }
 
-    /// Close all tabs (emits Close to dismiss the viewer).
+    /// Close all tabs, leaving an empty viewer state.
     pub(super) fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
-        cx.emit(FileViewerEvent::Close);
+        self.tabs.clear();
+        self.tabs.push(FileViewerTab::new_empty());
+        self.active_tab = 0;
+        cx.notify();
     }
 
     /// Switch to a tab by index.
