@@ -75,6 +75,8 @@ pub struct FocusManager {
     focused_project_id: Option<String>,
     /// When true, focusing a parent project shows only that project (not its worktree children)
     focus_project_individual: bool,
+    /// Saved terminal focus from before project zoom, restored when returning to overview
+    pre_zoom_focus: Option<FocusTarget>,
     /// Maximum stack depth to prevent memory issues
     max_stack_depth: usize,
 }
@@ -93,6 +95,7 @@ impl FocusManager {
             context: FocusContext::Terminal,
             focused_project_id: None,
             focus_project_individual: false,
+            pre_zoom_focus: None,
             max_stack_depth: 10,
         }
     }
@@ -132,15 +135,44 @@ impl FocusManager {
     }
 
     /// Set the focused/zoomed project ID
+    ///
+    /// When zooming into a project (Some), saves current terminal focus for later restoration.
+    /// When returning to overview (None), restores the previously saved terminal focus.
     pub fn set_focused_project_id(&mut self, id: Option<String>) {
+        self.apply_zoom_focus_save_restore(&id);
         self.focused_project_id = id;
         self.focus_project_individual = false;
     }
 
     /// Set the focused project ID with individual mode (show only this project, not worktree children)
+    ///
+    /// When zooming into a project (Some), saves current terminal focus for later restoration.
+    /// When returning to overview (None), restores the previously saved terminal focus.
     pub fn set_focused_project_id_individual(&mut self, id: Option<String>) {
+        self.apply_zoom_focus_save_restore(&id);
         self.focused_project_id = id;
         self.focus_project_individual = true;
+    }
+
+    /// Save/restore terminal focus around project zoom transitions.
+    ///
+    /// Entering zoom (None→Some): saves current focus.
+    /// Exiting zoom (Some→None): restores saved focus.
+    /// Switching zoom (Some→Some): no change to saved focus.
+    fn apply_zoom_focus_save_restore(&mut self, new_id: &Option<String>) {
+        match (&self.focused_project_id, new_id) {
+            (None, Some(_)) => {
+                // Entering zoom — save current terminal focus
+                self.pre_zoom_focus = self.current_focus.clone();
+            }
+            (Some(_), None) => {
+                // Returning to overview — restore saved terminal focus
+                if let Some(saved) = self.pre_zoom_focus.take() {
+                    self.current_focus = Some(saved);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Whether focus is in individual mode (don't expand worktree children)
@@ -299,6 +331,7 @@ impl FocusManager {
         self.current_focus = None;
         self.context = FocusContext::Terminal;
         self.focused_project_id = None;
+        self.pre_zoom_focus = None;
         self.focus_stack.clear();
     }
 
@@ -412,5 +445,59 @@ mod tests {
         fm.focus_terminal("proj1".to_string(), vec![0]);
         let result = fm.exit_fullscreen();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn zoom_to_project_saves_and_restores_focus() {
+        let mut fm = FocusManager::new();
+        // Focus a terminal in proj1 (on overview)
+        fm.focus_terminal("proj1".to_string(), vec![0, 1]);
+
+        // Zoom into proj2
+        fm.set_focused_project_id(Some("proj2".to_string()));
+        // Simulate focusing a terminal in proj2
+        fm.focus_terminal("proj2".to_string(), vec![0]);
+        assert_eq!(fm.focused_terminal_state().unwrap().project_id, "proj2");
+
+        // Return to overview
+        fm.set_focused_project_id(None);
+        // Focus should be restored to proj1's terminal
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
+        assert_eq!(state.layout_path, vec![0, 1]);
+    }
+
+    #[test]
+    fn zoom_switch_between_projects_preserves_original_focus() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        // Zoom into proj2
+        fm.set_focused_project_id(Some("proj2".to_string()));
+        fm.focus_terminal("proj2".to_string(), vec![0]);
+
+        // Switch zoom to proj3 (Some→Some, should NOT overwrite saved focus)
+        fm.set_focused_project_id(Some("proj3".to_string()));
+        fm.focus_terminal("proj3".to_string(), vec![0]);
+
+        // Return to overview
+        fm.set_focused_project_id(None);
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
+    }
+
+    #[test]
+    fn zoom_individual_also_saves_and_restores_focus() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        // Zoom individual into proj2
+        fm.set_focused_project_id_individual(Some("proj2".to_string()));
+        fm.focus_terminal("proj2".to_string(), vec![0]);
+
+        // Return to overview
+        fm.set_focused_project_id(None);
+        let state = fm.focused_terminal_state().unwrap();
+        assert_eq!(state.project_id, "proj1");
     }
 }
