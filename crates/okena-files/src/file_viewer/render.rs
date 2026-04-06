@@ -59,6 +59,7 @@ impl FileViewer {
 
         div()
             .id(ElementId::Name(format!("line-{}", line_number).into()))
+            .w_full()
             .flex()
             .h(px(line_height))
             .text_size(ui_text(font_size, cx))
