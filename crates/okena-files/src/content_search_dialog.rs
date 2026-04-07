@@ -6,7 +6,8 @@
 use crate::content_search::{
     ContentSearchConfig, FileSearchResult, SearchHandle, SearchMode, search_content,
 };
-use crate::code_view::build_styled_text_with_backgrounds;
+use crate::code_view::{CodeSelection, build_styled_text_with_backgrounds, extract_selected_text, selection_bg_ranges};
+use crate::selection::copy_to_clipboard;
 use crate::file_tree::{build_file_tree, expandable_folder_row, expandable_file_row, FileTreeNode};
 use crate::list_overlay::ListOverlayConfig;
 use crate::syntax::{
@@ -23,6 +24,7 @@ use okena_ui::file_icon::file_icon;
 use okena_ui::modal::{fullscreen_overlay, modal_backdrop, modal_content, modal_header};
 use okena_ui::selectable_list::selectable_list_item;
 use okena_ui::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
+use okena_ui::text_utils::find_word_boundaries;
 use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -116,6 +118,10 @@ pub struct ContentSearchDialog {
     tree_scroll_handle: ScrollHandle,
     /// Currently active scope path (folder or file) shown in sidebar.
     scope_path: Option<String>,
+    /// Text selection state in the preview panel.
+    preview_selection: CodeSelection,
+    /// File path currently shown in preview (for selection reset).
+    preview_file: Option<PathBuf>,
 }
 
 impl ContentSearchDialog {
@@ -215,6 +221,8 @@ impl ContentSearchDialog {
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             scope_path: None,
+            preview_selection: CodeSelection::default(),
+            preview_file: None,
         };
 
         // Run initial search if we have a restored query
@@ -600,6 +608,12 @@ impl ContentSearchDialog {
                 );
         };
 
+        // Reset selection when preview file changes
+        if self.preview_file.as_ref() != Some(&file_path) {
+            self.preview_selection = CodeSelection::default();
+            self.preview_file = Some(file_path.clone());
+        }
+
         // Ensure file is in highlight cache
         if !self.highlight_cache.contains_key(&file_path) {
             if let Ok(content) = std::fs::read_to_string(&file_path) {
@@ -692,36 +706,37 @@ impl ContentSearchDialog {
 
                                     let is_current_match = line_number == match_line;
 
+                                    // Combine match highlights with selection highlights
+                                    let line_len = lines.get(line_idx).map_or(0, |hl| hl.plain_text.len());
+                                    let sel_bg_ranges = selection_bg_ranges(&this.preview_selection, line_idx, line_len);
+
                                     let styled_text = if let Some(hl) =
                                         lines.get(line_idx)
                                     {
+                                        let mut bg_ranges: Vec<(std::ops::Range<usize>, Hsla)> = Vec::new();
                                         if let Some((_, ranges)) = line_match {
                                             let bg = if is_current_match {
                                                 current_match_bg
                                             } else {
                                                 match_bg
                                             };
-                                            let bg_ranges: Vec<(
-                                                std::ops::Range<usize>,
-                                                Hsla,
-                                            )> = ranges
-                                                .iter()
-                                                .filter(|r| {
-                                                    r.end <= hl.plain_text.len()
-                                                })
-                                                .map(|r| (r.clone(), bg))
-                                                .collect();
-                                            build_styled_text_with_backgrounds(
-                                                &hl.spans, &bg_ranges,
-                                            )
-                                        } else {
-                                            build_styled_text_with_backgrounds(
-                                                &hl.spans, &[],
-                                            )
+                                            bg_ranges.extend(
+                                                ranges
+                                                    .iter()
+                                                    .filter(|r| r.end <= hl.plain_text.len())
+                                                    .map(|r| (r.clone(), bg)),
+                                            );
                                         }
+                                        bg_ranges.extend(sel_bg_ranges);
+                                        build_styled_text_with_backgrounds(
+                                            &hl.spans, &bg_ranges,
+                                        )
                                     } else {
                                         StyledText::new(String::new())
                                     };
+
+                                    let text_layout = styled_text.layout().clone();
+                                    let plain_text = lines.get(line_idx).map(|hl| hl.plain_text.clone()).unwrap_or_default();
 
                                     let row_bg = if is_current_match {
                                         Some(current_match_bg)
@@ -732,6 +747,7 @@ impl ContentSearchDialog {
                                     };
 
                                     div()
+                                        .id(ElementId::Name(format!("preview-line-{}", line_idx).into()))
                                         .flex()
                                         .items_center()
                                         .px(px(8.0))
@@ -739,6 +755,51 @@ impl ContentSearchDialog {
                                         .text_size(ui_text(13.0, cx))
                                         .font_family("monospace")
                                         .when_some(row_bg, |d, bg| d.bg(bg))
+                                        .on_mouse_down(MouseButton::Left, {
+                                            let text_layout = text_layout.clone();
+                                            let plain_text = plain_text.clone();
+                                            cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                                let col = text_layout
+                                                    .index_for_position(event.position)
+                                                    .unwrap_or_else(|ix| ix)
+                                                    .min(line_len);
+                                                if event.click_count >= 3 {
+                                                    this.preview_selection.start = Some((line_idx, 0));
+                                                    this.preview_selection.end = Some((line_idx, line_len));
+                                                    this.preview_selection.finish();
+                                                } else if event.click_count == 2 {
+                                                    let (start, end) = find_word_boundaries(&plain_text, col);
+                                                    this.preview_selection.start = Some((line_idx, start));
+                                                    this.preview_selection.end = Some((line_idx, end));
+                                                    this.preview_selection.finish();
+                                                } else {
+                                                    this.preview_selection.start = Some((line_idx, col));
+                                                    this.preview_selection.end = Some((line_idx, col));
+                                                    this.preview_selection.is_selecting = true;
+                                                }
+                                                cx.notify();
+                                            })
+                                        })
+                                        .on_mouse_move({
+                                            let text_layout = text_layout.clone();
+                                            cx.listener(move |this, event: &MouseMoveEvent, _window, cx| {
+                                                if this.preview_selection.is_selecting {
+                                                    let col = text_layout
+                                                        .index_for_position(event.position)
+                                                        .unwrap_or_else(|ix| ix)
+                                                        .min(line_len);
+                                                    this.preview_selection.end = Some((line_idx, col));
+                                                    cx.notify();
+                                                }
+                                            })
+                                        })
+                                        .on_mouse_up(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _window, cx| {
+                                                this.preview_selection.finish();
+                                                cx.notify();
+                                            }),
+                                        )
                                         .child(
                                             div()
                                                 .text_color(rgb(t.text_muted))
@@ -1171,6 +1232,18 @@ impl Render for ContentSearchDialog {
                     cx.notify();
                 }
                 "escape" => this.close(cx),
+                "c" if event.keystroke.modifiers.platform => {
+                    if let Some(file_path) = &this.preview_file {
+                        if let Some(lines) = this.highlight_cache.get(file_path) {
+                            let text = extract_selected_text(
+                                &this.preview_selection,
+                                lines.len(),
+                                |i| &lines[i].plain_text,
+                            );
+                            copy_to_clipboard(cx, text);
+                        }
+                    }
+                }
                 _ => {}
             }
         });
