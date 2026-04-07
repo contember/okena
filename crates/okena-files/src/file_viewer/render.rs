@@ -49,7 +49,8 @@ impl FileViewer {
         let char_width = self.measured_char_width;
         let gutter_width = (tab.line_num_width as f32) * char_width + 16.0;
 
-        let bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
+        let mut bg_ranges = selection_bg_ranges(&tab.selection, line_number, line.plain_text.len());
+        bg_ranges.extend(self.search_bg_ranges_for_line(line_number));
 
         let plain_text = line.plain_text.clone();
         let line_len = line.plain_text.len();
@@ -736,8 +737,8 @@ impl Render for FileViewer {
             None
         };
 
-        // Focus on first render, but not when inline rename input is active
-        if self.rename_state.is_none() && !focus_handle.is_focused(window) {
+        // Focus on first render, but not when inline rename or search input is active
+        if self.rename_state.is_none() && self.search_state.is_none() && !focus_handle.is_focused(window) {
             window.focus(&focus_handle, cx);
         }
 
@@ -749,7 +750,7 @@ impl Render for FileViewer {
             .track_focus(&focus_handle)
             .key_context("FileViewer")
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
-            .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
                 // Dismiss overlays in priority order before default close behavior
                 if this.tab_context_menu.is_some() {
                     this.tab_context_menu = None;
@@ -768,6 +769,10 @@ impl Render for FileViewer {
                     this.cancel_delete(cx);
                     return;
                 }
+                if this.search_state.is_some() {
+                    this.close_search(window, cx);
+                    return;
+                }
 
                 let tab = this.active_tab();
                 let is_preview = tab.display_mode == DisplayMode::Preview;
@@ -781,7 +786,14 @@ impl Render for FileViewer {
                     this.close(cx);
                 }
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // Don't intercept keys when search input is focused
+                if this.search_state.as_ref().is_some_and(|s| {
+                    s.input.read(cx).focus_handle(cx).is_focused(window)
+                }) {
+                    return;
+                }
+
                 let key = event.keystroke.key.as_str();
                 let modifiers = &event.keystroke.modifiers;
                 let tab = this.active_tab();
@@ -789,6 +801,11 @@ impl Render for FileViewer {
                 let is_md = tab.is_markdown;
 
                 match key {
+                    "f" if modifiers.platform || modifiers.control => {
+                        if !is_preview {
+                            this.open_search(window, cx);
+                        }
+                    }
                     "tab" if is_md && !modifiers.control && !modifiers.shift => {
                         this.toggle_display_mode(cx);
                     }
@@ -957,6 +974,10 @@ impl Render for FileViewer {
                             .min_w_0()
                             // Tab bar (above editor, not above sidebar)
                             .when_some(tab_bar, |d, tab_bar| d.child(tab_bar))
+                            // In-file search bar
+                            .when(self.search_state.is_some(), |d| {
+                                d.child(self.render_search_bar(&t, cx))
+                            })
                             .when(has_error, |d| {
                                 d.child(
                                     div()

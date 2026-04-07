@@ -6,6 +6,7 @@
 mod context_menu;
 mod loading;
 mod render;
+mod search;
 mod selection;
 
 use crate::code_view::ScrollbarDrag;
@@ -249,6 +250,8 @@ pub struct FileViewer {
     pub(super) rename_state: Option<FileRenameState>,
     /// Delete confirmation dialog state
     pub(super) delete_confirm: Option<DeleteConfirmState>,
+    /// In-file search state (Ctrl+F)
+    pub(super) search_state: Option<search::FileSearchState>,
 }
 
 impl FileViewer {
@@ -300,6 +303,7 @@ impl FileViewer {
             tab_context_menu: None,
             rename_state: None,
             delete_confirm: None,
+            search_state: None,
         }
     }
 
@@ -346,6 +350,7 @@ impl FileViewer {
             tab_context_menu: None,
             rename_state: None,
             delete_confirm: None,
+            search_state: None,
         }
     }
 
@@ -527,6 +532,10 @@ impl FileViewer {
                 &self.project_path,
             );
             self.expanded_folders.extend(expanded);
+            // Re-run search for the new tab's content
+            if self.search_state.is_some() {
+                self.perform_file_search(cx);
+            }
             cx.notify();
         }
     }
