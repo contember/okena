@@ -106,7 +106,6 @@ impl RootView {
             let workspace = self.workspace.read(cx);
             let num_visible = workspace.visible_projects().len();
             let is_zoomed = workspace.focus_manager.focused_project_id().is_some();
-            drop(workspace);
 
             if is_zoomed || num_visible <= 1 {
                 // Still zoomed or only one project — no centering needed
@@ -534,7 +533,6 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &FocusActiveProject, _window, cx| {
                 let ws = this.workspace.read(cx);
                 let is_focused = ws.focus_manager.focused_project_id().is_some();
-                drop(ws);
                 if is_focused {
                     this.workspace.update(cx, |ws, cx| {
                         ws.set_focused_project(None, cx);

@@ -1,7 +1,6 @@
 //! In-file search for the file viewer.
 
 use crate::file_search::Cancel;
-use crate::theme::theme;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use okena_core::theme::ThemeColors;
@@ -29,14 +28,14 @@ const SEARCH_CURRENT_MATCH_BG: Rgba = Rgba {
 };
 
 /// A single match location in the file.
-pub(super) struct SearchMatch {
+pub(crate) struct SearchMatch {
     pub line: usize,
     pub start_col: usize,
     pub end_col: usize,
 }
 
 /// State for the in-file search bar.
-pub(super) struct FileSearchState {
+pub(crate) struct FileSearchState {
     pub input: Entity<SimpleInputState>,
     pub matches: Vec<SearchMatch>,
     pub current_match_index: Option<usize>,

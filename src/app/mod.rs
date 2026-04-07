@@ -614,7 +614,6 @@ impl Okena {
                             }
                         }
                         drop(terminals_guard);
-                        drop(ws);
                         if !status_updates.is_empty() {
                             this.workspace.update(cx, |ws, cx| {
                                 for (tid, status) in status_updates {

@@ -168,7 +168,7 @@ impl FileViewer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active_count = self.show_ignored as u8 + self.show_hidden as u8;
-        let is_open = self.filter_popover_open;
+        let _is_open = self.filter_popover_open;
 
         div()
             .w(px(SIDEBAR_WIDTH))

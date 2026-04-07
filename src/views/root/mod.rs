@@ -361,7 +361,6 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         use crate::workspace::state::{FolderData, ProjectData, LayoutNode};
-        use crate::theme::FolderColor;
         use crate::workspace::settings::HooksConfig;
         use okena_core::client::RemoteConnectionConfig;
 

@@ -27,7 +27,6 @@ use okena_workspace::requests::SidebarRequest;
 use okena_workspace::state::{FolderData, ProjectData, Workspace};
 use gpui::*;
 use gpui_component::h_flex;
-use gpui::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::drag::{ProjectDrag, FolderDrag};

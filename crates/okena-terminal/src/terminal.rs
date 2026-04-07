@@ -825,7 +825,7 @@ impl Terminal {
             let screen_lines = grid.screen_lines() as i32;
             let history_size = grid.history_size() as i32;
             let cols = grid.columns();
-            let display_offset = grid.display_offset() as i32;
+            let _display_offset = grid.display_offset() as i32;
 
             // Search from top of history to bottom of screen
             // Line numbers: negative = history, 0..screen_lines = visible

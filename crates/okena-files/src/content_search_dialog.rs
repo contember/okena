@@ -65,9 +65,9 @@ enum ResultRow {
         line_content: String,
         match_ranges: Vec<std::ops::Range<usize>>,
         /// Context lines before the match (line_number, content).
-        context_before: Vec<(usize, String)>,
+        _context_before: Vec<(usize, String)>,
         /// Context lines after the match (line_number, content).
-        context_after: Vec<(usize, String)>,
+        _context_after: Vec<(usize, String)>,
     },
 }
 
@@ -396,8 +396,8 @@ impl ContentSearchDialog {
                     line_number: m.line_number,
                     line_content: m.line_content.clone(),
                     match_ranges: m.match_ranges.clone(),
-                    context_before: m.context_before.clone(),
-                    context_after: m.context_after.clone(),
+                    _context_before: m.context_before.clone(),
+                    _context_after: m.context_after.clone(),
                 });
             }
         }
@@ -637,7 +637,7 @@ impl ContentSearchDialog {
             ResultRow::FileHeader { file_path, .. } => Some((file_path.clone(), 1, vec![])),
         });
 
-        let Some((file_path, match_line, match_ranges)) = selected_match else {
+        let Some((file_path, match_line, _match_ranges)) = selected_match else {
             return div()
                 .flex_1()
                 .h_full()
@@ -1341,7 +1341,7 @@ impl Render for ContentSearchDialog {
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
-            let has_context = self.expanded;
+            let _has_context = self.expanded;
             let view = cx.entity().clone();
 
             uniform_list("content-search-list", rows.len(), move |range, _window, cx| {
