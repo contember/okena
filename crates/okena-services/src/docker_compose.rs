@@ -1,18 +1,24 @@
 use okena_core::process;
 use crate::manager::ServiceStatus;
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::time::Duration;
 
-/// Check if `docker compose` CLI is available (cached via OnceLock).
+/// Timeout for Docker CLI commands.  When the Docker daemon is not running the
+/// CLI can hang for many seconds waiting for a connection; this cap prevents it
+/// from blocking background executor threads and starving the UI.
+const DOCKER_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Check if `docker compose` CLI is available.
+///
+/// This is intentionally **not** cached: a previous check may have failed
+/// because Docker Desktop was not running yet and caching that result would
+/// permanently disable Docker integration for the session.
 pub fn is_docker_compose_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        let mut cmd = process::command("docker");
-        cmd.args(["compose", "version"]);
-        process::safe_output(&mut cmd)
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
+    let mut cmd = process::command("docker");
+    cmd.args(["compose", "version"]);
+    process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Compose file names to probe, in priority order.
@@ -41,7 +47,7 @@ pub fn list_services(project_path: &str, compose_file: &str) -> Result<Vec<Strin
     cmd.args(["compose", "-f", compose_file, "config", "--format", "json"])
         .current_dir(project_path);
 
-    let output = process::safe_output(&mut cmd)
+    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
         .map_err(|e| format!("Failed to run docker compose config: {}", e))?;
 
     if !output.status.success() {
@@ -127,8 +133,8 @@ pub fn poll_status(project_path: &str, compose_file: &str) -> Result<Vec<DockerS
     cmd.args(["compose", "-f", compose_file, "ps", "--format", "json", "-a"])
         .current_dir(project_path);
 
-    let output = process::safe_output(&mut cmd)
-        .map_err(|e| format!("Failed to run docker compose ps: {}", e))?;
+    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
+        .map_err(|e| format!("docker compose ps failed: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
