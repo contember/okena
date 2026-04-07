@@ -287,6 +287,10 @@ pub enum ActionRequest {
     },
     ListFiles {
         project_id: String,
+        #[serde(default)]
+        show_ignored: bool,
+        #[serde(default)]
+        show_hidden: bool,
     },
     ReadFile {
         project_id: String,

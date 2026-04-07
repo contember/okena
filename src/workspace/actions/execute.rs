@@ -334,14 +334,14 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
             }
         }
-        ActionRequest::ListFiles { project_id } => {
+        ActionRequest::ListFiles { project_id, show_ignored, show_hidden } => {
             match ws.project(&project_id) {
                 Some(p) => {
                     let path = match std::path::Path::new(&p.path).canonicalize() {
                         Ok(c) => c,
                         Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
                     };
-                    let files = okena_files::file_search::FileSearchDialog::scan_files(&path, false, false);
+                    let files = okena_files::file_search::FileSearchDialog::scan_files(&path, show_ignored, show_hidden);
                     ActionResult::Ok(Some(serde_json::to_value(files).expect("BUG: FileEntry must serialize")))
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),

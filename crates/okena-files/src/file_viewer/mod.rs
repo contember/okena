@@ -281,7 +281,7 @@ impl FileViewer {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs_clone.list_files() })
+                .spawn(async move { fs_clone.list_files(false, false) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 let file_index = files.iter().position(|f| f.path == file_path_clone);
@@ -379,7 +379,7 @@ impl FileViewer {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs_clone.list_files() })
+                .spawn(async move { fs_clone.list_files(false, false) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.file_tree = build_file_tree(
@@ -454,10 +454,12 @@ impl FileViewer {
     /// Preserves expanded folders and updates file indices on open tabs.
     fn refresh_file_tree_async(&mut self, cx: &mut Context<Self>) {
         let fs = self.project_fs.clone();
+        let show_ignored = self.show_ignored;
+        let show_hidden = self.show_hidden;
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs.list_files() })
+                .spawn(async move { fs.list_files(show_ignored, show_hidden) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.file_tree = build_file_tree(

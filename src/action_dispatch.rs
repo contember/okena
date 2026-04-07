@@ -572,8 +572,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::GitListBranches { project_id } => ActionRequest::GitListBranches {
             project_id: s(&project_id),
         },
-        ActionRequest::ListFiles { project_id } => ActionRequest::ListFiles {
+        ActionRequest::ListFiles { project_id, show_ignored, show_hidden } => ActionRequest::ListFiles {
             project_id: s(&project_id),
+            show_ignored,
+            show_hidden,
         },
         ActionRequest::ReadFile { project_id, relative_path } => ActionRequest::ReadFile {
             project_id: s(&project_id),

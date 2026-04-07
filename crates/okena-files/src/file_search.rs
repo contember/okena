@@ -112,7 +112,7 @@ impl FileSearchDialog {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs.list_files() })
+                .spawn(async move { fs.list_files(false, false) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.files = files;
