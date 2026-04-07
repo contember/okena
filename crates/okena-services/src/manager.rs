@@ -1033,20 +1033,19 @@ impl ServiceManager {
             let service_names = {
                 let path = project_path.clone();
                 let file = compose_file.clone();
-                cx.background_executor()
-                    .spawn(async move {
-                        if !docker_compose::is_docker_compose_available() {
-                            return None;
+                smol::unblock(move || {
+                    if !docker_compose::is_docker_compose_available() {
+                        return None;
+                    }
+                    match docker_compose::list_services(&path, &file) {
+                        Ok(names) => Some(names),
+                        Err(e) => {
+                            log::warn!("Failed to list Docker Compose services: {}", e);
+                            None
                         }
-                        match docker_compose::list_services(&path, &file) {
-                            Ok(names) => Some(names),
-                            Err(e) => {
-                                log::warn!("Failed to list Docker Compose services: {}", e);
-                                None
-                            }
-                        }
-                    })
-                    .await
+                    }
+                })
+                .await
             };
 
             let Some(service_names) = service_names else { return };
@@ -1213,6 +1212,8 @@ impl ServiceManager {
             // Small initial delay
             cx.background_executor().timer(Duration::from_secs(1)).await;
 
+            let mut consecutive_failures: u32 = 0;
+
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     return;
@@ -1220,11 +1221,10 @@ impl ServiceManager {
 
                 let path_clone = path.clone();
                 let file_clone = file.clone();
-                let result = cx.background_executor()
-                    .spawn(async move {
-                        docker_compose::poll_status(&path_clone, &file_clone)
-                    })
-                    .await;
+                let result = smol::unblock(move || {
+                    docker_compose::poll_status(&path_clone, &file_clone)
+                })
+                .await;
 
                 if cancel.load(Ordering::Relaxed) {
                     return;
@@ -1232,6 +1232,7 @@ impl ServiceManager {
 
                 match result {
                     Ok(statuses) => {
+                        consecutive_failures = 0;
                         let should_stop = this.update(cx, |this, cx| {
                             let mut any_docker = false;
                             let mut changed = false;
@@ -1263,11 +1264,18 @@ impl ServiceManager {
                         }
                     }
                     Err(e) => {
+                        consecutive_failures += 1;
                         log::warn!("Docker status poll failed for project {}: {}", pid, e);
                     }
                 }
 
-                cx.background_executor().timer(Duration::from_secs(5)).await;
+                // Back off on repeated failures: 5s → 10s → 20s → 40s → 60s (cap)
+                let delay = if consecutive_failures == 0 {
+                    5
+                } else {
+                    (5u64 << consecutive_failures.min(4)).min(60)
+                };
+                cx.background_executor().timer(Duration::from_secs(delay)).await;
             }
         }).detach();
     }
