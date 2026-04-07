@@ -28,6 +28,51 @@ pub struct ContentMatch {
     pub context_after: Vec<(usize, String)>,
 }
 
+/// Expand tabs to 4 spaces in a string and remap byte ranges accordingly.
+///
+/// The syntax highlighter expands tabs to spaces, so match ranges computed on
+/// the raw text would be misaligned. This function applies the same expansion
+/// and adjusts all ranges to match the expanded string.
+fn expand_tabs(text: &str, ranges: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
+    let mut expanded = String::with_capacity(text.len());
+    // Map from original byte offset to expanded byte offset
+    let mut offset_map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    let mut expanded_pos: usize = 0;
+
+    for (orig_pos, ch) in text.char_indices() {
+        offset_map.resize(orig_pos + 1, expanded_pos);
+        if ch == '\t' {
+            expanded.push_str("    ");
+            expanded_pos += 4;
+        } else {
+            expanded.push(ch);
+            expanded_pos += ch.len_utf8();
+        }
+    }
+    // Sentinel for end-of-string
+    offset_map.resize(text.len() + 1, expanded_pos);
+
+    let new_ranges = ranges
+        .iter()
+        .filter_map(|r| {
+            let start = *offset_map.get(r.start)?;
+            let end = *offset_map.get(r.end)?;
+            Some(start..end)
+        })
+        .collect();
+
+    (expanded, new_ranges)
+}
+
+/// Expand tabs to 4 spaces in a string (no range remapping needed).
+fn expand_tabs_simple(text: &str) -> String {
+    if text.contains('\t') {
+        text.replace('\t', "    ")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Search results grouped by file.
 #[derive(Clone, Debug)]
 pub struct FileSearchResult {
@@ -140,7 +185,7 @@ fn add_context_lines(matches: &mut [ContentMatch], file_path: &Path, context_lin
         for i in start..line_idx {
             m.context_before.push((
                 i + 1,
-                all_lines.get(i).unwrap_or(&"").to_string(),
+                expand_tabs_simple(all_lines.get(i).unwrap_or(&"")),
             ));
         }
 
@@ -149,7 +194,7 @@ fn add_context_lines(matches: &mut [ContentMatch], file_path: &Path, context_lin
         for i in (line_idx + 1)..end {
             m.context_after.push((
                 i + 1,
-                all_lines.get(i).unwrap_or(&"").to_string(),
+                expand_tabs_simple(all_lines.get(i).unwrap_or(&"")),
             ));
         }
     }
@@ -233,7 +278,7 @@ fn search_content_grep(
                     return Ok(false);
                 }
 
-                let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]).to_string();
+                let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
 
                 // Find match ranges within the line
                 let mut match_ranges = Vec::new();
@@ -246,9 +291,12 @@ fn search_content_grep(
                     true
                 }).ok();
 
+                // Expand tabs to match syntax highlighter output
+                let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
+
                 file_matches.push(ContentMatch {
                     line_number: line_number as usize,
-                    line_content: line_trimmed,
+                    line_content: line_expanded,
                     match_ranges,
                     context_before: Vec::new(),
                     context_after: Vec::new(),
@@ -356,9 +404,12 @@ fn search_content_fuzzy(
                     })
                     .collect();
 
+                // Expand tabs to match syntax highlighter output
+                let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+
                 scored_matches.push((score, ContentMatch {
                     line_number: line_idx + 1,
-                    line_content: line.to_string(),
+                    line_content: line_expanded,
                     match_ranges,
                     context_before: Vec::new(),
                     context_after: Vec::new(),
