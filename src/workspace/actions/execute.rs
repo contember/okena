@@ -480,6 +480,7 @@ pub fn spawn_uninitialized_terminals(
     if let Some(layout) = &project.layout {
         collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
     }
+    log::info!("spawn_uninitialized_terminals: project={}, uninitialized_count={}", project_id, uninitialized.len());
 
     let app_settings = settings(cx);
     let global_default = app_settings.default_shell.clone();
@@ -536,11 +537,8 @@ pub fn spawn_uninitialized_terminals(
         }
     }
 
-    if spawned_ids.is_empty() {
-        ActionResult::Ok(None)
-    } else {
-        ActionResult::Ok(Some(serde_json::json!({ "terminal_ids": spawned_ids })))
-    }
+    // Always return terminal_ids — even when empty — so callers know the action completed
+    ActionResult::Ok(Some(serde_json::json!({ "terminal_ids": spawned_ids })))
 }
 
 /// Find the first terminal_id in a layout tree (depth-first).
