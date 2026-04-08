@@ -517,7 +517,7 @@ fn render_diff_tree_node(
             let file_path = summary.path.clone();
             let cb = on_file_click.clone();
             elements.push(
-                expandable_file_row(filename, depth, name_color, t, cx)
+                expandable_file_row(filename, depth, name_color, false, t, cx)
                     .id(ElementId::Name(format!("diff-file-{}", file_index).into()))
                     .on_click(move |_, window, cx| {
                         cb(&file_path, window, cx);

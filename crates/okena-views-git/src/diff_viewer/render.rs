@@ -805,7 +805,7 @@ impl DiffViewer {
                 };
 
                 elements.push(
-                    expandable_file_row(filename, depth, name_color, t, cx)
+                    expandable_file_row(filename, depth, name_color, false, t, cx)
                         .id(ElementId::Name(format!("tree-file-{}", file_index).into()))
                         .when(is_selected, |d| d.bg(rgb(t.bg_selection)))
                         .on_click(cx.listener(move |this, _, _window, cx| {

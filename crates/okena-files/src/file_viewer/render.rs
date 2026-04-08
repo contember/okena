@@ -269,8 +269,6 @@ impl FileViewer {
                     .h(px(26.0))
                     .pl(px(indent + 8.0))
                     .pr(px(12.0))
-                    .mx(px(4.0))
-                    .rounded(px(4.0))
                     .bg(rgb(t.bg_selection))
                     .child(
                         svg()
@@ -358,8 +356,6 @@ impl FileViewer {
                         .h(px(26.0))
                         .pl(px(indent + 8.0 + 18.0))
                         .pr(px(12.0))
-                        .mx(px(4.0))
-                        .rounded(px(4.0))
                         .bg(rgb(t.bg_selection))
                         .child(file_icon(&file.filename, t, cx).mr(px(4.0)));
                     if let Some(input) = self.render_rename_input(t, cx) {
@@ -374,12 +370,9 @@ impl FileViewer {
                 } else {
                     let file_path_for_ctx = file.path.clone();
                     elements.push(
-                        expandable_file_row(&file.filename, depth, None, t, cx)
+                        expandable_file_row(&file.filename, depth, None, is_open || is_active, t, cx)
                             .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
-                            .when(highlight, |d| d.bg(rgb(t.bg_selection)))
-                            .when(!highlight && is_open, |d| {
-                                d.bg(rgba(t.bg_selection, 0.4))
-                            })
+                            .when(highlight, |d| d.bg(rgba(t.bg_selection, 0.5)))
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.select_file(file_index, cx);
                             }))

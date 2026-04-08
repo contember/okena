@@ -55,8 +55,6 @@ pub fn expandable_folder_row(
         .h(px(26.0))
         .pl(px(indent + 8.0))
         .pr(px(12.0))
-        .mx(px(4.0))
-        .rounded(px(4.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(t.bg_hover)))
         // Chevron
@@ -100,6 +98,7 @@ pub fn expandable_file_row(
     filename: &str,
     depth: usize,
     name_color: Option<u32>,
+    is_open: bool,
     t: &ThemeColors,
     cx: &App,
 ) -> Div {
@@ -111,14 +110,28 @@ pub fn expandable_file_row(
         .h(px(26.0))
         .pl(px(indent + 8.0 + 18.0)) // extra 18px to align past chevron
         .pr(px(12.0))
-        .mx(px(4.0))
-        .rounded(px(4.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        // File icon
+        // File icon with optional open indicator dot
         .child(
-            file_icon(filename, t, cx)
-                .mr(px(4.0)),
+            div()
+                .relative()
+                .flex_shrink_0()
+                .child(
+                    file_icon(filename, t, cx)
+                        .mr(px(4.0)),
+                )
+                .when(is_open, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .bottom(px(-1.0))
+                            .right(px(2.0))
+                            .size(px(5.0))
+                            .rounded(px(2.5))
+                            .bg(rgb(t.border_active)),
+                    )
+                }),
         )
         // Filename
         .child(
