@@ -104,6 +104,7 @@ pub fn expandable_file_row(
 ) -> Div {
     let indent = depth as f32 * 14.0;
     div()
+        .relative()
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -112,27 +113,21 @@ pub fn expandable_file_row(
         .pr(px(12.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(t.bg_hover)))
-        // File icon with optional open indicator dot
-        .child(
-            div()
-                .relative()
-                .flex_shrink_0()
-                .child(
-                    file_icon(filename, t, cx)
-                        .mr(px(4.0)),
-                )
-                .when(is_open, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .bottom(px(-1.0))
-                            .right(px(2.0))
-                            .size(px(5.0))
-                            .rounded(px(2.5))
-                            .bg(rgb(t.border_active)),
-                    )
-                }),
-        )
+        // Left-edge accent bar for open files
+        .when(is_open, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .w(px(2.0))
+                    .bg(rgb(t.border_active))
+                    .rounded_r(px(1.0)),
+            )
+        })
+        // File icon
+        .child(file_icon(filename, t, cx).mr(px(4.0)).flex_shrink_0())
         // Filename
         .child(
             div()
