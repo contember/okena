@@ -2,7 +2,7 @@
 
 use crate::file_search::Cancel;
 use gpui::prelude::*;
-use gpui::*;
+use gpui::{ClipboardItem, *};
 use gpui_component::h_flex;
 use okena_ui::button::button;
 use okena_ui::icon_button::icon_button_sized;
@@ -338,6 +338,16 @@ impl FileViewer {
         let position = menu.position;
         let is_folder = menu.target.is_folder();
 
+        let abs_path = menu.target.abs_path().to_string_lossy().to_string();
+        let project_root = PathBuf::from(self.project_fs.project_id());
+        let rel_path = menu
+            .target
+            .abs_path()
+            .strip_prefix(&project_root)
+            .unwrap_or(menu.target.abs_path())
+            .to_string_lossy()
+            .to_string();
+
         Some(
             div()
                 .id("fv-context-menu-backdrop")
@@ -363,6 +373,34 @@ impl FileViewer {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_rename(window, cx);
                                     })),
+                            )
+                            .child(
+                                menu_item(
+                                    "fv-ctx-copy-rel-path",
+                                    "icons/copy.svg",
+                                    "Copy Relative Path",
+                                    t,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        rel_path.clone(),
+                                    ));
+                                    this.close_context_menu(cx);
+                                })),
+                            )
+                            .child(
+                                menu_item(
+                                    "fv-ctx-copy-abs-path",
+                                    "icons/copy.svg",
+                                    "Copy Absolute Path",
+                                    t,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        abs_path.clone(),
+                                    ));
+                                    this.close_context_menu(cx);
+                                })),
                             )
                             .child(menu_separator(t))
                             .child(
