@@ -20,9 +20,6 @@ pub struct TitleBar {
     title: SharedString,
     menu_open: bool,
     sidebar_open: bool,
-    /// HWND cached for Win32 drag operations (Windows only)
-    #[cfg(target_os = "windows")]
-    hwnd: Option<isize>,
     /// Flag for Linux compositor-driven window move (set on mouse-down, consumed on mouse-move)
     #[cfg(target_os = "linux")]
     should_move: bool,
@@ -36,8 +33,6 @@ impl TitleBar {
             title: title.into(),
             menu_open: false,
             sidebar_open: true,
-            #[cfg(target_os = "windows")]
-            hwnd: None,
             #[cfg(target_os = "linux")]
             should_move: false,
         }
@@ -227,145 +222,6 @@ impl TitleBar {
     }
 }
 
-/// Get the HWND from a GPUI Window on Windows.
-#[cfg(target_os = "windows")]
-fn get_hwnd(window: &Window) -> Option<isize> {
-    use raw_window_handle::HasWindowHandle;
-    // Use trait method explicitly since Window has its own window_handle() method
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    match handle.as_raw() {
-        raw_window_handle::RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as isize),
-        _ => None,
-    }
-}
-
-// --- Win32 timer-based window drag ---
-// We use a Win32 timer to poll cursor position and move the window.
-// This runs outside GPUI's event dispatch, avoiding RefCell re-entrancy.
-// The timer fires every ~16ms (60fps) while the mouse button is held.
-
-#[cfg(target_os = "windows")]
-unsafe extern "system" {
-    fn GetWindowRect(hwnd: isize, rect: *mut WinRect) -> i32;
-    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
-    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
-    fn IsZoomed(hwnd: isize) -> i32;
-    fn GetCursorPos(point: *mut WinPoint) -> i32;
-    fn GetAsyncKeyState(key: i32) -> i16;
-    fn SetTimer(hwnd: isize, id: usize, elapse: u32, func: Option<unsafe extern "system" fn(isize, u32, usize, u32)>) -> usize;
-    fn KillTimer(hwnd: isize, id: usize) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct WinRect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct WinPoint {
-    x: i32,
-    y: i32,
-}
-
-#[cfg(target_os = "windows")]
-const DRAG_TIMER_ID: usize = 0xD8A6; // Unique timer ID
-
-/// Thread-local drag state for the timer callback.
-#[cfg(target_os = "windows")]
-struct DragState {
-    hwnd: isize,
-    /// Screen cursor position at drag start
-    start_cursor: WinPoint,
-    /// Window position at drag start
-    start_window: WinPoint,
-}
-
-#[cfg(target_os = "windows")]
-thread_local! {
-    static DRAG_STATE: std::cell::RefCell<Option<DragState>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Timer callback - polls cursor and moves window. Runs in the message loop,
-/// outside GPUI's event dispatch.
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn drag_timer_proc(_hwnd: isize, _msg: u32, _id: usize, _time: u32) {
-    const VK_LBUTTON: i32 = 0x01;
-    // Check if left mouse button is still held
-    if GetAsyncKeyState(VK_LBUTTON) >= 0 {
-        // Button released - stop dragging
-        stop_drag();
-        return;
-    }
-
-    DRAG_STATE.with(|state| {
-        let state = state.borrow();
-        if let Some(ds) = state.as_ref() {
-            let mut cursor = WinPoint { x: 0, y: 0 };
-            if GetCursorPos(&mut cursor) != 0 {
-                let dx = cursor.x - ds.start_cursor.x;
-                let dy = cursor.y - ds.start_cursor.y;
-                const SWP_NOSIZE: u32 = 0x0001;
-                const SWP_NOZORDER: u32 = 0x0004;
-                const SWP_NOACTIVATE: u32 = 0x0010;
-                SetWindowPos(
-                    ds.hwnd, 0,
-                    ds.start_window.x + dx,
-                    ds.start_window.y + dy,
-                    0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
-        }
-    });
-}
-
-/// Start window drag timer.
-#[cfg(target_os = "windows")]
-fn start_drag(hwnd: isize) {
-    unsafe {
-        let mut cursor = WinPoint { x: 0, y: 0 };
-        let mut rect = WinRect { left: 0, top: 0, right: 0, bottom: 0 };
-        if GetCursorPos(&mut cursor) == 0 || GetWindowRect(hwnd, &mut rect) == 0 {
-            return;
-        }
-        DRAG_STATE.with(|state| {
-            *state.borrow_mut() = Some(DragState {
-                hwnd,
-                start_cursor: cursor,
-                start_window: WinPoint { x: rect.left, y: rect.top },
-            });
-        });
-        SetTimer(hwnd, DRAG_TIMER_ID, 16, Some(drag_timer_proc));
-    }
-}
-
-/// Stop window drag timer.
-#[cfg(target_os = "windows")]
-fn stop_drag() {
-    DRAG_STATE.with(|state| {
-        if let Some(ds) = state.borrow().as_ref() {
-            unsafe { KillTimer(ds.hwnd, DRAG_TIMER_ID); }
-        }
-        *state.borrow_mut() = None;
-    });
-}
-
-/// Toggle maximize/restore using ShowWindow.
-#[cfg(target_os = "windows")]
-fn toggle_maximize_hwnd(hwnd: isize) {
-    const SW_MAXIMIZE: i32 = 3;
-    const SW_RESTORE: i32 = 9;
-    unsafe {
-        let cmd = if IsZoomed(hwnd) != 0 { SW_RESTORE } else { SW_MAXIMIZE };
-        ShowWindow(hwnd, cmd);
-    }
-}
-
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -407,46 +263,10 @@ impl Render for TitleBar {
             .bg(rgb(t.bg_header))
             .border_b_1()
             .border_color(rgb(t.border))
-            // On Windows, use a Win32 timer to poll cursor position and move the window.
-            // This avoids GPUI's RefCell re-entrancy and works even when the cursor
-            // leaves the titlebar during fast drags.
-            // On other platforms, use WindowControlArea::Drag for platform-native drag.
-            .when(cfg!(target_os = "windows"), |d| {
-                d
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, _cx| {
-                        #[cfg(target_os = "windows")]
-                        {
-                            // Cache HWND on first use
-                            if this.hwnd.is_none() {
-                                this.hwnd = get_hwnd(window);
-                            }
-                            if let Some(hwnd) = this.hwnd {
-                                start_drag(hwnd);
-                            }
-                        }
-                        #[cfg(not(target_os = "windows"))]
-                        {
-                            let _ = (this, window);
-                        }
-                    }))
-                    .on_click(cx.listener(|this, event: &ClickEvent, _window, _cx| {
-                        if event.click_count() == 2 {
-                            #[cfg(target_os = "windows")]
-                            {
-                                if let Some(hwnd) = this.hwnd {
-                                    toggle_maximize_hwnd(hwnd);
-                                }
-                            }
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                let _ = this;
-                            }
-                        }
-                    }))
-            })
-            .when(!cfg!(target_os = "windows"), |d| {
-                d.window_control_area(WindowControlArea::Drag)
-            })
+            // Mark titlebar as drag region - GPUI maps this to HTCAPTION on Windows
+            // (enabling native snap gestures, unmaximize-on-drag) and platform-native
+            // drag on other platforms.
+            .window_control_area(WindowControlArea::Drag)
             // On Linux, WindowControlArea::Drag is a no-op (GPUI doesn't wire
             // the hit-test callback), so use a mouse-down → mouse-move pattern
             // to start a compositor-native window move. The move is deferred to
