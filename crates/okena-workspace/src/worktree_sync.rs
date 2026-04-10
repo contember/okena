@@ -32,6 +32,7 @@ impl WorktreeSyncWatcher {
                     let ws = workspace.read(cx);
                     ws.data().projects.iter()
                         .filter(|p| p.worktree_info.is_some())
+                        .filter(|p| !p.is_remote)
                         .filter(|p| !ws.closing_projects.contains(&p.id))
                         .filter(|p| !ws.creating_projects.contains(&p.id))
                         .filter(|p| !ws.removing_worktree_paths.contains(&p.path))
