@@ -98,7 +98,9 @@ impl RootView {
 
         // Apply on_create: wrap shell to run command first, then exec into shell
         if let Some(cmd) = hooks::resolve_terminal_on_create(&project_hooks, parent_hooks.as_ref(), &settings(cx).hooks, cx) {
-            actual_shell = hooks::apply_on_create(&actual_shell, &cmd, &env);
+            if let Some(wrapped) = hooks::apply_on_create(&actual_shell, &cmd, &env) {
+                actual_shell = wrapped;
+            }
         }
 
         // Create new terminal with the new shell

@@ -390,7 +390,9 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         // Apply on_create: wrap shell to run command first, then exec into shell
         if let Some(cmd) = hooks::resolve_terminal_on_create_simple(&project_hooks, parent_hooks.as_ref(), &global_hooks) {
-            shell = hooks::apply_on_create(&shell, &cmd, &env);
+            if let Some(wrapped) = hooks::apply_on_create(&shell, &cmd, &env) {
+                shell = wrapped;
+            }
         }
 
         match self

