@@ -941,16 +941,43 @@ pub fn resolve_shell_wrapper(
     resolve_hook_with_parent(project_hooks, parent_hooks, global_hooks, |h| &h.terminal.shell_wrapper)
 }
 
+/// Dangerous shell metacharacters that indicate injection attempts in wrapper templates.
+const DANGEROUS_PATTERNS: &[&str] = &[";", "&&", "||", "|", "`", "$(", ">", "<"];
+
+/// Validate a `shell_wrapper` template against shell injection.
+///
+/// Splits the wrapper on `{shell}` and checks that the surrounding parts do not contain
+/// dangerous shell metacharacters (`;`, `&&`, `||`, `|`, `` ` ``, `$(`, `>`, `<`).
+/// Returns `Ok(())` if the template is safe, or `Err(message)` describing the problem.
+pub fn validate_shell_wrapper(wrapper: &str) -> Result<(), String> {
+    let parts: Vec<&str> = wrapper.split("{shell}").collect();
+    for (i, part) in parts.iter().enumerate() {
+        for pattern in DANGEROUS_PATTERNS {
+            if part.contains(pattern) {
+                let position = if i == 0 { "before" } else { "after" };
+                return Err(format!(
+                    "shell_wrapper contains dangerous pattern '{}' {} {{shell}}: {:?}",
+                    pattern, position, wrapper,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Apply shell_wrapper to a ShellType, producing a new ShellType.
 /// The wrapper template uses `{shell}` as a placeholder for the resolved shell command.
 /// Environment variables are exported so they persist in the shell session.
 ///
-/// If the result contains shell metacharacters (`&&`, `||`, `;`, `|`), it is wrapped
-/// in `sh -c` for proper execution. Otherwise, it is split into executable + args directly,
-/// avoiding an extra `sh` process layer (important for session backends like dtach/tmux).
+/// If the wrapper fails validation (contains dangerous shell metacharacters outside
+/// `{shell}`), a warning is logged and the original shell is returned unwrapped.
 ///
 /// The shell is expected to be already resolved (not `ShellType::Default`).
 pub fn apply_shell_wrapper(shell: &ShellType, wrapper: &str, env_vars: &HashMap<String, String>) -> ShellType {
+    if let Err(msg) = validate_shell_wrapper(wrapper) {
+        log::warn!("Ignoring unsafe shell_wrapper: {}", msg);
+        return shell.clone();
+    }
     let shell_cmd = shell.to_command_string();
     // Replace {shell} with `exec <shell>` so the shell replaces the wrapper process.
     // This is critical for session backends (dtach/tmux) that monitor the top-level process.
@@ -1139,21 +1166,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_shell_wrapper_with_metacharacters() {
+    fn apply_shell_wrapper_rejects_metacharacters() {
         use super::apply_shell_wrapper;
         let shell = ShellType::Custom {
             path: "/bin/zsh".to_string(),
             args: vec![],
         };
+        // Wrapper with && before {shell} is rejected; original shell returned
         let wrapper = "echo hello && {shell}";
         let wrapped = apply_shell_wrapper(&shell, wrapper, &HashMap::new());
         match &wrapped {
-            ShellType::Custom { path: _, args } => {
-                // for_command uses $SHELL -ic on Unix
-                assert!(args[0] == "-c" || args[0] == "-ic", "got: {}", args[0]);
-                assert!(args[1].contains("echo hello && exec /bin/zsh"), "got: {}", args[1]);
+            ShellType::Custom { path, args } => {
+                assert_eq!(path, "/bin/zsh");
+                assert_eq!(args, &Vec::<String>::new());
             }
-            other => panic!("Expected ShellType::Custom, got: {:?}", other),
+            other => panic!("Expected original ShellType::Custom, got: {:?}", other),
         }
     }
 
@@ -1245,5 +1272,66 @@ mod tests {
             }
             other => panic!("Expected ShellType::Custom, got: {:?}", other),
         }
+    }
+
+    // --- validate_shell_wrapper tests ---
+
+    #[test]
+    fn validate_shell_wrapper_valid_direnv() {
+        assert!(validate_shell_wrapper("direnv exec . {shell}").is_ok());
+    }
+
+    #[test]
+    fn validate_shell_wrapper_valid_nix() {
+        assert!(validate_shell_wrapper("nix develop --command {shell}").is_ok());
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_semicolon_before() {
+        let result = validate_shell_wrapper("malicious; {shell}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(";"));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_subshell_before() {
+        let result = validate_shell_wrapper("$(evil) {shell}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("$("));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_semicolon_after() {
+        let result = validate_shell_wrapper("{shell}; evil");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(";"));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_and_after() {
+        let result = validate_shell_wrapper("{shell} && steal_data");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("&&"));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_backtick() {
+        let result = validate_shell_wrapper("`whoami` {shell}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("`"));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_pipe() {
+        let result = validate_shell_wrapper("{shell} | tee /tmp/log");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("|"));
+    }
+
+    #[test]
+    fn validate_shell_wrapper_injection_redirect() {
+        let result = validate_shell_wrapper("{shell} > /tmp/out");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(">"));
     }
 }
