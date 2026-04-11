@@ -88,6 +88,22 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
             terminal.claim_resize_local();
+
+            // Backspace with selection: delete selected text (only in plain shell)
+            if event.keystroke.key == "backspace"
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform
+                && terminal.has_selection()
+                && !terminal.is_mouse_mode()
+                && !terminal.is_alt_screen()
+                && !terminal.has_running_child()
+            {
+                if terminal.delete_selection() {
+                    return;
+                }
+            }
+
             let app_cursor_mode = terminal.is_app_cursor_mode();
             let key_event = KeyEvent {
                 key: event.keystroke.key.clone(),

@@ -40,6 +40,7 @@ pub struct TerminalContent {
     layout_path: Vec<usize>,
     workspace: Entity<Workspace>,
     scroll_accumulator: f32,
+    mouse_down_cell: Option<(usize, i32)>,
 }
 
 impl TerminalContent {
@@ -68,6 +69,7 @@ impl TerminalContent {
             layout_path,
             workspace,
             scroll_accumulator: 0.0,
+            mouse_down_cell: None,
         }
     }
 
@@ -194,6 +196,8 @@ impl TerminalContent {
 
         if let Some(ref terminal) = self.terminal {
             if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
+                self.mouse_down_cell = Some((col, row));
+
                 if event.modifiers.platform || event.modifiers.control {
                     if let Some(url_match) = self.url_detector.find_at(col, row) {
                         match &url_match.kind {
@@ -205,6 +209,7 @@ impl TerminalContent {
                                 UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
                             }
                         }
+                        self.mouse_down_cell = None;
                         return;
                     }
                 }
@@ -287,14 +292,25 @@ impl TerminalContent {
                 terminal.end_selection();
                 self.is_selecting = false;
 
-                if !terminal.has_selection()
-                    || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true)
-                {
+                let empty_selection = !terminal.has_selection()
+                    || terminal.get_selected_text().map(|s| s.is_empty()).unwrap_or(true);
+
+                if empty_selection {
                     terminal.clear_selection();
+
+                    // Click-to-cursor: on a clean single click (no drag), move cursor
+                    if self.click_count == 1 {
+                        if let Some((col, row)) = self.mouse_down_cell.take() {
+                            if !terminal.is_mouse_mode() && !terminal.is_alt_screen() && !terminal.has_running_child() {
+                                terminal.move_cursor_to_click(col, row);
+                            }
+                        }
+                    }
                 }
                 cx.notify();
             }
         }
+        self.mouse_down_cell = None;
     }
 }
 
