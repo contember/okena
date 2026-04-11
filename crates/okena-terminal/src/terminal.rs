@@ -252,6 +252,8 @@ pub struct Terminal {
     shell_pid: Mutex<Option<u32>>,
     /// Cached "waiting for input" state — updated by background loop, read by renderers
     waiting_for_input: AtomicBool,
+    /// Whether the shell has a running child process (cached, updated by background loop)
+    has_running_child: AtomicBool,
     /// Whether the user has ever sent input to this terminal (prevents flagging fresh terminals)
     had_user_input: AtomicBool,
     /// Timestamp of when the user last viewed this terminal (on blur)
@@ -306,6 +308,7 @@ impl Terminal {
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
+            has_running_child: AtomicBool::new(false),
             had_user_input: AtomicBool::new(false),
             last_viewed_time: Arc::new(Mutex::new(Instant::now())),
         }
@@ -774,6 +777,16 @@ impl Terminal {
     /// Update the cached waiting state (called from background thread only)
     pub fn set_waiting_for_input(&self, waiting: bool) {
         self.waiting_for_input.store(waiting, Ordering::Relaxed);
+    }
+
+    /// Whether the shell has a running child process (cached, updated by background loop).
+    pub fn has_running_child(&self) -> bool {
+        self.has_running_child.load(Ordering::Relaxed)
+    }
+
+    /// Update the cached child-process state (called from background thread only).
+    pub fn set_has_running_child(&self, val: bool) {
+        self.has_running_child.store(val, Ordering::Relaxed);
     }
 
     /// Reset the idle timer to now, clearing the waiting state.
@@ -1327,6 +1340,103 @@ impl Terminal {
         term.mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// Check if terminal is using the alternate screen buffer.
+    /// TUI apps (vim, less, htop, Claude Code CLI) use alternate screen.
+    pub fn is_alt_screen(&self) -> bool {
+        let term = self.term.lock();
+        term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Delete the currently selected text by sending arrow keys + backspaces to the PTY.
+    /// Only works for single-row selections on the cursor's row in a plain shell.
+    /// Returns true if deletion was performed.
+    pub fn delete_selection(&self) -> bool {
+        let mut term = self.term.lock();
+
+        let display_offset = term.grid().display_offset();
+        if display_offset != 0 {
+            return false;
+        }
+
+        let range = match term.selection.as_ref().and_then(|s| s.to_range(&*term)) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        let cursor = term.grid().cursor.point;
+
+        // Only single-row selections on the cursor's row
+        if range.start.line != range.end.line || range.start.line != cursor.line {
+            return false;
+        }
+
+        let sel_start = range.start.column.0;
+        let sel_end = range.end.column.0; // inclusive
+        let cursor_col = cursor.column.0;
+        let app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+
+        // Count logical characters in selection (skip WIDE_CHAR_SPACER)
+        let mut char_count = 0usize;
+        for c in sel_start..=sel_end {
+            let cell = &term.grid()[Point::new(cursor.line, Column(c))];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                char_count += 1;
+            }
+        }
+
+        if char_count == 0 {
+            return false;
+        }
+
+        // Move cursor to end of selection + 1 (position right after last selected char)
+        let target_col = sel_end + 1;
+        let mut arrow_count = 0usize;
+        if target_col > cursor_col {
+            for c in cursor_col..target_col {
+                let cell = &term.grid()[Point::new(cursor.line, Column(c))];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    arrow_count += 1;
+                }
+            }
+        } else if target_col < cursor_col {
+            // Cursor is to the right — need left arrows (negative direction)
+            for c in target_col..cursor_col {
+                let cell = &term.grid()[Point::new(cursor.line, Column(c))];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    arrow_count += 1;
+                }
+            }
+        }
+
+        let right_seq: &[u8] = if app_cursor { b"\x1bOC" } else { b"\x1b[C" };
+        let left_seq: &[u8] = if app_cursor { b"\x1bOD" } else { b"\x1b[D" };
+
+        let mut buf = Vec::new();
+
+        // Send arrow keys to move cursor to end of selection + 1
+        if target_col > cursor_col {
+            for _ in 0..arrow_count {
+                buf.extend_from_slice(right_seq);
+            }
+        } else if target_col < cursor_col {
+            for _ in 0..arrow_count {
+                buf.extend_from_slice(left_seq);
+            }
+        }
+
+        // Send backspaces for each character in the selection
+        for _ in 0..char_count {
+            buf.push(0x7f); // DEL / Backspace
+        }
+
+        // Clear selection
+        term.selection = None;
+
+        drop(term);
+        self.send_bytes(&buf);
+        true
+    }
+
     /// Send scroll events to PTY as a single batched write.
     /// button: 64 for scroll up, 65 for scroll down
     pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize, count: usize) {
@@ -1360,6 +1470,69 @@ impl Terminal {
                 ]);
             }
         }
+        self.send_bytes(&buf);
+    }
+
+    /// Move cursor to clicked column by sending arrow key sequences to the PTY.
+    /// `target_col` is the visual column, `visual_row` is the visual row from pixel_to_cell().
+    /// Only moves if the click is on the cursor's row and not scrolled into history.
+    pub fn move_cursor_to_click(&self, target_col: usize, visual_row: i32) {
+        let term = self.term.lock();
+
+        let display_offset = term.grid().display_offset();
+        if display_offset != 0 {
+            return;
+        }
+
+        let cursor = term.grid().cursor.point;
+        let cursor_visual_row = cursor.line.0; // equals buffer line when display_offset == 0
+
+        if visual_row != cursor_visual_row {
+            return;
+        }
+
+        let cursor_col = cursor.column.0;
+        let cols = term.grid().columns();
+        let target_col = target_col.min(cols.saturating_sub(1));
+
+        if cursor_col == target_col {
+            return;
+        }
+
+        let app_cursor = term.mode().contains(TermMode::APP_CURSOR);
+
+        // Count logical characters (arrow presses) between cursor and target,
+        // skipping WIDE_CHAR_SPACER cells (second cell of wide chars).
+        let (start, end, going_right) = if target_col > cursor_col {
+            (cursor_col, target_col, true)
+        } else {
+            (target_col, cursor_col, false)
+        };
+
+        let mut arrow_count = 0usize;
+        for c in start..end {
+            let cell = &term.grid()[Point::new(cursor.line, Column(c))];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                arrow_count += 1;
+            }
+        }
+
+        if arrow_count == 0 {
+            return;
+        }
+
+        let arrow_seq: &[u8] = if going_right {
+            if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
+        } else {
+            if app_cursor { b"\x1bOD" } else { b"\x1b[D" }
+        };
+
+        let mut buf = Vec::with_capacity(arrow_seq.len() * arrow_count);
+        for _ in 0..arrow_count {
+            buf.extend_from_slice(arrow_seq);
+        }
+
+        drop(term);
         self.send_bytes(&buf);
     }
 }

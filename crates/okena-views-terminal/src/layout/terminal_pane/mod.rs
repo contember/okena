@@ -249,39 +249,54 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             loop {
                 smol::Timer::after(interval).await;
 
-                let check_info = this.update(cx, |pane, cx| {
+                // Get terminal and PID for child-process check (always needed)
+                let term_info = this.update(cx, |pane, _cx| {
+                    pane.terminal.as_ref().map(|t| (t.clone(), t.shell_pid()))
+                });
+
+                let term_info = match term_info {
+                    Ok(Some(info)) => info,
+                    Ok(None) => continue,
+                    Err(_) => break,
+                };
+
+                let (terminal, pid) = term_info;
+
+                // Always check for child processes (used by click-to-cursor / backspace-delete)
+                let has_children = if let Some(pid) = pid {
+                    smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await
+                } else {
+                    false
+                };
+                terminal.set_has_running_child(has_children);
+
+                // Idle detection (for waiting-for-input indicator)
+                let idle_info = this.update(cx, |_pane, cx| {
                     let idle_timeout = crate::terminal_view_settings(cx).idle_timeout_secs;
                     if idle_timeout == 0 {
                         return None;
                     }
-                    pane.terminal.as_ref().map(|t| {
-                        let idle_threshold = Duration::from_secs(idle_timeout as u64);
-                        let is_idle = t.last_output_time().elapsed() >= idle_threshold;
-                        let pid = t.shell_pid();
-                        let had_input = t.had_user_input();
-                        let has_unseen = t.has_unseen_output();
-                        (t.clone(), is_idle, pid, had_input, has_unseen)
-                    })
+                    let idle_threshold = Duration::from_secs(idle_timeout as u64);
+                    let is_idle = terminal.last_output_time().elapsed() >= idle_threshold;
+                    let had_input = terminal.had_user_input();
+                    let has_unseen = terminal.has_unseen_output();
+                    Some((is_idle, had_input, has_unseen))
                 });
 
-                let check_info = match check_info {
+                let idle_info = match idle_info {
                     Ok(Some(info)) => info,
                     Ok(None) => {
                         if was_waiting {
                             was_waiting = false;
-                            let _ = this.update(cx, |pane, cx| {
-                                if let Some(ref t) = pane.terminal {
-                                    t.set_waiting_for_input(false);
-                                }
-                                cx.notify();
-                            });
+                            terminal.set_waiting_for_input(false);
+                            let _ = this.update(cx, |_pane, cx| { cx.notify(); });
                         }
                         continue;
                     }
                     Err(_) => break,
                 };
 
-                let (terminal, is_idle, pid, had_input, has_unseen) = check_info;
+                let (is_idle, had_input, has_unseen) = idle_info;
 
                 if !had_input || !has_unseen {
                     if was_waiting {
@@ -291,12 +306,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     }
                     continue;
                 }
-
-                let has_children = if let Some(pid) = pid {
-                    smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await
-                } else {
-                    false
-                };
 
                 let is_waiting = is_idle && !has_children;
 
