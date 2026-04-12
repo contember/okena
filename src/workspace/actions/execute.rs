@@ -472,6 +472,176 @@ pub fn execute_action(
         | ActionRequest::ReloadServices { .. } => {
             ActionResult::Err("service actions must be handled via ServiceManager".to_string())
         }
+        ActionRequest::RenameFile { project_id, relative_path, new_name } => {
+            if let Err(e) = validate_leaf_name(&new_name) {
+                return ActionResult::Err(e);
+            }
+            let project_path = match ws.project(&project_id) {
+                Some(p) => p.path.clone(),
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let old_path = match resolve_project_file(&project_path, &relative_path) {
+                Ok(c) => c,
+                Err(e) => return ActionResult::Err(e),
+            };
+            let parent = match old_path.parent() {
+                Some(p) => p,
+                None => return ActionResult::Err("cannot rename project root".to_string()),
+            };
+            let new_path = parent.join(&new_name);
+            if new_path.exists() {
+                return ActionResult::Err(format!("target already exists: {}", new_name));
+            }
+            match std::fs::rename(&old_path, &new_path) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(format!("Cannot rename: {}", e)),
+            }
+        }
+        ActionRequest::DeleteFile { project_id, relative_path } => {
+            let project_path = match ws.project(&project_id) {
+                Some(p) => p.path.clone(),
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let target = match resolve_project_file(&project_path, &relative_path) {
+                Ok(c) => c,
+                Err(e) => return ActionResult::Err(e),
+            };
+            let project_root = match std::path::Path::new(&project_path).canonicalize() {
+                Ok(r) => r,
+                Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
+            };
+            if target == project_root {
+                return ActionResult::Err("cannot delete project root".to_string());
+            }
+            let result = if target.is_dir() {
+                std::fs::remove_dir_all(&target)
+            } else {
+                std::fs::remove_file(&target)
+            };
+            match result {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(format!("Cannot delete: {}", e)),
+            }
+        }
+        ActionRequest::CreateFile { project_id, relative_path } => {
+            let project_path = match ws.project(&project_id) {
+                Some(p) => p.path.clone(),
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let target = match resolve_new_project_file(&project_path, &relative_path) {
+                Ok(c) => c,
+                Err(e) => return ActionResult::Err(e),
+            };
+            if target.exists() {
+                return ActionResult::Err("target already exists".to_string());
+            }
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+                Ok(_) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(format!("Cannot create file: {}", e)),
+            }
+        }
+        ActionRequest::CreateDirectory { project_id, relative_path } => {
+            let project_path = match ws.project(&project_id) {
+                Some(p) => p.path.clone(),
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let target = match resolve_new_project_file(&project_path, &relative_path) {
+                Ok(c) => c,
+                Err(e) => return ActionResult::Err(e),
+            };
+            if target.exists() {
+                return ActionResult::Err("target already exists".to_string());
+            }
+            match std::fs::create_dir(&target) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(format!("Cannot create directory: {}", e)),
+            }
+        }
+        ActionRequest::RenameProject { project_id, name } => {
+            if ws.project(&project_id).is_none() {
+                return ActionResult::Err(format!("project not found: {}", project_id));
+            }
+            ws.rename_project(&project_id, name, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::RenameProjectDirectory { project_id, new_name } => {
+            if let Err(e) = validate_leaf_name(&new_name) {
+                return ActionResult::Err(e);
+            }
+            let current_path = match ws.project(&project_id) {
+                Some(p) => p.path.clone(),
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            let old_path = std::path::Path::new(&current_path);
+            let parent = match old_path.parent() {
+                Some(p) => p,
+                None => return ActionResult::Err("cannot determine parent directory".to_string()),
+            };
+            let new_path = parent.join(&new_name);
+            if new_path.exists() {
+                return ActionResult::Err(format!("'{}' already exists", new_name));
+            }
+            if let Err(e) = std::fs::rename(old_path, &new_path) {
+                return ActionResult::Err(format!("Failed to rename: {}", e));
+            }
+            let new_path_str = new_path.to_string_lossy().to_string();
+            ws.rename_project_directory(&project_id, new_path_str, new_name, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::DeleteProject { project_id } => {
+            if ws.project(&project_id).is_none() {
+                return ActionResult::Err(format!("project not found: {}", project_id));
+            }
+            let global_hooks = settings(cx).hooks.clone();
+            ws.delete_project(&project_id, &global_hooks, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::SetProjectShowInOverview { project_id, show } => {
+            let current = match ws.project(&project_id) {
+                Some(p) => p.show_in_overview,
+                None => return ActionResult::Err(format!("project not found: {}", project_id)),
+            };
+            if current != show {
+                ws.toggle_project_overview_visibility(&project_id, cx);
+            }
+            ActionResult::Ok(None)
+        }
+        ActionRequest::RemoveWorktreeProject { project_id, force } => {
+            if ws.project(&project_id).is_none() {
+                return ActionResult::Err(format!("project not found: {}", project_id));
+            }
+            let global_hooks = settings(cx).hooks.clone();
+            match ws.remove_worktree_project(&project_id, force, &global_hooks, cx) {
+                Ok(()) => ActionResult::Ok(None),
+                Err(e) => ActionResult::Err(e),
+            }
+        }
+        ActionRequest::CreateFolder { name } => {
+            let id = ws.create_folder(name, cx);
+            ActionResult::Ok(Some(serde_json::json!({ "folder_id": id })))
+        }
+        ActionRequest::DeleteFolder { folder_id } => {
+            ws.delete_folder(&folder_id, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::RenameFolder { folder_id, name } => {
+            ws.rename_folder(&folder_id, name, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => {
+            if ws.project(&project_id).is_none() {
+                return ActionResult::Err(format!("project not found: {}", project_id));
+            }
+            ws.move_project_to_folder(&project_id, &folder_id, position, cx);
+            ActionResult::Ok(None)
+        }
+        ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => {
+            if ws.project(&project_id).is_none() {
+                return ActionResult::Err(format!("project not found: {}", project_id));
+            }
+            ws.move_project_out_of_folder(&project_id, top_level_index, cx);
+            ActionResult::Ok(None)
+        }
         ActionRequest::CreateWorktree { project_id, branch, create_branch } => {
             let project = match ws.project(&project_id) {
                 Some(p) => p,
@@ -681,6 +851,117 @@ fn resolve_project_file(project_path: &str, relative_path: &str) -> Result<std::
         return Err("path traversal not allowed".to_string());
     }
     Ok(canonical)
+}
+
+/// Resolve a new (possibly non-existent) target path inside a project. The parent
+/// must exist and canonicalize inside the project root. The leaf filename is then
+/// joined back on — so the target itself does not need to exist yet.
+fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<std::path::PathBuf, String> {
+    if relative_path.is_empty() {
+        return Err("relative_path must not be empty".to_string());
+    }
+    let full_path = std::path::Path::new(project_path).join(relative_path);
+    let parent = full_path
+        .parent()
+        .ok_or_else(|| "relative_path has no parent".to_string())?;
+    let file_name = full_path
+        .file_name()
+        .ok_or_else(|| "relative_path has no file name".to_string())?;
+    let parent_canonical = parent
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve parent directory: {}", e))?;
+    let project_root = std::path::Path::new(project_path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project path: {}", e))?;
+    if !parent_canonical.starts_with(&project_root) {
+        return Err("path traversal not allowed".to_string());
+    }
+    Ok(parent_canonical.join(file_name))
+}
+
+/// Reject names that would escape a directory or traverse paths.
+fn validate_leaf_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err("name must not contain path separators".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod path_guard_tests {
+    use super::{resolve_new_project_file, resolve_project_file, validate_leaf_name};
+    use std::fs;
+
+    fn mktmp() -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "okena-exec-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn resolve_project_file_rejects_traversal() {
+        let root = mktmp();
+        let outside = root.parent().unwrap().join("outside.txt");
+        fs::write(&outside, "x").unwrap();
+        let root_str = root.to_str().unwrap();
+        let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let err = resolve_project_file(root_str, &rel).unwrap_err();
+        assert!(err.contains("path traversal"), "got: {}", err);
+        fs::remove_file(&outside).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_project_file_ok_inside() {
+        let root = mktmp();
+        let inner = root.join("a.txt");
+        fs::write(&inner, "x").unwrap();
+        let out = resolve_project_file(root.to_str().unwrap(), "a.txt").unwrap();
+        assert!(out.ends_with("a.txt"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_new_project_file_parent_must_exist_inside_root() {
+        let root = mktmp();
+        // Parent exists (root), leaf doesn't.
+        let out = resolve_new_project_file(root.to_str().unwrap(), "new.txt").unwrap();
+        assert_eq!(out, root.canonicalize().unwrap().join("new.txt"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_new_project_file_rejects_parent_traversal() {
+        let root = mktmp();
+        let err = resolve_new_project_file(root.to_str().unwrap(), "../evil.txt").unwrap_err();
+        assert!(err.contains("path traversal"), "got: {}", err);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_new_project_file_rejects_missing_parent() {
+        let root = mktmp();
+        let err = resolve_new_project_file(root.to_str().unwrap(), "nope/new.txt").unwrap_err();
+        assert!(err.contains("parent"), "got: {}", err);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_leaf_name_rules() {
+        assert!(validate_leaf_name("ok.txt").is_ok());
+        assert!(validate_leaf_name("").is_err());
+        assert!(validate_leaf_name(".").is_err());
+        assert!(validate_leaf_name("..").is_err());
+        assert!(validate_leaf_name("a/b").is_err());
+        assert!(validate_leaf_name("a\\b").is_err());
+    }
 }
 
 /// Recursively collect paths to all Terminal nodes with `terminal_id: None`.

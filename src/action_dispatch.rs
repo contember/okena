@@ -596,5 +596,53 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
                 context_lines,
             }
         }
+        ActionRequest::RenameFile { project_id, relative_path, new_name } => ActionRequest::RenameFile {
+            project_id: s(&project_id),
+            relative_path,
+            new_name,
+        },
+        ActionRequest::DeleteFile { project_id, relative_path } => ActionRequest::DeleteFile {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::CreateFile { project_id, relative_path } => ActionRequest::CreateFile {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::CreateDirectory { project_id, relative_path } => ActionRequest::CreateDirectory {
+            project_id: s(&project_id),
+            relative_path,
+        },
+        ActionRequest::RenameProject { project_id, name } => ActionRequest::RenameProject {
+            project_id: s(&project_id),
+            name,
+        },
+        ActionRequest::RenameProjectDirectory { project_id, new_name } => ActionRequest::RenameProjectDirectory {
+            project_id: s(&project_id),
+            new_name,
+        },
+        ActionRequest::DeleteProject { project_id } => ActionRequest::DeleteProject {
+            project_id: s(&project_id),
+        },
+        ActionRequest::SetProjectShowInOverview { project_id, show } => ActionRequest::SetProjectShowInOverview {
+            project_id: s(&project_id),
+            show,
+        },
+        ActionRequest::RemoveWorktreeProject { project_id, force } => ActionRequest::RemoveWorktreeProject {
+            project_id: s(&project_id),
+            force,
+        },
+        ActionRequest::CreateFolder { name } => ActionRequest::CreateFolder { name },
+        ActionRequest::DeleteFolder { folder_id } => ActionRequest::DeleteFolder { folder_id },
+        ActionRequest::RenameFolder { folder_id, name } => ActionRequest::RenameFolder { folder_id, name },
+        ActionRequest::MoveProjectToFolder { project_id, folder_id, position } => ActionRequest::MoveProjectToFolder {
+            project_id: s(&project_id),
+            folder_id,
+            position,
+        },
+        ActionRequest::MoveProjectOutOfFolder { project_id, top_level_index } => ActionRequest::MoveProjectOutOfFolder {
+            project_id: s(&project_id),
+            top_level_index,
+        },
     }
 }

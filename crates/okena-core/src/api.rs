@@ -314,6 +314,63 @@ pub enum ActionRequest {
         #[serde(default)]
         context_lines: usize,
     },
+    RenameFile {
+        project_id: String,
+        relative_path: String,
+        new_name: String,
+    },
+    DeleteFile {
+        project_id: String,
+        relative_path: String,
+    },
+    CreateFile {
+        project_id: String,
+        relative_path: String,
+    },
+    CreateDirectory {
+        project_id: String,
+        relative_path: String,
+    },
+    RenameProject {
+        project_id: String,
+        name: String,
+    },
+    RenameProjectDirectory {
+        project_id: String,
+        new_name: String,
+    },
+    DeleteProject {
+        project_id: String,
+    },
+    SetProjectShowInOverview {
+        project_id: String,
+        show: bool,
+    },
+    RemoveWorktreeProject {
+        project_id: String,
+        #[serde(default)]
+        force: bool,
+    },
+    CreateFolder {
+        name: String,
+    },
+    DeleteFolder {
+        folder_id: String,
+    },
+    RenameFolder {
+        folder_id: String,
+        name: String,
+    },
+    MoveProjectToFolder {
+        project_id: String,
+        folder_id: String,
+        #[serde(default)]
+        position: Option<usize>,
+    },
+    MoveProjectOutOfFolder {
+        project_id: String,
+        top_level_index: usize,
+    },
 }
 
 fn default_search_mode() -> String { "literal".to_string() }
@@ -588,6 +645,61 @@ mod tests {
             },
             ActionRequest::ReloadServices {
                 project_id: "p1".into(),
+            },
+            ActionRequest::RenameFile {
+                project_id: "p1".into(),
+                relative_path: "src/main.rs".into(),
+                new_name: "lib.rs".into(),
+            },
+            ActionRequest::DeleteFile {
+                project_id: "p1".into(),
+                relative_path: "src/main.rs".into(),
+            },
+            ActionRequest::CreateFile {
+                project_id: "p1".into(),
+                relative_path: "src/new.rs".into(),
+            },
+            ActionRequest::CreateDirectory {
+                project_id: "p1".into(),
+                relative_path: "src/new_dir".into(),
+            },
+            ActionRequest::RenameProject {
+                project_id: "p1".into(),
+                name: "New Name".into(),
+            },
+            ActionRequest::RenameProjectDirectory {
+                project_id: "p1".into(),
+                new_name: "new-dir".into(),
+            },
+            ActionRequest::DeleteProject {
+                project_id: "p1".into(),
+            },
+            ActionRequest::SetProjectShowInOverview {
+                project_id: "p1".into(),
+                show: false,
+            },
+            ActionRequest::RemoveWorktreeProject {
+                project_id: "p1".into(),
+                force: true,
+            },
+            ActionRequest::CreateFolder {
+                name: "My Folder".into(),
+            },
+            ActionRequest::DeleteFolder {
+                folder_id: "f1".into(),
+            },
+            ActionRequest::RenameFolder {
+                folder_id: "f1".into(),
+                name: "Renamed".into(),
+            },
+            ActionRequest::MoveProjectToFolder {
+                project_id: "p1".into(),
+                folder_id: "f1".into(),
+                position: Some(0),
+            },
+            ActionRequest::MoveProjectOutOfFolder {
+                project_id: "p1".into(),
+                top_level_index: 0,
             },
         ];
         for action in actions {
