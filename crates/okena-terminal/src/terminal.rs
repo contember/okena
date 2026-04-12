@@ -1417,8 +1417,14 @@ fn grid_to_ansi(term: &Term<ZedEventListener>) -> Vec<u8> {
     // Generous pre-allocation
     let mut buf = Vec::with_capacity(screen_lines * cols * 4);
 
-    // Clear screen + move cursor home
-    buf.extend_from_slice(b"\x1b[2J\x1b[H");
+    // Clear viewport, then clear scrollback history, then home cursor.
+    // `\x1b[2J` alone scrolls the old viewport into history (alacritty's
+    // `clear_viewport` calls `scroll_up`), so successive snapshots would stack
+    // old content into the remote client's scrollback and the user would see
+    // their output duplicated when scrolling up. `\x1b[3J` (ED 3 = erase saved
+    // lines) drops the history alacritty just pushed, leaving a clean grid
+    // before the snapshot body renders.
+    buf.extend_from_slice(b"\x1b[2J\x1b[3J\x1b[H");
 
     let default_fg = Color::Named(NamedColor::Foreground);
     let default_bg = Color::Named(NamedColor::Background);
