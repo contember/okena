@@ -24,29 +24,38 @@ pub trait TerminalTransport: Send + Sync {
     fn resize_debounce_ms(&self) -> u64 { 16 }
 }
 
-/// Tracks who currently controls a terminal's resize.
-/// The "last to type" wins: local input sets Local, remote input sets Remote.
-/// After 30s of no remote input, the server auto-reclaims Local authority.
-#[derive(Clone, Debug)]
-pub enum ResizeOwner {
-    /// Server's own UI controls resize (default).
-    Local,
-    /// A remote client controls resize (set when remote input arrives).
-    Remote { last_input: std::time::Instant },
+/// Process-global resize authority. "Last to interact wins" across all terminals
+/// in this process: whichever side most recently typed or clicked gets to drive
+/// resize for every terminal. No time-based reclaim — the origin side takes over
+/// by actually interacting, not by waiting.
+///
+/// Implemented with a monotonically-increasing sequence counter to avoid
+/// timestamp collisions. Each claim bumps the counter and records the new value
+/// on the claiming side. Higher value wins. Both zero (initial) resolves to
+/// Local, so terminals behave normally before any interaction happens.
+static RESIZE_AUTH_SEQ: AtomicU64 = AtomicU64::new(0);
+static LAST_LOCAL_SEQ: AtomicU64 = AtomicU64::new(0);
+static LAST_REMOTE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+pub fn claim_resize_authority_local() {
+    let seq = RESIZE_AUTH_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    LAST_LOCAL_SEQ.store(seq, Ordering::Relaxed);
 }
 
-impl ResizeOwner {
-    const STALE_TIMEOUT_SECS: u64 = 30;
+pub fn claim_resize_authority_remote() {
+    let seq = RESIZE_AUTH_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    LAST_REMOTE_SEQ.store(seq, Ordering::Relaxed);
+}
 
-    /// Returns true if the server should perform resize (Local or stale Remote).
-    pub fn is_local(&self) -> bool {
-        match self {
-            ResizeOwner::Local => true,
-            ResizeOwner::Remote { last_input } => {
-                last_input.elapsed().as_secs() >= Self::STALE_TIMEOUT_SECS
-            }
-        }
-    }
+pub fn is_resize_authority_local() -> bool {
+    LAST_LOCAL_SEQ.load(Ordering::Relaxed) >= LAST_REMOTE_SEQ.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn reset_resize_authority() {
+    RESIZE_AUTH_SEQ.store(0, Ordering::Relaxed);
+    LAST_LOCAL_SEQ.store(0, Ordering::Relaxed);
+    LAST_REMOTE_SEQ.store(0, Ordering::Relaxed);
 }
 
 /// Terminal size in cells and pixels
@@ -242,8 +251,6 @@ pub struct Terminal {
     /// Content generation counter - incremented on each process_output call.
     /// Used by UrlDetector to skip redundant detect_urls() when content hasn't changed.
     content_generation: AtomicU64,
-    /// Who controls resize for this terminal (server UI vs remote client).
-    resize_owner: Mutex<ResizeOwner>,
     /// Initial working directory (for resolving relative file paths in URL detection)
     initial_cwd: String,
     /// Timestamp of last terminal output (for idle detection)
@@ -301,7 +308,6 @@ impl Terminal {
             pending_output: Mutex::new(Vec::new()),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
-            resize_owner: Mutex::new(ResizeOwner::Local),
             initial_cwd,
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
@@ -541,21 +547,24 @@ impl Terminal {
         self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Mark this terminal as locally controlled (server UI input).
+    /// Mark the local side (origin) as resize authority. Process-global:
+    /// any local keyboard/mouse input in any terminal claims authority for all
+    /// terminals.
     pub fn claim_resize_local(&self) {
-        *self.resize_owner.lock() = ResizeOwner::Local;
+        claim_resize_authority_local();
     }
 
-    /// Mark this terminal as remotely controlled (remote client sent input).
+    /// Mark the remote side as resize authority. Called on the server when a
+    /// remote client sends input to any terminal.
     pub fn claim_resize_remote(&self) {
-        *self.resize_owner.lock() = ResizeOwner::Remote {
-            last_input: std::time::Instant::now(),
-        };
+        claim_resize_authority_remote();
     }
 
-    /// Check if the server's UI should perform resize (Local or stale Remote).
+    /// Returns true if the local (origin) side currently has resize authority.
+    /// The server's UI uses this to decide whether to push resize events to
+    /// the PTY.
     pub fn is_resize_owner_local(&self) -> bool {
-        self.resize_owner.lock().is_local()
+        is_resize_authority_local()
     }
 
     /// Flush any pending PTY resize (call this when resize operations complete)
@@ -1653,8 +1662,14 @@ mod tests {
         assert!(title.is_none() || title.as_deref() == Some(""), "title should be empty or None, got: {:?}", title);
     }
 
+    // The resize authority is process-global; these tests share a mutex so
+    // they don't observe each other's writes.
+    static RESIZE_AUTH_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn resize_owner_defaults_to_local() {
+        let _g = RESIZE_AUTH_TEST_LOCK.lock();
+        reset_resize_authority();
         let transport = Arc::new(NullTransport);
         let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, String::new());
         assert!(terminal.is_resize_owner_local());
@@ -1662,6 +1677,8 @@ mod tests {
 
     #[test]
     fn resize_owner_transitions() {
+        let _g = RESIZE_AUTH_TEST_LOCK.lock();
+        reset_resize_authority();
         let transport = Arc::new(NullTransport);
         let terminal = Terminal::new("t".into(), TerminalSize::default(), transport, String::new());
 
@@ -1673,16 +1690,20 @@ mod tests {
     }
 
     #[test]
-    fn resize_owner_stale_remote_reclaims_local() {
-        let owner = ResizeOwner::Remote {
-            last_input: std::time::Instant::now() - std::time::Duration::from_secs(31),
-        };
-        assert!(owner.is_local(), "stale remote (>30s) should be treated as local");
+    fn resize_owner_is_process_global() {
+        let _g = RESIZE_AUTH_TEST_LOCK.lock();
+        reset_resize_authority();
+        let transport = Arc::new(NullTransport);
+        let term_a = Terminal::new("a".into(), TerminalSize::default(), transport.clone(), String::new());
+        let term_b = Terminal::new("b".into(), TerminalSize::default(), transport, String::new());
 
-        let owner = ResizeOwner::Remote {
-            last_input: std::time::Instant::now(),
-        };
-        assert!(!owner.is_local(), "fresh remote should NOT be treated as local");
+        // Claiming remote on A flips authority for B as well.
+        term_a.claim_resize_remote();
+        assert!(!term_b.is_resize_owner_local());
+
+        // Claiming local on B flips authority back for A.
+        term_b.claim_resize_local();
+        assert!(term_a.is_resize_owner_local());
     }
 
     #[test]
