@@ -1,8 +1,8 @@
 use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::remote::routes::AppState;
 use crate::remote::types::{
-    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, parse_binary_frame,
-    FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
+    ActionRequest, WsInbound, WsOutbound, build_binary_frame, build_pty_frame, build_pty_frame_v2,
+    parse_binary_frame_any, FRAME_TYPE_INPUT, FRAME_TYPE_SNAPSHOT,
 };
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
@@ -74,6 +74,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
     let mut subscribed_ids: HashMap<String, u32> = HashMap::new(); // terminal_id -> stream_id
     let mut reverse_stream_map: HashMap<u32, String> = HashMap::new();
     let mut next_stream_id: u32 = 1;
+    // Track latest input sequence per stream_id (for v2 protocol echo)
+    let mut last_input_seq: HashMap<u32, u64> = HashMap::new();
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
 
     // Subscribe to state_version and git status changes
@@ -192,8 +194,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
-                        // Binary input frame from client — fire-and-forget
-                        if let Some((FRAME_TYPE_INPUT, stream_id, payload)) = parse_binary_frame(&data) {
+                        // Binary input frame from client (v1 or v2) — fire-and-forget
+                        if let Some((FRAME_TYPE_INPUT, stream_id, payload, seq)) = parse_binary_frame_any(&data) {
+                            // Track input sequence for v2 echo
+                            if let Some(s) = seq {
+                                last_input_seq.insert(stream_id, s);
+                            }
                             if let Some(terminal_id) = reverse_stream_map.get(&stream_id) {
                                 let text = String::from_utf8_lossy(payload).to_string();
                                 let _ = state.bridge_tx.send(BridgeMessage {
@@ -301,7 +307,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState, query_token: Option<S
 
                         // Send coalesced PTY frames
                         for (stream_id, data) in batch {
-                            let frame = build_pty_frame(stream_id, &data);
+                            // Use v2 frame (with input_seq echo) if client sent v2 input
+                            let frame = if let Some(&seq) = last_input_seq.get(&stream_id) {
+                                build_pty_frame_v2(stream_id, seq, &data)
+                            } else {
+                                build_pty_frame(stream_id, &data)
+                            };
                             if out_tx.send(Message::Binary(frame.into())).await.is_err() {
                                 channel_closed = true;
                                 break;

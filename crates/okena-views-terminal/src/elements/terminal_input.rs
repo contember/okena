@@ -35,6 +35,15 @@ impl TerminalInputHandler {
             return;
         }
 
+        // Predict printable chars for remote terminals
+        if self.terminal.is_remote() {
+            for c in filtered.chars() {
+                if c.is_ascii_graphic() || c == ' ' || (!c.is_control() && !c.is_ascii()) {
+                    self.terminal.predict_char(c);
+                }
+            }
+        }
+
         // Fast path: no control characters, send entire string at once
         if !filtered.chars().any(|c| matches!(c, '\n' | '\r' | '\u{8}')) {
             self.terminal.send_input(&filtered);

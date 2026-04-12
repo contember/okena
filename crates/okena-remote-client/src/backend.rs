@@ -5,6 +5,7 @@ use anyhow::Result;
 use okena_core::client::{make_prefixed_id, strip_prefix, WsClientMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Transport implementation for remote terminals.
 ///
@@ -14,14 +15,18 @@ use std::sync::Arc;
 pub struct RemoteTransport {
     pub(crate) ws_tx: async_channel::Sender<WsClientMessage>,
     pub(crate) connection_id: String,
+    /// Latest input prediction sequence number (read by writer task).
+    pub(crate) latest_input_seq: Arc<AtomicU64>,
 }
 
 impl TerminalTransport for RemoteTransport {
     fn send_input(&self, terminal_id: &str, data: &[u8]) {
         let remote_id = strip_prefix(terminal_id, &self.connection_id);
+        let seq = self.latest_input_seq.load(Ordering::Relaxed);
         let _ = self.ws_tx.try_send(WsClientMessage::SendText {
             terminal_id: remote_id,
             text: String::from_utf8_lossy(data).to_string(),
+            input_seq: seq,
         });
     }
 

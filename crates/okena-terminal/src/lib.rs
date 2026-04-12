@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod input;
+pub mod input_overlay;
 pub mod process;
 pub mod pty_manager;
 pub mod session_backend;

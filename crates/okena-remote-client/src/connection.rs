@@ -11,6 +11,7 @@ use okena_core::client::{
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Desktop-specific handler that creates `Terminal` objects and manages the registry.
 pub struct DesktopConnectionHandler {
@@ -39,23 +40,30 @@ impl ConnectionHandler for DesktopConnectionHandler {
         if terminals.contains_key(prefixed_id) {
             return;
         }
+        // Create shared atomic so Terminal and RemoteTransport share the same input_seq
+        let shared_seq = Arc::new(AtomicU64::new(0));
         let transport = Arc::new(RemoteTransport {
             ws_tx: ws_sender,
             connection_id: connection_id.to_string(),
+            latest_input_seq: shared_seq.clone(),
         });
-        let terminal = Arc::new(Terminal::new(
+        let terminal = Arc::new(Terminal::new_remote_with_seq(
             prefixed_id.to_string(),
             TerminalSize::default(),
             transport,
             String::new(),
+            shared_seq,
         ));
         terminals.insert(prefixed_id.to_string(), terminal);
     }
 
-    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8]) {
+    fn on_terminal_output(&self, prefixed_id: &str, data: &[u8], acked_input_seq: Option<u64>) {
         let terminal = self.terminals.lock().get(prefixed_id).cloned();
         if let Some(terminal) = terminal {
             terminal.enqueue_output(data);
+            if let Some(seq) = acked_input_seq {
+                terminal.ack_predictions(seq);
+            }
         }
     }
 
@@ -184,6 +192,7 @@ impl RemoteConnection {
         let transport = Arc::new(RemoteTransport {
             ws_tx,
             connection_id: self.config().id.clone(),
+            latest_input_seq: Arc::new(AtomicU64::new(0)),
         });
         Arc::new(RemoteBackend::new(transport, self.config().id.clone()))
     }

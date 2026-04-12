@@ -169,6 +169,7 @@ pub async fn send_text(conn_id: String, terminal_id: String, text: String) -> an
         WsClientMessage::SendText {
             terminal_id,
             text,
+            input_seq: 0,
         },
     );
     Ok(())
