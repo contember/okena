@@ -211,7 +211,7 @@ impl ActionDispatcher {
                         // client's layout (see sync_remote_projects_into_workspace).
                         let pid = project_id.clone();
                         workspace.update(cx, |ws, _cx| {
-                            ws.pending_remote_focus.insert(pid);
+                            ws.queue_pending_remote_focus(&pid);
                         });
                         // Don't return — action proceeds to be sent to server below
                     }

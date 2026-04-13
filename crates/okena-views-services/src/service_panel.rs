@@ -154,9 +154,9 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         let terminal_id = if let Some(ref sm) = self.service_manager {
             sm.read(cx).terminal_id_for(&self.project_id, service_name).cloned()
         } else {
-            self.workspace.read(cx).project(&self.project_id)
-                .and_then(|p| {
-                    p.remote_services.iter()
+            self.workspace.read(cx).remote_snapshot(&self.project_id)
+                .and_then(|snap| {
+                    snap.services.iter()
                         .find(|s| s.name == service_name)
                         .and_then(|s| s.terminal_id.clone())
                 })
@@ -238,9 +238,9 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         cx.observe(&workspace, move |this, ws, cx| {
             let Some(ref active_name) = this.active_service_name else { return };
 
-            let current_tid = ws.read(cx).project(&project_id)
-                .and_then(|p| {
-                    p.remote_services.iter()
+            let current_tid = ws.read(cx).remote_snapshot(&project_id)
+                .and_then(|snap| {
+                    snap.services.iter()
                         .find(|s| s.name == *active_name)
                         .and_then(|s| s.terminal_id.clone())
                 });
@@ -263,7 +263,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     }
 
     /// Get the list of services for this project, from either ServiceManager (local)
-    /// or remote_services on ProjectData (remote).
+    /// or the remote snapshot (remote).
     fn get_service_list(&self, cx: &Context<Self>) -> Vec<ServiceSnapshot> {
         if let Some(ref sm) = self.service_manager {
             let services = sm.read(cx).services_for_project(&self.project_id);
@@ -279,8 +279,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             }
         }
         let ws = self.workspace.read(cx);
-        ws.project(&self.project_id)
-            .map(|p| p.remote_services.iter().map(|api_svc| ServiceSnapshot {
+        ws.remote_snapshot(&self.project_id)
+            .map(|snap| snap.services.iter().map(|api_svc| ServiceSnapshot {
                 name: api_svc.name.clone(),
                 status: ServiceStatus::from_api(&api_svc.status, api_svc.exit_code),
                 terminal_id: api_svc.terminal_id.clone(),
@@ -528,8 +528,8 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     /// Render the overview content showing all services in a table layout.
     fn render_overview_content(&self, t: &ThemeColors, services: &[ServiceSnapshot], cx: &mut Context<Self>) -> impl IntoElement {
 
-        let remote_host = self.workspace.read(cx).project(&self.project_id)
-            .and_then(|p| p.remote_host.clone());
+        let remote_host = self.workspace.read(cx).remote_snapshot(&self.project_id)
+            .and_then(|snap| snap.host.clone());
 
         let project_id = self.project_id.clone();
         let entity = cx.entity().downgrade();

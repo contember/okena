@@ -690,7 +690,7 @@ impl Okena {
                     ws.delete_project(&pending.project_id, &settings(cx).hooks, cx);
                     Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
                 } else {
-                    ws.closing_projects.remove(&pending.project_id);
+                    ws.finish_closing_project(&pending.project_id);
                     None
                 }
             });
@@ -763,7 +763,7 @@ impl Okena {
         let workspace = self.workspace.clone();
         if let Some(ref path) = project_path_for_git {
             workspace.update(cx, |ws, _| {
-                ws.removing_worktree_paths.insert(path.clone());
+                ws.mark_worktree_removing(path);
             });
         }
         cx.spawn(async move |_this, cx| {
@@ -781,7 +781,7 @@ impl Okena {
                 }
                 let _ = cx.update(|cx| {
                     workspace.update(cx, |ws, _| {
-                        ws.removing_worktree_paths.remove(&path);
+                        ws.finish_worktree_removing(&path);
                     });
                 });
             }

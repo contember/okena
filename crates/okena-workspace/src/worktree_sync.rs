@@ -33,9 +33,9 @@ impl WorktreeSyncWatcher {
                     ws.data().projects.iter()
                         .filter(|p| p.worktree_info.is_some())
                         .filter(|p| !p.is_remote)
-                        .filter(|p| !ws.closing_projects.contains(&p.id))
-                        .filter(|p| !ws.creating_projects.contains(&p.id))
-                        .filter(|p| !ws.removing_worktree_paths.contains(&p.path))
+                        .filter(|p| !ws.is_project_closing(&p.id))
+                        .filter(|p| !ws.is_creating_project(&p.id))
+                        .filter(|p| !ws.lifecycle.is_worktree_removing(&p.path))
                         .map(|p| (p.id.clone(), p.path.clone()))
                         .collect()
                 });

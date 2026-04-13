@@ -733,7 +733,7 @@ pub fn spawn_uninitialized_terminals(
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
-    if ws.creating_projects.contains(project_id) {
+    if ws.is_creating_project(project_id) {
         return ActionResult::Ok(None);
     }
 

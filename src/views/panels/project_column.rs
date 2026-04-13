@@ -334,12 +334,14 @@ impl ProjectColumn {
         let git_status = self.git_watcher.as_ref()
             .and_then(|w| w.read(cx).get(&self.project_id).cloned())
             .or_else(|| {
-                project.remote_git_status.as_ref().map(|g| git::GitStatus {
-                    branch: g.branch.clone(),
-                    lines_added: g.lines_added,
-                    lines_removed: g.lines_removed,
-                    pr_info: None,
-                })
+                self.workspace.read(cx).remote_snapshot(&self.project_id)
+                    .and_then(|snap| snap.git_status.as_ref())
+                    .map(|g| git::GitStatus {
+                        branch: g.branch.clone(),
+                        lines_added: g.lines_added,
+                        lines_removed: g.lines_removed,
+                        pr_info: None,
+                    })
             });
 
         v_flex()
@@ -647,7 +649,7 @@ impl Render for ProjectColumn {
             Some(project) => {
                 let has_layout = project.layout.is_some();
 
-                let is_creating = workspace.creating_projects.contains(&self.project_id);
+                let is_creating = workspace.is_creating_project(&self.project_id);
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {

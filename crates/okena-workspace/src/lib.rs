@@ -1,8 +1,11 @@
+pub mod access_history;
 pub mod actions;
 pub mod focus;
 pub mod hook_monitor;
 pub mod hooks;
+pub mod lifecycle;
 pub mod persistence;
+pub mod remote_sync;
 pub mod request_broker;
 pub mod requests;
 pub mod sessions;
@@ -10,4 +13,5 @@ pub mod sidebar_controller;
 pub mod settings;
 pub mod state;
 pub mod toast;
+pub mod visibility;
 pub mod worktree_sync;

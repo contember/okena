@@ -1,5 +1,9 @@
 use okena_core::theme::FolderColor;
+use crate::access_history::ProjectAccessHistory;
 use crate::focus::FocusManager;
+use crate::lifecycle::ProjectLifecycleTracker;
+use crate::remote_sync::{RemoteProjectSnapshot, RemoteSyncState};
+use crate::visibility::compute_visible_projects;
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -178,15 +182,6 @@ pub struct ProjectData {
     /// Used to reconnect to persistent sessions across restarts
     #[serde(default)]
     pub service_terminals: HashMap<String, String>,
-    /// Remote service state (transient, populated during remote state sync)
-    #[serde(skip)]
-    pub remote_services: Vec<okena_core::api::ApiServiceInfo>,
-    /// Remote host address for port badge URLs (transient)
-    #[serde(skip)]
-    pub remote_host: Option<String>,
-    /// Remote git status (transient, populated during remote state sync)
-    #[serde(skip)]
-    pub remote_git_status: Option<okena_core::api::ApiGitStatus>,
     /// Per-project default shell (overrides global default when ShellType::Default is used)
     #[serde(default)]
     pub default_shell: Option<okena_terminal::shell_config::ShellType>,
@@ -301,37 +296,26 @@ pub struct GlobalWorkspace(pub Entity<Workspace>);
 
 impl Global for GlobalWorkspace {}
 
-/// GPUI Entity for workspace state
+/// GPUI Entity for workspace state.
+///
+/// Composes focused helper types by ownership. `Workspace` itself is a
+/// coordinator — it does not own the raw transient HashSets/HashMaps directly.
 pub struct Workspace {
     pub data: WorkspaceData,
-    /// Unified focus manager for the workspace
+    /// Unified focus manager for the workspace.
     pub focus_manager: FocusManager,
-    /// Last access time for each project (for sorting in project switcher)
-    pub project_access_times: HashMap<String, std::time::Instant>,
+    /// Transient project lifecycle state (creating / closing / removing).
+    pub lifecycle: ProjectLifecycleTracker,
+    /// Remote-sync coordination state (pending focus, remote snapshots).
+    pub remote_sync: RemoteSyncState,
+    /// Per-project last-access timestamps, for "recently used" sorting.
+    pub access_history: ProjectAccessHistory,
     /// Monotonic counter incremented only on persistent data mutations.
     /// The auto-save observer compares this to skip saves for UI-only changes.
     data_version: u64,
     /// Transient folder filter — when set, only projects from this folder are shown.
     /// Not serialized; resets to None on restart.
     pub active_folder_filter: Option<String>,
-    /// Remote project IDs awaiting focus on the next state sync.
-    /// When a CreateTerminal action is dispatched for a remote project,
-    /// the project ID is recorded here. On the next sync, we detect the
-    /// new terminal and focus it.
-    pub pending_remote_focus: HashSet<String>,
-    /// Pending worktree close operations waiting for a hook terminal to exit.
-    /// Key is the hook terminal_id.
-    pub pending_worktree_closes: HashMap<String, PendingWorktreeClose>,
-    /// Project IDs currently being closed (hook running or git worktree remove in progress).
-    /// Used by the sidebar to show a visual "closing" indicator.
-    pub closing_projects: HashSet<String>,
-    /// Worktree paths currently being removed in the background.
-    /// The sync watcher skips these to avoid re-adding a worktree
-    /// whose directory hasn't been fully deleted yet.
-    pub removing_worktree_paths: HashSet<String>,
-    /// Project IDs whose worktree is still being created on disk (git fetch + worktree add).
-    /// Sidebar shows a "Creating…" indicator and terminals are not spawned.
-    pub creating_projects: HashSet<String>,
 }
 
 impl Workspace {
@@ -339,14 +323,11 @@ impl Workspace {
         Self {
             data,
             focus_manager: FocusManager::new(),
-            project_access_times: HashMap::new(),
+            lifecycle: ProjectLifecycleTracker::new(),
+            remote_sync: RemoteSyncState::new(),
+            access_history: ProjectAccessHistory::new(),
             data_version: 0,
             active_folder_filter: None,
-            pending_remote_focus: HashSet::new(),
-            pending_worktree_closes: HashMap::new(),
-            closing_projects: HashSet::new(),
-            removing_worktree_paths: HashSet::new(),
-            creating_projects: HashSet::new(),
         }
     }
 
@@ -380,22 +361,13 @@ impl Workspace {
 
     /// Record that a project was accessed (for sorting by recency)
     pub fn touch_project(&mut self, project_id: &str) {
-        self.project_access_times.insert(project_id.to_string(), std::time::Instant::now());
+        self.access_history.touch(project_id);
     }
 
     /// Get projects sorted by last access time (most recent first)
     pub fn projects_by_recency(&self) -> Vec<&ProjectData> {
         let mut projects: Vec<&ProjectData> = self.data.projects.iter().collect();
-        projects.sort_by(|a, b| {
-            let time_a = self.project_access_times.get(&a.id);
-            let time_b = self.project_access_times.get(&b.id);
-            match (time_a, time_b) {
-                (Some(ta), Some(tb)) => tb.cmp(ta), // Most recent first
-                (Some(_), None) => std::cmp::Ordering::Less, // Accessed projects first
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-        });
+        projects.sort_by(|a, b| self.access_history.cmp_by_recency(&a.id, &b.id));
         projects
     }
 
@@ -406,6 +378,46 @@ impl Workspace {
     pub fn set_folder_filter(&mut self, folder_id: Option<String>, cx: &mut Context<Self>) {
         self.active_folder_filter = folder_id;
         cx.notify();
+    }
+
+    // === ProjectLifecycleTracker conveniences ===
+
+    pub fn is_creating_project(&self, project_id: &str) -> bool {
+        self.lifecycle.is_creating(project_id)
+    }
+
+    pub fn mark_creating_project(&mut self, project_id: &str) {
+        self.lifecycle.mark_creating(project_id);
+    }
+
+    pub fn finish_creating_project(&mut self, project_id: &str) {
+        self.lifecycle.finish_creating(project_id);
+    }
+
+    pub fn mark_worktree_removing(&mut self, path: &str) {
+        self.lifecycle.mark_worktree_removing(path);
+    }
+
+    pub fn finish_worktree_removing(&mut self, path: &str) {
+        self.lifecycle.finish_worktree_removing(path);
+    }
+
+    pub fn finish_closing_project(&mut self, project_id: &str) {
+        self.lifecycle.finish_closing(project_id);
+    }
+
+    // === RemoteSyncState conveniences ===
+
+    pub fn queue_pending_remote_focus(&mut self, project_id: &str) {
+        self.remote_sync.queue_focus(project_id);
+    }
+
+    pub fn drain_pending_remote_focus(&mut self) -> Vec<String> {
+        self.remote_sync.drain_pending_focus()
+    }
+
+    pub fn remote_snapshot(&self, project_id: &str) -> Option<&RemoteProjectSnapshot> {
+        self.remote_sync.snapshot(project_id)
     }
 
     /// Update the saved service terminal IDs for a project.
@@ -556,25 +568,22 @@ impl Workspace {
 
     /// Register a pending worktree close that will execute when the hook terminal exits.
     pub fn register_pending_worktree_close(&mut self, pending: PendingWorktreeClose) {
-        self.closing_projects.insert(pending.project_id.clone());
-        self.pending_worktree_closes.insert(pending.hook_terminal_id.clone(), pending);
+        self.lifecycle.register_pending_close(pending);
     }
 
     /// Take a pending worktree close for the given terminal ID (removes it).
     pub fn take_pending_worktree_close(&mut self, terminal_id: &str) -> Option<PendingWorktreeClose> {
-        self.pending_worktree_closes.remove(terminal_id)
+        self.lifecycle.take_pending_close(terminal_id)
     }
 
     /// Cancel a pending worktree close: remove it and unmark the project as closing.
     pub fn cancel_pending_worktree_close(&mut self, terminal_id: &str) {
-        if let Some(pending) = self.take_pending_worktree_close(terminal_id) {
-            self.closing_projects.remove(&pending.project_id);
-        }
+        self.lifecycle.cancel_pending_close(terminal_id);
     }
 
     /// Check if a project is currently being closed (hook running or removal in progress).
     pub fn is_project_closing(&self, project_id: &str) -> bool {
-        self.closing_projects.contains(project_id)
+        self.lifecycle.is_closing(project_id)
     }
 
     pub fn projects(&self) -> &[ProjectData] {
@@ -591,165 +600,12 @@ impl Workspace {
     /// When a folder filter is active, only projects from that folder are shown
     /// (top-level projects are hidden). Focused project override still takes priority.
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
-        let focused = self.focused_project_id();
-        let focus_individual = self.focus_manager.is_focus_individual();
-        let folder_filter = self.active_folder_filter.as_ref();
-
-        // Pre-build worktree children lookup only when folder filter is active
-        // (it's the only code path that needs parent→children resolution)
-        // Pre-compute worktree children whose parent lives in a folder.
-        // These must only be added during folder expansion (not from project_order),
-        // because their position in project_order may not reflect the folder ordering.
-        let folder_owned_worktrees: HashSet<&str> = {
-            let folder_project_ids: HashSet<&str> = self.data.folders.iter()
-                .flat_map(|f| f.project_ids.iter().map(|id| id.as_str()))
-                .collect();
-            self.data.projects.iter()
-                .filter(|p| p.worktree_info.as_ref()
-                    .map_or(false, |wi| folder_project_ids.contains(wi.parent_project_id.as_str())))
-                .map(|p| p.id.as_str())
-                .collect()
-        };
-
-        let mut result = Vec::new();
-        // Track worktree children already added via their parent's folder
-        let mut added_via_folder: HashSet<&str> = HashSet::new();
-        for id in &self.data.project_order {
-            if let Some(folder) = self.data.folders.iter().find(|f| f.id == *id) {
-                // When folder filter is active, skip folders that don't match
-                if let Some(filter_id) = folder_filter {
-                    if &folder.id != filter_id {
-                        // Still allow the focused project (or its worktree) through
-                        if focused.is_some() {
-                            for pid in &folder.project_ids {
-                                if let Some(p) = self.data.projects.iter().find(|p| &p.id == pid) {
-                                    self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                }
-                // Folder: include its projects and their worktree children.
-                // Worktree children live in project_order (not folder.project_ids),
-                // so we expand them here to keep them positioned within their folder's section.
-                for pid in &folder.project_ids {
-                    // Skip if already added as a worktree child of a previous folder project
-                    if added_via_folder.contains(pid.as_str()) {
-                        continue;
-                    }
-                    if let Some(p) = self.data.projects.iter().find(|p| p.id == *pid) {
-                        self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
-                        if folder_filter.is_some() {
-                            for wt_id in &p.worktree_ids {
-                                added_via_folder.insert(wt_id.as_str());
-                            }
-                        }
-                    }
-                }
-            } else if let Some(p) = self.data.projects.iter().find(|p| p.id == *id) {
-                // Skip worktree children that belong to folder projects —
-                // they'll be added during their parent's folder expansion instead
-                if folder_owned_worktrees.contains(p.id.as_str()) || added_via_folder.contains(p.id.as_str()) {
-                    continue;
-                }
-                // Top-level project: hide when folder filter is active
-                if folder_filter.is_some() {
-                    // Still allow the focused project through
-                    if focused.is_some() {
-                        self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
-                    }
-                    continue;
-                }
-                self.push_project_with_worktrees(p, focused, focus_individual, &mut result);
-            }
-        }
-
-        // Group worktree children right after their parent project.
-        // Only moves worktrees whose parent IS in the result; orphan worktrees
-        // (parent not visible or in a folder) stay at their original position.
-        let worktree_children: HashMap<&str, Vec<&ProjectData>> = {
-            let result_ids: HashSet<&str> = result.iter().map(|p| p.id.as_str()).collect();
-            let mut map: HashMap<&str, Vec<&ProjectData>> = HashMap::new();
-            for p in &result {
-                if let Some(ref wi) = p.worktree_info {
-                    // Only group if parent is in the result (O(1) lookup)
-                    if result_ids.contains(wi.parent_project_id.as_str()) {
-                        map.entry(wi.parent_project_id.as_str())
-                            .or_default()
-                            .push(p);
-                    }
-                }
-            }
-            map
-        };
-        if !worktree_children.is_empty() {
-            let grouped_child_ids: HashSet<&str> = worktree_children.values()
-                .flat_map(|children| children.iter().map(|p| p.id.as_str()))
-                .collect();
-            let mut grouped = Vec::with_capacity(result.len());
-            for p in &result {
-                // Skip worktrees that will be grouped after their parent
-                if grouped_child_ids.contains(p.id.as_str()) {
-                    continue;
-                }
-                grouped.push(*p);
-                // Insert grouped children after their parent
-                if let Some(children) = worktree_children.get(p.id.as_str()) {
-                    grouped.extend(children);
-                }
-            }
-            return grouped;
-        }
-
-        result
-    }
-
-    /// Push a project and its worktree children into the result list,
-    /// respecting focus filtering: when a project is focused, only show that
-    /// project (not sibling worktrees). When a worktree is focused, only
-    /// show that worktree (found through its parent's worktree_ids).
-    /// When `individual` is true, even a parent project focus shows only that project.
-    fn push_project_with_worktrees<'a>(
-        &'a self,
-        p: &'a ProjectData,
-        focused: Option<&String>,
-        individual: bool,
-        result: &mut Vec<&'a ProjectData>,
-    ) {
-        match focused {
-            None => {
-                // No focus: show project if visible, then all visible worktree children
-                if p.show_in_overview {
-                    result.push(p);
-                }
-                for wt_id in &p.worktree_ids {
-                    if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == wt_id) {
-                        if wt.show_in_overview {
-                            result.push(wt);
-                        }
-                    }
-                }
-            }
-            Some(fid) => {
-                if &p.id == fid {
-                    result.push(p);
-                    if !individual {
-                        // Parent focused (not individual): show all worktree children
-                        for wt_id in &p.worktree_ids {
-                            if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == wt_id) {
-                                result.push(wt);
-                            }
-                        }
-                    }
-                } else if p.worktree_ids.contains(fid) {
-                    // Focused project is a worktree child of this parent
-                    if let Some(wt) = self.data.projects.iter().find(|pp| &pp.id == fid) {
-                        result.push(wt);
-                    }
-                }
-            }
-        }
+        compute_visible_projects(
+            &self.data,
+            self.focused_project_id(),
+            self.focus_manager.is_focus_individual(),
+            self.active_folder_filter.as_ref(),
+        )
     }
 
     /// Get IDs of worktree children for a given parent project.
@@ -861,6 +717,9 @@ impl Workspace {
 
         // Remove from project_widths
         self.data.project_widths.retain(|id, _| !id.starts_with(&prefix));
+
+        // Drop any remote snapshots for this connection
+        self.remote_sync.retain_not_starting_with(&prefix);
 
         // Clear focus if it pointed to a removed project
         if let Some(focused) = self.focus_manager.focused_project_id() {
@@ -1732,9 +1591,6 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         }
@@ -2621,9 +2477,6 @@ mod workspace_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         }
@@ -3382,7 +3235,7 @@ mod workspace_tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
+    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_terminal::shell_config::ShellType;
     use okena_core::theme::FolderColor;
@@ -3410,9 +3263,6 @@ mod gpui_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         }

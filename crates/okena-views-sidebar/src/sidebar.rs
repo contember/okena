@@ -349,7 +349,7 @@ impl Sidebar {
                         &worktree_path, &project_path, &hooks_for_register, cx,
                     );
                     if let Ok(ref id) = id {
-                        ws.creating_projects.insert(id.clone());
+                        ws.mark_creating_project(id);
                     }
                     id
                 })
@@ -395,7 +395,7 @@ impl Sidebar {
                     // Worktree directory exists — clear creating state and fire hooks
                     let _ = cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.creating_projects.remove(&project_id);
+                            ws.finish_creating_project(&project_id);
                             ws.fire_worktree_hooks(&project_id, &hooks_for_fire, cx);
                             ws.notify_data(cx);
                         });
@@ -406,7 +406,7 @@ impl Sidebar {
                     // Remove the optimistically-added project since git worktree add failed
                     let _ = cx.update(|cx| {
                         workspace.update(cx, |ws, cx| {
-                            ws.creating_projects.remove(&project_id);
+                            ws.finish_creating_project(&project_id);
                             ws.delete_project(&project_id, &hooks_for_error, cx);
                         });
                     });
@@ -1440,8 +1440,8 @@ impl Render for Sidebar {
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
                         let mut info = SidebarProjectInfo::from_project(p);
-                        info.is_closing = workspace.closing_projects.contains(&p.id);
-                        info.is_creating = workspace.creating_projects.contains(&p.id);
+                        info.is_closing = workspace.is_project_closing(&p.id);
+                        info.is_creating = workspace.is_creating_project(&p.id);
                         // Inherit parent project's color for visual association
                         info.folder_color = parent.folder_color;
                         children.push(info);
@@ -1479,9 +1479,10 @@ impl Render for Sidebar {
 
         // Also populate services from remote project data (for projects not covered by local ServiceManager)
         for project in &workspace.data().projects {
-            if !project.remote_services.is_empty() && !project_services.contains_key(&project.id) {
-                let port_host = project.remote_host.clone().unwrap_or_else(|| "localhost".to_string());
-                let services = project.remote_services.iter()
+            let Some(snapshot) = workspace.remote_snapshot(&project.id) else { continue };
+            if !snapshot.services.is_empty() && !project_services.contains_key(&project.id) {
+                let port_host = snapshot.host.clone().unwrap_or_else(|| "localhost".to_string());
+                let services = snapshot.services.iter()
                     .filter(|api_svc| !api_svc.is_extra)
                     .map(|api_svc| {
                         SidebarServiceInfo {
@@ -1511,8 +1512,8 @@ impl Render for Sidebar {
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
-                        info.is_closing = workspace.closing_projects.contains(&p.id);
-                        info.is_creating = workspace.creating_projects.contains(&p.id);
+                        info.is_closing = workspace.is_project_closing(&p.id);
+                        info.is_creating = workspace.is_creating_project(&p.id);
                         info
                     })
                     .collect();
@@ -1553,8 +1554,8 @@ impl Render for Sidebar {
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });
-                project_info.is_closing = workspace.closing_projects.contains(&project.id);
-                project_info.is_creating = workspace.creating_projects.contains(&project.id);
+                project_info.is_closing = workspace.is_project_closing(&project.id);
+                project_info.is_creating = workspace.is_creating_project(&project.id);
                 project_info.worktree_count = wt_children.len();
 
                 if !wt_children.is_empty() {

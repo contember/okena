@@ -385,7 +385,7 @@ impl RootView {
 
         // Collect old terminal IDs for projects pending focus, so we can detect new ones after sync.
         let old_terminal_ids: std::collections::HashMap<String, Vec<String>> = workspace.update(cx, |ws, _cx| {
-            ws.pending_remote_focus.iter().filter_map(|pid| {
+            ws.remote_sync.pending_focus().iter().filter_map(|pid| {
                 let ids = ws.project(pid)
                     .and_then(|p| p.layout.as_ref())
                     .map(|l| l.collect_terminal_ids())
@@ -457,6 +457,7 @@ impl RootView {
                         svc
                     }).collect();
                     let remote_host = Some(snap.config.host.clone());
+                    let remote_git_status = api_project.git_status.clone();
 
                     workspace.update(cx, |ws, _cx| {
                         if let Some(existing) = ws.data.projects.iter_mut().find(|p| p.id == prefixed_id) {
@@ -472,9 +473,6 @@ impl RootView {
                             };
                             existing.terminal_names = terminal_names;
                             existing.folder_color = project_color;
-                            existing.remote_services = remote_services;
-                            existing.remote_host = remote_host;
-                            existing.remote_git_status = api_project.git_status.clone();
                             existing.worktree_info = api_project.worktree_info.as_ref().map(|wt| {
                                 crate::workspace::state::WorktreeMetadata {
                                     parent_project_id: format!("remote:{}:{}", conn_id, wt.parent_project_id),
@@ -517,13 +515,15 @@ impl RootView {
                                 is_remote: true,
                                 connection_id: Some(conn_id_owned),
                                 service_terminals: std::collections::HashMap::new(),
-                                remote_services,
-                                remote_host,
-                                remote_git_status: api_project.git_status.clone(),
                                 default_shell: None,
                                 hook_terminals: std::collections::HashMap::new(),
                             });
                         }
+                        // Update the transient remote snapshot regardless of create/update path.
+                        let snapshot = ws.remote_sync.snapshot_mut(&prefixed_id);
+                        snapshot.services = remote_services;
+                        snapshot.host = remote_host;
+                        snapshot.git_status = remote_git_status;
                     });
                 }
 
@@ -584,7 +584,7 @@ impl RootView {
         // Focus newly appeared terminals for projects that had a pending CreateTerminal.
         if !old_terminal_ids.is_empty() {
             workspace.update(cx, |ws, cx| {
-                let pending: Vec<String> = ws.pending_remote_focus.drain().collect();
+                let pending: Vec<String> = ws.drain_pending_remote_focus();
                 for pid in pending {
                     let old_ids = match old_terminal_ids.get(&pid) {
                         Some(ids) => ids,

@@ -71,9 +71,6 @@ impl Workspace {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell,
             hook_terminals: HashMap::new(),
         };
@@ -244,7 +241,7 @@ impl Workspace {
         // Remove from widths
         self.data.project_widths.remove(project_id);
         // Clear closing state
-        self.closing_projects.remove(project_id);
+        self.lifecycle.finish_closing(project_id);
         // Clear focus if this was the focused project
         if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
             self.focus_manager.set_focused_project_id(None);
@@ -460,9 +457,6 @@ impl Workspace {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         };
@@ -591,9 +585,6 @@ impl Workspace {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             hook_terminals: HashMap::new(),
         };
 
@@ -628,7 +619,7 @@ impl Workspace {
     /// Does NOT fire hooks or call git worktree remove (the directory is already gone).
     pub fn remove_stale_worktree(&mut self, project_id: &str) {
         // Skip projects that are being actively managed (hook running, being created, etc.)
-        if self.closing_projects.contains(project_id) || self.creating_projects.contains(project_id) {
+        if self.lifecycle.is_closing(project_id) || self.lifecycle.is_creating(project_id) {
             return;
         }
 
@@ -726,9 +717,6 @@ mod tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         }
@@ -857,9 +845,6 @@ mod gpui_tests {
             is_remote: false,
             connection_id: None,
             service_terminals: HashMap::new(),
-            remote_services: Vec::new(),
-            remote_host: None,
-            remote_git_status: None,
             default_shell: None,
             hook_terminals: HashMap::new(),
         }
@@ -1031,7 +1016,7 @@ mod gpui_tests {
         data.projects = vec![make_project("parent"), wt];
         data.project_order = vec!["parent".to_string()];
         let mut ws = Workspace::new(data);
-        ws.closing_projects.insert("wt1".to_string());
+        ws.lifecycle.mark_closing("wt1");
 
         ws.remove_stale_worktree("wt1");
 
@@ -1045,7 +1030,7 @@ mod gpui_tests {
         data.projects = vec![make_project("parent"), wt];
         data.project_order = vec!["parent".to_string()];
         let mut ws = Workspace::new(data);
-        ws.creating_projects.insert("wt1".to_string());
+        ws.lifecycle.mark_creating("wt1");
 
         ws.remove_stale_worktree("wt1");
 
