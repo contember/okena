@@ -1,0 +1,17 @@
+[package]
+name = "okena-hooks"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-terminal = { path = "../okena-terminal" }
+okena-git = { path = "../okena-git" }
+okena-state = { path = "../okena-state" }
+
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
+
+parking_lot = "0.12"
+log = "0.4"
+libc = "0.2"

@@ -4683,6 +4683,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "okena-hooks"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "libc",
+ "log",
+ "okena-core",
+ "okena-git",
+ "okena-state",
+ "okena-terminal",
+ "parking_lot",
+]
+
+[[package]]
+name = "okena-layout"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-terminal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "okena-markdown"
 version = "0.1.0"
 dependencies = [
@@ -4724,6 +4749,19 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smol",
+]
+
+[[package]]
+name = "okena-state"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "okena-core",
+ "okena-layout",
+ "okena-terminal",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -4870,6 +4908,9 @@ dependencies = [
  "log",
  "okena-core",
  "okena-git",
+ "okena-hooks",
+ "okena-layout",
+ "okena-state",
  "okena-terminal",
  "parking_lot",
  "serde",

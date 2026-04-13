@@ -1,0 +1,15 @@
+[package]
+name = "okena-layout"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+okena-core = { path = "../okena-core", features = ["client"] }
+okena-terminal = { path = "../okena-terminal" }
+
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+
+[dev-dependencies]
+serde_json = "1.0"

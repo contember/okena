@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Desktop app — main binary, GPUI views, app coordinator
-crates/                     # Library crates (17 crates, see below)
+crates/                     # Library crates (20 crates, see below)
 mobile/                     # Mobile app (Flutter + Rust FFI)
 web/                        # Web client (React + TypeScript + xterm.js)
 assets/                     # Fonts, icons (assets/icons/*.svg referenced as icons/*.svg)
@@ -33,7 +33,10 @@ Most logic lives in `crates/`. The `src/` modules are thin re-exports (`pub use 
 
 | Crate | Purpose |
 |-------|---------|
-| `okena-workspace` | State management, persistence, settings, hooks, sessions |
+| `okena-state` | Pure data types: `WorkspaceData`, `ProjectData`, `FolderData`, `HooksConfig`, `Toast`. No GPUI. |
+| `okena-layout` | `LayoutNode` recursive tree + algorithms (split/normalize/merge_visual_state) |
+| `okena-hooks` | Lifecycle hook execution (`HookRunner`, `HookMonitor`). Decoupled from `okena-workspace`. |
+| `okena-workspace` | `Workspace` GPUI entity, persistence, settings, sessions, action methods |
 | `okena-terminal` | PTY management, shell config, session backends |
 | `okena-git` | Git status, diff parsing, worktree operations |
 | `okena-theme` | Theming system (built-in + custom themes) |
