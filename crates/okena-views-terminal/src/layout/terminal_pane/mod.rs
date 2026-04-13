@@ -27,32 +27,6 @@ use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// TTL for on-demand `has_running_child` refresh. Called from mouse_move / key_down
-/// handlers — this throttles to at most one `pgrep` per terminal per TTL window.
-const CHILD_STATE_TTL: Duration = Duration::from_millis(500);
-
-/// If the cached child-process state is older than `CHILD_STATE_TTL`, spawn an
-/// async background check and update the terminal's cached value. No-op if
-/// the cache is fresh, or the terminal has no PID yet.
-pub(super) fn refresh_child_state_if_stale<V: 'static>(
-    terminal: &Arc<Terminal>,
-    cx: &mut Context<V>,
-) {
-    if !terminal.claim_child_state_refresh(CHILD_STATE_TTL) {
-        return;
-    }
-    let Some(pid) = terminal.shell_pid() else {
-        terminal.set_has_running_child(false);
-        return;
-    };
-    let terminal = terminal.clone();
-    cx.spawn(async move |_, _| {
-        let has = smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await;
-        terminal.set_has_running_child(has);
-    })
-    .detach();
-}
-
 /// A terminal pane view composed of child entity views.
 pub struct TerminalPane<D: ActionDispatch> {
     // Identity
@@ -323,10 +297,6 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 } else {
                     false
                 };
-
-                // Opportunistically feed the child-state cache — click/backspace
-                // features also read this value, and refreshing it here is free.
-                terminal.set_has_running_child(has_children);
 
                 let is_waiting = is_idle && !has_children;
 

@@ -254,12 +254,6 @@ impl TerminalContent {
     }
 
     fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        // Opportunistically refresh the child-process cache while the user is
-        // hovering the terminal. The helper throttles itself to the TTL window.
-        if let Some(ref terminal) = self.terminal {
-            super::refresh_child_state_if_stale(terminal, cx);
-        }
-
         if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
             if self.url_detector.update_hover(col, row) {
                 cx.notify();

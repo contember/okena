@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use regex::Regex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Transport trait for terminal I/O operations.
 /// Implemented by PtyManager (local) and RemoteTransport (remote).
@@ -259,11 +259,6 @@ pub struct Terminal {
     shell_pid: Mutex<Option<u32>>,
     /// Cached "waiting for input" state — updated by background loop, read by renderers
     waiting_for_input: AtomicBool,
-    /// Whether the shell has a running child process (cached, refreshed on user activity
-    /// from mouse_move / key_down with a TTL, plus opportunistically from the idle loop).
-    has_running_child: AtomicBool,
-    /// Timestamp of the last `has_running_child` refresh. Used to throttle on-demand checks.
-    last_child_check: Mutex<Option<Instant>>,
     /// Whether the user has ever sent input to this terminal (prevents flagging fresh terminals)
     had_user_input: AtomicBool,
     /// Timestamp of when the user last viewed this terminal (on blur)
@@ -317,8 +312,6 @@ impl Terminal {
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
-            has_running_child: AtomicBool::new(false),
-            last_child_check: Mutex::new(None),
             had_user_input: AtomicBool::new(false),
             last_viewed_time: Arc::new(Mutex::new(Instant::now())),
         }
@@ -792,34 +785,14 @@ impl Terminal {
         self.waiting_for_input.store(waiting, Ordering::Relaxed);
     }
 
-    /// Whether the shell has a running child process (cached).
-    /// Refreshed on user activity (mouse move / key press) with a TTL.
+    /// Returns true if the shell currently has a child process.
+    /// Performs a synchronous, low-overhead check (direct `/proc` read on Linux,
+    /// `pgrep -P` fallback elsewhere) and is safe to call from UI event handlers.
     pub fn has_running_child(&self) -> bool {
-        self.has_running_child.load(Ordering::Relaxed)
-    }
-
-    /// Update the cached child-process state.
-    pub fn set_has_running_child(&self, val: bool) {
-        self.has_running_child.store(val, Ordering::Relaxed);
-        *self.last_child_check.lock() = Some(Instant::now());
-    }
-
-    /// Returns `true` if the cached `has_running_child` value is older than `ttl`
-    /// (or has never been computed). Caller is expected to then spawn an async
-    /// refresh and call `set_has_running_child` when done. This method eagerly
-    /// bumps the timestamp so that concurrent callers within the TTL window
-    /// won't all fire off their own refresh.
-    pub fn claim_child_state_refresh(&self, ttl: Duration) -> bool {
-        let mut last = self.last_child_check.lock();
-        let now = Instant::now();
-        let stale = match *last {
-            Some(t) => now.duration_since(t) >= ttl,
-            None => true,
-        };
-        if stale {
-            *last = Some(now);
+        match *self.shell_pid.lock() {
+            Some(pid) => has_child_processes(pid),
+            None => false,
         }
-        stale
     }
 
     /// Reset the idle timer to now, clearing the waiting state.
@@ -1570,9 +1543,33 @@ impl Terminal {
     }
 }
 
-/// Check if a process has child processes (Unix only).
-/// On non-Unix platforms, always returns false (falls back to idle-only detection).
-#[cfg(unix)]
+/// Check if a process has any child processes.
+///
+/// On Linux, this reads `/proc/<pid>/task/*/children` directly — sub-millisecond,
+/// safe to call synchronously from UI handlers (e.g. click / key-down).
+/// On other Unix, falls back to `pgrep -P` (~5–20 ms fork+exec).
+/// On non-Unix, always returns false.
+#[cfg(target_os = "linux")]
+pub fn has_child_processes(pid: u32) -> bool {
+    let task_dir = format!("/proc/{}/task", pid);
+    let Ok(entries) = std::fs::read_dir(&task_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Some(tid) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let path = format!("/proc/{}/task/{}/children", pid, tid);
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if !s.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 pub fn has_child_processes(pid: u32) -> bool {
     std::process::Command::new("pgrep")
         .args(["-P", &pid.to_string()])
