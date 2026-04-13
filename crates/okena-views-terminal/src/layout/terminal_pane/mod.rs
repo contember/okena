@@ -27,6 +27,32 @@ use gpui::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// TTL for on-demand `has_running_child` refresh. Called from mouse_move / key_down
+/// handlers — this throttles to at most one `pgrep` per terminal per TTL window.
+const CHILD_STATE_TTL: Duration = Duration::from_millis(500);
+
+/// If the cached child-process state is older than `CHILD_STATE_TTL`, spawn an
+/// async background check and update the terminal's cached value. No-op if
+/// the cache is fresh, or the terminal has no PID yet.
+pub(super) fn refresh_child_state_if_stale<V: 'static>(
+    terminal: &Arc<Terminal>,
+    cx: &mut Context<V>,
+) {
+    if !terminal.claim_child_state_refresh(CHILD_STATE_TTL) {
+        return;
+    }
+    let Some(pid) = terminal.shell_pid() else {
+        terminal.set_has_running_child(false);
+        return;
+    };
+    let terminal = terminal.clone();
+    cx.spawn(async move |_, _| {
+        let has = smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await;
+        terminal.set_has_running_child(has);
+    })
+    .detach();
+}
+
 /// A terminal pane view composed of child entity views.
 pub struct TerminalPane<D: ActionDispatch> {
     // Identity
@@ -249,54 +275,39 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             loop {
                 smol::Timer::after(interval).await;
 
-                // Get terminal and PID for child-process check (always needed)
-                let term_info = this.update(cx, |pane, _cx| {
-                    pane.terminal.as_ref().map(|t| (t.clone(), t.shell_pid()))
-                });
-
-                let term_info = match term_info {
-                    Ok(Some(info)) => info,
-                    Ok(None) => continue,
-                    Err(_) => break,
-                };
-
-                let (terminal, pid) = term_info;
-
-                // Always check for child processes (used by click-to-cursor / backspace-delete)
-                let has_children = if let Some(pid) = pid {
-                    smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await
-                } else {
-                    false
-                };
-                terminal.set_has_running_child(has_children);
-
-                // Idle detection (for waiting-for-input indicator)
-                let idle_info = this.update(cx, |_pane, cx| {
+                let check_info = this.update(cx, |pane, cx| {
                     let idle_timeout = crate::terminal_view_settings(cx).idle_timeout_secs;
                     if idle_timeout == 0 {
                         return None;
                     }
-                    let idle_threshold = Duration::from_secs(idle_timeout as u64);
-                    let is_idle = terminal.last_output_time().elapsed() >= idle_threshold;
-                    let had_input = terminal.had_user_input();
-                    let has_unseen = terminal.has_unseen_output();
-                    Some((is_idle, had_input, has_unseen))
+                    pane.terminal.as_ref().map(|t| {
+                        let idle_threshold = Duration::from_secs(idle_timeout as u64);
+                        let is_idle = t.last_output_time().elapsed() >= idle_threshold;
+                        let pid = t.shell_pid();
+                        let had_input = t.had_user_input();
+                        let has_unseen = t.has_unseen_output();
+                        (t.clone(), is_idle, pid, had_input, has_unseen)
+                    })
                 });
 
-                let idle_info = match idle_info {
+                let check_info = match check_info {
                     Ok(Some(info)) => info,
                     Ok(None) => {
                         if was_waiting {
                             was_waiting = false;
-                            terminal.set_waiting_for_input(false);
-                            let _ = this.update(cx, |_pane, cx| { cx.notify(); });
+                            let _ = this.update(cx, |pane, cx| {
+                                if let Some(ref t) = pane.terminal {
+                                    t.set_waiting_for_input(false);
+                                }
+                                cx.notify();
+                            });
                         }
                         continue;
                     }
                     Err(_) => break,
                 };
 
-                let (is_idle, had_input, has_unseen) = idle_info;
+                let (terminal, is_idle, pid, had_input, has_unseen) = check_info;
 
                 if !had_input || !has_unseen {
                     if was_waiting {
@@ -306,6 +317,16 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                     }
                     continue;
                 }
+
+                let has_children = if let Some(pid) = pid {
+                    smol::unblock(move || okena_terminal::terminal::has_child_processes(pid)).await
+                } else {
+                    false
+                };
+
+                // Opportunistically feed the child-state cache — click/backspace
+                // features also read this value, and refreshing it here is free.
+                terminal.set_has_running_child(has_children);
 
                 let is_waiting = is_idle && !has_children;
 

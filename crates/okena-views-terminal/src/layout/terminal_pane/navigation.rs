@@ -85,9 +85,13 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         });
     }
 
-    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
+    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
             terminal.claim_resize_local();
+
+            // Keep the child-process cache warm while the user is typing so the
+            // backspace-delete-selection guard below has a fresh value to read.
+            super::refresh_child_state_if_stale(terminal, cx);
 
             // Backspace with selection: delete selected text (only in plain shell)
             if event.keystroke.key == "backspace"
