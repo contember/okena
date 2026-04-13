@@ -613,6 +613,32 @@ impl PtyManager {
             .and_then(|h| h.child.process_id())
     }
 
+    /// Get the real foreground shell pid for this terminal, resolving through
+    /// session-backend proxies (dtach / tmux). For plain PTYs this is the same
+    /// as `get_shell_pid`. For dtach, walks from the daemon to its direct child
+    /// (the actual shell). For tmux, the pane pid returned by `list-panes` IS
+    /// the shell pid. Callers get a pid they can pgrep / `/proc`-inspect for
+    /// running children.
+    pub fn get_foreground_shell_pid(&self, terminal_id: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            match self.session_backend {
+                ResolvedBackend::Dtach => {
+                    if let Some(daemon) = self.get_dtach_service_pids(terminal_id).into_iter().next() {
+                        return first_proc_child(daemon).or(Some(daemon));
+                    }
+                }
+                ResolvedBackend::Tmux => {
+                    if let Some(pane) = self.get_tmux_service_pids(terminal_id).into_iter().next() {
+                        return Some(pane);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.get_shell_pid(terminal_id)
+    }
+
     /// Get root PIDs for port detection.
     /// With session backends (dtach/tmux), the PTY child is the attach process,
     /// not the actual service. This method finds the real service root PID.
@@ -1128,5 +1154,34 @@ fn find_pids_for_unix_sockets_lsof(
     }
 
     result
+}
+
+/// Return the first direct child pid of `pid` via `/proc/<pid>/task/<pid>/children`.
+/// Used to walk from a dtach daemon down to the actual shell process.
+#[cfg(target_os = "linux")]
+fn first_proc_child(pid: u32) -> Option<u32> {
+    let path = format!("/proc/{}/task/{}/children", pid, pid);
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.split_whitespace().next().and_then(|s| s.parse().ok())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn first_proc_child(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+#[cfg(not(unix))]
+fn first_proc_child(_pid: u32) -> Option<u32> {
+    None
 }
 

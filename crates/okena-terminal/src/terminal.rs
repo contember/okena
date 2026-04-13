@@ -785,27 +785,18 @@ impl Terminal {
         self.waiting_for_input.store(waiting, Ordering::Relaxed);
     }
 
-    /// Returns true if a foreground child process is (or might be) running
-    /// under this terminal — in which case features like click-to-move-cursor
-    /// and backspace-delete-selection must not fire, because keyboard input
-    /// would be delivered to the child, not the shell's readline.
+    /// Returns true if the shell currently has a child process running.
+    /// Performs a synchronous, low-overhead check (direct `/proc` read on Linux,
+    /// `pgrep -P` fallback elsewhere) and is safe to call from UI event handlers.
     ///
-    /// Performs a synchronous, low-overhead check and is safe to call from UI
-    /// event handlers.
-    ///
-    /// When a session backend (dtach / tmux / screen) is in use, okena's direct
-    /// PTY child is the proxy client, not the real shell — the shell lives on a
-    /// separate pty managed by the daemon. In that case we can't see what is
-    /// running on the other side, so we conservatively return `true` to block
-    /// the feature entirely.
+    /// Note: `shell_pid` is expected to be the *real* shell pid, not a session
+    /// proxy (dtach / tmux attach client). Session-backend resolution is done
+    /// when the terminal is created (see `TerminalBackend::get_foreground_shell_pid`).
     pub fn has_running_child(&self) -> bool {
-        let Some(pid) = *self.shell_pid.lock() else {
-            return false;
-        };
-        if is_session_proxy_process(pid) {
-            return true;
+        match *self.shell_pid.lock() {
+            Some(pid) => has_child_processes(pid),
+            None => false,
         }
-        has_child_processes(pid)
     }
 
     /// Reset the idle timer to now, clearing the waiting state.
@@ -1554,26 +1545,6 @@ impl Terminal {
         drop(term);
         self.send_bytes(&buf);
     }
-}
-
-/// True if `pid` is a terminal-session proxy process (dtach / tmux client /
-/// screen). In that case the "shell" we see is just an I/O forwarder, and the
-/// real shell + any foreground app run on a different pty we can't inspect.
-///
-/// Checks `/proc/<pid>/comm` on Linux (sub-microsecond). On other platforms
-/// returns false — callers may still get a wrong answer under dtach/tmux, but
-/// no worse than the status quo.
-#[cfg(target_os = "linux")]
-pub fn is_session_proxy_process(pid: u32) -> bool {
-    let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) else {
-        return false;
-    };
-    matches!(comm.trim(), "dtach" | "tmux" | "screen")
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn is_session_proxy_process(_pid: u32) -> bool {
-    false
 }
 
 /// Check if a process has any child processes.

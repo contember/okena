@@ -342,7 +342,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
 
         let size = TerminalSize::default();
         let terminal = Arc::new(Terminal::new(terminal_id.clone(), size, self.backend.transport(), self.project_path.clone()));
-        if let Some(pid) = self.backend.get_shell_pid(&terminal_id) {
+        if let Some(pid) = self.backend.get_foreground_shell_pid(&terminal_id) {
             terminal.set_shell_pid(pid);
         }
         self.terminals.lock().insert(terminal_id, terminal.clone());
