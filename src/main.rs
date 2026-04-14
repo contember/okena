@@ -280,6 +280,11 @@ fn main() {
         return;
     }
 
+    // Propagate the binary's version into okena-terminal so XTVERSION
+    // responses identify as `okena(<version>)` rather than the library's
+    // internal crate version.
+    okena_terminal::terminal::set_app_version(env!("CARGO_PKG_VERSION"));
+
     // Handle CLI subcommands before GPUI init
     if let Some(exit_code) = cli::try_handle_cli() {
         std::process::exit(exit_code);

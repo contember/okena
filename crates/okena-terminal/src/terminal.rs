@@ -209,20 +209,42 @@ impl EventListener for ZedEventListener {
     }
 }
 
-/// Side-channel VTE parser for OSC sequences that alacritty_terminal does
-/// not dispatch. Runs on the same byte stream as the main `Processor` so we
-/// can observe shell-reported state (OSC 7 cwd today, OSC 133 prompt marks
-/// later) without patching upstream.
+/// Application version used in XTVERSION responses. Injected once at
+/// startup from the main binary (which knows its own `CARGO_PKG_VERSION`);
+/// defaults to `"0.0.0"` so unit tests and library-only consumers still
+/// get a parseable response.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Register the application version that will be reported to terminal
+/// applications via XTVERSION (`DCS > | okena(<version>) ST`). Safe to
+/// call multiple times — the first value wins.
+pub fn set_app_version(version: impl Into<String>) {
+    let _ = APP_VERSION.set(version.into());
+}
+
+fn app_version() -> &'static str {
+    APP_VERSION.get().map(String::as_str).unwrap_or("0.0.0")
+}
+
+/// Side-channel VTE parser for sequences that alacritty_terminal either
+/// ignores or answers in a way Okena wants to override. Runs on the same
+/// byte stream as the main `Processor` so we can observe shell-reported
+/// state (OSC 7 cwd, later OSC 133) and answer terminal-identification
+/// queries (XTVERSION) without patching upstream.
 struct OscSidecar {
     parser: alacritty_terminal::vte::Parser,
-    perform: OscPerform,
+    perform: SidecarPerform,
 }
 
 impl OscSidecar {
-    fn new(reported_cwd: Arc<Mutex<Option<String>>>) -> Self {
+    fn new(
+        reported_cwd: Arc<Mutex<Option<String>>>,
+        transport: Arc<dyn TerminalTransport>,
+        terminal_id: String,
+    ) -> Self {
         Self {
             parser: alacritty_terminal::vte::Parser::new(),
-            perform: OscPerform { reported_cwd },
+            perform: SidecarPerform { reported_cwd, transport, terminal_id },
         }
     }
 
@@ -231,11 +253,13 @@ impl OscSidecar {
     }
 }
 
-struct OscPerform {
+struct SidecarPerform {
     reported_cwd: Arc<Mutex<Option<String>>>,
+    transport: Arc<dyn TerminalTransport>,
+    terminal_id: String,
 }
 
-impl Perform for OscPerform {
+impl Perform for SidecarPerform {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         if params.len() < 2 || params[0] != b"7" {
             return;
@@ -251,6 +275,31 @@ impl Perform for OscPerform {
         if let Some(path) = parse_osc7_file_uri(&uri) {
             *self.reported_cwd.lock() = Some(path);
         }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        params: &alacritty_terminal::vte::Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        // XTVERSION query: `CSI > Ps q`. Per xterm ctlseqs, only Ps=0 (or
+        // omitted) asks for the terminal name+version; other Ps values
+        // belong to unrelated private CSI sequences we must not answer.
+        if action != 'q' || intermediates != [b'>'] {
+            return;
+        }
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|p| p.first().copied())
+            .unwrap_or(0);
+        if ps != 0 {
+            return;
+        }
+        let response = format!("\x1bP>|okena({})\x1b\\", app_version());
+        self.transport.send_input(&self.terminal_id, response.as_bytes());
     }
 }
 
@@ -485,7 +534,11 @@ impl Terminal {
         let term = Term::new(config, &term_size, event_listener);
 
         let reported_cwd = Arc::new(Mutex::new(None));
-        let osc_sidecar = Mutex::new(OscSidecar::new(reported_cwd.clone()));
+        let osc_sidecar = Mutex::new(OscSidecar::new(
+            reported_cwd.clone(),
+            transport.clone(),
+            terminal_id.clone(),
+        ));
 
         Self {
             term: Arc::new(Mutex::new(term)),
@@ -2219,6 +2272,30 @@ mod tests {
         fn uses_mouse_backend(&self) -> bool { false }
     }
 
+    /// Records every byte the sidecar writes back to the PTY so tests can
+    /// assert on XTVERSION / DA / color responses.
+    struct CapturingTransport {
+        writes: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl CapturingTransport {
+        fn new() -> Self {
+            Self { writes: Mutex::new(Vec::new()) }
+        }
+
+        fn writes(&self) -> Vec<Vec<u8>> {
+            self.writes.lock().clone()
+        }
+    }
+
+    impl TerminalTransport for CapturingTransport {
+        fn send_input(&self, _terminal_id: &str, data: &[u8]) {
+            self.writes.lock().push(data.to_vec());
+        }
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool { false }
+    }
+
     #[test]
     fn test_osc_title_set() {
         let transport = Arc::new(NullTransport);
@@ -2372,6 +2449,76 @@ mod tests {
 
         terminal.process_output(b"\x1b]7;http://example/x\x07");
         assert_eq!(terminal.reported_cwd(), None);
+    }
+
+    #[test]
+    fn test_xtversion_responds_with_okena_name() {
+        set_app_version("0.20.0-test");
+
+        let transport = Arc::new(CapturingTransport::new());
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport.clone(),
+            "/tmp".into(),
+        );
+
+        // XTVERSION query: `CSI > q` with empty Ps.
+        terminal.process_output(b"\x1b[>q");
+
+        let writes = transport.writes();
+        assert_eq!(writes.len(), 1, "expected exactly one PTY response");
+        let body = std::str::from_utf8(&writes[0]).unwrap();
+        // Response must be `DCS > | okena(<version>) ST` and start with ESC P.
+        assert!(body.starts_with("\x1bP>|okena("), "got: {body:?}");
+        assert!(body.ends_with("\x1b\\"), "got: {body:?}");
+        // The version slot is filled from whatever was injected first; since
+        // set_app_version uses OnceLock, we can't rely on the exact string
+        // across tests. Assert that *some* non-empty version is reported.
+        assert!(body.contains("okena("), "got: {body:?}");
+        assert!(!body.contains("okena()"), "version must not be empty: {body:?}");
+    }
+
+    #[test]
+    fn test_xtversion_ignores_nonzero_ps() {
+        // `CSI > 1 q` is NOT XTVERSION — xterm uses it for unrelated
+        // reporting modes. We must stay silent, otherwise we corrupt
+        // whatever the real handler expects.
+        set_app_version("0.20.0-test");
+
+        let transport = Arc::new(CapturingTransport::new());
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport.clone(),
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b[>1q");
+
+        assert!(
+            transport.writes().is_empty(),
+            "non-zero Ps must not trigger a response: {:?}",
+            transport.writes(),
+        );
+    }
+
+    #[test]
+    fn test_xtversion_ignores_unrelated_csi() {
+        set_app_version("0.20.0-test");
+
+        let transport = Arc::new(CapturingTransport::new());
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport.clone(),
+            "/tmp".into(),
+        );
+
+        // Cursor positioning and SGR must not trip the sidecar.
+        terminal.process_output(b"\x1b[1;1H\x1b[31mhello\x1b[0m");
+
+        assert!(transport.writes().is_empty());
     }
 
     #[test]
