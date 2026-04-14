@@ -459,8 +459,12 @@ impl Element for TerminalElement {
                         color: fg_color,
                         background_color: None,
                         underline: if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                            let line_color = cell
+                                .underline_color()
+                                .map(|c| ansi_to_hsla(&t, &c))
+                                .unwrap_or(fg_color);
                             Some(UnderlineStyle {
-                                color: Some(fg_color),
+                                color: Some(line_color),
                                 thickness: px(1.0),
                                 wavy: cell.flags.contains(Flags::UNDERCURL),
                             })
