@@ -943,6 +943,65 @@ impl Terminal {
         matches
     }
 
+    /// Scan visible cells for OSC 8 hyperlinks.
+    ///
+    /// Returns one `DetectedLink` per contiguous run of cells sharing the same
+    /// hyperlink id on the same visual row. Runs that share an id across rows
+    /// (wrapped link labels) get the same `wrap_group`, so hover highlight
+    /// covers both halves together.
+    pub fn detect_hyperlinks(&self) -> Vec<DetectedLink> {
+        let mut result = Vec::new();
+        let mut id_to_group: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        self.with_content(|term| {
+            let grid = term.grid();
+            let screen_lines = grid.screen_lines() as i32;
+            let cols = grid.columns();
+            let display_offset = grid.display_offset() as i32;
+
+            for visual_row in 0..screen_lines {
+                let buffer_line = visual_row - display_offset;
+                let mut col = 0usize;
+                while col < cols {
+                    let cell = &grid[Point::new(Line(buffer_line), Column(col))];
+                    let Some(hl) = cell.hyperlink() else {
+                        col += 1;
+                        continue;
+                    };
+                    let id = hl.id().to_owned();
+                    let uri = hl.uri().to_owned();
+
+                    let start_col = col;
+                    col += 1;
+                    while col < cols {
+                        let next_cell = &grid[Point::new(Line(buffer_line), Column(col))];
+                        match next_cell.hyperlink() {
+                            Some(nh) if nh.id() == id => col += 1,
+                            _ => break,
+                        }
+                    }
+                    let len = col - start_col;
+
+                    let next_group = id_to_group.len();
+                    let link_group = *id_to_group.entry(id).or_insert(next_group);
+
+                    result.push(DetectedLink {
+                        line: visual_row,
+                        col: start_col,
+                        len,
+                        text: uri,
+                        file_line: None,
+                        file_col: None,
+                        is_url: true,
+                        wrap_group: link_group,
+                    });
+                }
+            }
+        });
+
+        result
+    }
+
     /// Get the number of screen lines
     pub fn screen_lines(&self) -> usize {
         self.with_content(|term| term.grid().screen_lines())

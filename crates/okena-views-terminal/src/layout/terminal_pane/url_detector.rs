@@ -88,6 +88,10 @@ impl UrlDetector {
             let detected = terminal.detect_urls();
             let cwd = terminal.initial_cwd();
 
+            // OSC 8 hyperlinks get their own `link_group` namespace so they
+            // don't collide with regex-detected URL groups on hover.
+            let regex_group_ceiling = detected.iter().map(|l| l.wrap_group).max().map(|m| m + 1).unwrap_or(0);
+
             self.matches = detected
                 .into_iter()
                 .filter_map(|link| {
@@ -122,6 +126,30 @@ impl UrlDetector {
                     }
                 })
                 .collect();
+
+            // OSC 8 hyperlinks take precedence: if a cell span is already
+            // claimed by a regex match, keep the regex match to avoid double
+            // underlining. Otherwise append the OSC 8 span.
+            let osc8 = terminal.detect_hyperlinks();
+            for link in osc8 {
+                let overlaps_existing = self.matches.iter().any(|m| {
+                    m.line == link.line
+                        && m.col < link.col + link.len
+                        && link.col < m.col + m.len
+                });
+                if overlaps_existing {
+                    continue;
+                }
+                self.matches.push(URLMatch {
+                    line: link.line,
+                    col: link.col,
+                    len: link.len,
+                    url: link.text,
+                    kind: LinkKind::Url,
+                    link_group: regex_group_ceiling + link.wrap_group,
+                });
+            }
+
             self.matches_cache = Arc::new(self.matches.clone());
         }
     }
