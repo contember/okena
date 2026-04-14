@@ -426,6 +426,7 @@ impl Render for TerminalContent {
         }
 
         if let Some(ref terminal) = self.terminal {
+            terminal.set_palette(t);
             for text in terminal.take_pending_clipboard_writes() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }

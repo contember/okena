@@ -87,6 +87,9 @@ pub struct ZedEventListener {
     has_bell: Arc<Mutex<bool>>,
     /// Pending OSC 52 clipboard writes to be picked up by the GPUI thread
     pending_clipboard: Arc<Mutex<Vec<String>>>,
+    /// Current theme palette, pushed from the GPUI thread on each render.
+    /// Used to answer OSC 10/11/12/4 color queries from apps.
+    palette: Arc<Mutex<Option<okena_core::theme::ThemeColors>>>,
     /// Transport for writing responses back to the terminal
     transport: Arc<dyn TerminalTransport>,
     /// Terminal ID for PTY write operations
@@ -98,10 +101,42 @@ impl ZedEventListener {
         title: Arc<Mutex<Option<String>>>,
         has_bell: Arc<Mutex<bool>>,
         pending_clipboard: Arc<Mutex<Vec<String>>>,
+        palette: Arc<Mutex<Option<okena_core::theme::ThemeColors>>>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
-        Self { title, has_bell, pending_clipboard, transport, terminal_id }
+        Self { title, has_bell, pending_clipboard, palette, transport, terminal_id }
+    }
+
+    /// Resolve a color index (as passed by alacritty on a color query) to an
+    /// (r, g, b) triple from the currently cached theme palette.
+    fn resolve_color(&self, index: usize) -> Option<(u8, u8, u8)> {
+        use alacritty_terminal::vte::ansi::NamedColor;
+        let palette = self.palette.lock();
+        let colors = palette.as_ref()?;
+        let hex = match index {
+            0 => colors.term_black,
+            1 => colors.term_red,
+            2 => colors.term_green,
+            3 => colors.term_yellow,
+            4 => colors.term_blue,
+            5 => colors.term_magenta,
+            6 => colors.term_cyan,
+            7 => colors.term_white,
+            8 => colors.term_bright_black,
+            9 => colors.term_bright_red,
+            10 => colors.term_bright_green,
+            11 => colors.term_bright_yellow,
+            12 => colors.term_bright_blue,
+            13 => colors.term_bright_magenta,
+            14 => colors.term_bright_cyan,
+            15 => colors.term_bright_white,
+            i if i == NamedColor::Foreground as usize => colors.term_foreground,
+            i if i == NamedColor::Background as usize => colors.term_background,
+            i if i == NamedColor::Cursor as usize => colors.cursor,
+            _ => return None,
+        };
+        Some(((hex >> 16) as u8, (hex >> 8) as u8, hex as u8))
     }
 }
 
@@ -119,6 +154,13 @@ impl EventListener for ZedEventListener {
             }
             TermEvent::ClipboardStore(_, text) => {
                 self.pending_clipboard.lock().push(text);
+            }
+            TermEvent::ColorRequest(index, response_fn) => {
+                if let Some((r, g, b)) = self.resolve_color(index) {
+                    let reply =
+                        response_fn(alacritty_terminal::vte::ansi::Rgb { r, g, b });
+                    self.transport.send_input(&self.terminal_id, reply.as_bytes());
+                }
             }
             TermEvent::PtyWrite(data) => {
                 // Write response back to PTY (e.g., cursor position report)
@@ -262,6 +304,10 @@ pub struct Terminal {
     /// Pending OSC 52 clipboard writes requested by the running app (drained
     /// by the GPUI thread on the next render).
     pending_clipboard: Arc<Mutex<Vec<String>>>,
+    /// Theme palette used to answer OSC 10/11/12/4 color queries. Pushed
+    /// from the render thread on every frame so it stays in sync with the
+    /// active theme.
+    palette: Arc<Mutex<Option<okena_core::theme::ThemeColors>>>,
     /// Pending output from remote connections, drained before rendering.
     /// Decouples the tokio reader thread from the GPUI render thread so that
     /// `process_output` (which holds `term.lock()`) never runs on the tokio
@@ -311,10 +357,12 @@ impl Terminal {
         let title = Arc::new(Mutex::new(None));
         let has_bell = Arc::new(Mutex::new(false));
         let pending_clipboard = Arc::new(Mutex::new(Vec::new()));
+        let palette = Arc::new(Mutex::new(None));
         let event_listener = ZedEventListener::new(
             title.clone(),
             has_bell.clone(),
             pending_clipboard.clone(),
+            palette.clone(),
             transport.clone(),
             terminal_id.clone(),
         );
@@ -339,6 +387,7 @@ impl Terminal {
             title,
             has_bell,
             pending_clipboard,
+            palette,
             pending_output: Mutex::new(Vec::new()),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
@@ -768,6 +817,13 @@ impl Terminal {
     /// on each render; returns the texts to write to the system clipboard.
     pub fn take_pending_clipboard_writes(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_clipboard.lock())
+    }
+
+    /// Push the active theme palette so the event listener can answer
+    /// OSC 10/11/12/4 color queries with real theme colors. Called from the
+    /// render loop on every frame; writes are cheap and uncontested.
+    pub fn set_palette(&self, colors: okena_core::theme::ThemeColors) {
+        *self.palette.lock() = Some(colors);
     }
 
     /// Return the OSC 8 hyperlink URI at the given visual cell, if any.
