@@ -420,6 +420,12 @@ impl Render for TerminalContent {
             self.last_focus_reported = Some(is_focused);
         }
 
+        if let Some(ref terminal) = self.terminal {
+            for text in terminal.take_pending_clipboard_writes() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+
         let base_bg = if is_focused {
             t.term_background
         } else {

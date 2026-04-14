@@ -85,6 +85,8 @@ pub struct ZedEventListener {
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag
     has_bell: Arc<Mutex<bool>>,
+    /// Pending OSC 52 clipboard writes to be picked up by the GPUI thread
+    pending_clipboard: Arc<Mutex<Vec<String>>>,
     /// Transport for writing responses back to the terminal
     transport: Arc<dyn TerminalTransport>,
     /// Terminal ID for PTY write operations
@@ -95,10 +97,11 @@ impl ZedEventListener {
     pub fn new(
         title: Arc<Mutex<Option<String>>>,
         has_bell: Arc<Mutex<bool>>,
+        pending_clipboard: Arc<Mutex<Vec<String>>>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
-        Self { title, has_bell, transport, terminal_id }
+        Self { title, has_bell, pending_clipboard, transport, terminal_id }
     }
 }
 
@@ -113,6 +116,9 @@ impl EventListener for ZedEventListener {
             }
             TermEvent::Bell => {
                 *self.has_bell.lock() = true;
+            }
+            TermEvent::ClipboardStore(_, text) => {
+                self.pending_clipboard.lock().push(text);
             }
             TermEvent::PtyWrite(data) => {
                 // Write response back to PTY (e.g., cursor position report)
@@ -241,6 +247,9 @@ pub struct Terminal {
     title: Arc<Mutex<Option<String>>>,
     /// Bell notification flag (set when terminal receives bell, cleared on focus)
     has_bell: Arc<Mutex<bool>>,
+    /// Pending OSC 52 clipboard writes requested by the running app (drained
+    /// by the GPUI thread on the next render).
+    pending_clipboard: Arc<Mutex<Vec<String>>>,
     /// Pending output from remote connections, drained before rendering.
     /// Decouples the tokio reader thread from the GPUI render thread so that
     /// `process_output` (which holds `term.lock()`) never runs on the tokio
@@ -279,9 +288,11 @@ impl Terminal {
         // Create shared storage for OSC sequence handling and bell
         let title = Arc::new(Mutex::new(None));
         let has_bell = Arc::new(Mutex::new(false));
+        let pending_clipboard = Arc::new(Mutex::new(Vec::new()));
         let event_listener = ZedEventListener::new(
             title.clone(),
             has_bell.clone(),
+            pending_clipboard.clone(),
             transport.clone(),
             terminal_id.clone(),
         );
@@ -305,6 +316,7 @@ impl Terminal {
             scroll_offset: Mutex::new(0),
             title,
             has_bell,
+            pending_clipboard,
             pending_output: Mutex::new(Vec::new()),
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
@@ -728,6 +740,12 @@ impl Terminal {
     /// Check if terminal has unread bell notification
     pub fn has_bell(&self) -> bool {
         *self.has_bell.lock()
+    }
+
+    /// Take any pending OSC 52 clipboard writes. Called by the GPUI thread
+    /// on each render; returns the texts to write to the system clipboard.
+    pub fn take_pending_clipboard_writes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_clipboard.lock())
     }
 
     /// Clear the bell notification flag (call when terminal receives focus)
