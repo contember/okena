@@ -1,6 +1,7 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
+use alacritty_terminal::vte::Perform;
 use alacritty_terminal::vte::ansi::{Color, CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, NamedColor, Processor};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
@@ -174,6 +175,81 @@ impl EventListener for ZedEventListener {
     }
 }
 
+/// Side-channel VTE parser for OSC sequences that alacritty_terminal does
+/// not dispatch. Runs on the same byte stream as the main `Processor` so we
+/// can observe shell-reported state (OSC 7 cwd today, OSC 133 prompt marks
+/// later) without patching upstream.
+struct OscSidecar {
+    parser: alacritty_terminal::vte::Parser,
+    perform: OscPerform,
+}
+
+impl OscSidecar {
+    fn new(reported_cwd: Arc<Mutex<Option<String>>>) -> Self {
+        Self {
+            parser: alacritty_terminal::vte::Parser::new(),
+            perform: OscPerform { reported_cwd },
+        }
+    }
+
+    fn advance(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.perform, bytes);
+    }
+}
+
+struct OscPerform {
+    reported_cwd: Arc<Mutex<Option<String>>>,
+}
+
+impl Perform for OscPerform {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.len() < 2 || params[0] != b"7" {
+            return;
+        }
+        // Rejoin with `;` in case an unencoded semicolon in the URI caused
+        // the parser to split the value across multiple params. Well-behaved
+        // shell scripts percent-encode `;`, but be forgiving.
+        let uri: String = params[1..]
+            .iter()
+            .filter_map(|p| std::str::from_utf8(p).ok())
+            .collect::<Vec<_>>()
+            .join(";");
+        if let Some(path) = parse_osc7_file_uri(&uri) {
+            *self.reported_cwd.lock() = Some(path);
+        }
+    }
+}
+
+/// Extract the local path from an `OSC 7` `file://host/path` URI.
+///
+/// Host component is accepted but ignored — Okena's remote terminals already
+/// know which host a session belongs to, so the path alone is what callers
+/// care about. Returns `None` if the scheme is missing, the URI has no path
+/// component, or percent-decoding yields invalid UTF-8.
+fn parse_osc7_file_uri(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let path_start = rest.find('/')?;
+    percent_decode(&rest[path_start..])
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Cursor shape requested by the terminal application via DECSCUSR.
 ///
 /// Maps onto the three shapes Okena's renderer knows how to paint.
@@ -320,6 +396,12 @@ pub struct Terminal {
     content_generation: AtomicU64,
     /// Initial working directory (for resolving relative file paths in URL detection)
     initial_cwd: String,
+    /// Working directory most recently reported by the shell via OSC 7.
+    /// `None` until the shell sends its first `ESC ] 7 ; file://...` sequence.
+    reported_cwd: Arc<Mutex<Option<String>>>,
+    /// VTE sidecar parser that watches the PTY byte stream for OSC sequences
+    /// (currently OSC 7) that alacritty_terminal itself ignores.
+    osc_sidecar: Mutex<OscSidecar>,
     /// Timestamp of last terminal output (for idle detection)
     last_output_time: Arc<Mutex<Instant>>,
     /// Shell process PID (for foreground process check)
@@ -368,6 +450,9 @@ impl Terminal {
         );
         let term = Term::new(config, &term_size, event_listener);
 
+        let reported_cwd = Arc::new(Mutex::new(None));
+        let osc_sidecar = Mutex::new(OscSidecar::new(reported_cwd.clone()));
+
         Self {
             term: Arc::new(Mutex::new(term)),
             processor: Mutex::new(Processor::new()),
@@ -392,6 +477,8 @@ impl Terminal {
             dirty: AtomicBool::new(false),
             content_generation: AtomicU64::new(0),
             initial_cwd,
+            reported_cwd,
+            osc_sidecar,
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
@@ -404,8 +491,10 @@ impl Terminal {
     pub fn process_output(&self, data: &[u8]) {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
+        let mut sidecar = self.osc_sidecar.lock();
 
         processor.advance(&mut *term, data);
+        sidecar.advance(data);
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
@@ -435,7 +524,9 @@ impl Terminal {
         };
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
+        let mut sidecar = self.osc_sidecar.lock();
         processor.advance(&mut *term, &data);
+        sidecar.advance(&data);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -845,6 +936,24 @@ impl Terminal {
     /// Get the initial working directory for this terminal
     pub fn initial_cwd(&self) -> &str {
         &self.initial_cwd
+    }
+
+    /// Get the working directory most recently reported by the shell via
+    /// `OSC 7 ; file://host/path`. Returns `None` until the shell has emitted
+    /// at least one such sequence.
+    pub fn reported_cwd(&self) -> Option<String> {
+        self.reported_cwd.lock().clone()
+    }
+
+    /// Best known working directory for the shell running in this terminal.
+    /// Prefers the shell-reported cwd (OSC 7) and falls back to the directory
+    /// the PTY was originally spawned in. Use this when resolving relative
+    /// paths, opening "new tab here", or syncing sidebar selection.
+    pub fn current_cwd(&self) -> String {
+        self.reported_cwd
+            .lock()
+            .clone()
+            .unwrap_or_else(|| self.initial_cwd.clone())
     }
 
     /// Set the shell process PID (for foreground process checking)
@@ -2126,6 +2235,127 @@ mod tests {
 
         terminal.process_output(b"_JMENO\x07");
         assert_eq!(terminal.title(), Some("MOJE_JMENO".to_string()));
+    }
+
+    #[test]
+    fn test_osc7_reports_cwd() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "test-id".to_string(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".to_string(),
+        );
+
+        assert_eq!(terminal.reported_cwd(), None);
+        assert_eq!(terminal.current_cwd(), "/tmp");
+
+        terminal.process_output(b"\x1b]7;file://myhost/home/matej/projects/okena\x1b\\");
+
+        assert_eq!(
+            terminal.reported_cwd().as_deref(),
+            Some("/home/matej/projects/okena"),
+        );
+        assert_eq!(terminal.current_cwd(), "/home/matej/projects/okena");
+    }
+
+    #[test]
+    fn test_osc7_percent_decoded() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]7;file:///home/user/My%20Projects/foo%20bar\x07");
+
+        assert_eq!(
+            terminal.reported_cwd().as_deref(),
+            Some("/home/user/My Projects/foo bar"),
+        );
+    }
+
+    #[test]
+    fn test_osc7_empty_host() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]7;file:///home/user\x07");
+
+        assert_eq!(terminal.reported_cwd().as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn test_osc7_split_across_chunks() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]7;file:///home");
+        assert_eq!(terminal.reported_cwd(), None);
+
+        terminal.process_output(b"/user/proj\x07");
+        assert_eq!(terminal.reported_cwd().as_deref(), Some("/home/user/proj"));
+    }
+
+    #[test]
+    fn test_osc7_updates_on_cd() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]7;file:///a\x07");
+        assert_eq!(terminal.reported_cwd().as_deref(), Some("/a"));
+
+        terminal.process_output(b"\x1b]7;file:///b/c\x07");
+        assert_eq!(terminal.reported_cwd().as_deref(), Some("/b/c"));
+    }
+
+    #[test]
+    fn test_osc7_invalid_scheme_ignored() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]7;http://example/x\x07");
+        assert_eq!(terminal.reported_cwd(), None);
+    }
+
+    #[test]
+    fn test_parse_osc7_file_uri() {
+        assert_eq!(
+            parse_osc7_file_uri("file:///home/user").as_deref(),
+            Some("/home/user"),
+        );
+        assert_eq!(
+            parse_osc7_file_uri("file://host/home/user").as_deref(),
+            Some("/home/user"),
+        );
+        assert_eq!(
+            parse_osc7_file_uri("file:///path/with%20space").as_deref(),
+            Some("/path/with space"),
+        );
+        assert_eq!(parse_osc7_file_uri("http://example/x"), None);
+        assert_eq!(parse_osc7_file_uri("file://host-without-path"), None);
     }
 
     #[test]
