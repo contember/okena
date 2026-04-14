@@ -89,6 +89,56 @@ impl TerminalContent {
         bits
     }
 
+    /// Forward a button press to the PTY if the app has mouse mode enabled.
+    /// `button_code` is 0=left, 1=middle, 2=right. Returns true if forwarded.
+    fn try_forward_mouse_press(
+        &mut self,
+        button_code: u8,
+        event_position: Point<Pixels>,
+        modifiers: &Modifiers,
+    ) -> bool {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return false;
+        };
+        if !terminal.is_mouse_mode() {
+            return false;
+        }
+        let Some((col, row, _)) = self.pixel_to_cell(event_position) else {
+            return false;
+        };
+        let mods = Self::mouse_modifier_bits(modifiers);
+        terminal.send_mouse_button(button_code, true, col, row as usize, mods);
+        self.forwarded_button = Some((button_code, mods));
+        self.mouse_down_cell = None;
+        self.is_selecting = false;
+        true
+    }
+
+    /// Forward a button release to the PTY if that button's press was forwarded.
+    /// Returns true if a release was sent (or the forwarded state was cleared).
+    fn try_forward_mouse_release(
+        &mut self,
+        button_code: u8,
+        event_position: Point<Pixels>,
+        modifiers: &Modifiers,
+    ) -> bool {
+        let Some((forwarded, _)) = self.forwarded_button else {
+            return false;
+        };
+        if forwarded != button_code {
+            return false;
+        }
+        if let Some(terminal) = self.terminal.as_ref() {
+            if let Some((col, row, _)) = self.pixel_to_cell(event_position) {
+                let mods = Self::mouse_modifier_bits(modifiers);
+                terminal.send_mouse_button(button_code, false, col, row as usize, mods);
+            }
+        }
+        self.forwarded_button = None;
+        self.mouse_down_cell = None;
+        true
+    }
+
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
         self.terminal = terminal.clone();
         self.scrollbar.update(cx, |scrollbar, _| {
@@ -210,73 +260,71 @@ impl TerminalContent {
     ) {
         window.focus(&self.focus_handle, cx);
 
-        if let Some(ref terminal) = self.terminal {
-            if let Some((col, row, side)) = self.pixel_to_cell(event.position) {
-                self.mouse_down_cell = Some((col, row));
+        if self.terminal.is_none() {
+            return;
+        }
+        let Some((col, row, side)) = self.pixel_to_cell(event.position) else {
+            return;
+        };
+        self.mouse_down_cell = Some((col, row));
 
-                if event.modifiers.platform || event.modifiers.control {
-                    if let Some(url_match) = self.url_detector.find_at(col, row) {
-                        match &url_match.kind {
-                            LinkKind::Url => {
-                                UrlDetector::open_url(&url_match.url);
-                            }
-                            LinkKind::FilePath { line, col } => {
-                                let file_opener = terminal_view_settings(cx).file_opener.clone();
-                                UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
-                            }
-                        }
-                        self.mouse_down_cell = None;
-                        return;
+        if event.modifiers.platform || event.modifiers.control {
+            if let Some(url_match) = self.url_detector.find_at(col, row) {
+                match &url_match.kind {
+                    LinkKind::Url => {
+                        UrlDetector::open_url(&url_match.url);
+                    }
+                    LinkKind::FilePath { line, col } => {
+                        let file_opener = terminal_view_settings(cx).file_opener.clone();
+                        UrlDetector::open_file(&url_match.url, *line, *col, &file_opener);
                     }
                 }
-
-                if terminal.is_mouse_mode() {
-                    let mods = Self::mouse_modifier_bits(&event.modifiers);
-                    let button: u8 = 0; // left
-                    terminal.send_mouse_button(button, true, col, row as usize, mods);
-                    self.forwarded_button = Some((button, mods));
-                    self.mouse_down_cell = None;
-                    self.is_selecting = false;
-                    return;
-                }
-
-                let now = Instant::now();
-
-                let click_count = if let Some((last_time, last_col, last_row)) = self.last_click {
-                    let elapsed = now.duration_since(last_time).as_millis();
-                    let same_position =
-                        (col as i32 - last_col as i32).abs() <= 1 && (row - last_row).abs() <= 0;
-                    if elapsed < 400 && same_position {
-                        if self.click_count >= 3 { 1 } else { self.click_count + 1 }
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                };
-
-                self.last_click = Some((now, col, row));
-                self.click_count = click_count;
-
-                terminal.clear_selection();
-
-                match click_count {
-                    2 => {
-                        terminal.start_word_selection(col, row);
-                        self.is_selecting = false;
-                    }
-                    3 => {
-                        terminal.start_line_selection(col, row);
-                        self.is_selecting = false;
-                    }
-                    _ => {
-                        terminal.start_selection(col, row, side);
-                        self.is_selecting = true;
-                    }
-                }
-                cx.notify();
+                self.mouse_down_cell = None;
+                return;
             }
         }
+
+        if self.try_forward_mouse_press(0, event.position, &event.modifiers) {
+            cx.notify();
+            return;
+        }
+
+        let now = Instant::now();
+
+        let click_count = if let Some((last_time, last_col, last_row)) = self.last_click {
+            let elapsed = now.duration_since(last_time).as_millis();
+            let same_position =
+                (col as i32 - last_col as i32).abs() <= 1 && (row - last_row).abs() <= 0;
+            if elapsed < 400 && same_position {
+                if self.click_count >= 3 { 1 } else { self.click_count + 1 }
+            } else {
+                1
+            }
+        } else {
+            1
+        };
+
+        self.last_click = Some((now, col, row));
+        self.click_count = click_count;
+
+        let terminal = self.terminal.as_ref().unwrap();
+        terminal.clear_selection();
+
+        match click_count {
+            2 => {
+                terminal.start_word_selection(col, row);
+                self.is_selecting = false;
+            }
+            3 => {
+                terminal.start_line_selection(col, row);
+                self.is_selecting = false;
+            }
+            _ => {
+                terminal.start_selection(col, row, side);
+                self.is_selecting = true;
+            }
+        }
+        cx.notify();
     }
 
     fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -324,14 +372,8 @@ impl TerminalContent {
     }
 
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
-        if let Some((button, _)) = self.forwarded_button.take() {
-            if let Some(ref terminal) = self.terminal {
-                let mods = Self::mouse_modifier_bits(&event.modifiers);
-                if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
-                    terminal.send_mouse_button(button, false, col, row as usize, mods);
-                }
-            }
-            self.mouse_down_cell = None;
+        if self.try_forward_mouse_release(0, event.position, &event.modifiers) {
+            cx.notify();
             return;
         }
 
@@ -481,6 +523,10 @@ impl Render for TerminalContent {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    if this.try_forward_mouse_press(2, event.position, &event.modifiers) {
+                        cx.notify();
+                        return;
+                    }
                     let has_selection = this.terminal.as_ref().map(|t| t.has_selection()).unwrap_or(false);
                     let link_url = this.pixel_to_cell(event.position).and_then(|(col, row, _side)| {
                         this.url_detector.find_at(col, row)
@@ -492,6 +538,30 @@ impl Render for TerminalContent {
                         has_selection,
                         link_url,
                     });
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    if this.try_forward_mouse_release(2, event.position, &event.modifiers) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    if this.try_forward_mouse_press(1, event.position, &event.modifiers) {
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    if this.try_forward_mouse_release(1, event.position, &event.modifiers) {
+                        cx.notify();
+                    }
                 }),
             )
             .child(canvas(element_bounds_setter, |_, _, _, _| {}).absolute().size_full())
