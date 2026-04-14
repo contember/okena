@@ -322,9 +322,16 @@ impl Element for TerminalElement {
         // Get selection bounds
         let selection = self.terminal.selection_bounds();
 
-        // Capture cursor state for the closure
+        // Capture cursor state for the closure. An app-set cursor shape
+        // (DECSCUSR, e.g. vim/helix toggling bar in insert mode) wins over
+        // the user preference.
         let cursor_visible = self.cursor_visible;
-        let cursor_style = self.cursor_style;
+        let cursor_style = match self.terminal.app_cursor_shape() {
+            Some(okena_terminal::terminal::AppCursorShape::Block) => CursorShape::Block,
+            Some(okena_terminal::terminal::AppCursorShape::Bar) => CursorShape::Bar,
+            Some(okena_terminal::terminal::AppCursorShape::Underline) => CursorShape::Underline,
+            None => self.cursor_style,
+        };
 
         self.terminal.with_content(|term| {
             let grid = term.grid();

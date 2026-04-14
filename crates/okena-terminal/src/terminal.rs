@@ -1,7 +1,7 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use alacritty_terminal::vte::ansi::{Color, CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, NamedColor, Processor};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::index::{Point, Line, Column, Side};
 use alacritty_terminal::term::cell::Flags;
@@ -130,6 +130,18 @@ impl EventListener for ZedEventListener {
             }
         }
     }
+}
+
+/// Cursor shape requested by the terminal application via DECSCUSR.
+///
+/// Maps onto the three shapes Okena's renderer knows how to paint.
+/// Alacritty's `HollowBlock` is used internally as a sentinel for "app has
+/// not set any shape" and never reaches callers as this type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppCursorShape {
+    Block,
+    Bar,
+    Underline,
 }
 
 /// Selection state for the terminal
@@ -282,7 +294,17 @@ impl Terminal {
         transport: Arc<dyn TerminalTransport>,
         initial_cwd: String,
     ) -> Self {
-        let config = TermConfig::default();
+        // Use HollowBlock as a sentinel for "app has not set a cursor shape
+        // via DECSCUSR" — no real DECSCUSR code maps to HollowBlock, so if
+        // `cursor_style()` returns it we know to fall back to the user
+        // setting instead of honoring an app override.
+        let config = TermConfig {
+            default_cursor_style: VteCursorStyle {
+                shape: VteCursorShape::HollowBlock,
+                blinking: false,
+            },
+            ..TermConfig::default()
+        };
         let term_size = TermSize::new(size.cols as usize, size.rows as usize);
 
         // Create shared storage for OSC sequence handling and bell
@@ -1533,6 +1555,22 @@ impl Terminal {
         drop(term);
         self.send_bytes(&buf);
         true
+    }
+
+    /// Cursor shape requested by the terminal application via DECSCUSR, if any.
+    ///
+    /// Returns `None` when the app has not overridden the shape (or has reset
+    /// it with `\x1b[0 q`), so callers can fall back to the user setting.
+    pub fn app_cursor_shape(&self) -> Option<AppCursorShape> {
+        let term = self.term.lock();
+        let style = term.cursor_style();
+        match style.shape {
+            VteCursorShape::HollowBlock => None,
+            VteCursorShape::Block => Some(AppCursorShape::Block),
+            VteCursorShape::Beam => Some(AppCursorShape::Bar),
+            VteCursorShape::Underline => Some(AppCursorShape::Underline),
+            VteCursorShape::Hidden => None,
+        }
     }
 
     /// True if the active app has enabled focus event reporting (DEC mode 1004).
