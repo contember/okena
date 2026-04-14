@@ -271,6 +271,11 @@ impl TerminalContent {
         self.mouse_down_cell = Some((col, row));
 
         if event.modifiers.platform || event.modifiers.control {
+            if let Some(uri) = self.terminal.as_ref().and_then(|t| t.hyperlink_at(col, row)) {
+                UrlDetector::open_url(&uri);
+                self.mouse_down_cell = None;
+                return;
+            }
             if let Some(url_match) = self.url_detector.find_at(col, row) {
                 match &url_match.kind {
                     LinkKind::Url => {

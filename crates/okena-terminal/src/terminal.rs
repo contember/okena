@@ -748,6 +748,17 @@ impl Terminal {
         std::mem::take(&mut *self.pending_clipboard.lock())
     }
 
+    /// Return the OSC 8 hyperlink URI at the given visual cell, if any.
+    /// `visual_row` is the on-screen row (0..screen_lines); scrolling is
+    /// handled via `display_offset` so history cells work too.
+    pub fn hyperlink_at(&self, col: usize, visual_row: i32) -> Option<String> {
+        let term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let buffer_row = visual_row - display_offset;
+        let cell = &term.grid()[Point::new(Line(buffer_row), Column(col))];
+        cell.hyperlink().map(|h| h.uri().to_owned())
+    }
+
     /// Clear the bell notification flag (call when terminal receives focus)
     pub fn clear_bell(&self) {
         *self.has_bell.lock() = false;
