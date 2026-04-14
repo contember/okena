@@ -1447,6 +1447,80 @@ impl Terminal {
         true
     }
 
+    /// True if the active app wants drag/motion events (DEC modes 1002/1003).
+    /// Press/release alone (1000) is implied by `is_mouse_mode()`.
+    pub fn supports_mouse_drag(&self) -> bool {
+        if self.transport.uses_mouse_backend() {
+            return true;
+        }
+        let term = self.term.lock();
+        term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
+    /// Forward a mouse button press or release to the PTY.
+    /// `button` is 0=left, 1=middle, 2=right. `modifiers` is the OR of 4 (shift),
+    /// 8 (alt/meta), 16 (control). Coordinates are 0-based cells.
+    pub fn send_mouse_button(
+        &self,
+        button: u8,
+        pressed: bool,
+        col: usize,
+        row: usize,
+        modifiers: u8,
+    ) {
+        let use_sgr = if self.transport.uses_mouse_backend() {
+            true
+        } else {
+            let term = self.term.lock();
+            term.mode().contains(TermMode::SGR_MOUSE)
+        };
+
+        let cb = (button & 0b11) | (modifiers & 0b1_1100);
+        let buf: Vec<u8> = if use_sgr {
+            let action = if pressed { 'M' } else { 'm' };
+            format!("\x1b[<{};{};{}{}", cb, col + 1, row + 1, action).into_bytes()
+        } else {
+            // Legacy X10/normal format: release reports button=3, no SGR distinction.
+            let legacy_cb = if pressed { cb } else { 3 | (modifiers & 0b1_1100) };
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                legacy_cb.saturating_add(32),
+                (col as u8).saturating_add(33).min(255),
+                (row as u8).saturating_add(33).min(255),
+            ]
+        };
+        self.send_bytes(&buf);
+    }
+
+    /// Forward a drag (button-held motion) event to the PTY.
+    /// Caller should gate on `supports_mouse_drag()`.
+    pub fn send_mouse_drag(&self, button: u8, col: usize, row: usize, modifiers: u8) {
+        let use_sgr = if self.transport.uses_mouse_backend() {
+            true
+        } else {
+            let term = self.term.lock();
+            term.mode().contains(TermMode::SGR_MOUSE)
+        };
+
+        // Motion bit = 32 (0x20) added to button code.
+        let cb = (button & 0b11) | (modifiers & 0b1_1100) | 32;
+        let buf: Vec<u8> = if use_sgr {
+            format!("\x1b[<{};{};{}M", cb, col + 1, row + 1).into_bytes()
+        } else {
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                cb.saturating_add(32),
+                (col as u8).saturating_add(33).min(255),
+                (row as u8).saturating_add(33).min(255),
+            ]
+        };
+        self.send_bytes(&buf);
+    }
+
     /// Send scroll events to PTY as a single batched write.
     /// button: 64 for scroll up, 65 for scroll down
     pub fn send_mouse_scroll(&self, button: u8, col: usize, row: usize, count: usize) {

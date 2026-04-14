@@ -41,6 +41,7 @@ pub struct TerminalContent {
     workspace: Entity<Workspace>,
     scroll_accumulator: f32,
     mouse_down_cell: Option<(usize, i32)>,
+    forwarded_button: Option<(u8, u8)>,
 }
 
 impl TerminalContent {
@@ -70,7 +71,22 @@ impl TerminalContent {
             workspace,
             scroll_accumulator: 0.0,
             mouse_down_cell: None,
+            forwarded_button: None,
         }
+    }
+
+    fn mouse_modifier_bits(m: &Modifiers) -> u8 {
+        let mut bits = 0u8;
+        if m.shift {
+            bits |= 4;
+        }
+        if m.alt {
+            bits |= 8;
+        }
+        if m.control {
+            bits |= 16;
+        }
+        bits
     }
 
     pub fn set_terminal(&mut self, terminal: Option<Arc<Terminal>>, cx: &mut Context<Self>) {
@@ -214,6 +230,16 @@ impl TerminalContent {
                     }
                 }
 
+                if terminal.is_mouse_mode() {
+                    let mods = Self::mouse_modifier_bits(&event.modifiers);
+                    let button: u8 = 0; // left
+                    terminal.send_mouse_button(button, true, col, row as usize, mods);
+                    self.forwarded_button = Some((button, mods));
+                    self.mouse_down_cell = None;
+                    self.is_selecting = false;
+                    return;
+                }
+
                 let now = Instant::now();
 
                 let click_count = if let Some((last_time, last_col, last_row)) = self.last_click {
@@ -262,6 +288,17 @@ impl TerminalContent {
             cx.notify();
         }
 
+        if let Some((button, mods)) = self.forwarded_button {
+            if let Some(ref terminal) = self.terminal {
+                if terminal.supports_mouse_drag() {
+                    if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
+                        terminal.send_mouse_drag(button, col, row as usize, mods);
+                    }
+                }
+            }
+            return;
+        }
+
         if self.is_selecting {
             if event.pressed_button != Some(MouseButton::Left) {
                 if let Some(ref terminal) = self.terminal {
@@ -286,7 +323,18 @@ impl TerminalContent {
         }
     }
 
-    fn handle_mouse_up(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if let Some((button, _)) = self.forwarded_button.take() {
+            if let Some(ref terminal) = self.terminal {
+                let mods = Self::mouse_modifier_bits(&event.modifiers);
+                if let Some((col, row, _side)) = self.pixel_to_cell(event.position) {
+                    terminal.send_mouse_button(button, false, col, row as usize, mods);
+                }
+            }
+            self.mouse_down_cell = None;
+            return;
+        }
+
         if self.is_selecting {
             if let Some(ref terminal) = self.terminal {
                 terminal.end_selection();
