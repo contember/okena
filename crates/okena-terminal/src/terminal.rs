@@ -110,9 +110,24 @@ impl ZedEventListener {
     }
 
     /// Resolve a color index (as passed by alacritty on a color query) to an
-    /// (r, g, b) triple from the currently cached theme palette.
+    /// (r, g, b) triple.
+    ///
+    /// Indices 0..=15 and the named foreground/background/cursor slots come
+    /// from the active theme palette (so apps that ask "what's your red?"
+    /// see Okena's configured red, not xterm's). Indices 16..=231 and the
+    /// 24-step grayscale ramp 232..=255 are answered from the standard
+    /// xterm 256-color table — these are not themed and match every other
+    /// modern terminal.
     fn resolve_color(&self, index: usize) -> Option<(u8, u8, u8)> {
         use alacritty_terminal::vte::ansi::NamedColor;
+
+        if (16..=231).contains(&index) {
+            return Some(xterm_256_cube_rgb(index));
+        }
+        if (232..=255).contains(&index) {
+            return Some(xterm_256_grayscale_rgb(index));
+        }
+
         let palette = self.palette.lock();
         let colors = palette.as_ref()?;
         let hex = match index {
@@ -139,6 +154,25 @@ impl ZedEventListener {
         };
         Some(((hex >> 16) as u8, (hex >> 8) as u8, hex as u8))
     }
+}
+
+/// xterm 6x6x6 color cube for palette indices 16..=231.
+///
+/// Each axis uses the canonical xterm levels [0, 95, 135, 175, 215, 255]
+/// (not a linear 0/51/102/... ramp — xterm jumps at 95 for perceptual
+/// reasons and every modern terminal matches this).
+fn xterm_256_cube_rgb(index: usize) -> (u8, u8, u8) {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let n = index - 16;
+    (LEVELS[n / 36], LEVELS[(n / 6) % 6], LEVELS[n % 6])
+}
+
+/// xterm 24-step grayscale ramp for palette indices 232..=255. The levels
+/// start at 8 and step by 10 (8, 18, ..., 238), skipping true black and
+/// true white — apps that need those use cube indices 16 and 231.
+fn xterm_256_grayscale_rgb(index: usize) -> (u8, u8, u8) {
+    let level = 8 + (index as u8 - 232) * 10;
+    (level, level, level)
 }
 
 impl EventListener for ZedEventListener {
@@ -2338,6 +2372,53 @@ mod tests {
 
         terminal.process_output(b"\x1b]7;http://example/x\x07");
         assert_eq!(terminal.reported_cwd(), None);
+    }
+
+    #[test]
+    fn test_xterm_cube_corners() {
+        // First cube entry (16) is true black, last (231) is true white.
+        assert_eq!(xterm_256_cube_rgb(16), (0, 0, 0));
+        assert_eq!(xterm_256_cube_rgb(231), (255, 255, 255));
+    }
+
+    #[test]
+    fn test_xterm_cube_axis_order() {
+        // Pure blue axis: changing only the blue component.
+        assert_eq!(xterm_256_cube_rgb(17), (0, 0, 95));
+        assert_eq!(xterm_256_cube_rgb(18), (0, 0, 135));
+        assert_eq!(xterm_256_cube_rgb(21), (0, 0, 255));
+
+        // Pure green axis: next cube row.
+        assert_eq!(xterm_256_cube_rgb(22), (0, 95, 0));
+        assert_eq!(xterm_256_cube_rgb(28), (0, 135, 0));
+
+        // Pure red axis: next cube plane.
+        assert_eq!(xterm_256_cube_rgb(52), (95, 0, 0));
+        assert_eq!(xterm_256_cube_rgb(88), (135, 0, 0));
+    }
+
+    #[test]
+    fn test_xterm_cube_mixed() {
+        // xterm's canonical value for 208 is the familiar "orange" (#ff8700).
+        assert_eq!(xterm_256_cube_rgb(208), (255, 135, 0));
+        // 196 = pure bright red (#ff0000).
+        assert_eq!(xterm_256_cube_rgb(196), (255, 0, 0));
+        // 226 = pure bright yellow (#ffff00).
+        assert_eq!(xterm_256_cube_rgb(226), (255, 255, 0));
+    }
+
+    #[test]
+    fn test_xterm_grayscale_endpoints() {
+        // First grayscale step is 8 (just above black); last is 238.
+        assert_eq!(xterm_256_grayscale_rgb(232), (8, 8, 8));
+        assert_eq!(xterm_256_grayscale_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn test_xterm_grayscale_linear() {
+        // Each step adds 10 to every channel.
+        assert_eq!(xterm_256_grayscale_rgb(233), (18, 18, 18));
+        assert_eq!(xterm_256_grayscale_rgb(244), (128, 128, 128));
     }
 
     #[test]
