@@ -20,6 +20,10 @@ pub struct UrlDetector {
     path_exists_cache: HashMap<String, bool>,
     /// Last terminal content generation we processed (skip if unchanged)
     last_generation: u64,
+    /// Cwd used for the entries currently in `path_exists_cache`. When the
+    /// shell reports a new cwd (OSC 7), relative-path cache hits become
+    /// wrong, so the cache is cleared.
+    last_cwd: String,
 }
 
 impl Default for UrlDetector {
@@ -36,6 +40,7 @@ impl UrlDetector {
             hovered_group: None,
             path_exists_cache: HashMap::new(),
             last_generation: u64::MAX, // force first update
+            last_cwd: String::new(),
         }
     }
 
@@ -86,7 +91,11 @@ impl UrlDetector {
             self.last_generation = content_gen;
 
             let detected = terminal.detect_urls();
-            let cwd = terminal.initial_cwd();
+            let cwd = terminal.current_cwd();
+            if cwd != self.last_cwd {
+                self.path_exists_cache.clear();
+                self.last_cwd = cwd.clone();
+            }
 
             // OSC 8 hyperlinks get their own `link_group` namespace so they
             // don't collide with regex-detected URL groups on hover.
@@ -108,7 +117,7 @@ impl UrlDetector {
                         })
                     } else {
                         // File path: verify existence before showing
-                        if self.path_exists_cached(&link.text, cwd) {
+                        if self.path_exists_cached(&link.text, &cwd) {
                             Some(URLMatch {
                                 line: link.line,
                                 col: link.col,
