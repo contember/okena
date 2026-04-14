@@ -42,6 +42,7 @@ pub struct TerminalContent {
     scroll_accumulator: f32,
     mouse_down_cell: Option<(usize, i32)>,
     forwarded_button: Option<(u8, u8)>,
+    last_focus_reported: Option<bool>,
 }
 
 impl TerminalContent {
@@ -72,6 +73,7 @@ impl TerminalContent {
             scroll_accumulator: 0.0,
             mouse_down_cell: None,
             forwarded_button: None,
+            last_focus_reported: None,
         }
     }
 
@@ -407,7 +409,18 @@ impl TerminalContent {
 impl Render for TerminalContent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let base_bg = if self.focus_handle.is_focused(window) {
+        let is_focused = self.focus_handle.is_focused(window);
+
+        if self.last_focus_reported != Some(is_focused) {
+            if let Some(ref terminal) = self.terminal {
+                if terminal.wants_focus_events() {
+                    terminal.send_focus(is_focused);
+                }
+            }
+            self.last_focus_reported = Some(is_focused);
+        }
+
+        let base_bg = if is_focused {
             t.term_background
         } else {
             t.term_background_unfocused

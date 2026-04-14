@@ -1447,6 +1447,19 @@ impl Terminal {
         true
     }
 
+    /// True if the active app has enabled focus event reporting (DEC mode 1004).
+    pub fn wants_focus_events(&self) -> bool {
+        let term = self.term.lock();
+        term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
+    /// Send a focus-in (`\x1b[I`) or focus-out (`\x1b[O`) report to the PTY.
+    /// Caller should gate on `wants_focus_events()`.
+    pub fn send_focus(&self, focused: bool) {
+        let bytes: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.send_bytes(bytes);
+    }
+
     /// True if the active app wants drag/motion events (DEC modes 1002/1003).
     /// Press/release alone (1000) is implied by `is_mouse_mode()`.
     pub fn supports_mouse_drag(&self) -> bool {
