@@ -239,12 +239,18 @@ struct OscSidecar {
 impl OscSidecar {
     fn new(
         reported_cwd: Arc<Mutex<Option<String>>>,
+        pending_notifications: Arc<Mutex<Vec<String>>>,
         transport: Arc<dyn TerminalTransport>,
         terminal_id: String,
     ) -> Self {
         Self {
             parser: alacritty_terminal::vte::Parser::new(),
-            perform: SidecarPerform { reported_cwd, transport, terminal_id },
+            perform: SidecarPerform {
+                reported_cwd,
+                pending_notifications,
+                transport,
+                terminal_id,
+            },
         }
     }
 
@@ -255,25 +261,49 @@ impl OscSidecar {
 
 struct SidecarPerform {
     reported_cwd: Arc<Mutex<Option<String>>>,
+    /// iTerm2-style `OSC 9 ; <message>` notifications, drained by the GPUI
+    /// thread on each render (same model as `pending_clipboard`).
+    pending_notifications: Arc<Mutex<Vec<String>>>,
     transport: Arc<dyn TerminalTransport>,
     terminal_id: String,
 }
 
 impl Perform for SidecarPerform {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.len() < 2 || params[0] != b"7" {
+        if params.len() < 2 {
             return;
         }
-        // Rejoin with `;` in case an unencoded semicolon in the URI caused
-        // the parser to split the value across multiple params. Well-behaved
-        // shell scripts percent-encode `;`, but be forgiving.
-        let uri: String = params[1..]
-            .iter()
-            .filter_map(|p| std::str::from_utf8(p).ok())
-            .collect::<Vec<_>>()
-            .join(";");
-        if let Some(path) = parse_osc7_file_uri(&uri) {
-            *self.reported_cwd.lock() = Some(path);
+        match params[0] {
+            b"7" => {
+                // Rejoin with `;` in case an unencoded semicolon in the URI
+                // caused the parser to split the value across multiple
+                // params. Well-behaved shell scripts percent-encode `;`,
+                // but be forgiving.
+                let uri: String = params[1..]
+                    .iter()
+                    .filter_map(|p| std::str::from_utf8(p).ok())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                if let Some(path) = parse_osc7_file_uri(&uri) {
+                    *self.reported_cwd.lock() = Some(path);
+                }
+            }
+            b"9" => {
+                // iTerm2-style notification: `OSC 9 ; <message>`. ConEmu's
+                // `OSC 9 ; 4 ; state ; progress` progress-bar subtype is
+                // treated as a plain-text message for now — we can split
+                // off subtypes when there's a UI for them.
+                let message: String = params[1..]
+                    .iter()
+                    .filter_map(|p| std::str::from_utf8(p).ok())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let message = message.trim();
+                if !message.is_empty() {
+                    self.pending_notifications.lock().push(message.to_string());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -482,8 +512,13 @@ pub struct Terminal {
     /// Working directory most recently reported by the shell via OSC 7.
     /// `None` until the shell sends its first `ESC ] 7 ; file://...` sequence.
     reported_cwd: Arc<Mutex<Option<String>>>,
-    /// VTE sidecar parser that watches the PTY byte stream for OSC sequences
-    /// (currently OSC 7) that alacritty_terminal itself ignores.
+    /// Pending iTerm2-style `OSC 9` notifications drained by the GPUI thread
+    /// on each render (same model as `pending_clipboard`).
+    pending_notifications: Arc<Mutex<Vec<String>>>,
+    /// VTE sidecar parser that watches the PTY byte stream for OSC and CSI
+    /// sequences (OSC 7 cwd, OSC 9 notifications, XTVERSION) that
+    /// alacritty_terminal either ignores or answers differently than Okena
+    /// wants.
     osc_sidecar: Mutex<OscSidecar>,
     /// Timestamp of last terminal output (for idle detection)
     last_output_time: Arc<Mutex<Instant>>,
@@ -534,8 +569,10 @@ impl Terminal {
         let term = Term::new(config, &term_size, event_listener);
 
         let reported_cwd = Arc::new(Mutex::new(None));
+        let pending_notifications = Arc::new(Mutex::new(Vec::new()));
         let osc_sidecar = Mutex::new(OscSidecar::new(
             reported_cwd.clone(),
+            pending_notifications.clone(),
             transport.clone(),
             terminal_id.clone(),
         ));
@@ -565,6 +602,7 @@ impl Terminal {
             content_generation: AtomicU64::new(0),
             initial_cwd,
             reported_cwd,
+            pending_notifications,
             osc_sidecar,
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
@@ -995,6 +1033,14 @@ impl Terminal {
     /// on each render; returns the texts to write to the system clipboard.
     pub fn take_pending_clipboard_writes(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_clipboard.lock())
+    }
+
+    /// Take any pending iTerm2-style `OSC 9 ; message` notifications. The
+    /// GPUI thread drains these on each render to surface toasts or native
+    /// desktop notifications for long-running commands that finished while
+    /// the user was in another pane.
+    pub fn take_pending_notifications(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_notifications.lock())
     }
 
     /// Push the active theme palette so the event listener can answer
@@ -2449,6 +2495,98 @@ mod tests {
 
         terminal.process_output(b"\x1b]7;http://example/x\x07");
         assert_eq!(terminal.reported_cwd(), None);
+    }
+
+    #[test]
+    fn test_osc9_notification_collected() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]9;Build complete\x07");
+
+        let pending = terminal.take_pending_notifications();
+        assert_eq!(pending, vec!["Build complete".to_string()]);
+        // Second drain is empty (consumed).
+        assert!(terminal.take_pending_notifications().is_empty());
+    }
+
+    #[test]
+    fn test_osc9_multiple_notifications_queued() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]9;first\x07\x1b]9;second\x07");
+
+        assert_eq!(
+            terminal.take_pending_notifications(),
+            vec!["first".to_string(), "second".to_string()],
+        );
+    }
+
+    #[test]
+    fn test_osc9_empty_message_ignored() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // Empty body should not queue a blank toast.
+        terminal.process_output(b"\x1b]9;\x07");
+        terminal.process_output(b"\x1b]9;   \x07");
+
+        assert!(terminal.take_pending_notifications().is_empty());
+    }
+
+    #[test]
+    fn test_osc9_split_across_chunks() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]9;Long ");
+        assert!(terminal.take_pending_notifications().is_empty());
+        terminal.process_output(b"running job done\x07");
+
+        assert_eq!(
+            terminal.take_pending_notifications(),
+            vec!["Long running job done".to_string()],
+        );
+    }
+
+    #[test]
+    fn test_osc9_st_terminator() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // ST-terminated form (ESC \) is equally valid.
+        terminal.process_output(b"\x1b]9;hello\x1b\\");
+
+        assert_eq!(
+            terminal.take_pending_notifications(),
+            vec!["hello".to_string()],
+        );
     }
 
     #[test]
