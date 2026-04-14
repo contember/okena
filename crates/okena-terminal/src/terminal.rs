@@ -1629,6 +1629,20 @@ impl Terminal {
         }
     }
 
+    /// Cursor blinking flag from DECSCUSR, if the app has set a shape.
+    ///
+    /// Returns `None` when the app has not spoken (HollowBlock sentinel),
+    /// so callers can fall back to the user's cursor_blink setting.
+    pub fn app_cursor_blinking(&self) -> Option<bool> {
+        let term = self.term.lock();
+        let style = term.cursor_style();
+        if style.shape == VteCursorShape::HollowBlock {
+            None
+        } else {
+            Some(style.blinking)
+        }
+    }
+
     /// True if the active app has enabled focus event reporting (DEC mode 1004).
     pub fn wants_focus_events(&self) -> bool {
         let term = self.term.lock();

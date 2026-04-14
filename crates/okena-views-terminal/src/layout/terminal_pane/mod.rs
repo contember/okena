@@ -210,7 +210,14 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 smol::Timer::after(interval).await;
 
                 let result = this.update(cx, |pane, cx| {
-                    if crate::terminal_view_settings(cx).cursor_blink {
+                    // App-set DECSCUSR blinking wins over the user setting.
+                    let blink_enabled = pane
+                        .terminal
+                        .as_ref()
+                        .and_then(|t| t.app_cursor_blinking())
+                        .unwrap_or_else(|| crate::terminal_view_settings(cx).cursor_blink);
+
+                    if blink_enabled {
                         if !pane.was_focused {
                             if !pane.cursor_visible {
                                 pane.cursor_visible = true;
