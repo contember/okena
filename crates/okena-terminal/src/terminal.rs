@@ -9,6 +9,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::grid::{Scroll, Dimensions};
 use parking_lot::Mutex;
 use regex::Regex;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -363,6 +364,193 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Kind of an OSC 133 shell-integration mark.
+///
+/// Shells that implement OSC 133 emit one of these four sequences at
+/// well-defined points in the prompt/command lifecycle. Each kind carries
+/// no positional data itself — the row/column are captured by Okena when
+/// the sidecar sees the sequence arrive on the byte stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptMarkKind {
+    /// `OSC 133 ; A` — beginning of a new prompt (before the user can type).
+    PromptStart,
+    /// `OSC 133 ; B` — end of prompt, the shell is ready for input.
+    CommandStart,
+    /// `OSC 133 ; C` — user hit Enter, the command is now executing.
+    CommandExecuted,
+    /// `OSC 133 ; D [; <exit_code>]` — the command finished. The exit code
+    /// is optional because some shells elide it on interactive prompts.
+    CommandFinished { exit_code: Option<i32> },
+}
+
+/// A shell-integration mark with its captured grid position.
+///
+/// `line` is in alacritty's `Line` coordinate system: `0..screen_lines-1`
+/// is the viewport and negative values live in scrollback. The tracker
+/// rebases `line` as content scrolls so the value stays valid across
+/// command output — up to the scrollback cap (see [`PromptTracker`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PromptMark {
+    pub kind: PromptMarkKind,
+    pub line: i32,
+    pub column: usize,
+}
+
+/// Ring buffer of recent OSC 133 marks plus a best-effort scroll tracker.
+///
+/// **Scrollback-cap caveat**: the tracker rebases marks by watching
+/// `grid.history_size()` grow — which is exact until the user hits the
+/// configured scrollback limit. Past that, the grid starts evicting from
+/// the top without changing `history_size`, so mark line values drift by
+/// the number of post-cap scrolls. Follow-up work can tighten this by
+/// counting linefeeds directly; until then, callers should treat marks
+/// older than the scrollback as "approximate" and prefer jumping to the
+/// most recent few.
+struct PromptTracker {
+    marks: VecDeque<PromptMark>,
+    /// Oldest-first ring buffer cap. Shells that run thousands of commands
+    /// don't need thousands of marks — the UX only looks at the last few.
+    capacity: usize,
+}
+
+impl PromptTracker {
+    fn new() -> Self {
+        Self { marks: VecDeque::with_capacity(64), capacity: 64 }
+    }
+
+    /// Record a new mark at the given grid point. Evicts the oldest mark
+    /// when the ring buffer is full.
+    fn record(&mut self, kind: PromptMarkKind, point: Point) {
+        if self.marks.len() == self.capacity {
+            self.marks.pop_front();
+        }
+        self.marks.push_back(PromptMark {
+            kind,
+            line: point.line.0,
+            column: point.column.0,
+        });
+    }
+
+    /// Shift all stored marks upward by the number of lines that just
+    /// scrolled into history. Marks whose new `line` falls off the top of
+    /// the grid (below `-history_size`) are dropped.
+    fn on_history_changed(&mut self, before: usize, after: usize, topmost: i32) {
+        let delta = after.saturating_sub(before);
+        if delta == 0 {
+            return;
+        }
+        let delta_i32 = delta as i32;
+        self.marks.retain_mut(|mark| {
+            mark.line -= delta_i32;
+            mark.line >= topmost
+        });
+    }
+
+    fn snapshot(&self) -> Vec<PromptMark> {
+        self.marks.iter().copied().collect()
+    }
+}
+
+/// Parse the body of an `OSC 133 ; <kind> [; <args...>]` sequence into a
+/// [`PromptMarkKind`]. Returns `None` for unrecognized kind bytes; extra
+/// key=value parameters (e.g. `aid=...`, `cl=...` used by some shells)
+/// are ignored.
+fn parse_osc133_kind(kind: u8, rest: &[&[u8]]) -> Option<PromptMarkKind> {
+    match kind {
+        b'A' => Some(PromptMarkKind::PromptStart),
+        b'B' => Some(PromptMarkKind::CommandStart),
+        b'C' => Some(PromptMarkKind::CommandExecuted),
+        b'D' => {
+            // First sub-param, when present and purely numeric, is the
+            // exit code. Anything else (key=value metadata, junk) means
+            // "unknown exit".
+            let exit_code = rest
+                .first()
+                .and_then(|p| std::str::from_utf8(p).ok())
+                .and_then(|s| {
+                    let s = s.trim();
+                    if s.is_empty() { None } else { s.parse::<i32>().ok() }
+                });
+            Some(PromptMarkKind::CommandFinished { exit_code })
+        }
+        _ => None,
+    }
+}
+
+/// Byte-splitting sidecar for OSC 133. Unlike the observer-only
+/// [`OscSidecar`], this one uses `advance_until_terminated` so the caller
+/// can snapshot the main processor's cursor position at the exact byte
+/// where the mark arrived.
+struct PromptSidecar {
+    parser: alacritty_terminal::vte::Parser,
+    perform: PromptSidecarPerform,
+}
+
+impl PromptSidecar {
+    fn new() -> Self {
+        Self {
+            parser: alacritty_terminal::vte::Parser::new(),
+            perform: PromptSidecarPerform { pending: None },
+        }
+    }
+}
+
+struct PromptSidecarPerform {
+    pending: Option<PromptMarkKind>,
+}
+
+impl Perform for PromptSidecarPerform {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // We only care about `OSC 133 ; X [; args...]`. Everything else
+        // is handled by the observer sidecar or ignored.
+        if params.first().copied() != Some(b"133".as_ref()) {
+            return;
+        }
+        let Some(kind_param) = params.get(1) else { return };
+        let Some(&kind_byte) = kind_param.first() else { return };
+        if let Some(kind) = parse_osc133_kind(kind_byte, &params[2..]) {
+            self.pending = Some(kind);
+        }
+    }
+
+    fn terminated(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// Feed `data` to both the main alacritty processor and the prompt sidecar
+/// in lockstep. Whenever the sidecar sees an `OSC 133` sequence it flags
+/// itself as terminated; we advance the main processor up to the same byte
+/// offset (so the cursor is at its post-OSC position, which is unchanged
+/// since OSC sequences are zero-width) and then record the mark.
+fn advance_with_prompt_marks<L: EventListener>(
+    term: &mut Term<L>,
+    processor: &mut Processor,
+    sidecar: &mut PromptSidecar,
+    tracker: &mut PromptTracker,
+    data: &[u8],
+) {
+    let mut pos = 0;
+    while pos < data.len() {
+        let consumed = sidecar
+            .parser
+            .advance_until_terminated(&mut sidecar.perform, &data[pos..]);
+        processor.advance(term, &data[pos..pos + consumed]);
+        if let Some(kind) = sidecar.perform.pending.take() {
+            let point = term.grid().cursor.point;
+            tracker.record(kind, point);
+        }
+        if consumed == 0 {
+            // Safety net: `advance_until_terminated` is expected to make
+            // progress on every call (at least one byte per inner loop
+            // iteration) as long as `terminated()` was false on entry.
+            // If the parser ever stalls anyway, bail rather than spin.
+            break;
+        }
+        pos += consumed;
+    }
+}
+
 /// Cursor shape requested by the terminal application via DECSCUSR.
 ///
 /// Maps onto the three shapes Okena's renderer knows how to paint.
@@ -520,6 +708,12 @@ pub struct Terminal {
     /// alacritty_terminal either ignores or answers differently than Okena
     /// wants.
     osc_sidecar: Mutex<OscSidecar>,
+    /// Byte-splitting sidecar for OSC 133 shell-integration marks. Runs
+    /// in lockstep with the main processor so cursor positions can be
+    /// snapshotted at the exact byte each mark arrives.
+    prompt_sidecar: Mutex<PromptSidecar>,
+    /// Ring buffer of captured OSC 133 marks.
+    prompt_tracker: Mutex<PromptTracker>,
     /// Timestamp of last terminal output (for idle detection)
     last_output_time: Arc<Mutex<Instant>>,
     /// Shell process PID (for foreground process check)
@@ -604,6 +798,8 @@ impl Terminal {
             reported_cwd,
             pending_notifications,
             osc_sidecar,
+            prompt_sidecar: Mutex::new(PromptSidecar::new()),
+            prompt_tracker: Mutex::new(PromptTracker::new()),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
@@ -617,9 +813,35 @@ impl Terminal {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();
+        let mut prompt_sidecar = self.prompt_sidecar.lock();
+        let mut prompt_tracker = self.prompt_tracker.lock();
 
-        processor.advance(&mut *term, data);
+        let history_before = term.grid().history_size();
+
+        // OSC 7 / OSC 9 / XTVERSION observer runs on the full chunk in one
+        // pass — it never needs cursor-accurate positioning.
         sidecar.advance(data);
+
+        // OSC 133 requires the main processor and the prompt sidecar to
+        // advance in lockstep so we can snapshot the cursor at the exact
+        // byte where each mark arrives. `advance_until_terminated` stops
+        // the prompt sidecar at every OSC 133 so the main processor can
+        // catch up before we read `grid.cursor.point`.
+        advance_with_prompt_marks(
+            &mut *term,
+            &mut *processor,
+            &mut prompt_sidecar,
+            &mut prompt_tracker,
+            data,
+        );
+
+        let history_after = term.grid().history_size();
+        prompt_tracker.on_history_changed(
+            history_before,
+            history_after,
+            term.grid().topmost_line().0,
+        );
+
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
         *self.last_output_time.lock() = Instant::now();
@@ -650,8 +872,24 @@ impl Terminal {
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();
-        processor.advance(&mut *term, &data);
+        let mut prompt_sidecar = self.prompt_sidecar.lock();
+        let mut prompt_tracker = self.prompt_tracker.lock();
+
+        let history_before = term.grid().history_size();
         sidecar.advance(&data);
+        advance_with_prompt_marks(
+            &mut *term,
+            &mut *processor,
+            &mut prompt_sidecar,
+            &mut prompt_tracker,
+            &data,
+        );
+        let history_after = term.grid().history_size();
+        prompt_tracker.on_history_changed(
+            history_before,
+            history_after,
+            term.grid().topmost_line().0,
+        );
         self.content_generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1087,6 +1325,13 @@ impl Terminal {
             .lock()
             .clone()
             .unwrap_or_else(|| self.initial_cwd.clone())
+    }
+
+    /// Snapshot of the OSC 133 shell-integration marks currently tracked
+    /// for this terminal, oldest first. Returns an empty Vec when the
+    /// running shell has no OSC 133 support enabled.
+    pub fn prompt_marks(&self) -> Vec<PromptMark> {
+        self.prompt_tracker.lock().snapshot()
     }
 
     /// Set the shell process PID (for foreground process checking)
@@ -2495,6 +2740,199 @@ mod tests {
 
         terminal.process_output(b"\x1b]7;http://example/x\x07");
         assert_eq!(terminal.reported_cwd(), None);
+    }
+
+    #[test]
+    fn test_osc133_prompt_start_captures_cursor_position() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // Two lines of output, then a prompt marker. After the newline
+        // and carriage return the cursor sits at column 0 of line 2, and
+        // that's where the prompt begins.
+        terminal.process_output(b"hi\r\nok\r\n\x1b]133;A\x1b\\$ ");
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(marks.len(), 1);
+        let mark = marks[0];
+        assert_eq!(mark.kind, PromptMarkKind::PromptStart);
+        assert_eq!(mark.line, 2);
+        assert_eq!(mark.column, 0);
+    }
+
+    #[test]
+    fn test_osc133_all_four_kinds_captured_in_order() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // Full prompt lifecycle on one line: A (prompt) B (cmd input) C
+        // (executing) D (done with exit code).
+        terminal.process_output(
+            b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls\r\n\x1b]133;C\x1b\\output\r\n\x1b]133;D;0\x1b\\",
+        );
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(marks.len(), 4);
+        assert_eq!(marks[0].kind, PromptMarkKind::PromptStart);
+        assert_eq!(marks[1].kind, PromptMarkKind::CommandStart);
+        assert_eq!(marks[2].kind, PromptMarkKind::CommandExecuted);
+        assert_eq!(
+            marks[3].kind,
+            PromptMarkKind::CommandFinished { exit_code: Some(0) },
+        );
+    }
+
+    #[test]
+    fn test_osc133_d_parses_nonzero_exit_code() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]133;D;127\x1b\\");
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(
+            marks[0].kind,
+            PromptMarkKind::CommandFinished { exit_code: Some(127) },
+        );
+    }
+
+    #[test]
+    fn test_osc133_d_without_exit_code_is_none() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]133;D\x1b\\");
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(
+            marks[0].kind,
+            PromptMarkKind::CommandFinished { exit_code: None },
+        );
+    }
+
+    #[test]
+    fn test_osc133_ignores_unknown_kind() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // `E` is not a valid OSC 133 kind — must be dropped silently.
+        terminal.process_output(b"\x1b]133;E\x1b\\");
+
+        assert!(terminal.prompt_marks().is_empty());
+    }
+
+    #[test]
+    fn test_osc133_split_across_chunks() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]133");
+        assert!(terminal.prompt_marks().is_empty());
+        terminal.process_output(b";A\x1b\\");
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].kind, PromptMarkKind::PromptStart);
+    }
+
+    #[test]
+    fn test_osc133_marks_shift_when_content_scrolls() {
+        // Small viewport so we can provoke scrollback growth without
+        // flooding the test. 5 rows, 20 columns.
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        // Capture a prompt at the top of the viewport.
+        terminal.process_output(b"\x1b]133;A\x1b\\$ ");
+        assert_eq!(terminal.prompt_marks()[0].line, 0);
+
+        // Push three lines of output — content scrolls, prompt should
+        // still be tracked but at a lower line value (scrollback).
+        terminal.process_output(b"\r\na\r\nb\r\nc\r\nd\r\ne");
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(marks.len(), 1, "mark must survive scroll within cap");
+        // After five linefeeds with a five-row viewport the original
+        // prompt row is pushed one row into scrollback.
+        assert!(
+            marks[0].line < 0,
+            "expected prompt to slide into scrollback, got {}",
+            marks[0].line,
+        );
+    }
+
+    #[test]
+    fn test_osc133_ring_buffer_evicts_oldest() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        // Drive 70 PromptStart marks through — ring capacity is 64, so
+        // the 6 oldest must be evicted and the newest kept.
+        for _ in 0..70 {
+            terminal.process_output(b"\x1b]133;A\x1b\\");
+        }
+
+        let marks = terminal.prompt_marks();
+        assert_eq!(marks.len(), 64);
+        assert!(marks.iter().all(|m| m.kind == PromptMarkKind::PromptStart));
+    }
+
+    #[test]
+    fn test_parse_osc133_kind() {
+        assert_eq!(parse_osc133_kind(b'A', &[]), Some(PromptMarkKind::PromptStart));
+        assert_eq!(parse_osc133_kind(b'B', &[]), Some(PromptMarkKind::CommandStart));
+        assert_eq!(parse_osc133_kind(b'C', &[]), Some(PromptMarkKind::CommandExecuted));
+        assert_eq!(
+            parse_osc133_kind(b'D', &[b"42"]),
+            Some(PromptMarkKind::CommandFinished { exit_code: Some(42) }),
+        );
+        // Non-numeric extra params mean "unknown exit".
+        assert_eq!(
+            parse_osc133_kind(b'D', &[b"aid=abc"]),
+            Some(PromptMarkKind::CommandFinished { exit_code: None }),
+        );
+        assert_eq!(parse_osc133_kind(b'Z', &[]), None);
     }
 
     #[test]
