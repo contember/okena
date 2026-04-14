@@ -59,6 +59,7 @@ pub use okena_views_terminal::actions::{
     Copy, Paste, Search, SearchNext, SearchPrev, CloseSearch,
     SendTab, SendBacktab, ZoomIn, ZoomOut, ResetZoom,
     ToggleFullscreen, FullscreenNextTerminal, FullscreenPrevTerminal,
+    JumpToPreviousPrompt, JumpToNextPrompt,
 };
 
 // Sidebar-specific actions (defined in okena-views-sidebar crate)
@@ -284,6 +285,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "Search" => Some(KeyBinding::new(keystroke, Search, context)),
         "SearchNext" => Some(KeyBinding::new(keystroke, SearchNext, context)),
         "SearchPrev" => Some(KeyBinding::new(keystroke, SearchPrev, context)),
+        "JumpToPreviousPrompt" => Some(KeyBinding::new(keystroke, JumpToPreviousPrompt, context)),
+        "JumpToNextPrompt" => Some(KeyBinding::new(keystroke, JumpToNextPrompt, context)),
         "CloseSearch" => Some(KeyBinding::new(keystroke, CloseSearch, context)),
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),

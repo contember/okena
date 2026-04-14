@@ -74,6 +74,22 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         }
     }
 
+    pub(super) fn handle_jump_prev_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal {
+            if terminal.jump_to_prompt_above() {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn handle_jump_next_prompt(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref terminal) = self.terminal {
+            if terminal.jump_to_prompt_below() {
+                cx.notify();
+            }
+        }
+    }
+
     pub(super) fn handle_file_drop(&mut self, paths: &ExternalPaths, _cx: &mut Context<Self>) {
         let Some(ref terminal) = self.terminal else {
             return;

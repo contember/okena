@@ -273,6 +273,15 @@ impl KeybindingConfig {
         );
 
         bindings.insert(
+            "JumpToPreviousPrompt".to_string(),
+            vec![KeybindingEntry::new("cmd-up", Some("TerminalPane"))],
+        );
+        bindings.insert(
+            "JumpToNextPrompt".to_string(),
+            vec![KeybindingEntry::new("cmd-down", Some("TerminalPane"))],
+        );
+
+        bindings.insert(
             "TogglePaneSwitcher".to_string(),
             vec![
                 KeybindingEntry::new("cmd-`", None),

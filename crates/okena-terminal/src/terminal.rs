@@ -364,6 +364,13 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// Which way `jump_to_prompt` looks relative to the currently visible top.
+#[derive(Clone, Copy, Debug)]
+enum JumpDirection {
+    Above,
+    Below,
+}
+
 /// Kind of an OSC 133 shell-integration mark.
 ///
 /// Shells that implement OSC 133 emit one of these four sequences at
@@ -714,6 +721,12 @@ pub struct Terminal {
     prompt_sidecar: Mutex<PromptSidecar>,
     /// Ring buffer of captured OSC 133 marks.
     prompt_tracker: Mutex<PromptTracker>,
+    /// Reverse index into the current list of `PromptStart` marks (0 =
+    /// newest). `Some` while the user is walking through prompts with
+    /// `jump_to_prompt_above/below`; reset to `None` on any output or
+    /// external scroll so the next walk starts from the most recent
+    /// prompt again.
+    prompt_jump_index: Mutex<Option<usize>>,
     /// Timestamp of last terminal output (for idle detection)
     last_output_time: Arc<Mutex<Instant>>,
     /// Shell process PID (for foreground process check)
@@ -800,6 +813,7 @@ impl Terminal {
             osc_sidecar,
             prompt_sidecar: Mutex::new(PromptSidecar::new()),
             prompt_tracker: Mutex::new(PromptTracker::new()),
+            prompt_jump_index: Mutex::new(None),
             last_output_time: Arc::new(Mutex::new(Instant::now())),
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
@@ -841,6 +855,10 @@ impl Terminal {
             history_after,
             term.grid().topmost_line().0,
         );
+
+        // New output disengages the prompt-jump walker so the next
+        // Above jump starts from the newest prompt again.
+        *self.prompt_jump_index.lock() = None;
 
         self.dirty.store(true, Ordering::Relaxed);
         self.content_generation.fetch_add(1, Ordering::Relaxed);
@@ -1136,6 +1154,10 @@ impl Terminal {
         term.scroll_display(scroll);
         *self.scroll_offset.lock() += delta;
         self.content_generation.fetch_add(1, Ordering::Relaxed);
+        // External scroll disengages the prompt-jump walker — the user's
+        // implicit reference point has moved, so the next Above jump
+        // should start over from the newest prompt.
+        *self.prompt_jump_index.lock() = None;
     }
 
     /// Scroll up by lines
@@ -1332,6 +1354,74 @@ impl Terminal {
     /// running shell has no OSC 133 support enabled.
     pub fn prompt_marks(&self) -> Vec<PromptMark> {
         self.prompt_tracker.lock().snapshot()
+    }
+
+    /// Scroll the viewport so the next older `OSC 133 ; A` prompt lands at
+    /// visual row 0. The first call after any shell output lands on the
+    /// most-recent prompt (even if it's already visible); each subsequent
+    /// call walks one prompt further into history until there are none
+    /// left, at which point `false` is returned.
+    pub fn jump_to_prompt_above(&self) -> bool {
+        self.jump_to_prompt(JumpDirection::Above)
+    }
+
+    /// Reverse of [`jump_to_prompt_above`]: walks one prompt forward toward
+    /// the live bottom. Returns `false` when the walker is already sitting
+    /// on the newest prompt or hasn't started walking yet.
+    pub fn jump_to_prompt_below(&self) -> bool {
+        self.jump_to_prompt(JumpDirection::Below)
+    }
+
+    fn jump_to_prompt(&self, direction: JumpDirection) -> bool {
+        let marks = self.prompt_tracker.lock().snapshot();
+        // Only `PromptStart` is a reliable "prompt begins here" marker.
+        let prompts: Vec<&PromptMark> = marks
+            .iter()
+            .filter(|m| m.kind == PromptMarkKind::PromptStart)
+            .collect();
+        if prompts.is_empty() {
+            return false;
+        }
+
+        // `prompt_jump_index` is a reverse index into `prompts`: 0 = newest,
+        // 1 = one older, etc. `None` means "walker is not engaged; an
+        // Above jump should land on the newest prompt". Storing a reverse
+        // index keeps the walk scroll-invariant — scrolling rebases line
+        // values on every mark, but the relative order and count don't
+        // change.
+        let new_index: usize = {
+            let mut state = self.prompt_jump_index.lock();
+            let next = match (direction, *state) {
+                (JumpDirection::Above, None) => 0,
+                (JumpDirection::Above, Some(n)) => {
+                    if n + 1 >= prompts.len() {
+                        return false;
+                    }
+                    n + 1
+                }
+                (JumpDirection::Below, Some(n)) if n > 0 => n - 1,
+                (JumpDirection::Below, _) => return false,
+            };
+            *state = Some(next);
+            next
+        };
+
+        let target = prompts[prompts.len() - 1 - new_index];
+        let target_offset = (-target.line).max(0);
+
+        // Scroll inline (bypassing self.scroll) so the jump walker state
+        // isn't cleared — self.scroll() is reserved for externally-driven
+        // scrolling which resets the walker.
+        let mut term = self.term.lock();
+        let current = term.grid().display_offset() as i32;
+        let delta = target_offset - current;
+        if delta != 0 {
+            term.scroll_display(Scroll::Delta(delta));
+            drop(term);
+            *self.scroll_offset.lock() += delta;
+            self.content_generation.fetch_add(1, Ordering::Relaxed);
+        }
+        true
     }
 
     /// Set the shell process PID (for foreground process checking)
@@ -2895,6 +2985,167 @@ mod tests {
             "expected prompt to slide into scrollback, got {}",
             marks[0].line,
         );
+    }
+
+    #[test]
+    fn test_jump_to_prompt_walks_through_history() {
+        // Small viewport (5x20) so three prompts push older ones into
+        // scrollback and jumping eventually lands in history.
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        // Three prompts with enough output between them to push the
+        // oldest into scrollback.
+        terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\nmore\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\nout\r\nmore\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ c\r\n");
+
+        assert_eq!(terminal.prompt_marks().len(), 3);
+
+        // Walk all the way back. Each press must succeed; at least one of
+        // them must cross into scrollback.
+        assert!(terminal.jump_to_prompt_above());
+        assert!(terminal.jump_to_prompt_above());
+        assert!(terminal.jump_to_prompt_above());
+        assert!(
+            terminal.display_offset() > 0,
+            "after walking through all three prompts the display must be \
+             scrolled into history, got offset {}",
+            terminal.display_offset(),
+        );
+
+        // Fourth press has nothing older.
+        assert!(!terminal.jump_to_prompt_above());
+    }
+
+    #[test]
+    fn test_jump_to_prompt_above_stops_at_oldest() {
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\n");
+
+        // Two prompts → two Above presses succeed, third fails.
+        assert!(terminal.jump_to_prompt_above()); // newest (index 0)
+        assert!(terminal.jump_to_prompt_above()); // oldest (index 1)
+        let before = terminal.display_offset();
+        assert!(!terminal.jump_to_prompt_above()); // nothing older
+        assert_eq!(terminal.display_offset(), before);
+    }
+
+    #[test]
+    fn test_jump_to_prompt_below_reverses_walk() {
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\nmore\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\nout\r\nmore\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ c\r\n");
+
+        // Walk up to oldest prompt (3 presses: newest → middle → oldest).
+        terminal.jump_to_prompt_above();
+        terminal.jump_to_prompt_above();
+        terminal.jump_to_prompt_above();
+        let at_top = terminal.display_offset();
+
+        // Step down once — must move strictly forward (smaller offset).
+        assert!(terminal.jump_to_prompt_below());
+        let step1 = terminal.display_offset();
+        assert!(
+            step1 < at_top,
+            "below should reduce display offset ({step1} < {at_top})",
+        );
+    }
+
+    #[test]
+    fn test_jump_below_without_walker_is_noop() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        terminal.process_output(b"\x1b]133;A\x1b\\");
+        // No Above press yet — walker is disengaged, Below must no-op.
+        assert!(!terminal.jump_to_prompt_below());
+    }
+
+    #[test]
+    fn test_new_output_resets_walker() {
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        terminal.process_output(b"\x1b]133;A\x1b\\$ a\r\nout\r\n");
+        terminal.process_output(b"\x1b]133;A\x1b\\$ b\r\n");
+
+        // Engage the walker and step back.
+        terminal.jump_to_prompt_above();
+        terminal.jump_to_prompt_above();
+
+        // New shell output must reset the walker — a subsequent Below
+        // press has no walker to reverse, so it no-ops.
+        terminal.process_output(b"fresh output\r\n");
+        assert!(!terminal.jump_to_prompt_below());
+    }
+
+    #[test]
+    fn test_jump_to_prompt_returns_false_without_marks() {
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new(
+            "t".into(),
+            TerminalSize::default(),
+            transport,
+            "/tmp".into(),
+        );
+
+        assert!(!terminal.jump_to_prompt_above());
+        assert!(!terminal.jump_to_prompt_below());
+    }
+
+    #[test]
+    fn test_jump_to_prompt_ignores_non_prompt_kinds() {
+        let size = TerminalSize {
+            cols: 20,
+            rows: 5,
+            cell_width: 8.0,
+            cell_height: 16.0,
+        };
+        let transport = Arc::new(NullTransport);
+        let terminal = Terminal::new("t".into(), size, transport, "/tmp".into());
+
+        // Only `C` and `D` kinds — jumping must still be a no-op because
+        // PromptStart is the canonical "prompt begins here" signal.
+        terminal.process_output(b"\x1b]133;C\x1b\\cmd\r\nout\r\n");
+        terminal.process_output(b"\x1b]133;D;0\x1b\\");
+
+        assert!(!terminal.jump_to_prompt_above());
     }
 
     #[test]

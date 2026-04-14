@@ -5,6 +5,7 @@ use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy,
     CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
+    JumpToNextPrompt, JumpToPreviousPrompt,
     MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
@@ -218,6 +219,24 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Close search panel",
             category: "Search",
             factory: || Box::new(CloseSearch),
+        },
+    );
+    map.insert(
+        "JumpToPreviousPrompt",
+        ActionDescription {
+            name: "Jump to Previous Prompt",
+            description: "Scroll to the previous shell prompt (OSC 133)",
+            category: "Terminal",
+            factory: || Box::new(JumpToPreviousPrompt),
+        },
+    );
+    map.insert(
+        "JumpToNextPrompt",
+        ActionDescription {
+            name: "Jump to Next Prompt",
+            description: "Scroll forward to the next shell prompt (OSC 133)",
+            category: "Terminal",
+            factory: || Box::new(JumpToNextPrompt),
         },
     );
 

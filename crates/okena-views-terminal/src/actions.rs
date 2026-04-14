@@ -33,5 +33,7 @@ gpui::actions!(
         ToggleFullscreen,
         FullscreenNextTerminal,
         FullscreenPrevTerminal,
+        JumpToPreviousPrompt,
+        JumpToNextPrompt,
     ]
 );
