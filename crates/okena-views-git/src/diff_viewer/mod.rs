@@ -386,17 +386,21 @@ impl DiffViewer {
     }
 
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.file_stats.len() {
-            self.selected_file_index = index;
-            self.selection.clear();
-            self.selection_side = None;
-            self.scroll_x = 0.0;
-            self.current_file = None;
-            self.side_by_side_lines.clear();
-
-            self.process_current_file_async(cx);
-            cx.notify();
+        if index >= self.file_stats.len() {
+            return;
         }
+        if index == self.selected_file_index && self.current_file.is_some() {
+            return;
+        }
+        self.selected_file_index = index;
+        self.selection.clear();
+        self.selection_side = None;
+        self.scroll_x = 0.0;
+        self.current_file = None;
+        self.side_by_side_lines.clear();
+
+        self.process_current_file_async(cx);
+        cx.notify();
     }
 
     fn prev_file(&mut self, cx: &mut Context<Self>) {
