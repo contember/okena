@@ -3,6 +3,7 @@
 //! Provides a read-only view of git diffs with working/staged toggle,
 //! file tree sidebar, syntax highlighting, and selection support.
 
+mod context_menu;
 mod line_render;
 pub mod provider;
 mod render;
@@ -97,6 +98,12 @@ pub struct DiffViewer {
     commits: Vec<CommitLogEntry>,
     /// Current index in the commits list.
     commit_index: usize,
+    /// Open file-tree right-click context menu.
+    file_context_menu: Option<context_menu::DiffFileContextMenu>,
+    /// Open "Delete file" confirmation modal.
+    delete_confirm: Option<context_menu::DeleteConfirmState>,
+    /// Open "Discard changes" confirmation modal.
+    discard_confirm: Option<context_menu::DiscardConfirmState>,
 }
 
 impl DiffViewer {
@@ -151,6 +158,9 @@ impl DiffViewer {
             commit_message,
             commits: commits.unwrap_or_default(),
             commit_index: commit_index.unwrap_or(0),
+            file_context_menu: None,
+            delete_confirm: None,
+            discard_confirm: None,
         };
 
         if !provider.is_git_repo() {
@@ -675,6 +685,9 @@ impl Render for DiffViewer {
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
+                if this.dismiss_transient_ui(cx) {
+                    return;
+                }
                 if this.selection.normalized_non_empty().is_some() {
                     this.selection.clear();
                     this.selection_side = None;
@@ -744,6 +757,7 @@ impl Render for DiffViewer {
             })
             .child(self.render_content(&t, self.loading, has_error, error_message, has_files, is_binary, file_path, line_count, gutter_width, tree_elements, theme_colors, cx))
             .child(self.render_footer(&t, cx))
+            .children(self.render_context_overlays(&t, cx))
     }
 }
 

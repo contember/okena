@@ -505,6 +505,53 @@ pub fn stash_pop(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Stage a file (git add -- <file>).
+pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<(), String> {
+    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let output = command("git")
+        .args(["-C", path_str, "add", "--", file_path])
+        .output()
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+/// Unstage a file from the index (git restore --staged -- <file>).
+/// Works for both modified and newly-added files.
+pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<(), String> {
+    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let output = command("git")
+        .args(["-C", path_str, "restore", "--staged", "--", file_path])
+        .output()
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
+/// Discard working-tree changes for a file (git checkout HEAD -- <file>).
+/// Restores the file to its HEAD state.
+pub fn discard_file_changes(repo_path: &Path, file_path: &str) -> Result<(), String> {
+    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let output = command("git")
+        .args(["-C", path_str, "checkout", "HEAD", "--", file_path])
+        .output()
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.trim().to_string())
+    }
+}
+
 /// Fetch from all remotes.
 pub fn fetch_all(path: &Path) -> Result<(), String> {
     let path_str = path.to_str().ok_or("Invalid path")?;

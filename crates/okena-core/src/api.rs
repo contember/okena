@@ -241,6 +241,18 @@ pub enum ActionRequest {
     GitListBranches {
         project_id: String,
     },
+    GitStageFile {
+        project_id: String,
+        file_path: String,
+    },
+    GitUnstageFile {
+        project_id: String,
+        file_path: String,
+    },
+    GitDiscardFile {
+        project_id: String,
+        file_path: String,
+    },
     AddProject {
         name: String,
         path: String,
@@ -607,6 +619,18 @@ mod tests {
                 project_id: "p1".into(),
                 file_path: "src/main.rs".into(),
                 mode: DiffMode::Staged,
+            },
+            ActionRequest::GitStageFile {
+                project_id: "p1".into(),
+                file_path: "src/main.rs".into(),
+            },
+            ActionRequest::GitUnstageFile {
+                project_id: "p1".into(),
+                file_path: "src/main.rs".into(),
+            },
+            ActionRequest::GitDiscardFile {
+                project_id: "p1".into(),
+                file_path: "src/main.rs".into(),
             },
             ActionRequest::AddProject {
                 name: "My Project".into(),

@@ -795,6 +795,7 @@ impl DiffViewer {
             if let Some(file) = self.file_stats.get(file_index) {
                 let filename = file.path.rsplit('/').next().unwrap_or(&file.path);
                 let is_selected = file_index == self.selected_file_index;
+                let file_path_for_menu = file.path.clone();
 
                 let name_color = if file.is_new {
                     Some(t.diff_added_fg)
@@ -811,6 +812,17 @@ impl DiffViewer {
                         .on_click(cx.listener(move |this, _, _window, cx| {
                             this.select_file(file_index, cx);
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                this.select_file(file_index, cx);
+                                this.open_file_context_menu(
+                                    event.position,
+                                    file_path_for_menu.clone(),
+                                    cx,
+                                );
+                            }),
+                        )
                         // Line counts
                         .when(file.added > 0 || file.removed > 0, |d| {
                             d.child(

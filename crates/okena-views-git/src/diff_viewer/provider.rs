@@ -10,6 +10,16 @@ pub trait GitProvider: Send + Sync + 'static {
     fn get_diff_file_summary(&self) -> Vec<FileDiffSummary>;
     fn get_commit_graph(&self, count: usize, branch: Option<&str>) -> Vec<GraphRow>;
     fn list_branches(&self) -> Vec<String>;
+
+    // ── Mutations (Phase 1: per-file) ──────────────────────────────────────
+    fn stage_file(&self, file_path: &str) -> Result<(), String>;
+    fn unstage_file(&self, file_path: &str) -> Result<(), String>;
+    fn discard_file(&self, file_path: &str) -> Result<(), String>;
+    fn delete_file(&self, file_path: &str) -> Result<(), String>;
+    /// Absolute path of a file in the working tree, used for copy-absolute-path.
+    /// Returns None when the provider can't resolve it (e.g. remote without
+    /// a sensible local absolute path).
+    fn absolute_file_path(&self, file_path: &str) -> Option<String>;
 }
 
 /// Local git provider — wraps existing git functions.
@@ -46,6 +56,33 @@ impl GitProvider for LocalGitProvider {
 
     fn list_branches(&self) -> Vec<String> {
         okena_git::list_branches(std::path::Path::new(&self.path))
+    }
+
+    fn stage_file(&self, file_path: &str) -> Result<(), String> {
+        okena_git::stage_file(std::path::Path::new(&self.path), file_path)
+    }
+
+    fn unstage_file(&self, file_path: &str) -> Result<(), String> {
+        okena_git::unstage_file(std::path::Path::new(&self.path), file_path)
+    }
+
+    fn discard_file(&self, file_path: &str) -> Result<(), String> {
+        okena_git::discard_file_changes(std::path::Path::new(&self.path), file_path)
+    }
+
+    fn delete_file(&self, file_path: &str) -> Result<(), String> {
+        let abs = std::path::Path::new(&self.path).join(file_path);
+        std::fs::remove_file(&abs)
+            .map_err(|e| format!("Failed to delete file: {}", e))
+    }
+
+    fn absolute_file_path(&self, file_path: &str) -> Option<String> {
+        Some(
+            std::path::Path::new(&self.path)
+                .join(file_path)
+                .to_string_lossy()
+                .to_string(),
+        )
     }
 }
 
@@ -140,5 +177,41 @@ impl GitProvider for RemoteGitProvider {
             }),
             _ => Vec::new(),
         }
+    }
+
+    fn stage_file(&self, file_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitStageFile {
+            project_id: self.project_id.clone(),
+            file_path: file_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn unstage_file(&self, file_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitUnstageFile {
+            project_id: self.project_id.clone(),
+            file_path: file_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn discard_file(&self, file_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::GitDiscardFile {
+            project_id: self.project_id.clone(),
+            file_path: file_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn delete_file(&self, file_path: &str) -> Result<(), String> {
+        let action = okena_core::api::ActionRequest::DeleteFile {
+            project_id: self.project_id.clone(),
+            relative_path: file_path.to_string(),
+        };
+        self.post_action(action).map(|_| ())
+    }
+
+    fn absolute_file_path(&self, _file_path: &str) -> Option<String> {
+        None
     }
 }
