@@ -105,6 +105,11 @@ impl TerminalContent {
         if !terminal.is_mouse_mode() {
             return false;
         }
+        // Shift bypasses mouse reporting so users can still select text
+        // in apps like nano/tmux that capture mouse. Matches xterm/iTerm2/WezTerm.
+        if modifiers.shift {
+            return false;
+        }
         let Some((col, row, _)) = self.pixel_to_cell(event_position) else {
             return false;
         };
@@ -171,12 +176,13 @@ impl TerminalContent {
         &mut self,
         delta: f32,
         position: Point<Pixels>,
+        shift: bool,
         cx: &mut Context<Self>,
     ) {
         if let Some(ref terminal) = self.terminal {
             let (cell_width, cell_height) = terminal.cell_dimensions();
 
-            if terminal.is_mouse_mode() {
+            if terminal.is_mouse_mode() && !shift {
                 self.scroll_accumulator += delta;
                 let lines = (self.scroll_accumulator / cell_height) as i32;
                 if lines != 0 {
@@ -542,7 +548,7 @@ impl Render for TerminalContent {
                         workspace.set_terminal_zoom(&project_id, &layout_path, new_zoom, cx);
                     });
                 } else {
-                    this.handle_scroll(f32::from(delta.y), event.position, cx);
+                    this.handle_scroll(f32::from(delta.y), event.position, event.modifiers.shift, cx);
                 }
             }))
             .on_mouse_down(
