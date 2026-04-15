@@ -11,10 +11,14 @@ use gpui::prelude::*;
 use okena_ui::empty_state::empty_state;
 use okena_ui::selectable_list::selectable_list_item;
 
+const RECENT_COMMANDS_LIMIT: usize = 20;
+
 /// Remembered state from the last command palette session.
 #[derive(Default)]
 struct CommandPaletteMemory {
     query: String,
+    /// Action keys in most-recently-used order (front = most recent).
+    recent: Vec<&'static str>,
 }
 
 impl Global for CommandPaletteMemory {}
@@ -22,6 +26,8 @@ impl Global for CommandPaletteMemory {}
 /// Command entry for the palette
 #[derive(Clone)]
 struct CommandEntry {
+    /// Stable action identifier (HashMap key from `get_action_descriptions`)
+    action_key: &'static str,
     /// Display name
     name: String,
     /// Description
@@ -60,6 +66,7 @@ impl CommandPalette {
                     .map(|e| format_keystroke(&e.keystroke));
 
                 CommandEntry {
+                    action_key: *action,
                     name: desc.name.to_string(),
                     description: desc.description.to_string(),
                     category: desc.category.to_string(),
@@ -69,9 +76,25 @@ impl CommandPalette {
             })
             .collect();
 
-        // Sort by category then name
+        // Restore from previous session
+        let (query, recent) = cx.try_global::<CommandPaletteMemory>()
+            .map(|m| (m.query.clone(), m.recent.clone()))
+            .unwrap_or_default();
+        let select_all = !query.is_empty();
+
+        // Sort: most-recently-used first (in MRU order), then remaining by category + name.
+        let recent_rank: std::collections::HashMap<&'static str, usize> = recent
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, i))
+            .collect();
         commands.sort_by(|a, b| {
-            a.category.cmp(&b.category).then(a.name.cmp(&b.name))
+            match (recent_rank.get(a.action_key), recent_rank.get(b.action_key)) {
+                (Some(ra), Some(rb)) => ra.cmp(rb),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.category.cmp(&b.category).then(a.name.cmp(&b.name)),
+            }
         });
 
         let config = ListOverlayConfig::new("Command Palette")
@@ -80,12 +103,6 @@ impl CommandPalette {
             .empty_message("No commands found")
             .keyboard_hints(vec![("Enter", "to select"), ("Esc", "to close")])
             .key_context("CommandPalette");
-
-        // Restore from previous session
-        let query = cx.try_global::<CommandPaletteMemory>()
-            .map(|m| m.query.clone())
-            .unwrap_or_default();
-        let select_all = !query.is_empty();
 
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
@@ -101,8 +118,25 @@ impl CommandPalette {
     }
 
     fn save_memory(&self, cx: &mut Context<Self>) {
+        let recent = cx.try_global::<CommandPaletteMemory>()
+            .map(|m| m.recent.clone())
+            .unwrap_or_default();
         cx.set_global(CommandPaletteMemory {
             query: self.state.search_query.clone(),
+            recent,
+        });
+    }
+
+    fn record_recent(&self, action_key: &'static str, cx: &mut Context<Self>) {
+        let mut recent = cx.try_global::<CommandPaletteMemory>()
+            .map(|m| m.recent.clone())
+            .unwrap_or_default();
+        recent.retain(|k| *k != action_key);
+        recent.insert(0, action_key);
+        recent.truncate(RECENT_COMMANDS_LIMIT);
+        cx.set_global(CommandPaletteMemory {
+            query: self.state.search_query.clone(),
+            recent,
         });
     }
 
@@ -115,7 +149,8 @@ impl CommandPalette {
         if let Some(filter_result) = self.state.filtered.get(index) {
             let command = &self.state.items[filter_result.index];
             let action = (command.factory)();
-            self.save_memory(cx);
+            let action_key = command.action_key;
+            self.record_recent(action_key, cx);
 
             // Restore focus to the terminal pane before dispatching so that
             // context-scoped actions (e.g. CloseTerminal on "TerminalPane")
