@@ -9,7 +9,7 @@ use okena_git::{
     self as git, CommitLogEntry, FileDiffSummary, GitStatus, GraphRow,
 };
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::requests::OverlayRequest;
+use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 
 use crate::diff_viewer::provider::GitProvider;
 use crate::project_header;
@@ -391,14 +391,16 @@ impl GitHeader {
                                     cx.stop_propagation();
                                     this.hide_diff_popover(cx);
                                     request_broker.update(cx, |broker, cx| {
-                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                        broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
                                             project_id: project_id_for_click.clone(),
-                                            file: None,
-                                            mode: None,
-                                            commit_message: None,
-                                            commits: None,
-                                            commit_index: None,
-                                        }, cx);
+                                            kind: ProjectOverlayKind::DiffViewer {
+                                                file: None,
+                                                mode: None,
+                                                commit_message: None,
+                                                commits: None,
+                                                commit_index: None,
+                                            },
+                                        }), cx);
                                     });
                                 }))
                                 // Invisible canvas to capture bounds for popover positioning
@@ -439,14 +441,16 @@ impl GitHeader {
                     this.hide_diff_popover(cx);
                 });
                 request_broker.update(cx, |broker, cx| {
-                    broker.push_overlay_request(OverlayRequest::DiffViewer {
+                    broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
                         project_id: pid,
-                        file: Some(file_path),
-                        mode: None,
-                        commit_message: None,
-                        commits: None,
-                        commit_index: None,
-                    }, cx);
+                        kind: ProjectOverlayKind::DiffViewer {
+                            file: Some(file_path),
+                            mode: None,
+                            commit_message: None,
+                            commits: None,
+                            commit_index: None,
+                        },
+                    }), cx);
                 });
             },
             t,
@@ -537,14 +541,16 @@ impl GitHeader {
                             this.hide_commit_log(cx);
                         });
                         request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::DiffViewer {
+                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
                                 project_id: project_id.clone(),
-                                file: None,
-                                mode: Some(DiffMode::Commit(commit_hash)),
-                                commit_message: Some(commit_msg),
-                                commits: Some(commits_vec),
-                                commit_index: Some(commit_idx),
-                            }, cx);
+                                kind: ProjectOverlayKind::DiffViewer {
+                                    file: None,
+                                    mode: Some(DiffMode::Commit(commit_hash)),
+                                    commit_message: Some(commit_msg),
+                                    commits: Some(commits_vec),
+                                    commit_index: Some(commit_idx),
+                                },
+                            }), cx);
                         });
                     }))
                 };
@@ -786,17 +792,19 @@ impl GitHeader {
                                                                     let head = this.commit_log_compare_head.clone().unwrap();
                                                                     this.hide_commit_log(cx);
                                                                     broker.update(cx, |broker, cx| {
-                                                                        broker.push_overlay_request(OverlayRequest::DiffViewer {
+                                                                        broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
                                                                             project_id: pid.clone(),
-                                                                            file: None,
-                                                                            mode: Some(DiffMode::BranchCompare {
-                                                                                base,
-                                                                                head,
-                                                                            }),
-                                                                            commit_message: None,
-                                                                            commits: None,
-                                                                            commit_index: None,
-                                                                        }, cx);
+                                                                            kind: ProjectOverlayKind::DiffViewer {
+                                                                                file: None,
+                                                                                mode: Some(DiffMode::BranchCompare {
+                                                                                    base,
+                                                                                    head,
+                                                                                }),
+                                                                                commit_message: None,
+                                                                                commits: None,
+                                                                                commit_index: None,
+                                                                            },
+                                                                        }), cx);
                                                                     });
                                                                 }))
                                                             })

@@ -186,10 +186,12 @@ impl Sidebar {
                             });
                             this.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(
-                                    okena_workspace::requests::OverlayRequest::ShowServiceLog {
+                                    okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                                         project_id: project_id.clone(),
-                                        service_name: service_name.clone(),
-                                    },
+                                        kind: okena_workspace::requests::ProjectOverlayKind::ShowServiceLog {
+                                            service_name: service_name.clone(),
+                                        },
+                                    }),
                                     cx,
                                 );
                             });

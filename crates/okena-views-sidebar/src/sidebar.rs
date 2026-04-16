@@ -610,20 +610,20 @@ impl Sidebar {
     /// Request to show color picker for a project (routed via OverlayManager).
     pub fn show_color_picker(&mut self, project_id: String, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::ColorPicker {
+            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                 project_id,
-                position,
-            }, cx);
+                kind: okena_workspace::requests::ProjectOverlayKind::ColorPicker { position },
+            }), cx);
         });
     }
 
     /// Request to show color picker for a folder (routed via OverlayManager).
     pub fn show_folder_color_picker(&mut self, folder_id: String, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::FolderColorPicker {
+            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Folder(okena_workspace::requests::FolderOverlay {
                 folder_id,
-                position,
-            }, cx);
+                kind: okena_workspace::requests::FolderOverlayKind::ColorPicker { position },
+            }), cx);
         });
     }
 
@@ -645,10 +645,10 @@ impl Sidebar {
 
     pub(crate) fn request_context_menu(&mut self, project_id: String, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::ContextMenu {
+            broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                 project_id,
-                position,
-            }, cx);
+                kind: okena_workspace::requests::ProjectOverlayKind::ContextMenu { position },
+            }), cx);
         });
     }
 

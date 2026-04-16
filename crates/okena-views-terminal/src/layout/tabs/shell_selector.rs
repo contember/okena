@@ -57,11 +57,13 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 el.on_mouse_down(MouseButton::Left, move |_, _window, cx| {
                     cx.stop_propagation();
                     request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(okena_workspace::requests::OverlayRequest::ShellSelector {
+                        broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                             project_id: project_id.clone(),
-                            terminal_id: tid.clone(),
-                            current_shell: shell_type.clone(),
-                        }, cx);
+                            kind: okena_workspace::requests::ProjectOverlayKind::ShellSelector {
+                                terminal_id: tid.clone(),
+                                current_shell: shell_type.clone(),
+                            },
+                        }), cx);
                     });
                 })
             })

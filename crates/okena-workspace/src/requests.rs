@@ -18,15 +18,20 @@ pub struct FolderContextMenuRequest {
     pub position: gpui::Point<gpui::Pixels>,
 }
 
-/// Requests consumed by RootView::process_pending_requests()
+/// Project-scoped overlay request. Carries a `project_id` once;
+/// the specific overlay is in `kind`.
 #[derive(Clone, Debug)]
-pub enum OverlayRequest {
-    ContextMenu { project_id: String, position: gpui::Point<gpui::Pixels> },
-    FolderContextMenu { folder_id: String, folder_name: String, position: gpui::Point<gpui::Pixels> },
-    ShellSelector { project_id: String, terminal_id: String, current_shell: okena_terminal::shell_config::ShellType },
-    AddProjectDialog,
+pub struct ProjectOverlay {
+    pub project_id: String,
+    pub kind: ProjectOverlayKind,
+}
+
+/// The specific overlay to show for a project.
+#[derive(Clone, Debug)]
+pub enum ProjectOverlayKind {
+    ContextMenu { position: gpui::Point<gpui::Pixels> },
+    ShellSelector { terminal_id: String, current_shell: okena_terminal::shell_config::ShellType },
     DiffViewer {
-        project_id: String,
         file: Option<String>,
         mode: Option<okena_core::types::DiffMode>,
         commit_message: Option<String>,
@@ -35,11 +40,8 @@ pub enum OverlayRequest {
         /// Current index into the commits list.
         commit_index: Option<usize>,
     },
-    RemoteConnect,
-    RemoteConnectionContextMenu { connection_id: String, connection_name: String, is_pairing: bool, position: gpui::Point<gpui::Pixels> },
     TerminalContextMenu {
         terminal_id: String,
-        project_id: String,
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
         has_selection: bool,
@@ -48,18 +50,51 @@ pub enum OverlayRequest {
     TabContextMenu {
         tab_index: usize,
         num_tabs: usize,
-        project_id: String,
         layout_path: Vec<usize>,
         position: gpui::Point<gpui::Pixels>,
     },
-    ShowServiceLog { project_id: String, service_name: String },
-    ShowHookTerminal { project_id: String, terminal_id: String },
-    FileSearch { project_id: String },
-    ContentSearch { project_id: String },
-    FileBrowser { project_id: String },
-    ColorPicker { project_id: String, position: gpui::Point<gpui::Pixels> },
-    FolderColorPicker { folder_id: String, position: gpui::Point<gpui::Pixels> },
-    WorktreeList { project_id: String, position: gpui::Point<gpui::Pixels> },
+    ShowServiceLog { service_name: String },
+    ShowHookTerminal { terminal_id: String },
+    FileSearch,
+    ContentSearch,
+    FileBrowser,
+    ColorPicker { position: gpui::Point<gpui::Pixels> },
+    WorktreeList { position: gpui::Point<gpui::Pixels> },
+}
+
+/// Folder-scoped overlay request. Carries a `folder_id` once;
+/// the specific overlay is in `kind`.
+#[derive(Clone, Debug)]
+pub struct FolderOverlay {
+    pub folder_id: String,
+    pub kind: FolderOverlayKind,
+}
+
+/// The specific overlay to show for a folder.
+#[derive(Clone, Debug)]
+pub enum FolderOverlayKind {
+    ContextMenu { folder_name: String, position: gpui::Point<gpui::Pixels> },
+    ColorPicker { position: gpui::Point<gpui::Pixels> },
+}
+
+/// Requests consumed by RootView::process_pending_requests().
+///
+/// Project-scoped and folder-scoped variants are grouped into
+/// `ProjectOverlay` and `FolderOverlay` to avoid duplicating
+/// `project_id` / `folder_id` across every variant. Global and
+/// remote variants remain flat.
+#[derive(Clone, Debug)]
+pub enum OverlayRequest {
+    Project(ProjectOverlay),
+    Folder(FolderOverlay),
+    AddProjectDialog,
+    RemoteConnect,
+    RemoteConnectionContextMenu {
+        connection_id: String,
+        connection_name: String,
+        is_pairing: bool,
+        position: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// Requests consumed by Sidebar::render()

@@ -110,11 +110,13 @@ impl Sidebar {
                 let folder_name = folder_name.clone();
                 move |this, event: &MouseDownEvent, _window, cx| {
                     this.request_broker.update(cx, |broker, cx| {
-                        broker.push_overlay_request(okena_workspace::requests::OverlayRequest::FolderContextMenu {
+                        broker.push_overlay_request(okena_workspace::requests::OverlayRequest::Folder(okena_workspace::requests::FolderOverlay {
                             folder_id: folder_id.clone(),
-                            folder_name: folder_name.clone(),
-                            position: event.position,
-                        }, cx);
+                            kind: okena_workspace::requests::FolderOverlayKind::ContextMenu {
+                                folder_name: folder_name.clone(),
+                                position: event.position,
+                            },
+                        }), cx);
                     });
                     cx.stop_propagation();
                 }

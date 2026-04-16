@@ -37,7 +37,7 @@ use okena_core::client::RemoteConnectionConfig;
 use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, SidebarRequest};
+use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
 use crate::workspace::state::{Workspace, WorkspaceData};
 
 // Re-export generic overlay utilities from okena-ui
@@ -683,7 +683,10 @@ impl OverlayManager {
                     this.hide_context_menu(cx);
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            OverlayRequest::FileBrowser { project_id: project_id.clone() },
+                            OverlayRequest::Project(ProjectOverlay {
+                                project_id: project_id.clone(),
+                                kind: ProjectOverlayKind::FileBrowser,
+                            }),
                             cx,
                         );
                     });
@@ -692,14 +695,16 @@ impl OverlayManager {
                     this.hide_context_menu(cx);
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            OverlayRequest::DiffViewer {
+                            OverlayRequest::Project(ProjectOverlay {
                                 project_id: project_id.clone(),
-                                file: None,
-                                mode: None,
-                                commit_message: None,
-                                commits: None,
-                                commit_index: None,
-                            },
+                                kind: ProjectOverlayKind::DiffViewer {
+                                    file: None,
+                                    mode: None,
+                                    commit_message: None,
+                                    commits: None,
+                                    commit_index: None,
+                                },
+                            }),
                             cx,
                         );
                     });

@@ -3,7 +3,7 @@ use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
 use crate::views::layout::split_pane::{compute_resize, render_project_divider, render_sidebar_divider, DragState};
-use crate::workspace::requests::OverlayRequest;
+use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use crate::ui::tokens::{ui_text_md, ui_text_xl};
 use gpui::*;
 use gpui::prelude::*;
@@ -818,7 +818,7 @@ impl Render for RootView {
                     if let Some(project_id) = project_id {
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_overlay_request(
-                                OverlayRequest::FileSearch { project_id },
+                                OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::FileSearch }),
                                 cx,
                             );
                         });
@@ -840,7 +840,7 @@ impl Render for RootView {
                     if let Some(project_id) = project_id {
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_overlay_request(
-                                OverlayRequest::ContentSearch { project_id },
+                                OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::ContentSearch }),
                                 cx,
                             );
                         });
@@ -869,7 +869,12 @@ impl Render for RootView {
 
                     if let Some(project_id) = project_id {
                         this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::DiffViewer { project_id, file: None, mode: None, commit_message: None, commits: None, commit_index: None }, cx);
+                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
+                                project_id,
+                                kind: ProjectOverlayKind::DiffViewer {
+                                    file: None, mode: None, commit_message: None, commits: None, commit_index: None,
+                                },
+                            }), cx);
                         });
                     }
                 }

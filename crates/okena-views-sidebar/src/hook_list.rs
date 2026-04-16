@@ -78,10 +78,12 @@ impl Sidebar {
                     this.cursor_index = None;
                     this.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            okena_workspace::requests::OverlayRequest::ShowHookTerminal {
+                            okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                                 project_id: project_id.clone(),
-                                terminal_id: terminal_id.clone(),
-                            },
+                                kind: okena_workspace::requests::ProjectOverlayKind::ShowHookTerminal {
+                                    terminal_id: terminal_id.clone(),
+                                },
+                            }),
                             cx,
                         );
                     });

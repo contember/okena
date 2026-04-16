@@ -479,13 +479,15 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
                         this.request_broker.update(cx, |broker, cx| {
                             broker.push_overlay_request(
-                                okena_workspace::requests::OverlayRequest::TabContextMenu {
-                                    tab_index: i,
-                                    num_tabs: num_children,
+                                okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                                     project_id: project_id.clone(),
-                                    layout_path: layout_path.clone(),
-                                    position: event.position,
-                                },
+                                    kind: okena_workspace::requests::ProjectOverlayKind::TabContextMenu {
+                                        tab_index: i,
+                                        num_tabs: num_children,
+                                        layout_path: layout_path.clone(),
+                                        position: event.position,
+                                    },
+                                }),
                                 cx,
                             );
                         });

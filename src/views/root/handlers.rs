@@ -1,8 +1,10 @@
 use crate::action_dispatch::ActionDispatcher;
 use crate::settings::settings;
 use crate::views::overlay_manager::{OverlayManager, OverlayManagerEvent};
-use crate::workspace::requests::OverlayRequest;
-use crate::workspace::requests::SidebarRequest;
+use crate::workspace::requests::{
+    FolderOverlay, FolderOverlayKind, OverlayRequest, ProjectOverlay, ProjectOverlayKind,
+    SidebarRequest,
+};
 use crate::workspace::state::{LayoutNode, Workspace};
 use gpui::*;
 
@@ -354,43 +356,112 @@ impl RootView {
 
         for request in requests {
             match request {
-                OverlayRequest::ContextMenu { project_id, position } => {
-                    if !self.overlay_manager.read(cx).has_context_menu() {
+                OverlayRequest::Project(ProjectOverlay { project_id, kind }) => match kind {
+                    ProjectOverlayKind::ContextMenu { position } => {
+                        if !self.overlay_manager.read(cx).has_context_menu() {
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_context_menu(
+                                    crate::workspace::requests::ContextMenuRequest { project_id, position },
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::ShellSelector { terminal_id, current_shell } => {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_context_menu(
-                                crate::workspace::requests::ContextMenuRequest { project_id, position },
+                            om.show_shell_selector(current_shell, project_id, terminal_id, cx);
+                        });
+                    }
+                    ProjectOverlayKind::DiffViewer { file, mode, commit_message, commits, commit_index } => {
+                        if let Some(provider) = self.build_git_provider(&project_id, cx) {
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_diff_viewer(provider, file, mode, commit_message, commits, commit_index, cx);
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::TerminalContextMenu { terminal_id, layout_path, position, has_selection, link_url } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, link_url, cx);
+                        });
+                    }
+                    ProjectOverlayKind::TabContextMenu { tab_index, num_tabs, layout_path, position } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
+                        });
+                    }
+                    ProjectOverlayKind::ShowServiceLog { service_name } => {
+                        self.handle_show_service_log(project_id, service_name, cx);
+                    }
+                    ProjectOverlayKind::ShowHookTerminal { terminal_id } => {
+                        if let Some(col) = self.project_columns.get(&project_id).cloned() {
+                            col.update(cx, |col, cx| {
+                                col.show_hook_terminal(&terminal_id, cx);
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::FileSearch => {
+                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.toggle_file_search(fs, cx);
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::ContentSearch => {
+                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                            let is_dark = crate::theme::theme(cx).is_dark();
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.toggle_content_search(fs, is_dark, cx);
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::FileBrowser => {
+                        if let Some(fs) = self.build_project_fs(&project_id, cx) {
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_file_browser(fs, cx);
+                            });
+                        }
+                    }
+                    ProjectOverlayKind::ColorPicker { position } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_color_picker(
+                                okena_views_sidebar::ColorPickerTarget::Project { project_id },
+                                position,
                                 cx,
                             );
                         });
                     }
-                }
-                OverlayRequest::FolderContextMenu { folder_id, folder_name, position } => {
-                    if !self.overlay_manager.read(cx).has_folder_context_menu() {
+                    ProjectOverlayKind::WorktreeList { position } => {
                         self.overlay_manager.update(cx, |om, cx| {
-                            om.show_folder_context_menu(
-                                crate::workspace::requests::FolderContextMenuRequest { folder_id, folder_name, position },
+                            om.show_worktree_list(project_id, position, cx);
+                        });
+                    }
+                },
+                OverlayRequest::Folder(FolderOverlay { folder_id, kind }) => match kind {
+                    FolderOverlayKind::ContextMenu { folder_name, position } => {
+                        if !self.overlay_manager.read(cx).has_folder_context_menu() {
+                            self.overlay_manager.update(cx, |om, cx| {
+                                om.show_folder_context_menu(
+                                    crate::workspace::requests::FolderContextMenuRequest { folder_id, folder_name, position },
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                    FolderOverlayKind::ColorPicker { position } => {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_color_picker(
+                                okena_views_sidebar::ColorPickerTarget::Folder { folder_id },
+                                position,
                                 cx,
                             );
                         });
                     }
-                }
-                OverlayRequest::ShellSelector { project_id, terminal_id, current_shell } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_shell_selector(current_shell, project_id, terminal_id, cx);
-                    });
-                }
+                },
                 OverlayRequest::AddProjectDialog => {
                     let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {
                         om.toggle_add_project_dialog(rm, cx);
                     });
-                }
-                OverlayRequest::DiffViewer { project_id, file, mode, commit_message, commits, commit_index } => {
-                    if let Some(provider) = self.build_git_provider(&project_id, cx) {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.show_diff_viewer(provider, file, mode, commit_message, commits, commit_index, cx);
-                        });
-                    }
                 }
                 OverlayRequest::RemoteConnect => {
                     if let Some(ref rm) = self.remote_manager {
@@ -406,71 +477,6 @@ impl RootView {
                             om.show_remote_context_menu(connection_id, connection_name, is_pairing, position, cx);
                         });
                     }
-                }
-                OverlayRequest::TerminalContextMenu { terminal_id, project_id, layout_path, position, has_selection, link_url } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_terminal_context_menu(terminal_id, project_id, layout_path, position, has_selection, link_url, cx);
-                    });
-                }
-                OverlayRequest::TabContextMenu { tab_index, num_tabs, project_id, layout_path, position } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_tab_context_menu(tab_index, num_tabs, project_id, layout_path, position, cx);
-                    });
-                }
-                OverlayRequest::ShowServiceLog { project_id, service_name } => {
-                    self.handle_show_service_log(project_id, service_name, cx);
-                }
-                OverlayRequest::ShowHookTerminal { project_id, terminal_id } => {
-                    if let Some(col) = self.project_columns.get(&project_id).cloned() {
-                        col.update(cx, |col, cx| {
-                            col.show_hook_terminal(&terminal_id, cx);
-                        });
-                    }
-                }
-                OverlayRequest::FileSearch { project_id } => {
-                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.toggle_file_search(fs, cx);
-                        });
-                    }
-                }
-                OverlayRequest::ContentSearch { project_id } => {
-                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                        let is_dark = crate::theme::theme(cx).is_dark();
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.toggle_content_search(fs, is_dark, cx);
-                        });
-                    }
-                }
-                OverlayRequest::FileBrowser { project_id } => {
-                    if let Some(fs) = self.build_project_fs(&project_id, cx) {
-                        self.overlay_manager.update(cx, |om, cx| {
-                            om.show_file_browser(fs, cx);
-                        });
-                    }
-                }
-                OverlayRequest::ColorPicker { project_id, position } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_color_picker(
-                            okena_views_sidebar::ColorPickerTarget::Project { project_id },
-                            position,
-                            cx,
-                        );
-                    });
-                }
-                OverlayRequest::FolderColorPicker { folder_id, position } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_color_picker(
-                            okena_views_sidebar::ColorPickerTarget::Folder { folder_id },
-                            position,
-                            cx,
-                        );
-                    });
-                }
-                OverlayRequest::WorktreeList { project_id, position } => {
-                    self.overlay_manager.update(cx, |om, cx| {
-                        om.show_worktree_list(project_id, position, cx);
-                    });
                 }
             }
         }

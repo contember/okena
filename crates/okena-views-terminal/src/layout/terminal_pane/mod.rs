@@ -169,14 +169,16 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
                 if let Some(ref terminal_id) = self.terminal_id {
                     self.request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            okena_workspace::requests::OverlayRequest::TerminalContextMenu {
-                                terminal_id: terminal_id.clone(),
+                            okena_workspace::requests::OverlayRequest::Project(okena_workspace::requests::ProjectOverlay {
                                 project_id: self.project_id.clone(),
-                                layout_path: self.layout_path.clone(),
-                                position: *position,
-                                has_selection: *has_selection,
-                                link_url: link_url.clone(),
-                            },
+                                kind: okena_workspace::requests::ProjectOverlayKind::TerminalContextMenu {
+                                    terminal_id: terminal_id.clone(),
+                                    layout_path: self.layout_path.clone(),
+                                    position: *position,
+                                    has_selection: *has_selection,
+                                    link_url: link_url.clone(),
+                                },
+                            }),
                             cx,
                         );
                     });

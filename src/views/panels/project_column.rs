@@ -17,7 +17,7 @@ use gpui_component::{h_flex, v_flex};
 use std::sync::Arc;
 
 use okena_core::api::ActionRequest;
-use okena_workspace::requests::OverlayRequest;
+use okena_workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayKind};
 use okena_views_services::service_panel::ServicePanel;
 use crate::views::panels::hook_panel::HookPanel;
 use crate::views::root::TerminalsRegistry;
@@ -371,10 +371,10 @@ impl ProjectColumn {
                     cx.stop_propagation();
                     request_broker.update(cx, |broker, cx| {
                         broker.push_overlay_request(
-                            OverlayRequest::ContextMenu {
+                            OverlayRequest::Project(ProjectOverlay {
                                 project_id: project_id.clone(),
-                                position: event.position,
-                            },
+                                kind: ProjectOverlayKind::ContextMenu { position: event.position },
+                            }),
                             cx,
                         );
                     });
@@ -434,7 +434,10 @@ impl ProjectColumn {
                             .on_click(move |_, _, cx| {
                                 request_broker_for_click.update(cx, |broker, cx| {
                                     broker.push_overlay_request(
-                                        OverlayRequest::FileBrowser { project_id: project_id_for_click.clone() },
+                                        OverlayRequest::Project(ProjectOverlay {
+                                            project_id: project_id_for_click.clone(),
+                                            kind: ProjectOverlayKind::FileBrowser,
+                                        }),
                                         cx,
                                     );
                                 });
