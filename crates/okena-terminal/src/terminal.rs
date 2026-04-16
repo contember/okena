@@ -673,70 +673,214 @@ pub struct ResizeState {
 }
 
 /// A terminal instance wrapping alacritty_terminal
+/// Terminal emulator state.
+///
+/// # Threading model
+///
+/// `Terminal` is always stored behind `Arc` (in `TerminalsRegistry`) and all
+/// methods take `&self`, using interior mutability for mutation. Three
+/// execution contexts access the struct:
+///
+/// 1. **GPUI thread** — the main UI thread. Runs `process_output` (via the
+///    batched PTY event loop in `Okena`), all rendering (`with_content`),
+///    user-input methods, resize, selection, scroll, and idle-detection reads.
+///    This is where the vast majority of field access happens.
+///
+/// 2. **Tokio reader task** (remote connections only) — calls `enqueue_output`
+///    to buffer incoming data without holding `term.lock()`. Only touches
+///    `pending_output`, `dirty`, and `last_output_time`.
+///
+/// 3. **Resize debounce timer** — a short-lived `std::thread::spawn` that
+///    flushes a trailing-edge resize after the debounce window. Only touches
+///    `resize_state` and `transport`.
+///
+/// The PTY reader OS thread does **not** touch `Terminal` directly — it sends
+/// `PtyEvent::Data` through an `async_channel`, which the GPUI thread drains.
+///
+/// # Synchronization primitives
+///
+/// - **`Arc<Mutex<T>>`** — the `Arc` is needed when the value is shared with a
+///   sub-struct (`ZedEventListener`, `OscSidecar`) or handed to a background
+///   thread (`resize_state`). The `Mutex` (from `parking_lot`) provides
+///   interior mutability.
+///
+/// - **`Mutex<T>`** — interior mutability for fields that don't need to be
+///   shared outside the `Terminal` struct. All current `Mutex`-only fields are
+///   accessed exclusively from the GPUI thread; the `Mutex` is required
+///   because `&self` methods need interior mutability, not because multiple
+///   threads contend.
+///
+/// - **`AtomicBool` / `AtomicU64`** — lock-free signaling between the GPUI
+///   thread and the tokio reader task (for `dirty`), or between the GPUI
+///   thread's output path and its render path (for `content_generation`,
+///   `waiting_for_input`, `had_user_input`) to avoid mutex overhead on every
+///   frame.
 pub struct Terminal {
-    term: Arc<Mutex<Term<ZedEventListener>>>,
-    processor: Mutex<Processor>,
+    // ── Immutable after construction ─────────────────────────────────
+
+    /// Unique identifier for this terminal instance. Immutable after
+    /// construction; read freely from any thread.
     pub terminal_id: String,
-    pub resize_state: Arc<Mutex<ResizeState>>,
+
+    /// I/O transport (local PTY or remote WebSocket). Immutable ref after
+    /// construction. `Arc` for sharing with `ZedEventListener`, `OscSidecar`,
+    /// and the resize debounce timer.
     transport: Arc<dyn TerminalTransport>,
-    selection_state: Mutex<SelectionState>,
-    scroll_offset: Mutex<i32>,
-    /// Terminal title from OSC sequences
-    title: Arc<Mutex<Option<String>>>,
-    /// Bell notification flag (set when terminal receives bell, cleared on focus)
-    has_bell: Arc<Mutex<bool>>,
-    /// Pending OSC 52 clipboard writes requested by the running app (drained
-    /// by the GPUI thread on the next render).
-    pending_clipboard: Arc<Mutex<Vec<String>>>,
-    /// Theme palette used to answer OSC 10/11/12/4 color queries. Pushed
-    /// from the render thread on every frame so it stays in sync with the
-    /// active theme.
-    palette: Arc<Mutex<Option<okena_core::theme::ThemeColors>>>,
-    /// Pending output from remote connections, drained before rendering.
-    /// Decouples the tokio reader thread from the GPUI render thread so that
-    /// `process_output` (which holds `term.lock()`) never runs on the tokio
-    /// thread, avoiding lock contention that freezes the UI.
-    pending_output: Mutex<Vec<u8>>,
-    /// Dirty flag - set when terminal content changes, cleared after render
-    dirty: AtomicBool,
-    /// Content generation counter - incremented on each process_output call.
-    /// Used by UrlDetector to skip redundant detect_urls() when content hasn't changed.
-    content_generation: AtomicU64,
-    /// Initial working directory (for resolving relative file paths in URL detection)
+
+    /// Initial working directory passed at creation time. Immutable.
+    /// Used as fallback when the shell has not yet reported its cwd via OSC 7.
     initial_cwd: String,
+
+    // ── GPUI-thread only ─────────────────────────────────────────────
+    // All fields below are accessed exclusively from the GPUI thread.
+    // `Mutex` provides interior mutability for `&self` methods, not
+    // cross-thread safety.
+
+    /// ANSI parser state (alacritty_terminal `Term`). Locked by
+    /// `process_output`, `with_content`, `resize`, `scroll`, and selection
+    /// methods — all on the GPUI thread. The `Arc` is structural: it doesn't
+    /// get cloned, but `Terminal` requires `Send + Sync` and `Term` is
+    /// mutated through `&self`.
+    term: Arc<Mutex<Term<ZedEventListener>>>,
+
+    /// VTE byte processor. Locked together with `term` in `process_output`
+    /// and `drain_pending_output`. GPUI thread only.
+    processor: Mutex<Processor>,
+
+    /// Mouse/keyboard selection state. GPUI thread only (selection start,
+    /// update, finish, cancel — all driven by UI events).
+    selection_state: Mutex<SelectionState>,
+
+    /// Cumulative scroll delta in the scrollback buffer. GPUI thread only
+    /// (scroll, scroll_page). The `Mutex` is for interior mutability; no
+    /// cross-thread contention.
+    scroll_offset: Mutex<i32>,
+
+    /// Terminal title set by OSC 0/1/2 sequences. `Arc` shared with
+    /// `ZedEventListener` (which lives inside `Term`): the listener writes
+    /// on title-change events during `process_output`, and the GPUI render
+    /// path reads via `get_title`. Both happen on the GPUI thread.
+    title: Arc<Mutex<Option<String>>>,
+
+    /// Bell notification flag. `Arc` shared with `ZedEventListener`: set on
+    /// BEL during `process_output`, cleared by the render path on focus.
+    /// GPUI thread only.
+    has_bell: Arc<Mutex<bool>>,
+
+    /// Pending OSC 52 clipboard writes requested by the running app. `Arc`
+    /// shared with `ZedEventListener`: pushed during `process_output`,
+    /// drained by the GPUI render path via `drain_clipboard_writes`.
+    /// GPUI thread only.
+    pending_clipboard: Arc<Mutex<Vec<String>>>,
+
+    /// Theme palette used to answer OSC 10/11/12/4 color queries from
+    /// terminal apps. `Arc` shared with `ZedEventListener`: the render path
+    /// pushes the current theme via `push_palette`, and the listener reads
+    /// it when composing color-query responses. GPUI thread only.
+    palette: Arc<Mutex<Option<okena_core::theme::ThemeColors>>>,
+
     /// Working directory most recently reported by the shell via OSC 7.
-    /// `None` until the shell sends its first `ESC ] 7 ; file://...` sequence.
+    /// `None` until the shell sends its first `ESC ] 7 ; file://...`
+    /// sequence. `Arc` shared with `OscSidecar` (the sidecar writes on
+    /// parse, GPUI reads via `reported_cwd`). GPUI thread only.
     reported_cwd: Arc<Mutex<Option<String>>>,
-    /// Pending iTerm2-style `OSC 9` notifications drained by the GPUI thread
-    /// on each render (same model as `pending_clipboard`).
+
+    /// Pending iTerm2-style `OSC 9` notifications. `Arc` shared with
+    /// `OscSidecar`: pushed during `process_output`, drained by the GPUI
+    /// render path via `drain_notifications`. GPUI thread only.
     pending_notifications: Arc<Mutex<Vec<String>>>,
-    /// VTE sidecar parser that watches the PTY byte stream for OSC and CSI
-    /// sequences (OSC 7 cwd, OSC 9 notifications, XTVERSION) that
-    /// alacritty_terminal either ignores or answers differently than Okena
-    /// wants.
+
+    /// VTE sidecar parser for OSC/CSI sequences (OSC 7 cwd, OSC 9
+    /// notifications, XTVERSION) that alacritty_terminal either ignores or
+    /// answers differently than Okena wants. GPUI thread only
+    /// (`process_output` and `drain_pending_output`).
     osc_sidecar: Mutex<OscSidecar>,
+
     /// Byte-splitting sidecar for OSC 133 shell-integration marks. Runs
-    /// in lockstep with the main processor so cursor positions can be
-    /// snapshotted at the exact byte each mark arrives.
+    /// in lockstep with the main `processor` so cursor positions can be
+    /// snapshotted at the exact byte each mark arrives. GPUI thread only.
     prompt_sidecar: Mutex<PromptSidecar>,
-    /// Ring buffer of captured OSC 133 marks.
+
+    /// Ring buffer of captured OSC 133 prompt marks. Written during
+    /// `process_output`, read by `prompt_marks` and `jump_to_prompt_*`.
+    /// GPUI thread only.
     prompt_tracker: Mutex<PromptTracker>,
+
     /// Reverse index into the current list of `PromptStart` marks (0 =
     /// newest). `Some` while the user is walking through prompts with
     /// `jump_to_prompt_above/below`; reset to `None` on any output or
-    /// external scroll so the next walk starts from the most recent
-    /// prompt again.
+    /// scroll so the next walk starts from the most recent prompt again.
+    /// GPUI thread only.
     prompt_jump_index: Mutex<Option<usize>>,
-    /// Timestamp of last terminal output (for idle detection)
-    last_output_time: Arc<Mutex<Instant>>,
-    /// Shell process PID (for foreground process check)
+
+    /// Shell process PID. Set by `set_shell_pid` (called from GPUI thread
+    /// after PTY spawn), read by `shell_pid` and `has_running_child`.
+    /// GPUI thread only.
     shell_pid: Mutex<Option<u32>>,
-    /// Cached "waiting for input" state — updated by background loop, read by renderers
-    waiting_for_input: AtomicBool,
-    /// Whether the user has ever sent input to this terminal (prevents flagging fresh terminals)
-    had_user_input: AtomicBool,
-    /// Timestamp of when the user last viewed this terminal (on blur)
+
+    /// Timestamp of when the user last viewed this terminal (set on blur
+    /// via `mark_as_viewed`). Compared against `last_output_time` to
+    /// determine `has_unseen_output`. GPUI thread only.
+    ///
+    /// The `Arc` is historical — the value is never cloned; a plain `Mutex`
+    /// would suffice.
     last_viewed_time: Arc<Mutex<Instant>>,
+
+    // ── GPUI + resize debounce timer ─────────────────────────────────
+
+    /// Terminal size, debounce state, and pending PTY resize. `Arc` is
+    /// required: a clone is handed to the short-lived debounce timer thread
+    /// (`std::thread::spawn` in `resize`) which flushes the trailing-edge
+    /// resize after the debounce window.
+    pub resize_state: Arc<Mutex<ResizeState>>,
+
+    // ── Cross-thread (GPUI + tokio reader task) ──────────────────────
+    // These fields are touched by the remote-connection tokio reader task
+    // via `enqueue_output`. The tokio task buffers data and sets flags;
+    // the GPUI thread drains and clears them.
+
+    /// Buffer for remote-connection output. Written by the tokio reader
+    /// task (`enqueue_output`), drained by the GPUI thread
+    /// (`drain_pending_output` inside `with_content`). Decouples the tokio
+    /// task from `term.lock()`, preventing lock contention that would
+    /// freeze the UI.
+    pending_output: Mutex<Vec<u8>>,
+
+    /// Content-changed flag. Set by `process_output` (GPUI) and
+    /// `enqueue_output` (tokio). Cleared by `take_dirty` (GPUI render).
+    /// `AtomicBool` for lock-free cross-thread signaling.
+    dirty: AtomicBool,
+
+    /// Timestamp of last terminal output. Written by `process_output`
+    /// (GPUI), `enqueue_output` (tokio), and `clear_waiting` (GPUI). Read
+    /// by idle-detection methods on the GPUI thread.
+    ///
+    /// The `Arc` is historical — the value is never cloned; a plain `Mutex`
+    /// would suffice since `Terminal` is already behind `Arc`.
+    last_output_time: Arc<Mutex<Instant>>,
+
+    // ── Atomics (lock-free render reads) ─────────────────────────────
+    // These use atomics so the GPUI render path can read them without
+    // taking a mutex on every frame.
+
+    /// Monotonically-increasing counter bumped on every `process_output`,
+    /// `drain_pending_output`, resize, scroll, and selection change. Used
+    /// by `UrlDetector` and `SearchBar` to skip redundant work when
+    /// content hasn't changed. GPUI thread only (despite being atomic —
+    /// the atomic avoids locking, not cross-thread access).
+    content_generation: AtomicU64,
+
+    /// Cached "waiting for input" state. Written by the GPUI idle-check
+    /// loop (`set_waiting_for_input`), read lock-free by renderers
+    /// (`is_waiting_for_input`). Atomic avoids mutex overhead in the
+    /// render hot path.
+    waiting_for_input: AtomicBool,
+
+    /// Whether the user has ever typed into this terminal. Set on
+    /// `send_input` / `send_paste` / `send_raw_input` (GPUI thread), read
+    /// lock-free by the idle-detection loop. Prevents flagging fresh
+    /// terminals as idle before the user has interacted.
+    had_user_input: AtomicBool,
 }
 
 impl Terminal {
