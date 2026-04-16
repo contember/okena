@@ -896,7 +896,7 @@ impl Render for SimpleInputState {
         };
 
         div()
-            .id("simple-input")
+            .id(ElementId::from(&focus_handle))
             .track_focus(&focus_handle)
             .relative()
             .flex()
