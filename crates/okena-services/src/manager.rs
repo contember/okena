@@ -206,7 +206,7 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
-                let instance = self.instances.get_mut(&key).unwrap();
+                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
@@ -457,7 +457,7 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
-                let instance = self.instances.get_mut(&key).unwrap();
+                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
@@ -472,7 +472,7 @@ impl ServiceManager {
                     project_id,
                     e
                 );
-                let instance = self.instances.get_mut(&key).unwrap();
+                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Crashed { exit_code: None };
             }
         }
@@ -1170,7 +1170,7 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
-                let instance = self.instances.get_mut(&key).unwrap();
+                let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
                     terminal_id,

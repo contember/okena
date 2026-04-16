@@ -29,24 +29,27 @@ pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = safe_output(
+    let output = match safe_output(
         command("git").args(["-C", path_str, "worktree", "list", "--porcelain"]),
-    )
-    .ok();
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("git worktree list failed: {e}");
+            return vec![];
+        }
+    };
 
     let mut branches = Vec::new();
 
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.starts_with("branch ") {
-                    let branch = line.strip_prefix("branch refs/heads/").unwrap_or(
-                        line.strip_prefix("branch ").unwrap_or("")
-                    );
-                    if !branch.is_empty() {
-                        branches.push(branch.to_string());
-                    }
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.starts_with("branch ") {
+                let branch = line.strip_prefix("branch refs/heads/").unwrap_or(
+                    line.strip_prefix("branch ").unwrap_or("")
+                );
+                if !branch.is_empty() {
+                    branches.push(branch.to_string());
                 }
             }
         }
@@ -235,28 +238,31 @@ pub fn list_branches(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = safe_output(
+    let output = match safe_output(
         command("git").args(["-C", path_str, "branch", "-a", "--format=%(refname:short)"]),
-    )
-    .ok();
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("git branch -a failed: {e}");
+            return vec![];
+        }
+    };
 
     let mut branches = Vec::new();
 
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let branch = line.trim();
-                if !branch.is_empty() {
-                    // Skip remote tracking branches that duplicate local ones
-                    if branch.starts_with("origin/") {
-                        let local_name = branch.strip_prefix("origin/").unwrap_or(branch);
-                        if !branches.contains(&local_name.to_string()) {
-                            branches.push(branch.to_string());
-                        }
-                    } else {
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let branch = line.trim();
+            if !branch.is_empty() {
+                // Skip remote tracking branches that duplicate local ones
+                if branch.starts_with("origin/") {
+                    let local_name = branch.strip_prefix("origin/").unwrap_or(branch);
+                    if !branches.contains(&local_name.to_string()) {
                         branches.push(branch.to_string());
                     }
+                } else {
+                    branches.push(branch.to_string());
                 }
             }
         }
@@ -308,17 +314,18 @@ pub fn has_uncommitted_changes(path: &Path) -> bool {
         None => return false,
     };
 
-    let output = command("git")
+    let output = match command("git")
         .args(["-C", path_str, "status", "--porcelain"])
         .output()
-        .ok();
-
-    match output {
-        Some(output) if output.status.success() => {
-            !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("git status --porcelain failed: {e}");
+            return false;
         }
-        _ => false,
-    }
+    };
+
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
 }
 
 /// Get the current branch name or short commit hash for detached HEAD.
@@ -362,15 +369,12 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     };
 
     // Get diff stats for staged + unstaged changes
-    let output = safe_output(
-        command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
-    )
-    .ok();
-
     let (mut added, mut removed) = (0usize, 0usize);
 
-    if let Some(output) = output {
-        if output.status.success() {
+    match safe_output(
+        command("git").args(["-C", path_str, "diff", "--numstat", "--no-color", "--no-ext-diff", "HEAD"]),
+    ) {
+        Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split('\t').collect();
@@ -385,16 +389,15 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
                 }
             }
         }
+        Ok(_) => {}
+        Err(e) => log::warn!("git diff --numstat failed: {e}"),
     }
 
     // Also include untracked files (count lines)
-    let output = safe_output(
+    match safe_output(
         command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
-    )
-    .ok();
-
-    if let Some(output) = output {
-        if output.status.success() {
+    ) {
+        Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for file in stdout.lines() {
                 if !file.is_empty() {
@@ -406,6 +409,8 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
                 }
             }
         }
+        Ok(_) => {}
+        Err(e) => log::warn!("git ls-files failed: {e}"),
     }
 
     (added, removed)
@@ -655,18 +660,21 @@ pub fn count_unpushed_commits(path: &Path) -> usize {
         None => return 0,
     };
     let remote_ref = format!("origin/{}..HEAD", branch);
-    let output = command("git")
+    match command("git")
         .args(["-C", path_str, "rev-list", &remote_ref, "--count"])
         .output()
-        .ok();
-    match output {
-        Some(output) if output.status.success() => {
+    {
+        Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout)
                 .trim()
                 .parse::<usize>()
                 .unwrap_or(0)
         }
-        _ => 0,
+        Ok(_) => 0,
+        Err(e) => {
+            log::warn!("git rev-list --count failed: {e}");
+            0
+        }
     }
 }
 
@@ -677,22 +685,26 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
         Some(s) => s,
         None => return vec![],
     };
-    let output = command("git")
+    let output = match command("git")
         .args(["-C", path_str, "worktree", "list", "--porcelain"])
         .output()
-        .ok();
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("git worktree list failed: {e}");
+            return vec![];
+        }
+    };
     let mut result = Vec::new();
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut current_path = String::new();
-            for line in stdout.lines() {
-                if let Some(wt_path) = line.strip_prefix("worktree ") {
-                    current_path = wt_path.to_string();
-                } else if let Some(branch_ref) = line.strip_prefix("branch refs/heads/") {
-                    if !current_path.is_empty() {
-                        result.push((current_path.clone(), branch_ref.to_string()));
-                    }
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut current_path = String::new();
+        for line in stdout.lines() {
+            if let Some(wt_path) = line.strip_prefix("worktree ") {
+                current_path = wt_path.to_string();
+            } else if let Some(branch_ref) = line.strip_prefix("branch refs/heads/") {
+                if !current_path.is_empty() {
+                    result.push((current_path.clone(), branch_ref.to_string()));
                 }
             }
         }
@@ -896,17 +908,18 @@ pub fn get_commit_graph(path: &Path, limit: usize, branch: Option<&str>) -> Vec<
         args.push(b.to_string());
     }
 
-    let output = safe_output(
+    match safe_output(
         command("git").args(args.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
-    )
-    .ok();
-
-    match output {
-        Some(o) if o.status.success() => {
+    ) {
+        Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             parse_commit_graph_output(&stdout)
         }
-        _ => vec![],
+        Ok(_) => vec![],
+        Err(e) => {
+            log::warn!("git log --graph failed: {e}");
+            vec![]
+        }
     }
 }
 

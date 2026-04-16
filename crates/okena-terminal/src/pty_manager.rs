@@ -111,12 +111,14 @@ impl PtyManager {
         // Clean up stale dtach sockets from previous crashes
         #[cfg(unix)]
         if matches!(session_backend, ResolvedBackend::Dtach) {
-            std::thread::Builder::new()
+            if let Err(e) = std::thread::Builder::new()
                 .name("dtach-socket-gc".into())
                 .spawn(|| {
                     crate::session_backend::cleanup_stale_dtach_sockets();
                 })
-                .ok();
+            {
+                log::warn!("failed to spawn dtach cleanup thread: {e}");
+            }
         }
 
         (

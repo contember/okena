@@ -377,20 +377,21 @@ fn get_untracked_files(path: &Path) -> Vec<String> {
         None => return vec![],
     };
 
-    let output = safe_output(
+    match safe_output(
         command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
-    )
-    .ok();
-
-    match output {
-        Some(output) if output.status.success() => {
+    ) {
+        Ok(output) if output.status.success() => {
             String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect()
         }
-        _ => vec![],
+        Ok(_) => vec![],
+        Err(e) => {
+            log::warn!("git ls-files --others failed: {e}");
+            vec![]
+        }
     }
 }
 
