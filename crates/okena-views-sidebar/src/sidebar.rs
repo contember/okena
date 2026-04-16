@@ -387,7 +387,7 @@ impl Sidebar {
                     &branch_clone,
                     &target,
                     default_branch.as_deref(),
-                )
+                ).map_err(|e| e.to_string())
             }).await;
 
             match create_result {

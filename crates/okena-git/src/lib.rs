@@ -1,7 +1,9 @@
 pub mod branch_names;
 pub mod diff;
+pub mod error;
 pub mod repository;
 
+pub use error::{GitError, GitResult};
 pub use diff::{DiffResult, DiffMode, FileDiff, DiffLineType, get_diff_with_options, is_git_repo, get_file_contents_for_diff};
 pub use repository::{
     create_worktree,
@@ -34,9 +36,9 @@ pub use repository::{
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look
 /// like a command-line flag.  Returns `Ok(name)` for safe values, or an error
 /// for values starting with `-`.
-pub fn validate_git_ref(name: &str) -> Result<&str, String> {
+pub fn validate_git_ref(name: &str) -> GitResult<&str> {
     if name.starts_with('-') {
-        Err(format!("Invalid git ref: '{}'", name))
+        Err(GitError::InvalidRef(name.to_string()))
     } else {
         Ok(name)
     }
@@ -363,19 +365,19 @@ mod tests {
 
     #[test]
     fn validate_git_ref_accepts_normal_refs() {
-        assert_eq!(validate_git_ref("main"), Ok("main"));
-        assert_eq!(validate_git_ref("feature/foo"), Ok("feature/foo"));
-        assert_eq!(validate_git_ref("abc123"), Ok("abc123"));
-        assert_eq!(validate_git_ref("HEAD"), Ok("HEAD"));
-        assert_eq!(validate_git_ref("v1.0.0"), Ok("v1.0.0"));
+        assert!(validate_git_ref("main").is_ok());
+        assert!(validate_git_ref("feature/foo").is_ok());
+        assert!(validate_git_ref("abc123").is_ok());
+        assert!(validate_git_ref("HEAD").is_ok());
+        assert!(validate_git_ref("v1.0.0").is_ok());
     }
 
     #[test]
     fn validate_git_ref_rejects_flag_like_refs() {
-        assert!(validate_git_ref("--upload-pack=evil").is_err());
-        assert!(validate_git_ref("-b").is_err());
-        assert!(validate_git_ref("--exec=malicious").is_err());
-        assert!(validate_git_ref("-").is_err());
+        assert!(matches!(validate_git_ref("--upload-pack=evil"), Err(GitError::InvalidRef(_))));
+        assert!(matches!(validate_git_ref("-b"), Err(GitError::InvalidRef(_))));
+        assert!(matches!(validate_git_ref("--exec=malicious"), Err(GitError::InvalidRef(_))));
+        assert!(matches!(validate_git_ref("-"), Err(GitError::InvalidRef(_))));
     }
 
     #[test]

@@ -368,7 +368,13 @@ impl Workspace {
     ) -> Result<String, String> {
         // Create the git worktree at the repo-level target path
         let target = std::path::PathBuf::from(worktree_path);
-        okena_git::create_worktree(repo_path, branch, &target, create_branch)?;
+        okena_git::create_worktree(repo_path, branch, &target, create_branch)
+            .map_err(|e| match &e {
+                okena_git::GitError::WorktreeExists { path } => {
+                    format!("Directory '{}' is already an active worktree", path.display())
+                }
+                other => other.to_string(),
+            })?;
 
         // Register in workspace state
         self.register_worktree_project(parent_project_id, branch, repo_path, worktree_path, project_path, global_hooks, cx)
@@ -684,7 +690,8 @@ impl Workspace {
         hooks::fire_on_worktree_close(&project_hooks, project_id, &project_name, &project_path, &branch, hook_folder_id.as_deref(), hook_folder_name.as_deref(), global_hooks, cx);
 
         // Remove the git worktree
-        okena_git::remove_worktree(&worktree_path, force)?;
+        okena_git::remove_worktree(&worktree_path, force)
+            .map_err(|e| e.to_string())?;
 
         // Delete the project from workspace (this also fires on_project_close)
         self.delete_project(project_id, global_hooks, cx);

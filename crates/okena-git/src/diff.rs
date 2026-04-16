@@ -293,7 +293,7 @@ fn parse_hunk_header(header: &str) -> (usize, usize) {
 
 /// Get diff for a repository path.
 #[allow(dead_code)]
-pub fn get_diff(path: &Path, mode: DiffMode) -> Result<DiffResult, String> {
+pub fn get_diff(path: &Path, mode: DiffMode) -> crate::GitResult<DiffResult> {
     get_diff_with_options(path, mode, false)
 }
 
@@ -302,9 +302,12 @@ pub fn get_diff_with_options(
     path: &Path,
     mode: DiffMode,
     ignore_whitespace: bool,
-) -> Result<DiffResult, String> {
+) -> crate::GitResult<DiffResult> {
+    use crate::error::GitError;
+
     let t_total = std::time::Instant::now();
-    let path_str = path.to_str().ok_or("Invalid path")?;
+    let path_str = path.to_str()
+        .ok_or_else(|| GitError::InvalidPath(path.to_path_buf()))?;
 
     // Build git diff command based on mode
     // WorkingTree: unstaged changes (working tree vs index)
@@ -335,18 +338,15 @@ pub fn get_diff_with_options(
     }
 
     let t0 = std::time::Instant::now();
-    let output = safe_output(command("git").args(&args))
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
+    let output = safe_output(command("git").args(&args))?;
     log::debug!("[get_diff_with_options] git diff command: {:?}, stdout: {} bytes", t0.elapsed(), output.stdout.len());
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let msg = if stderr.is_empty() {
-            format!("git diff failed with exit code {}", output.status.code().unwrap_or(-1))
-        } else {
-            stderr
-        };
-        return Err(msg);
+        return Err(GitError::GitExitError {
+            status: output.status.code().unwrap_or(-1),
+            stderr,
+        });
     }
 
     let t1 = std::time::Instant::now();

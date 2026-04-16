@@ -8,6 +8,7 @@ license = "MIT"
 okena-core = { path = "../okena-core" }
 
 parking_lot = "0.12"
+thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1.10", features = ["v4"] }

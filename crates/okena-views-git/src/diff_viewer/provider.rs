@@ -40,6 +40,7 @@ impl GitProvider for LocalGitProvider {
 
     fn get_diff(&self, mode: DiffMode, ignore_whitespace: bool) -> Result<DiffResult, String> {
         okena_git::get_diff_with_options(std::path::Path::new(&self.path), mode, ignore_whitespace)
+            .map_err(|e| e.to_string())
     }
 
     fn get_file_contents(&self, file_path: &str, mode: DiffMode) -> (Option<String>, Option<String>) {
@@ -60,14 +61,17 @@ impl GitProvider for LocalGitProvider {
 
     fn stage_file(&self, file_path: &str) -> Result<(), String> {
         okena_git::stage_file(std::path::Path::new(&self.path), file_path)
+            .map_err(|e| e.to_string())
     }
 
     fn unstage_file(&self, file_path: &str) -> Result<(), String> {
         okena_git::unstage_file(std::path::Path::new(&self.path), file_path)
+            .map_err(|e| e.to_string())
     }
 
     fn discard_file(&self, file_path: &str) -> Result<(), String> {
         okena_git::discard_file_changes(std::path::Path::new(&self.path), file_path)
+            .map_err(|e| e.to_string())
     }
 
     fn delete_file(&self, file_path: &str) -> Result<(), String> {

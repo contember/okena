@@ -277,7 +277,7 @@ pub fn execute_action(
                     let path = p.path.clone();
                     match crate::git::get_diff_with_options(std::path::Path::new(&path), mode, ignore_whitespace) {
                         Ok(diff) => ActionResult::Ok(Some(serde_json::to_value(diff).expect("BUG: DiffResult must serialize"))),
-                        Err(e) => ActionResult::Err(e),
+                        Err(e) => ActionResult::Err(e.to_string()),
                     }
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -340,7 +340,7 @@ pub fn execute_action(
                     let path = p.path.clone();
                     match crate::git::stage_file(std::path::Path::new(&path), &file_path) {
                         Ok(()) => ActionResult::Ok(None),
-                        Err(e) => ActionResult::Err(e),
+                        Err(e) => ActionResult::Err(e.to_string()),
                     }
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -352,7 +352,7 @@ pub fn execute_action(
                     let path = p.path.clone();
                     match crate::git::unstage_file(std::path::Path::new(&path), &file_path) {
                         Ok(()) => ActionResult::Ok(None),
-                        Err(e) => ActionResult::Err(e),
+                        Err(e) => ActionResult::Err(e.to_string()),
                     }
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
@@ -364,7 +364,7 @@ pub fn execute_action(
                     let path = p.path.clone();
                     match crate::git::discard_file_changes(std::path::Path::new(&path), &file_path) {
                         Ok(()) => ActionResult::Ok(None),
-                        Err(e) => ActionResult::Err(e),
+                        Err(e) => ActionResult::Err(e.to_string()),
                     }
                 }
                 None => ActionResult::Err(format!("project not found: {}", project_id)),

@@ -42,17 +42,21 @@ pub fn detect_compose_file(project_path: &str) -> Option<String> {
 
 /// List service names defined in a compose file.
 /// Excludes services with `deploy.replicas = 0`.
-pub fn list_services(project_path: &str, compose_file: &str) -> Result<Vec<String>, String> {
+pub fn list_services(project_path: &str, compose_file: &str) -> crate::ServiceResult<Vec<String>> {
+    use crate::error::ServiceError;
+
     let mut cmd = process::command("docker");
     cmd.args(["compose", "-f", compose_file, "config", "--format", "json"])
         .current_dir(project_path);
 
-    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
-        .map_err(|e| format!("Failed to run docker compose config: {}", e))?;
+    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker compose config failed: {}", stderr.trim()));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(ServiceError::CommandExitError {
+            context: "docker compose config".to_string(),
+            stderr,
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -61,9 +65,14 @@ pub fn list_services(project_path: &str, compose_file: &str) -> Result<Vec<Strin
 
 /// Parse `docker compose config --format json` output and return service names,
 /// filtering out services that have `deploy.replicas` set to 0.
-fn parse_compose_config_services(json: &str) -> Result<Vec<String>, String> {
+fn parse_compose_config_services(json: &str) -> crate::ServiceResult<Vec<String>> {
+    use crate::error::ServiceError;
+
     let config: ComposeConfig = serde_json::from_str(json)
-        .map_err(|e| format!("Failed to parse docker compose config JSON: {}", e))?;
+        .map_err(|e| ServiceError::ParseError {
+            context: "docker compose config JSON".to_string(),
+            detail: e.to_string(),
+        })?;
 
     Ok(config
         .services
@@ -128,17 +137,21 @@ struct Publisher {
 }
 
 /// Poll status of all services in the compose project.
-pub fn poll_status(project_path: &str, compose_file: &str) -> Result<Vec<DockerServiceStatus>, String> {
+pub fn poll_status(project_path: &str, compose_file: &str) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
+    use crate::error::ServiceError;
+
     let mut cmd = process::command("docker");
     cmd.args(["compose", "-f", compose_file, "ps", "--format", "json", "-a"])
         .current_dir(project_path);
 
-    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)
-        .map_err(|e| format!("docker compose ps failed: {}", e))?;
+    let output = process::safe_output_with_timeout(&mut cmd, DOCKER_TIMEOUT)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docker compose ps failed: {}", stderr.trim()));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(ServiceError::CommandExitError {
+            context: "docker compose ps".to_string(),
+            stderr,
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -147,7 +160,9 @@ pub fn poll_status(project_path: &str, compose_file: &str) -> Result<Vec<DockerS
 
 /// Parse the output of `docker compose ps --format json`.
 /// Docker outputs either NDJSON (one JSON object per line) or a JSON array.
-pub fn parse_docker_ps_output(output: &str) -> Result<Vec<DockerServiceStatus>, String> {
+pub fn parse_docker_ps_output(output: &str) -> crate::ServiceResult<Vec<DockerServiceStatus>> {
+    use crate::error::ServiceError;
+
     let trimmed = output.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
@@ -156,7 +171,10 @@ pub fn parse_docker_ps_output(output: &str) -> Result<Vec<DockerServiceStatus>, 
     let entries: Vec<DockerPsEntry> = if trimmed.starts_with('[') {
         // JSON array format
         serde_json::from_str(trimmed)
-            .map_err(|e| format!("Failed to parse docker ps JSON array: {}", e))?
+            .map_err(|e| ServiceError::ParseError {
+                context: "docker ps JSON array".to_string(),
+                detail: e.to_string(),
+            })?
     } else {
         // NDJSON format (one JSON object per line)
         trimmed
@@ -164,7 +182,10 @@ pub fn parse_docker_ps_output(output: &str) -> Result<Vec<DockerServiceStatus>, 
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
                 serde_json::from_str::<DockerPsEntry>(line)
-                    .map_err(|e| format!("Failed to parse docker ps line: {}", e))
+                    .map_err(|e| ServiceError::ParseError {
+                        context: "docker ps line".to_string(),
+                        detail: e.to_string(),
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?
     };

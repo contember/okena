@@ -50,15 +50,23 @@ fn default_restart_delay() -> u64 {
 /// Load project config from `{project_path}/okena.yaml`.
 ///
 /// Returns `Ok(None)` if the file doesn't exist, `Err` on parse failure.
-pub fn load_project_config(project_path: &str) -> Result<Option<OkenaProjectConfig>, String> {
+pub fn load_project_config(project_path: &str) -> crate::ServiceResult<Option<OkenaProjectConfig>> {
+    use crate::error::ServiceError;
+
     let path = Path::new(project_path).join("okena.yaml");
     if !path.exists() {
         return Ok(None);
     }
     let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        .map_err(|e| ServiceError::ReadError {
+            path: path.display().to_string(),
+            source: e,
+        })?;
     let config: OkenaProjectConfig =
-        serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+        serde_yaml::from_str(&content).map_err(|e| ServiceError::ParseError {
+            context: path.display().to_string(),
+            detail: e.to_string(),
+        })?;
     Ok(Some(config))
 }
 

@@ -1,7 +1,27 @@
 use std::path::{Component, Path, PathBuf};
 
+use crate::error::{GitError, GitResult};
 use crate::GitStatus;
 use okena_core::process::{command, safe_output};
+
+/// Run a git command and return `Ok(())` if it exits successfully,
+/// or `Err(GitExitError)` with the stderr message.
+fn require_success(output: std::process::Output) -> GitResult<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(GitError::GitExitError {
+            status: output.status.code().unwrap_or(-1),
+            stderr,
+        })
+    }
+}
+
+/// Convert a `Path` to a UTF-8 `&str`, returning `GitError::InvalidPath` on failure.
+fn path_str(path: &Path) -> GitResult<&str> {
+    path.to_str().ok_or_else(|| GitError::InvalidPath(path.to_path_buf()))
+}
 
 /// Get the root directory of the git repository containing the given path.
 /// Returns None if the path is not inside a git repository.
@@ -61,17 +81,16 @@ pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
 /// If `target_path` exists but is NOT a currently registered worktree, remove
 /// the stale directory and prune worktree metadata so a fresh `worktree add`
 /// can succeed.  Returns an error only when the path is still an active worktree.
-fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> Result<(), String> {
+fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> GitResult<()> {
     if !target_path.exists() {
         return Ok(());
     }
 
     // Ask git which paths are active worktrees
-    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let repo_str = path_str(repo_path)?;
     let output = safe_output(
         command("git").args(["-C", repo_str, "worktree", "list", "--porcelain"]),
-    )
-    .map_err(|e| format!("Failed to list worktrees: {}", e))?;
+    )?;
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -79,10 +98,9 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> Result<(), 
         for line in stdout.lines() {
             if let Some(wt_path) = line.strip_prefix("worktree ") {
                 if normalize_path(Path::new(wt_path)) == target_normalized {
-                    return Err(format!(
-                        "Directory '{}' is already an active worktree",
-                        target_path.display()
-                    ));
+                    return Err(GitError::WorktreeExists {
+                        path: target_path.to_path_buf(),
+                    });
                 }
             }
         }
@@ -94,21 +112,23 @@ fn clean_stale_worktree_dir(repo_path: &Path, target_path: &Path) -> Result<(), 
         target_path.display()
     );
     std::fs::remove_dir_all(target_path)
-        .map_err(|e| format!("Failed to remove stale directory '{}': {}", target_path.display(), e))?;
+        .map_err(|e| GitError::RemoveFailed {
+            path: target_path.to_path_buf(),
+            source: e,
+        })?;
 
     let _ = safe_output(command("git").args(["-C", repo_str, "worktree", "prune"]));
 
     Ok(())
 }
 
-/// Create a new worktree
-/// Returns Ok(()) on success, Err(error_message) on failure
-pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, create_branch: bool) -> Result<(), String> {
+/// Create a new worktree.
+pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, create_branch: bool) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     clean_stale_worktree_dir(repo_path, target_path)?;
 
-    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
-    let target_str = target_path.to_str().ok_or("Invalid target path")?;
+    let repo_str = path_str(repo_path)?;
+    let target_str = path_str(target_path)?;
 
     let mut args = vec!["-C", repo_str, "worktree", "add"];
 
@@ -130,15 +150,8 @@ pub fn create_worktree(repo_path: &Path, branch: &str, target_path: &Path, creat
         args.push(branch);
     }
 
-    let output = safe_output(command("git").args(&args))
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+    let output = safe_output(command("git").args(&args))?;
+    require_success(output)
 }
 
 /// Create a new worktree with an optional pre-fetched start point.
@@ -149,15 +162,15 @@ pub fn create_worktree_with_start_point(
     branch: &str,
     target_path: &Path,
     start_branch: Option<&str>,
-) -> Result<(), String> {
+) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
     if let Some(sb) = start_branch {
         crate::validate_git_ref(sb)?;
     }
     clean_stale_worktree_dir(repo_path, target_path)?;
 
-    let repo_str = repo_path.to_str().ok_or("Invalid repo path")?;
-    let target_str = target_path.to_str().ok_or("Invalid target path")?;
+    let repo_str = path_str(repo_path)?;
+    let target_str = path_str(target_path)?;
 
     let mut args = vec!["-C", repo_str, "worktree", "add", "-b", branch, target_str];
 
@@ -167,40 +180,24 @@ pub fn create_worktree_with_start_point(
         args.push(&start_point);
     }
 
-    let output = safe_output(command("git").args(&args))
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+    let output = safe_output(command("git").args(&args))?;
+    require_success(output)
 }
 
-/// Remove a worktree
-/// Returns Ok(()) on success, Err(error_message) on failure
-pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> {
-    // First, find the main repo by getting the common git dir
-    let path_str = worktree_path.to_str().ok_or("Invalid worktree path")?;
+/// Remove a worktree.
+pub fn remove_worktree(worktree_path: &Path, force: bool) -> GitResult<()> {
+    let wt_str = path_str(worktree_path)?;
 
-    let mut args = vec!["-C", path_str, "worktree", "remove"];
+    let mut args = vec!["-C", wt_str, "worktree", "remove"];
 
     if force {
         args.push("--force");
     }
 
-    args.push(path_str);
+    args.push(wt_str);
 
-    let output = safe_output(command("git").args(&args))
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+    let output = safe_output(command("git").args(&args))?;
+    require_success(output)
 }
 
 /// Fast worktree removal: delete the directory and prune stale worktree metadata.
@@ -210,18 +207,20 @@ pub fn remove_worktree(worktree_path: &Path, force: bool) -> Result<(), String> 
 /// Note: `git worktree prune` removes ALL stale entries (not just the one we deleted).
 /// This is safe because prune only acts on entries whose directories no longer exist,
 /// and we only delete the single target directory before pruning.
-pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> Result<(), String> {
+pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitResult<()> {
     // Remove the worktree directory (treat NotFound as success — already gone)
     match std::fs::remove_dir_all(worktree_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("Failed to remove worktree directory: {}", e)),
+        Err(e) => return Err(GitError::RemoveFailed {
+            path: worktree_path.to_path_buf(),
+            source: e,
+        }),
     }
 
     // Prune stale worktree entries from the main repo
-    let main_str = main_repo_path.to_str().ok_or("Invalid main repo path")?;
-    let output = safe_output(command("git").args(["-C", main_str, "worktree", "prune"]))
-        .map_err(|e| format!("Failed to prune worktrees: {}", e))?;
+    let main_str = path_str(main_repo_path)?;
+    let output = safe_output(command("git").args(["-C", main_str, "worktree", "prune"]))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -456,14 +455,13 @@ pub fn get_default_branch(repo_path: &Path) -> Option<String> {
 
 /// Rebase the current branch onto a target branch.
 /// Automatically aborts on failure.
-pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> Result<(), String> {
+pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> GitResult<()> {
     crate::validate_git_ref(target_branch)?;
-    let path_str = worktree_path.to_str().ok_or("Invalid worktree path")?;
+    let wt_str = path_str(worktree_path)?;
 
     let output = command("git")
-        .args(["-C", path_str, "rebase", target_branch])
-        .output()
-        .map_err(|e| format!("Failed to execute git rebase: {}", e))?;
+        .args(["-C", wt_str, "rebase", target_branch])
+        .output()?;
 
     if output.status.success() {
         Ok(())
@@ -472,113 +470,80 @@ pub fn rebase_onto(worktree_path: &Path, target_branch: &str) -> Result<(), Stri
 
         // Abort the failed rebase
         let _ = command("git")
-            .args(["-C", path_str, "rebase", "--abort"])
+            .args(["-C", wt_str, "rebase", "--abort"])
             .output();
 
-        Err(stderr)
+        Err(GitError::GitExitError {
+            status: output.status.code().unwrap_or(-1),
+            stderr,
+        })
     }
 }
 
 /// Stash uncommitted changes.
-pub fn stash_changes(path: &Path) -> Result<(), String> {
-    let path_str = path.to_str().ok_or("Invalid path")?;
+pub fn stash_changes(path: &Path) -> GitResult<()> {
+    let p = path_str(path)?;
     let output = command("git")
-        .args(["-C", path_str, "stash"])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "stash"])
+        .output()?;
+    require_success(output)
 }
 
 /// Pop the most recent stash entry.
 /// Used for recovery when rebase/merge fails after stash.
-pub fn stash_pop(path: &Path) -> Result<(), String> {
-    let path_str = path.to_str().ok_or("Invalid path")?;
+pub fn stash_pop(path: &Path) -> GitResult<()> {
+    let p = path_str(path)?;
     let output = command("git")
-        .args(["-C", path_str, "stash", "pop"])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "stash", "pop"])
+        .output()?;
+    require_success(output)
 }
 
 /// Stage a file (git add -- <file>).
-pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<(), String> {
-    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+pub fn stage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "add", "--", file_path])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "add", "--", file_path])
+        .output()?;
+    require_success(output)
 }
 
 /// Unstage a file from the index (git restore --staged -- <file>).
 /// Works for both modified and newly-added files.
-pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<(), String> {
-    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+pub fn unstage_file(repo_path: &Path, file_path: &str) -> GitResult<()> {
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "restore", "--staged", "--", file_path])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "restore", "--staged", "--", file_path])
+        .output()?;
+    require_success(output)
 }
 
 /// Discard working-tree changes for a file (git checkout HEAD -- <file>).
 /// Restores the file to its HEAD state.
-pub fn discard_file_changes(repo_path: &Path, file_path: &str) -> Result<(), String> {
-    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+pub fn discard_file_changes(repo_path: &Path, file_path: &str) -> GitResult<()> {
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "checkout", "HEAD", "--", file_path])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "checkout", "HEAD", "--", file_path])
+        .output()?;
+    require_success(output)
 }
 
 /// Fetch from all remotes.
-pub fn fetch_all(path: &Path) -> Result<(), String> {
-    let path_str = path.to_str().ok_or("Invalid path")?;
+pub fn fetch_all(path: &Path) -> GitResult<()> {
+    let p = path_str(path)?;
     let output = command("git")
-        .args(["-C", path_str, "fetch", "--all"])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "fetch", "--all"])
+        .output()?;
+    require_success(output)
 }
 
 /// Merge a branch into the current branch.
 /// If `no_ff` is true, uses `--no-ff` to create a merge commit even if fast-forward is possible.
-pub fn merge_branch(repo_path: &Path, branch: &str, no_ff: bool) -> Result<(), String> {
+pub fn merge_branch(repo_path: &Path, branch: &str, no_ff: bool) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
-    let path_str = repo_path.to_str().ok_or("Invalid repo path")?;
+    let p = path_str(repo_path)?;
 
-    let mut args = vec!["-C", path_str, "merge"];
+    let mut args = vec!["-C", p, "merge"];
     if no_ff {
         args.push("--no-ff");
     }
@@ -586,63 +551,38 @@ pub fn merge_branch(repo_path: &Path, branch: &str, no_ff: bool) -> Result<(), S
 
     let output = command("git")
         .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to execute git merge: {}", e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .output()?;
+    require_success(output)
 }
 
 /// Delete a local branch (uses `-d`, fails if branch has unmerged changes).
-pub fn delete_local_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+pub fn delete_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
-    let path_str = repo_path.to_str().ok_or("Invalid path")?;
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "branch", "-d", "--", branch])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "branch", "-d", "--", branch])
+        .output()?;
+    require_success(output)
 }
 
 /// Delete a remote branch.
-pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
-    let path_str = repo_path.to_str().ok_or("Invalid path")?;
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "push", "origin", "--delete", "--", branch])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "push", "origin", "--delete", "--", branch])
+        .output()?;
+    require_success(output)
 }
 
 /// Push a branch to origin.
-pub fn push_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
+pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
-    let path_str = repo_path.to_str().ok_or("Invalid path")?;
+    let p = path_str(repo_path)?;
     let output = command("git")
-        .args(["-C", path_str, "push", "origin", "--", branch])
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(stderr.trim().to_string())
-    }
+        .args(["-C", p, "push", "origin", "--", branch])
+        .output()?;
+    require_success(output)
 }
 
 /// Count commits that haven't been pushed to the branch's own remote.

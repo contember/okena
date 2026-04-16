@@ -287,6 +287,7 @@ impl CloseWorktreeDialog {
 
                 if let Err(e) = rebase_result {
                     // Fire on_rebase_conflict hook
+                    let error_msg = e.to_string();
                     let (terminal_actions, hook_results) = hooks::fire_on_rebase_conflict(
                         &project_hooks,
                         &global_hooks,
@@ -296,7 +297,7 @@ impl CloseWorktreeDialog {
                         &branch,
                         &default_branch,
                         &main_repo_path,
-                        &e,
+                        &error_msg,
                         folder_id.as_deref(),
                         folder_name.as_deref(),
                         monitor.as_ref(),
