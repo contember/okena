@@ -509,8 +509,8 @@ impl Render for SessionManager {
         let error_message = self.error_message.clone();
         let active_tab = self.active_tab;
 
-        // Focus on first render
-        if !focus_handle.is_focused(window) {
+        // Focus on first open, but don't steal focus from our own children (e.g. inputs)
+        if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
         }
 
