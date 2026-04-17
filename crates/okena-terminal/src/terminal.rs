@@ -1835,6 +1835,7 @@ impl Terminal {
     ///
     /// Returns a list of `DetectedLink` for each match. File paths are validated
     /// for existence by the caller (UrlDetector).
+    #[allow(clippy::expect_used, reason = "literal regex, compilation checked by unit test")]
     pub fn detect_urls(&self) -> Vec<DetectedLink> {
         static LINK_REGEX: OnceLock<Regex> = OnceLock::new();
         let regex = LINK_REGEX.get_or_init(|| {

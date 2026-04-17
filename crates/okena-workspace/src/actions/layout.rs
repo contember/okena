@@ -664,12 +664,14 @@ impl Workspace {
         if source_path.is_empty() {
             // Source is root — remove entire layout
             src_project.layout = None;
-        } else {
-            let src_layout = src_project.layout.as_mut().unwrap();
+        } else if let Some(src_layout) = src_project.layout.as_mut() {
             if src_layout.remove_at_path(&source_path).is_none() {
                 return;
             }
             src_layout.normalize();
+        } else {
+            // Layout was validated Some above; disappearing is a bug, not a crash.
+            return;
         }
 
         // Migrate metadata from source to target
@@ -713,8 +715,10 @@ impl Workspace {
             tgt_layout.find_terminal_path(source_terminal_id)
         } else {
             // Target has no layout — set source node as root
-            tgt_project.layout = Some(source_node);
-            tgt_project.layout.as_ref().unwrap().find_terminal_path(source_terminal_id)
+            let root = source_node;
+            let path = root.find_terminal_path(source_terminal_id);
+            tgt_project.layout = Some(root);
+            path
         };
 
         self.notify_data(cx);
@@ -963,12 +967,14 @@ impl Workspace {
         let src_project = &mut self.data.projects[src_idx];
         if source_path.is_empty() {
             src_project.layout = None;
-        } else {
-            let src_layout = src_project.layout.as_mut().unwrap();
+        } else if let Some(src_layout) = src_project.layout.as_mut() {
             if src_layout.remove_at_path(&source_path).is_none() {
                 return;
             }
             src_layout.normalize();
+        } else {
+            // Layout was validated Some above; disappearing is a bug, not a crash.
+            return;
         }
 
         // Migrate metadata
@@ -1022,8 +1028,10 @@ impl Workspace {
             tgt_layout.find_terminal_path(terminal_id)
         } else {
             // Target has no layout — set source node as root
-            tgt_project.layout = Some(source_node);
-            tgt_project.layout.as_ref().unwrap().find_terminal_path(terminal_id)
+            let root = source_node;
+            let path = root.find_terminal_path(terminal_id);
+            tgt_project.layout = Some(root);
+            path
         };
 
         self.notify_data(cx);

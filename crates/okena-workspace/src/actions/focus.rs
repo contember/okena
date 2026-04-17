@@ -67,9 +67,9 @@ impl Workspace {
             .chain(self.worktree_child_ids(project_id));
         for id in candidates {
             if let Some(project) = self.project(&id) {
-                if project.layout.is_some() {
+                if let Some(layout) = project.layout.as_ref() {
                     // Focus the currently visible terminal (follows active tabs)
-                    let path = project.layout.as_ref().unwrap().find_visible_terminal_path();
+                    let path = layout.find_visible_terminal_path();
                     self.focus_manager.focus_terminal(id, path);
                     return;
                 }
