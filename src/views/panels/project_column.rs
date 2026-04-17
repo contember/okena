@@ -175,6 +175,17 @@ impl ProjectColumn {
         });
     }
 
+    /// Replace the git provider used by the project's `GitHeader`.
+    /// Called when the project's on-disk path changes (e.g. directory rename),
+    /// so cached commit/diff data stops referring to the stale path.
+    pub fn set_git_provider(
+        &mut self,
+        provider: Arc<dyn okena_views_git::diff_viewer::provider::GitProvider>,
+        cx: &mut Context<Self>,
+    ) {
+        self.git_header.update(cx, |gh, cx| gh.set_git_provider(provider, cx));
+    }
+
     /// Show a hook terminal in the hook panel.
     pub fn show_hook_terminal(&mut self, terminal_id: &str, cx: &mut Context<Self>) {
         let tid = terminal_id.to_string();

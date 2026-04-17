@@ -88,6 +88,9 @@ pub struct RootView {
     was_project_focused: bool,
     /// Project ID to center-scroll to after the next layout pass
     pending_center_scroll: Option<String>,
+    /// Last-known on-disk paths per local project, used to detect renames
+    /// so we can refresh cached git providers / service paths.
+    last_project_paths: HashMap<String, String>,
 }
 
 impl RootView {
@@ -205,6 +208,7 @@ impl RootView {
             last_scroll_project: None,
             was_project_focused: false,
             pending_center_scroll: None,
+            last_project_paths: HashMap::new(),
         };
 
         // Observe workspace to scroll focused project into view
@@ -227,10 +231,15 @@ impl RootView {
             }
 
             this.was_project_focused = is_project_focused;
+
+            this.refresh_for_project_path_changes(cx);
         }).detach();
 
         // Initialize project columns
         view.sync_project_columns(cx);
+
+        // Seed path snapshot so the observer only fires on real changes.
+        view.last_project_paths = view.snapshot_local_project_paths(cx);
 
         view
     }
@@ -613,6 +622,48 @@ impl RootView {
         workspace.update(cx, |ws, cx| {
             ws.notify_ui_only(cx);
         });
+    }
+
+    /// Snapshot current on-disk paths for local projects (keyed by project_id).
+    fn snapshot_local_project_paths(&self, cx: &Context<Self>) -> HashMap<String, String> {
+        self.workspace.read(cx).projects().iter()
+            .filter(|p| !p.is_remote)
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect()
+    }
+
+    /// Detect local project directory renames and refresh caches that hold a
+    /// snapshotted path (git provider inside GitHeader, ServiceManager paths).
+    fn refresh_for_project_path_changes(&mut self, cx: &mut Context<Self>) {
+        let current = self.snapshot_local_project_paths(cx);
+
+        let changed: Vec<(String, String)> = current.iter()
+            .filter(|(id, path)| self.last_project_paths.get(id.as_str()) != Some(*path))
+            .map(|(id, path)| (id.clone(), path.clone()))
+            .collect();
+
+        if changed.is_empty() {
+            // Still drop entries for projects that no longer exist
+            if current.len() != self.last_project_paths.len() {
+                self.last_project_paths = current;
+            }
+            return;
+        }
+
+        for (id, new_path) in &changed {
+            if let Some(column) = self.project_columns.get(id).cloned() {
+                if let Some(provider) = self.build_git_provider(id, cx) {
+                    column.update(cx, |col, cx| col.set_git_provider(provider, cx));
+                }
+            }
+            if let Some(sm) = self.service_manager.clone() {
+                let id = id.clone();
+                let new_path = new_path.clone();
+                sm.update(cx, move |sm, _cx| sm.update_project_path(&id, &new_path));
+            }
+        }
+
+        self.last_project_paths = current;
     }
 
     /// Ensure project columns exist for all visible projects

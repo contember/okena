@@ -113,6 +113,19 @@ impl GitHeader {
         self.current_branch = branch;
     }
 
+    /// Replace the git provider. Clears cached diff/commit data that belonged
+    /// to the old provider so subsequent reads refetch from the new source.
+    pub fn set_git_provider(&mut self, provider: Arc<dyn GitProvider>, cx: &mut Context<Self>) {
+        self.git_provider = provider;
+        self.diff_file_summaries.clear();
+        self.commit_log_entries.clear();
+        self.commit_log_count = 0;
+        self.commit_log_has_more = false;
+        self.commit_log_loading = false;
+        self.commit_log_branches.clear();
+        cx.notify();
+    }
+
     // ── Diff popover ────────────────────────────────────────────────
 
     fn show_diff_popover(&mut self, cx: &mut Context<Self>) {
