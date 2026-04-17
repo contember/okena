@@ -35,7 +35,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  FullscreenInfo dco_decode_box_autoadd_fullscreen_info(dynamic raw);
+
+  @protected
   SelectionBounds dco_decode_box_autoadd_selection_bounds(dynamic raw);
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt dco_decode_box_autoadd_usize(dynamic raw);
 
   @protected
   CellData dco_decode_cell_data(dynamic raw);
@@ -50,7 +59,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CursorState dco_decode_cursor_state(dynamic raw);
 
   @protected
+  double dco_decode_f_32(dynamic raw);
+
+  @protected
   double dco_decode_f_64(dynamic raw);
+
+  @protected
+  FolderInfo dco_decode_folder_info(dynamic raw);
+
+  @protected
+  FullscreenInfo dco_decode_fullscreen_info(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -62,7 +80,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<CellData> dco_decode_list_cell_data(dynamic raw);
 
   @protected
+  List<FolderInfo> dco_decode_list_folder_info(dynamic raw);
+
+  @protected
+  List<double> dco_decode_list_prim_f_32_loose(dynamic raw);
+
+  @protected
+  Float32List dco_decode_list_prim_f_32_strict(dynamic raw);
+
+  @protected
+  Uint16List dco_decode_list_prim_u_16_strict(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  Uint64List dco_decode_list_prim_usize_strict(dynamic raw);
 
   @protected
   List<ProjectInfo> dco_decode_list_project_info(dynamic raw);
@@ -71,10 +104,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
 
   @protected
+  List<ServiceInfo> dco_decode_list_service_info(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  FullscreenInfo? dco_decode_opt_box_autoadd_fullscreen_info(dynamic raw);
+
+  @protected
   SelectionBounds? dco_decode_opt_box_autoadd_selection_bounds(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BigInt? dco_decode_opt_box_autoadd_usize(dynamic raw);
 
   @protected
   ProjectInfo dco_decode_project_info(dynamic raw);
@@ -89,6 +134,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SelectionBounds dco_decode_selection_bounds(dynamic raw);
 
   @protected
+  ServiceInfo dco_decode_service_info(dynamic raw);
+
+  @protected
   int dco_decode_u_16(dynamic raw);
 
   @protected
@@ -99,6 +147,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  BigInt dco_decode_usize(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -115,9 +166,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  FullscreenInfo sse_decode_box_autoadd_fullscreen_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   SelectionBounds sse_decode_box_autoadd_selection_bounds(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_box_autoadd_usize(SseDeserializer deserializer);
 
   @protected
   CellData sse_decode_cell_data(SseDeserializer deserializer);
@@ -132,7 +194,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CursorState sse_decode_cursor_state(SseDeserializer deserializer);
 
   @protected
+  double sse_decode_f_32(SseDeserializer deserializer);
+
+  @protected
   double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  FolderInfo sse_decode_folder_info(SseDeserializer deserializer);
+
+  @protected
+  FullscreenInfo sse_decode_fullscreen_info(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -144,7 +215,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<CellData> sse_decode_list_cell_data(SseDeserializer deserializer);
 
   @protected
+  List<FolderInfo> sse_decode_list_folder_info(SseDeserializer deserializer);
+
+  @protected
+  List<double> sse_decode_list_prim_f_32_loose(SseDeserializer deserializer);
+
+  @protected
+  Float32List sse_decode_list_prim_f_32_strict(SseDeserializer deserializer);
+
+  @protected
+  Uint16List sse_decode_list_prim_u_16_strict(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  Uint64List sse_decode_list_prim_usize_strict(SseDeserializer deserializer);
 
   @protected
   List<ProjectInfo> sse_decode_list_project_info(SseDeserializer deserializer);
@@ -155,12 +241,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<ServiceInfo> sse_decode_list_service_info(SseDeserializer deserializer);
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  FullscreenInfo? sse_decode_opt_box_autoadd_fullscreen_info(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SelectionBounds? sse_decode_opt_box_autoadd_selection_bounds(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BigInt? sse_decode_opt_box_autoadd_usize(SseDeserializer deserializer);
 
   @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer);
@@ -177,6 +277,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SelectionBounds sse_decode_selection_bounds(SseDeserializer deserializer);
 
   @protected
+  ServiceInfo sse_decode_service_info(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_16(SseDeserializer deserializer);
 
   @protected
@@ -187,6 +290,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_usize(SseDeserializer deserializer);
 
   @protected
   void sse_encode_AnyhowException(
@@ -207,10 +313,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_fullscreen_info(
+    FullscreenInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_selection_bounds(
     SelectionBounds self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_usize(BigInt self, SseSerializer serializer);
 
   @protected
   void sse_encode_cell_data(CellData self, SseSerializer serializer);
@@ -228,7 +346,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_cursor_state(CursorState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_f_32(double self, SseSerializer serializer);
+
+  @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_folder_info(FolderInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_fullscreen_info(
+    FullscreenInfo self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -240,8 +370,38 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_cell_data(List<CellData> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_folder_info(
+    List<FolderInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_f_32_loose(
+    List<double> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_f_32_strict(
+    Float32List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_u_16_strict(
+    Uint16List self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_usize_strict(
+    Uint64List self,
     SseSerializer serializer,
   );
 
@@ -258,13 +418,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_service_info(
+    List<ServiceInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_fullscreen_info(
+    FullscreenInfo? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_selection_bounds(
     SelectionBounds? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_usize(BigInt? self, SseSerializer serializer);
 
   @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer);
@@ -285,6 +463,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_service_info(ServiceInfo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_16(int self, SseSerializer serializer);
 
   @protected
@@ -295,6 +476,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_usize(BigInt self, SseSerializer serializer);
 }
 
 // Section: wire_class

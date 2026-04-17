@@ -1,9 +1,54 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../src/rust/api/state.dart' as state_ffi;
 import '../../src/rust/api/terminal.dart' as ffi;
+import '../theme/app_theme.dart';
+
+/// Three-state modifier cycle: inactive -> active (one-shot) -> locked (sticky).
+enum ModifierState { inactive, active, locked }
+
+/// Shared modifier state between [KeyToolbar] and [TerminalView].
+class KeyModifiers extends ChangeNotifier {
+  ModifierState _ctrl = ModifierState.inactive;
+  ModifierState _option = ModifierState.inactive;
+  ModifierState _cmd = ModifierState.inactive;
+
+  bool get ctrl => _ctrl != ModifierState.inactive;
+  bool get option => _option != ModifierState.inactive;
+  bool get cmd => _cmd != ModifierState.inactive;
+  bool get hasAny => ctrl || option || cmd;
+
+  ModifierState get ctrlState => _ctrl;
+  ModifierState get optionState => _option;
+  ModifierState get cmdState => _cmd;
+
+  /// Cycle: inactive -> active -> locked -> inactive.
+  void toggleCtrl() { _ctrl = _nextState(_ctrl); notifyListeners(); }
+  void toggleOption() { _option = _nextState(_option); notifyListeners(); }
+  void toggleCmd() { _cmd = _nextState(_cmd); notifyListeners(); }
+
+  static ModifierState _nextState(ModifierState s) => switch (s) {
+    ModifierState.inactive => ModifierState.active,
+    ModifierState.active   => ModifierState.locked,
+    ModifierState.locked   => ModifierState.inactive,
+  };
+
+  /// Reset only one-shot (active) modifiers; locked ones persist.
+  void reset() {
+    final changed = _ctrl == ModifierState.active ||
+        _option == ModifierState.active ||
+        _cmd == ModifierState.active;
+    if (!changed) return;
+    if (_ctrl == ModifierState.active) _ctrl = ModifierState.inactive;
+    if (_option == ModifierState.active) _option = ModifierState.inactive;
+    if (_cmd == ModifierState.active) _cmd = ModifierState.inactive;
+    notifyListeners();
+  }
+}
 
 const _kComposeHistoryKey = 'compose_history';
 const _kMaxHistory = 30;
@@ -11,11 +56,13 @@ const _kMaxHistory = 30;
 class KeyToolbar extends StatefulWidget {
   final String connId;
   final String? terminalId;
+  final KeyModifiers modifiers;
 
   const KeyToolbar({
     super.key,
     required this.connId,
     this.terminalId,
+    required this.modifiers,
   });
 
   @override
@@ -23,8 +70,15 @@ class KeyToolbar extends StatefulWidget {
 }
 
 class _KeyToolbarState extends State<KeyToolbar> {
-  bool _ctrlActive = false;
-  bool _altActive = false;
+  KeyModifiers get _mod => widget.modifiers;
+
+  // Arrow key name -> xterm suffix character
+  static const _arrowChar = {
+    'ArrowUp': 'A',
+    'ArrowDown': 'B',
+    'ArrowRight': 'C',
+    'ArrowLeft': 'D',
+  };
 
   // Compose history
   List<String> _composeHistory = [];
@@ -32,7 +86,27 @@ class _KeyToolbarState extends State<KeyToolbar> {
   @override
   void initState() {
     super.initState();
+    _mod.addListener(_onModChanged);
     _loadComposeHistory();
+  }
+
+  @override
+  void didUpdateWidget(KeyToolbar old) {
+    super.didUpdateWidget(old);
+    if (old.modifiers != widget.modifiers) {
+      old.modifiers.removeListener(_onModChanged);
+      widget.modifiers.addListener(_onModChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    _mod.removeListener(_onModChanged);
+    super.dispose();
+  }
+
+  void _onModChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadComposeHistory() async {
@@ -77,141 +151,62 @@ class _KeyToolbarState extends State<KeyToolbar> {
     );
   }
 
-  void _sendCtrlChar(String letter) {
-    final code = letter.toLowerCase().codeUnitAt(0);
-    if (code >= 0x61 && code <= 0x7A) {
-      _sendText(String.fromCharCode(code - 0x60));
-    }
-  }
-
-  void _onCtrlTap() {
-    HapticFeedback.lightImpact();
-    setState(() => _ctrlActive = !_ctrlActive);
-  }
-
-  void _onAltTap() {
-    HapticFeedback.lightImpact();
-    setState(() => _altActive = !_altActive);
-  }
-
-  void _handleKey(String key) {
-    if (_ctrlActive) {
-      if (key.length == 1) {
-        final code = key.codeUnitAt(0);
+  /// Send a character key, applying any active modifiers.
+  void _sendCharKey(String char) {
+    if (_mod.hasAny) {
+      if (_mod.ctrl) {
+        final code = char.codeUnitAt(0);
         if (code >= 0x61 && code <= 0x7A) {
           _sendText(String.fromCharCode(code - 0x60));
         } else if (code >= 0x41 && code <= 0x5A) {
           _sendText(String.fromCharCode(code - 0x40));
+        } else {
+          _sendText(char);
         }
+      } else {
+        // Option/Cmd: ESC prefix
+        _sendText('\x1b$char');
       }
-      setState(() => _ctrlActive = false);
+      _mod.reset();
     } else {
-      _sendSpecialKey(key);
-    }
-    if (_altActive) {
-      setState(() => _altActive = false);
+      _sendText(char);
     }
   }
 
-  void _pasteFromClipboard() async {
-    HapticFeedback.lightImpact();
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
+  /// Handle arrow from joystick, respecting modifier state.
+  void _handleArrow(String key) {
+    final arrow = _arrowChar[key];
+
+    if (arrow != null && _mod.hasAny) {
+      if (_mod.cmd && !_mod.ctrl && !_mod.option) {
+        switch (key) {
+          case 'ArrowLeft':
+            _sendSpecialKey('Home');
+          case 'ArrowRight':
+            _sendSpecialKey('End');
+          case 'ArrowUp':
+            _sendSpecialKey('PageUp');
+          case 'ArrowDown':
+            _sendSpecialKey('PageDown');
+        }
+      } else {
+        int mod = 1;
+        if (_mod.ctrl) mod += 4;
+        if (_mod.option) mod += 2;
+        _sendText('\x1b[1;$mod$arrow');
+      }
+      _mod.reset();
+    } else {
+      _sendSpecialKey(key);
+      if (_mod.hasAny) _mod.reset();
+    }
+  }
+
+  Future<void> _paste() async {
+    final data = await Clipboard.getData('text/plain');
     if (data?.text != null && data!.text!.isNotEmpty) {
       _sendText(data.text!);
     }
-  }
-
-  void _showCtrlGrid() {
-    const shortcuts = [
-      ('C', 'kill'),
-      ('D', 'eof'),
-      ('Z', 'suspend'),
-      ('L', 'clear'),
-      ('A', 'bol'),
-      ('E', 'eol'),
-      ('R', 'search'),
-      ('W', 'del word'),
-      ('U', 'del left'),
-      ('K', 'del right'),
-      ('P', 'prev'),
-      ('N', 'next'),
-    ];
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF252526),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 12),
-                child: Text(
-                  'CTRL + ...',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 13,
-                    fontFamily: 'JetBrainsMono',
-                  ),
-                ),
-              ),
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 4,
-                mainAxisSpacing: 6,
-                crossAxisSpacing: 6,
-                childAspectRatio: 1.6,
-                physics: const NeverScrollableScrollPhysics(),
-                children: shortcuts.map((s) {
-                  final (letter, label) = s;
-                  return Material(
-                    color: const Color(0xFF3C3C3C),
-                    borderRadius: BorderRadius.circular(8),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () {
-                        HapticFeedback.lightImpact();
-                        _sendCtrlChar(letter);
-                        Navigator.of(ctx).pop();
-                      },
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            '^$letter',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              fontFamily: 'JetBrainsMono',
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            label,
-                            style: const TextStyle(
-                              color: Colors.white38,
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-              SizedBox(height: MediaQuery.of(ctx).padding.bottom),
-            ],
-          ),
-        );
-      },
-    );
   }
 
   void _showComposeSheet() {
@@ -222,7 +217,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF252526),
+      backgroundColor: OkenaColors.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -288,15 +283,17 @@ class _KeyToolbarState extends State<KeyToolbar> {
                       IconButton(
                         icon: const Icon(Icons.arrow_upward, size: 20),
                         color: _composeHistory.isNotEmpty
-                            ? Colors.white70
-                            : Colors.white24,
+                            ? OkenaColors.textSecondary
+                            : OkenaColors.textTertiary,
                         onPressed: _composeHistory.isNotEmpty ? historyUp : null,
                         tooltip: 'Previous command',
                         visualDensity: VisualDensity.compact,
                       ),
                       IconButton(
                         icon: const Icon(Icons.arrow_downward, size: 20),
-                        color: historyIdx > 0 ? Colors.white70 : Colors.white24,
+                        color: historyIdx > 0
+                            ? OkenaColors.textSecondary
+                            : OkenaColors.textTertiary,
                         onPressed: historyIdx >= 0 ? historyDown : null,
                         tooltip: 'Next command',
                         visualDensity: VisualDensity.compact,
@@ -313,8 +310,8 @@ class _KeyToolbarState extends State<KeyToolbar> {
                           ),
                           decoration: BoxDecoration(
                             color: sendEnter
-                                ? const Color(0xFF007ACC)
-                                : const Color(0xFF3C3C3C),
+                                ? OkenaColors.accent
+                                : OkenaColors.surfaceElevated,
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Row(
@@ -324,7 +321,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
                                 Icons.keyboard_return,
                                 size: 14,
                                 color:
-                                    sendEnter ? Colors.white : Colors.white54,
+                                    sendEnter ? Colors.white : OkenaColors.textTertiary,
                               ),
                               const SizedBox(width: 4),
                               Text(
@@ -332,7 +329,7 @@ class _KeyToolbarState extends State<KeyToolbar> {
                                 style: TextStyle(
                                   color: sendEnter
                                       ? Colors.white
-                                      : Colors.white54,
+                                      : OkenaColors.textTertiary,
                                   fontSize: 12,
                                   fontFamily: 'JetBrainsMono',
                                 ),
@@ -350,21 +347,21 @@ class _KeyToolbarState extends State<KeyToolbar> {
                     maxLines: null,
                     minLines: 3,
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: OkenaColors.textPrimary,
                       fontFamily: 'JetBrainsMono',
                       fontSize: 14,
                     ),
                     decoration: InputDecoration(
                       hintText: 'Enter command...',
-                      hintStyle: const TextStyle(color: Colors.white38),
+                      hintStyle: TextStyle(color: OkenaColors.textTertiary),
                       filled: true,
-                      fillColor: const Color(0xFF3C3C3C),
+                      fillColor: OkenaColors.surfaceElevated,
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
                         borderSide: BorderSide.none,
                       ),
                       suffixIcon: IconButton(
-                        icon: const Icon(Icons.send, color: Color(0xFF007ACC)),
+                        icon: Icon(Icons.send, color: OkenaColors.accent),
                         onPressed: submit,
                       ),
                     ),
@@ -378,300 +375,370 @@ class _KeyToolbarState extends State<KeyToolbar> {
     );
   }
 
-  void _sendShiftTab() {
-    HapticFeedback.lightImpact();
-    // Shift+Tab = reverse tab escape sequence
-    _sendText('\x1b[Z');
-  }
-
-  void _showMoreKeys() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF252526),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(left: 4, bottom: 12),
-                child: Text(
-                  'More keys',
-                  style: TextStyle(
-                    color: Colors.white54,
-                    fontSize: 13,
-                    fontFamily: 'JetBrainsMono',
-                  ),
-                ),
-              ),
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 4,
-                mainAxisSpacing: 6,
-                crossAxisSpacing: 6,
-                childAspectRatio: 1.8,
-                physics: const NeverScrollableScrollPhysics(),
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: OkenaColors.glassBg,
+            border: Border(
+              top: BorderSide(color: OkenaColors.glassStroke, width: 0.5),
+            ),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+              child: Row(
                 children: [
-                  _buildGridKey(ctx, 'TAB', () => _sendSpecialKey('Tab')),
-                  _buildGridKey(ctx, 'ALT', () {
-                    _onAltTap();
-                    Navigator.of(ctx).pop();
-                  }, toggle: _altActive),
-                  _buildGridKey(ctx, 'DEL', () => _sendSpecialKey('Delete')),
-                  _buildGridKey(ctx, 'HOME', () => _sendSpecialKey('Home')),
-                  _buildGridKey(ctx, 'END', () => _sendSpecialKey('End')),
-                  _buildGridKey(ctx, 'PG\u2191', () => _sendSpecialKey('PageUp')),
-                  _buildGridKey(ctx, 'PG\u2193', () => _sendSpecialKey('PageDown')),
+                  // Scrollable button row
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _Key(label: 'esc', onTap: () => _sendSpecialKey('Escape')),
+                          _ToggleKey(
+                            label: '\u2303',
+                            state: _mod.ctrlState,
+                            onTap: _mod.toggleCtrl,
+                          ),
+                          _ToggleKey(
+                            label: '\u2325',
+                            state: _mod.optionState,
+                            onTap: _mod.toggleOption,
+                          ),
+                          _ToggleKey(
+                            label: '\u2318',
+                            state: _mod.cmdState,
+                            onTap: _mod.toggleCmd,
+                          ),
+                          _Key(label: 'tab', onTap: () => _sendSpecialKey('Tab')),
+                          const SizedBox(width: 12),
+                          _Key(label: '~', onTap: () => _sendCharKey('~')),
+                          _Key(label: '|', onTap: () => _sendCharKey('|')),
+                          _Key(label: '/', onTap: () => _sendCharKey('/')),
+                          _Key(label: '-', onTap: () => _sendCharKey('-')),
+                          const SizedBox(width: 12),
+                          _IconKey(
+                            icon: Icons.edit_note_rounded,
+                            onTap: _showComposeSheet,
+                          ),
+                          _IconKey(
+                            icon: Icons.content_paste_rounded,
+                            onTap: _paste,
+                          ),
+                          _IconKey(
+                            icon: Icons.keyboard_hide_rounded,
+                            onTap: () => FocusScope.of(context).unfocus(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  // Fixed arrow joystick
+                  _ArrowJoystick(onArrow: _handleArrow),
                 ],
               ),
-              SizedBox(height: MediaQuery.of(ctx).padding.bottom),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildGridKey(BuildContext ctx, String label, VoidCallback onTap,
-      {bool toggle = false}) {
-    return Material(
-      color: toggle ? const Color(0xFF007ACC) : const Color(0xFF3C3C3C),
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: () {
-          HapticFeedback.lightImpact();
-          onTap();
-          if (!toggle) Navigator.of(ctx).pop();
-        },
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              color: toggle ? Colors.white : Colors.white70,
-              fontSize: 14,
-              fontWeight: toggle ? FontWeight.bold : FontWeight.normal,
-              fontFamily: 'JetBrainsMono',
             ),
           ),
         ),
       ),
     );
+  }
+}
+
+// ── Shared key widgets ─────────────────────────────────────────────────
+
+class _Key extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _Key({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        child: Container(
+          constraints: const BoxConstraints(minWidth: 40),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+          decoration: BoxDecoration(
+            color: OkenaColors.keyBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: OkenaColors.keyBorder, width: 0.5),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: OkenaColors.keyText,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _IconKey extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _IconKey({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        child: Container(
+          constraints: const BoxConstraints(minWidth: 40),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          decoration: BoxDecoration(
+            color: OkenaColors.keyBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: OkenaColors.keyBorder, width: 0.5),
+          ),
+          alignment: Alignment.center,
+          child: Icon(icon, color: OkenaColors.keyText, size: 17),
+        ),
+      ),
+    );
+  }
+}
+
+class _ToggleKey extends StatelessWidget {
+  final String label;
+  final ModifierState state;
+  final VoidCallback onTap;
+
+  const _ToggleKey({
+    required this.label,
+    required this.state,
+    required this.onTap,
+  });
+
+  bool get _active => state != ModifierState.inactive;
+  bool get _locked => state == ModifierState.locked;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: GestureDetector(
+        onTap: () {
+          HapticFeedback.lightImpact();
+          onTap();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOutCubic,
+          constraints: const BoxConstraints(minWidth: 40),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+          decoration: BoxDecoration(
+            color: _active ? OkenaColors.accent : OkenaColors.keyBg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: _active ? OkenaColors.accent : OkenaColors.keyBorder,
+              width: 0.5,
+            ),
+            boxShadow: _active
+                ? [
+                    BoxShadow(
+                      color: OkenaColors.accent.withOpacity(0.35),
+                      blurRadius: 12,
+                      spreadRadius: -2,
+                    ),
+                  ]
+                : null,
+          ),
+          alignment: Alignment.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: _active ? Colors.white : OkenaColors.keyText,
+                  fontSize: 16,
+                  fontWeight: _active ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+              // Small bar indicator for locked state
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                curve: Curves.easeOutCubic,
+                width: 12,
+                height: 2,
+                margin: const EdgeInsets.only(top: 1),
+                decoration: BoxDecoration(
+                  color: _locked ? Colors.white : Colors.transparent,
+                  borderRadius: BorderRadius.circular(1),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Arrow Joystick ─────────────────────────────────────────────────────
+
+class _ArrowJoystick extends StatefulWidget {
+  final ValueChanged<String> onArrow;
+
+  const _ArrowJoystick({required this.onArrow});
+
+  @override
+  State<_ArrowJoystick> createState() => _ArrowJoystickState();
+}
+
+class _ArrowJoystickState extends State<_ArrowJoystick> {
+  static const _size = 52.0;
+  static const _dragThreshold = 14.0;
+
+  String? _activeDirection;
+  Offset _panOrigin = Offset.zero;
+  bool _hasMoved = false;
+
+  void _fire(String direction) {
+    widget.onArrow(direction);
+    HapticFeedback.selectionClick();
+    setState(() => _activeDirection = direction);
+  }
+
+  void _onPanStart(DragStartDetails details) {
+    _panOrigin = details.localPosition;
+    _hasMoved = false;
+  }
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    final delta = details.localPosition - _panOrigin;
+    if (delta.distance >= _dragThreshold) {
+      _hasMoved = true;
+      final dir = delta.dx.abs() > delta.dy.abs()
+          ? (delta.dx > 0 ? 'ArrowRight' : 'ArrowLeft')
+          : (delta.dy > 0 ? 'ArrowDown' : 'ArrowUp');
+      _fire(dir);
+      _panOrigin = details.localPosition;
+    }
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    if (!_hasMoved) {
+      final center = const Offset(_size / 2, _size / 2);
+      final delta = _panOrigin - center;
+      if (delta.distance >= 4) {
+        final dir = delta.dx.abs() > delta.dy.abs()
+            ? (delta.dx > 0 ? 'ArrowRight' : 'ArrowLeft')
+            : (delta.dy > 0 ? 'ArrowDown' : 'ArrowUp');
+        _fire(dir);
+        Future.delayed(const Duration(milliseconds: 120), () {
+          if (mounted) setState(() => _activeDirection = null);
+        });
+        return;
+      }
+    }
+    setState(() => _activeDirection = null);
   }
 
   @override
   Widget build(BuildContext context) {
-    final modifierActive = _ctrlActive || _altActive;
-    return Container(
-      color: const Color(0xFF252526),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (modifierActive)
-              Container(height: 2, color: const Color(0xFF007ACC)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(2, 4, 2, 4),
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // Left: two rows of action keys (~75% width)
-                    Expanded(
-                      flex: 3,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(children: [
-                            _buildIconKey(Icons.edit_note, _showComposeSheet),
-                            _buildIconKey(Icons.content_paste, _pasteFromClipboard),
-                            _buildKey('ESC', () => _sendSpecialKey('Escape')),
-                            _buildKey('ENT', () => _sendSpecialKey('Enter')),
-                          ]),
-                          Row(children: [
-                            _buildToggleKey(
-                              'CTRL', _ctrlActive,
-                              onTap: _onCtrlTap,
-                              onLongPress: _showCtrlGrid,
-                            ),
-                            _buildKey('TAB', () => _sendSpecialKey('Tab')),
-                            _buildKey('S+T', _sendShiftTab),
-                            _buildIconKey(Icons.more_horiz, _showMoreKeys),
-                          ]),
-                        ],
-                      ),
-                    ),
-                    // Divider
-                    Container(
-                      width: 1,
-                      color: Colors.white10,
-                      margin: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
-                    ),
-                    // Right: arrow d-pad (~25% width)
-                    Expanded(
-                      flex: 1,
-                      child: _buildDpad(),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+    return GestureDetector(
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      child: Container(
+        width: _size,
+        height: _size,
+        decoration: BoxDecoration(
+          color: OkenaColors.keyBg,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: OkenaColors.keyBorder, width: 0.5),
+        ),
+        child: CustomPaint(
+          size: const Size(_size, _size),
+          painter: _JoystickPainter(_activeDirection),
         ),
       ),
     );
   }
+}
 
-  Widget _buildDpad() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // Top row: spacer | ↑ | spacer
-          Row(
-            children: [
-              const Expanded(child: SizedBox()),
-              Expanded(child: _buildDpadKey('\u2191', () => _handleKey('ArrowUp'))),
-              const Expanded(child: SizedBox()),
-            ],
-          ),
-          const SizedBox(height: 2),
-          // Bottom row: ← | ↓ | →
-          Row(
-            children: [
-              Expanded(child: _buildDpadKey('\u2190', () => _handleKey('ArrowLeft'))),
-              Expanded(child: _buildDpadKey('\u2193', () => _handleKey('ArrowDown'))),
-              Expanded(child: _buildDpadKey('\u2192', () => _handleKey('ArrowRight'))),
-            ],
-          ),
-        ],
-      ),
+class _JoystickPainter extends CustomPainter {
+  final String? activeDirection;
+
+  _JoystickPainter(this.activeDirection);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    const armLength = 12.0;
+    const gap = 3.0;
+    const tipSize = 4.0;
+
+    const dirs = {
+      'ArrowUp': Offset(0, -1),
+      'ArrowDown': Offset(0, 1),
+      'ArrowLeft': Offset(-1, 0),
+      'ArrowRight': Offset(1, 0),
+    };
+
+    for (final entry in dirs.entries) {
+      final isActive = activeDirection == entry.key;
+      final color = isActive ? OkenaColors.accent : const Color(0x61FFFFFF);
+      final paint = Paint()
+        ..color = color
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round;
+
+      final d = entry.value;
+      final armStart = center + d * gap;
+      final armEnd = center + d * armLength;
+
+      paint.style = PaintingStyle.stroke;
+      canvas.drawLine(armStart, armEnd, paint);
+
+      paint.style = PaintingStyle.fill;
+      final path = Path();
+      if (d.dy != 0) {
+        path.moveTo(armEnd.dx, armEnd.dy);
+        path.lineTo(armEnd.dx - tipSize, armEnd.dy - d.dy * tipSize);
+        path.lineTo(armEnd.dx + tipSize, armEnd.dy - d.dy * tipSize);
+      } else {
+        path.moveTo(armEnd.dx, armEnd.dy);
+        path.lineTo(armEnd.dx - d.dx * tipSize, armEnd.dy - tipSize);
+        path.lineTo(armEnd.dx - d.dx * tipSize, armEnd.dy + tipSize);
+      }
+      path.close();
+      canvas.drawPath(path, paint);
+    }
+
+    canvas.drawCircle(
+      center,
+      1.5,
+      Paint()..color = const Color(0x3DFFFFFF),
     );
   }
 
-  Widget _buildDpadKey(String label, VoidCallback onTap) {
-    return Padding(
-      padding: const EdgeInsets.all(1),
-      child: Material(
-        color: const Color(0xFF3C3C3C),
-        borderRadius: BorderRadius.circular(6),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () {
-            HapticFeedback.lightImpact();
-            onTap();
-          },
-          child: Container(
-            height: 30,
-            alignment: Alignment.center,
-            child: Text(
-              label,
-              style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 14,
-                fontFamily: 'JetBrainsMono',
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildKey(String label, VoidCallback onTap) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
-        child: Material(
-          color: const Color(0xFF3C3C3C),
-          borderRadius: BorderRadius.circular(6),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: () {
-              HapticFeedback.lightImpact();
-              onTap();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              alignment: Alignment.center,
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 12,
-                  fontFamily: 'JetBrainsMono',
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildIconKey(IconData icon, VoidCallback onTap) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
-        child: Material(
-          color: const Color(0xFF3C3C3C),
-          borderRadius: BorderRadius.circular(6),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: () {
-              HapticFeedback.lightImpact();
-              onTap();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              alignment: Alignment.center,
-              child: Icon(icon, color: Colors.white70, size: 16),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildToggleKey(
-    String label,
-    bool active, {
-    required VoidCallback onTap,
-    VoidCallback? onLongPress,
-  }) {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 1.5, vertical: 5),
-        child: Material(
-          color: active ? const Color(0xFF007ACC) : const Color(0xFF3C3C3C),
-          borderRadius: BorderRadius.circular(6),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(6),
-            onTap: onTap,
-            onLongPress: onLongPress,
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              alignment: Alignment.center,
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: active ? Colors.white : Colors.white70,
-                  fontSize: 12,
-                  fontWeight: active ? FontWeight.bold : FontWeight.normal,
-                  fontFamily: 'JetBrainsMono',
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  @override
+  bool shouldRepaint(_JoystickPainter old) =>
+      old.activeDirection != activeDirection;
 }

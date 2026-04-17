@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `collect_layout_ids_vec`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Get all projects from the cached remote state.
 List<ProjectInfo> getProjects({required String connId}) =>
@@ -16,6 +16,27 @@ List<ProjectInfo> getProjects({required String connId}) =>
 /// Get the focused project ID from the cached remote state.
 String? getFocusedProjectId({required String connId}) =>
     RustLib.instance.api.crateApiStateGetFocusedProjectId(connId: connId);
+
+/// Get folders from the cached remote state.
+List<FolderInfo> getFolders({required String connId}) =>
+    RustLib.instance.api.crateApiStateGetFolders(connId: connId);
+
+/// Get the project order from the cached remote state.
+List<String> getProjectOrder({required String connId}) =>
+    RustLib.instance.api.crateApiStateGetProjectOrder(connId: connId);
+
+/// Get fullscreen terminal info.
+FullscreenInfo? getFullscreenTerminal({required String connId}) =>
+    RustLib.instance.api.crateApiStateGetFullscreenTerminal(connId: connId);
+
+/// Get layout JSON for a project.
+String? getProjectLayoutJson({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateGetProjectLayoutJson(
+  connId: connId,
+  projectId: projectId,
+);
 
 /// Check if a terminal has unprocessed output (dirty flag).
 bool isDirty({required String connId, required String terminalId}) => RustLib
@@ -40,7 +61,7 @@ Future<void> sendSpecialKey({
 List<String> getAllTerminalIds({required String connId}) =>
     RustLib.instance.api.crateApiStateGetAllTerminalIds(connId: connId);
 
-/// Create a new terminal in the given project via POST /v1/actions.
+/// Create a new terminal in the given project.
 Future<void> createTerminal({
   required String connId,
   required String projectId,
@@ -49,7 +70,7 @@ Future<void> createTerminal({
   projectId: projectId,
 );
 
-/// Close a terminal in the given project via POST /v1/actions.
+/// Close a terminal in the given project.
 Future<void> closeTerminal({
   required String connId,
   required String projectId,
@@ -60,6 +81,387 @@ Future<void> closeTerminal({
   terminalId: terminalId,
 );
 
+/// Close multiple terminals in a project.
+Future<void> closeTerminals({
+  required String connId,
+  required String projectId,
+  required List<String> terminalIds,
+}) => RustLib.instance.api.crateApiStateCloseTerminals(
+  connId: connId,
+  projectId: projectId,
+  terminalIds: terminalIds,
+);
+
+/// Rename a terminal.
+Future<void> renameTerminal({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+  required String name,
+}) => RustLib.instance.api.crateApiStateRenameTerminal(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+  name: name,
+);
+
+/// Focus a terminal.
+Future<void> focusTerminal({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateFocusTerminal(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+);
+
+/// Toggle minimized state of a terminal.
+Future<void> toggleMinimized({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateToggleMinimized(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+);
+
+/// Set/clear fullscreen terminal.
+Future<void> setFullscreen({
+  required String connId,
+  required String projectId,
+  String? terminalId,
+}) => RustLib.instance.api.crateApiStateSetFullscreen(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+);
+
+/// Split a terminal pane.
+Future<void> splitTerminal({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required String direction,
+}) => RustLib.instance.api.crateApiStateSplitTerminal(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  direction: direction,
+);
+
+/// Run a command in a terminal (presses Enter automatically).
+Future<void> runCommand({
+  required String connId,
+  required String terminalId,
+  required String command,
+}) => RustLib.instance.api.crateApiStateRunCommand(
+  connId: connId,
+  terminalId: terminalId,
+  command: command,
+);
+
+/// Read terminal content as text.
+Future<String> readContent({
+  required String connId,
+  required String terminalId,
+}) => RustLib.instance.api.crateApiStateReadContent(
+  connId: connId,
+  terminalId: terminalId,
+);
+
+/// Get detailed git status for a project.
+Future<String> gitStatus({required String connId, required String projectId}) =>
+    RustLib.instance.api.crateApiStateGitStatus(
+      connId: connId,
+      projectId: projectId,
+    );
+
+/// Get git diff summary for a project.
+Future<String> gitDiffSummary({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateGitDiffSummary(
+  connId: connId,
+  projectId: projectId,
+);
+
+/// Get git diff for a project. Mode: "working_tree", "staged".
+Future<String> gitDiff({
+  required String connId,
+  required String projectId,
+  required String mode,
+}) => RustLib.instance.api.crateApiStateGitDiff(
+  connId: connId,
+  projectId: projectId,
+  mode: mode,
+);
+
+/// Get git branches for a project.
+Future<String> gitBranches({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateGitBranches(
+  connId: connId,
+  projectId: projectId,
+);
+
+/// Start a service.
+Future<void> startService({
+  required String connId,
+  required String projectId,
+  required String serviceName,
+}) => RustLib.instance.api.crateApiStateStartService(
+  connId: connId,
+  projectId: projectId,
+  serviceName: serviceName,
+);
+
+/// Stop a service.
+Future<void> stopService({
+  required String connId,
+  required String projectId,
+  required String serviceName,
+}) => RustLib.instance.api.crateApiStateStopService(
+  connId: connId,
+  projectId: projectId,
+  serviceName: serviceName,
+);
+
+/// Restart a service.
+Future<void> restartService({
+  required String connId,
+  required String projectId,
+  required String serviceName,
+}) => RustLib.instance.api.crateApiStateRestartService(
+  connId: connId,
+  projectId: projectId,
+  serviceName: serviceName,
+);
+
+/// Start all services in a project.
+Future<void> startAllServices({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateStartAllServices(
+  connId: connId,
+  projectId: projectId,
+);
+
+/// Stop all services in a project.
+Future<void> stopAllServices({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateStopAllServices(
+  connId: connId,
+  projectId: projectId,
+);
+
+/// Reload services config for a project.
+Future<void> reloadServices({
+  required String connId,
+  required String projectId,
+}) => RustLib.instance.api.crateApiStateReloadServices(
+  connId: connId,
+  projectId: projectId,
+);
+
+/// Add a new project.
+Future<void> addProject({
+  required String connId,
+  required String name,
+  required String path,
+}) => RustLib.instance.api.crateApiStateAddProject(
+  connId: connId,
+  name: name,
+  path: path,
+);
+
+/// Set project color.
+Future<void> setProjectColor({
+  required String connId,
+  required String projectId,
+  required String color,
+}) => RustLib.instance.api.crateApiStateSetProjectColor(
+  connId: connId,
+  projectId: projectId,
+  color: color,
+);
+
+/// Set folder color.
+Future<void> setFolderColor({
+  required String connId,
+  required String folderId,
+  required String color,
+}) => RustLib.instance.api.crateApiStateSetFolderColor(
+  connId: connId,
+  folderId: folderId,
+  color: color,
+);
+
+/// Reorder a project within a folder.
+Future<void> reorderProjectInFolder({
+  required String connId,
+  required String folderId,
+  required String projectId,
+  required BigInt newIndex,
+}) => RustLib.instance.api.crateApiStateReorderProjectInFolder(
+  connId: connId,
+  folderId: folderId,
+  projectId: projectId,
+  newIndex: newIndex,
+);
+
+/// Update split sizes for a split pane.
+Future<void> updateSplitSizes({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required List<double> sizes,
+}) => RustLib.instance.api.crateApiStateUpdateSplitSizes(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  sizes: sizes,
+);
+
+/// Add a new tab to a tab group.
+Future<void> addTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required bool inGroup,
+}) => RustLib.instance.api.crateApiStateAddTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  inGroup: inGroup,
+);
+
+/// Set the active tab in a tab group.
+Future<void> setActiveTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required BigInt index,
+}) => RustLib.instance.api.crateApiStateSetActiveTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  index: index,
+);
+
+/// Move a tab within a tab group.
+Future<void> moveTab({
+  required String connId,
+  required String projectId,
+  required Uint64List path,
+  required BigInt fromIndex,
+  required BigInt toIndex,
+}) => RustLib.instance.api.crateApiStateMoveTab(
+  connId: connId,
+  projectId: projectId,
+  path: path,
+  fromIndex: fromIndex,
+  toIndex: toIndex,
+);
+
+/// Move a terminal into a tab group.
+Future<void> moveTerminalToTabGroup({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+  required Uint64List targetPath,
+  BigInt? position,
+  String? targetProjectId,
+}) => RustLib.instance.api.crateApiStateMoveTerminalToTabGroup(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+  targetPath: targetPath,
+  position: position,
+  targetProjectId: targetProjectId,
+);
+
+/// Move a pane to a drop zone relative to another terminal.
+Future<void> movePaneTo({
+  required String connId,
+  required String projectId,
+  required String terminalId,
+  required String targetProjectId,
+  required String targetTerminalId,
+  required String zone,
+}) => RustLib.instance.api.crateApiStateMovePaneTo(
+  connId: connId,
+  projectId: projectId,
+  terminalId: terminalId,
+  targetProjectId: targetProjectId,
+  targetTerminalId: targetTerminalId,
+  zone: zone,
+);
+
+/// Get file contents from git (working tree or staged).
+Future<String> gitFileContents({
+  required String connId,
+  required String projectId,
+  required String filePath,
+  required String mode,
+}) => RustLib.instance.api.crateApiStateGitFileContents(
+  connId: connId,
+  projectId: projectId,
+  filePath: filePath,
+  mode: mode,
+);
+
+/// FFI-friendly folder info.
+class FolderInfo {
+  final String id;
+  final String name;
+  final List<String> projectIds;
+  final String folderColor;
+
+  const FolderInfo({
+    required this.id,
+    required this.name,
+    required this.projectIds,
+    required this.folderColor,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ name.hashCode ^ projectIds.hashCode ^ folderColor.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FolderInfo &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          projectIds == other.projectIds &&
+          folderColor == other.folderColor;
+}
+
+/// FFI-friendly fullscreen info.
+class FullscreenInfo {
+  final String projectId;
+  final String terminalId;
+
+  const FullscreenInfo({required this.projectId, required this.terminalId});
+
+  @override
+  int get hashCode => projectId.hashCode ^ terminalId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FullscreenInfo &&
+          runtimeType == other.runtimeType &&
+          projectId == other.projectId &&
+          terminalId == other.terminalId;
+}
+
 /// Flat FFI-friendly project info.
 class ProjectInfo {
   final String id;
@@ -68,6 +470,11 @@ class ProjectInfo {
   final bool showInOverview;
   final List<String> terminalIds;
   final Map<String, String> terminalNames;
+  final String? gitBranch;
+  final int gitLinesAdded;
+  final int gitLinesRemoved;
+  final List<ServiceInfo> services;
+  final String folderColor;
 
   const ProjectInfo({
     required this.id,
@@ -76,6 +483,11 @@ class ProjectInfo {
     required this.showInOverview,
     required this.terminalIds,
     required this.terminalNames,
+    this.gitBranch,
+    required this.gitLinesAdded,
+    required this.gitLinesRemoved,
+    required this.services,
+    required this.folderColor,
   });
 
   @override
@@ -85,7 +497,12 @@ class ProjectInfo {
       path.hashCode ^
       showInOverview.hashCode ^
       terminalIds.hashCode ^
-      terminalNames.hashCode;
+      terminalNames.hashCode ^
+      gitBranch.hashCode ^
+      gitLinesAdded.hashCode ^
+      gitLinesRemoved.hashCode ^
+      services.hashCode ^
+      folderColor.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -97,5 +514,54 @@ class ProjectInfo {
           path == other.path &&
           showInOverview == other.showInOverview &&
           terminalIds == other.terminalIds &&
-          terminalNames == other.terminalNames;
+          terminalNames == other.terminalNames &&
+          gitBranch == other.gitBranch &&
+          gitLinesAdded == other.gitLinesAdded &&
+          gitLinesRemoved == other.gitLinesRemoved &&
+          services == other.services &&
+          folderColor == other.folderColor;
+}
+
+/// FFI-friendly service info.
+class ServiceInfo {
+  final String name;
+  final String status;
+  final String? terminalId;
+  final Uint16List ports;
+  final int? exitCode;
+  final String kind;
+  final bool isExtra;
+
+  const ServiceInfo({
+    required this.name,
+    required this.status,
+    this.terminalId,
+    required this.ports,
+    this.exitCode,
+    required this.kind,
+    required this.isExtra,
+  });
+
+  @override
+  int get hashCode =>
+      name.hashCode ^
+      status.hashCode ^
+      terminalId.hashCode ^
+      ports.hashCode ^
+      exitCode.hashCode ^
+      kind.hashCode ^
+      isExtra.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServiceInfo &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          status == other.status &&
+          terminalId == other.terminalId &&
+          ports == other.ports &&
+          exitCode == other.exitCode &&
+          kind == other.kind &&
+          isExtra == other.isExtra;
 }

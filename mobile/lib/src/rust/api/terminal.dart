@@ -130,6 +130,20 @@ void resizeTerminal({
   rows: rows,
 );
 
+/// Resize only the local alacritty terminal — does NOT send a WS resize message to the server.
+/// Used when mobile adapts to the server's terminal size.
+void resizeLocal({
+  required String connId,
+  required String terminalId,
+  required int cols,
+  required int rows,
+}) => RustLib.instance.api.crateApiTerminalResizeLocal(
+  connId: connId,
+  terminalId: terminalId,
+  cols: cols,
+  rows: rows,
+);
+
 /// Cell data for FFI transfer (flat, no pointers).
 class CellData {
   /// The character in this cell.

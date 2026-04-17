@@ -102,18 +102,18 @@ impl RootView {
         // Execute pending center-scroll (deferred from unfocus to let layout update first).
         // We wait until the scroll handle reports overflow (max_offset > 0), which means
         // the layout has been recalculated with all projects visible.
-        if let Some(project_id) = self.pending_center_scroll.take() {
+        if let Some(project_id) = self.pending_ensure_visible_scroll.take() {
             let workspace = self.workspace.read(cx);
             let num_visible = workspace.visible_projects().len();
             let is_zoomed = workspace.focus_manager.focused_project_id().is_some();
 
             if is_zoomed || num_visible <= 1 {
-                // Still zoomed or only one project — no centering needed
+                // Still zoomed or only one project — no scrolling needed
             } else if self.projects_scroll_handle.max_offset().x > px(0.0) {
-                self.scroll_to_focused_project(Some(&project_id), true, cx);
+                self.scroll_to_focused_project(Some(&project_id), false, cx);
             } else {
                 // Layout hasn't updated yet — re-queue for next frame
-                self.pending_center_scroll = Some(project_id);
+                self.pending_ensure_visible_scroll = Some(project_id);
                 cx.notify();
             }
         }

@@ -30,6 +30,8 @@ impl ConnectionHandler for DesktopConnectionHandler {
         _terminal_id: &str,
         prefixed_id: &str,
         ws_sender: async_channel::Sender<WsClientMessage>,
+        cols: u16,
+        rows: u16,
     ) {
         let mut terminals = self.terminals.lock();
         // Skip if terminal already exists — on reconnect the server re-sends
@@ -43,9 +45,14 @@ impl ConnectionHandler for DesktopConnectionHandler {
             ws_tx: ws_sender,
             connection_id: connection_id.to_string(),
         });
+        let size = if cols > 0 && rows > 0 {
+            TerminalSize { cols, rows, ..TerminalSize::default() }
+        } else {
+            TerminalSize::default()
+        };
         let terminal = Arc::new(Terminal::new(
             prefixed_id.to_string(),
-            TerminalSize::default(),
+            size,
             transport,
             String::new(),
         ));

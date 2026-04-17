@@ -663,6 +663,7 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
                 minimized: *minimized,
@@ -697,6 +698,7 @@ impl LayoutNode {
                 terminal_id,
                 minimized,
                 detached,
+                ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
                 minimized: *minimized,
@@ -731,31 +733,48 @@ impl LayoutNode {
 
     /// Convert to API layout node.
     pub fn to_api(&self) -> okena_core::api::ApiLayoutNode {
+        self.to_api_with_sizes(&std::collections::HashMap::new())
+    }
+
+    /// Convert to API, populating terminal `cols`/`rows` from the given size map.
+    pub fn to_api_with_sizes(
+        &self,
+        sizes: &std::collections::HashMap<String, (u16, u16)>,
+    ) -> okena_core::api::ApiLayoutNode {
         match self {
             LayoutNode::Terminal {
                 terminal_id,
                 minimized,
                 detached,
                 ..
-            } => okena_core::api::ApiLayoutNode::Terminal {
-                terminal_id: terminal_id.clone(),
-                minimized: *minimized,
-                detached: *detached,
-            },
+            } => {
+                let (cols, rows) = terminal_id
+                    .as_ref()
+                    .and_then(|id| sizes.get(id))
+                    .map(|&(c, r)| (Some(c), Some(r)))
+                    .unwrap_or((None, None));
+                okena_core::api::ApiLayoutNode::Terminal {
+                    terminal_id: terminal_id.clone(),
+                    minimized: *minimized,
+                    detached: *detached,
+                    cols,
+                    rows,
+                }
+            }
             LayoutNode::Split {
                 direction,
-                sizes,
+                sizes: split_sizes,
                 children,
             } => okena_core::api::ApiLayoutNode::Split {
                 direction: *direction,
-                sizes: sizes.clone(),
-                children: children.iter().map(LayoutNode::to_api).collect(),
+                sizes: split_sizes.clone(),
+                children: children.iter().map(|c| c.to_api_with_sizes(sizes)).collect(),
             },
             LayoutNode::Tabs {
                 children,
                 active_tab,
             } => okena_core::api::ApiLayoutNode::Tabs {
-                children: children.iter().map(LayoutNode::to_api).collect(),
+                children: children.iter().map(|c| c.to_api_with_sizes(sizes)).collect(),
                 active_tab: *active_tab,
             },
         }

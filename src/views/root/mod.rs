@@ -86,8 +86,8 @@ pub struct RootView {
     last_scroll_project: Option<String>,
     /// Whether a project was zoomed/focused in the last observation (for detecting unfocus)
     was_project_focused: bool,
-    /// Project ID to center-scroll to after the next layout pass
-    pending_center_scroll: Option<String>,
+    /// Project ID to scroll into view after the next layout pass (on fullscreen exit)
+    pending_ensure_visible_scroll: Option<String>,
 }
 
 impl RootView {
@@ -204,7 +204,7 @@ impl RootView {
             pane_switcher_entity: None,
             last_scroll_project: None,
             was_project_focused: false,
-            pending_center_scroll: None,
+            pending_ensure_visible_scroll: None,
         };
 
         // Observe workspace to scroll focused project into view
@@ -218,7 +218,7 @@ impl RootView {
             // When project zoom is cleared, defer centering until after next layout pass
             if this.was_project_focused && !is_project_focused {
                 this.last_scroll_project = focused_terminal_project.clone();
-                this.pending_center_scroll = focused_terminal_project;
+                this.pending_ensure_visible_scroll = focused_terminal_project;
             }
             // When the active terminal changes project, ensure it's visible
             else if focused_terminal_project != this.last_scroll_project && focused_terminal_project.is_some() {
