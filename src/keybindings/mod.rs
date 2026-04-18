@@ -76,6 +76,10 @@ static KEYBINDING_CONFIG: RwLock<Option<KeybindingConfig>> = RwLock::new(None);
 /// The guard must be held for the duration of access.
 pub fn get_config() -> impl std::ops::Deref<Target = KeybindingConfig> {
     parking_lot::RwLockReadGuard::map(KEYBINDING_CONFIG.read(), |opt| {
+        #[allow(
+            clippy::expect_used,
+            reason = "init_keybindings() runs at startup before any caller reaches get_config()"
+        )]
         opt.as_ref().expect("Keybinding config not initialized")
     })
 }

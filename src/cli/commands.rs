@@ -216,7 +216,12 @@ pub fn cli_services(args: &[String]) -> i32 {
                 }));
             }
         }
-        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+        #[allow(
+            clippy::unwrap_used,
+            reason = "entries is a Vec of serde_json::Value — serialization is infallible"
+        )]
+        let out = serde_json::to_string_pretty(&entries).unwrap();
+        println!("{}", out);
     } else {
         for project in &projects {
             for svc in &project.services {

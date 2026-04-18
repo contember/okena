@@ -12,6 +12,10 @@ use rust_embed::RustEmbed;
 pub struct Assets;
 
 /// Get embedded fonts for registration with GPUI
+#[allow(
+    clippy::expect_used,
+    reason = "fonts are embedded via RustEmbed at compile time — missing asset means the build is broken"
+)]
 pub fn embedded_fonts() -> Vec<Cow<'static, [u8]>> {
     vec![
         Assets::get("fonts/JetBrainsMono-Regular.ttf")

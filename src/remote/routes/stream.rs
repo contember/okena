@@ -1,3 +1,7 @@
+// All `.expect("BUG: WsOutbound must serialize")` sites in this file serialize
+// internal WsOutbound DTOs whose Serialize impls cannot fail in practice.
+#![allow(clippy::expect_used)]
+
 use crate::remote::bridge::{BridgeMessage, CommandResult, RemoteCommand};
 use crate::remote::routes::AppState;
 use crate::remote::types::{

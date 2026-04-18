@@ -13,15 +13,18 @@ pub async fn post_pair(
     Json(req): Json<PairRequest>,
 ) -> impl IntoResponse {
     match state.auth_store.try_pair(&req.code, addr.ip()) {
-        Ok(token) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(PairResponse {
+        Ok(token) => {
+            #[allow(
+                clippy::unwrap_used,
+                reason = "PairResponse is an internal type — serialization is infallible"
+            )]
+            let body = serde_json::to_value(PairResponse {
                 token,
                 expires_in: TOKEN_TTL_SECS,
             })
-            .unwrap()),
-        )
-            .into_response(),
+            .unwrap();
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Err(PairError::RateLimited) => {
             // 300ms delay after rate-limited attempt
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;

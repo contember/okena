@@ -1,3 +1,7 @@
+// The `.expect("BUG: ... must serialize")` sites in this file serialize
+// internal DTOs whose Serialize impls cannot fail in practice.
+#![allow(clippy::expect_used)]
+
 use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, RemoteCommand};
 use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
 use crate::services::manager::{ServiceManager, ServiceStatus};

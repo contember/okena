@@ -290,7 +290,9 @@ impl Render for CommandPalette {
                             return;
                         }
                         k if k.len() == 1 => {
-                            let ch = k.chars().next().unwrap();
+                            let Some(ch) = k.chars().next() else {
+                                return;
+                            };
                             if "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_./".contains(ch) {
                                 this.state.search_query.clear();
                                 this.select_all = false;

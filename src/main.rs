@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 #[macro_use]
 mod macros;
@@ -367,11 +368,11 @@ fn main() {
     };
 
     if headless {
-        if listen_addr.is_none() {
+        let Some(addr) = listen_addr else {
             eprintln!("Headless mode requires --listen <addr>, e.g. --headless --listen 0.0.0.0");
             std::process::exit(1);
-        }
-        run_headless(listen_addr.unwrap());
+        };
+        run_headless(addr);
         return;
     }
 
@@ -393,6 +394,10 @@ fn main() {
         set_app_menus(cx);
 
         // Register embedded JetBrains Mono font
+        #[allow(
+            clippy::expect_used,
+            reason = "embedded fonts ship with the binary — failure here means the build is broken"
+        )]
         cx.text_system()
             .add_fonts(embedded_fonts())
             .expect("Failed to register embedded fonts");
@@ -554,6 +559,10 @@ fn main() {
         let pty_manager = Arc::new(pty_manager);
 
         // Create the main window
+        #[allow(
+            clippy::expect_used,
+            reason = "main window creation failing at startup leaves nothing to recover into"
+        )]
         cx.open_window(
             WindowOptions {
                 // On Windows, disable platform titlebar entirely for custom titlebar

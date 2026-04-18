@@ -4,6 +4,11 @@
 //! the desktop UI and the remote API to eliminate code duplication
 //! and ensure consistent behavior.
 
+// All `.expect("BUG: ... must serialize")` call sites in this module
+// serialize internal response DTOs to serde_json::Value. Failure is
+// unreachable for well-formed types, and callers cannot recover anyway.
+#![allow(clippy::expect_used)]
+
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use crate::remote::bridge::CommandResult;
