@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 use gpui::*;
 use std::collections::HashSet;
 use std::sync::Arc;

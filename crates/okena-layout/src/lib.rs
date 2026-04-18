@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! okena-layout — Layout tree algorithms.
 //!
 //! The `LayoutNode` recursive enum models terminal panes as a tree of

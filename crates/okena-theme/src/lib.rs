@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 // Re-export core theme types (source of truth is okena-core)
 pub use okena_core::theme::{
     ThemeColors, ThemeInfo, ThemeMode, FolderColor,

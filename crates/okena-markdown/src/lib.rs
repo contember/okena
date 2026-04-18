@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! Markdown renderer for GPUI.
 //!
 //! Parses markdown content and renders it as GPUI elements.

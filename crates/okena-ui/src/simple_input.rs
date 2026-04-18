@@ -251,9 +251,8 @@ impl SimpleInputState {
 
             if extend_selection {
                 self.extend_selection(old_pos, self.cursor_position);
-            } else if self.selection.is_some() {
-                // Move cursor to start of selection
-                self.cursor_position = self.selection.as_ref().unwrap().start;
+            } else if let Some(sel) = self.selection.as_ref() {
+                self.cursor_position = sel.start;
                 self.selection = None;
             }
             if !extend_selection {
@@ -275,9 +274,8 @@ impl SimpleInputState {
 
             if extend_selection {
                 self.extend_selection(old_pos, self.cursor_position);
-            } else if self.selection.is_some() {
-                // Move cursor to end of selection
-                self.cursor_position = self.selection.as_ref().unwrap().end;
+            } else if let Some(sel) = self.selection.as_ref() {
+                self.cursor_position = sel.end;
                 self.selection = None;
             }
             if !extend_selection {

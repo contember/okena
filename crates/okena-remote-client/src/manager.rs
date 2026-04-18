@@ -30,6 +30,10 @@ pub struct RemoteConnectionManager {
 
 impl RemoteConnectionManager {
     pub fn new(terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+        #[allow(
+            clippy::expect_used,
+            reason = "tokio runtime build only fails on OS resource exhaustion at startup — nothing recoverable"
+        )]
         let runtime = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)

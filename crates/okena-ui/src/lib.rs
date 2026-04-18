@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! Okena UI component library.
 //!
 //! Reusable UI components, design tokens, and theme helpers for the Okena terminal.

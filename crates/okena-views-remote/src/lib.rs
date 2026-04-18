@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod remote_connect_dialog;
 pub mod remote_pair_dialog;
 pub mod remote_context_menu;
