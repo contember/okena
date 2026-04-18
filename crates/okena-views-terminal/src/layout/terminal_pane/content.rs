@@ -268,9 +268,6 @@ impl TerminalContent {
     ) {
         window.focus(&self.focus_handle, cx);
 
-        if self.terminal.is_none() {
-            return;
-        }
         let Some((col, row, side)) = self.pixel_to_cell(event.position) else {
             return;
         };
@@ -320,7 +317,9 @@ impl TerminalContent {
         self.last_click = Some((now, col, row));
         self.click_count = click_count;
 
-        let terminal = self.terminal.as_ref().unwrap();
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
         terminal.clear_selection();
 
         match click_count {

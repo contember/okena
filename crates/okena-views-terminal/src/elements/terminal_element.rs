@@ -420,14 +420,19 @@ impl Element for TerminalElement {
                     };
 
                     if let Some(color) = bg_color {
-                        if let Some(ref mut rect) = current_rect {
-                            if rect.line == visual_line && rect.start_col + rect.num_cells as i32 == col_i32 && rect.color == color {
+                        let can_extend = current_rect.as_ref().is_some_and(|rect| {
+                            rect.line == visual_line
+                                && rect.start_col + rect.num_cells as i32 == col_i32
+                                && rect.color == color
+                        });
+                        if can_extend {
+                            if let Some(rect) = current_rect.as_mut() {
                                 rect.extend();
-                            } else {
-                                rects.push(current_rect.take().unwrap());
-                                current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                             }
                         } else {
+                            if let Some(prev) = current_rect.take() {
+                                rects.push(prev);
+                            }
                             current_rect = Some(LayoutRect::new(visual_line, col_i32, color));
                         }
                     } else if let Some(rect) = current_rect.take() {
@@ -488,14 +493,17 @@ impl Element for TerminalElement {
                         },
                     };
 
-                    if let Some(ref mut batch) = current_batch {
-                        if batch.can_append(&text_style, visual_line, col_i32) {
+                    let can_append = current_batch
+                        .as_ref()
+                        .is_some_and(|batch| batch.can_append(&text_style, visual_line, col_i32));
+                    if can_append {
+                        if let Some(batch) = current_batch.as_mut() {
                             batch.append_char(cell.c);
-                        } else {
-                            batched_runs.push(current_batch.take().unwrap());
-                            current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                         }
                     } else {
+                        if let Some(prev) = current_batch.take() {
+                            batched_runs.push(prev);
+                        }
                         current_batch = Some(BatchedTextRun::new(visual_line, col_i32, cell.c, text_style));
                     }
                 }

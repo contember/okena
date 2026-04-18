@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! Okena terminal views crate.
 //!
 //! Contains custom GPUI elements for terminal rendering and the layout system

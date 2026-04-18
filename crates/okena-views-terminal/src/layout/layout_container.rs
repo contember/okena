@@ -250,9 +250,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .child(AnyView::from(self.terminal_pane.clone().unwrap()).cached(
-                        StyleRefinement::default().size_full()
-                    ))
+                    .when_some(self.terminal_pane.clone(), |d, pane| {
+                        d.child(AnyView::from(pane).cached(
+                            StyleRefinement::default().size_full(),
+                        ))
+                    })
                     .child(self.render_drop_zones(terminal_id, cx, &self.active_drag.clone())),
             )
     }
