@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! okena-hooks — Lifecycle hook execution.
 //!
 //! Runs project/terminal/worktree lifecycle hooks as shell commands, either
