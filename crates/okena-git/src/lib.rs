@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod branch_names;
 pub mod diff;
 pub mod error;

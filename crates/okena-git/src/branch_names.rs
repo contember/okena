@@ -140,6 +140,10 @@ fn sanitize_username(name: &str) -> String {
 pub fn generate_branch_name(repo_path: &Path) -> String {
     // Run username detection and branch listing in parallel —
     // they spawn independent subprocesses.
+    #[allow(
+        clippy::expect_used,
+        reason = "scoped worker panic re-raised by the orchestrator is the intended behavior"
+    )]
     let (username, taken) = std::thread::scope(|s| {
         let u = s.spawn(|| detect_github_username(repo_path));
         let t = s.spawn(|| collect_taken_branches(repo_path));
@@ -196,6 +200,10 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
 fn collect_taken_branches(repo_path: &Path) -> HashSet<String> {
     // list_branches and get_worktree_branches are independent git commands —
     // run them in parallel to halve the latency.
+    #[allow(
+        clippy::expect_used,
+        reason = "scoped worker panic re-raised by the orchestrator is the intended behavior"
+    )]
     let (branches, wt_branches) = std::thread::scope(|s| {
         let b = s.spawn(|| super::repository::list_branches(repo_path));
         let w = s.spawn(|| super::repository::get_worktree_branches(repo_path));
