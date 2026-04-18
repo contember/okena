@@ -29,6 +29,10 @@ impl ConnectionManager {
     /// Initialize the global singleton. Call once at app startup.
     pub fn init() {
         MANAGER.get_or_init(|| {
+            #[allow(
+                clippy::expect_used,
+                reason = "tokio runtime must start for the mobile app to function; abort on failure"
+            )]
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -43,6 +47,10 @@ impl ConnectionManager {
     }
 
     /// Get the global singleton. Panics if `init()` hasn't been called.
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant: init() is called at app startup before any FFI access"
+    )]
     pub fn get() -> &'static ConnectionManager {
         MANAGER.get().expect("ConnectionManager not initialized")
     }
