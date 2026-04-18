@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 //! okena-state — Pure data types for workspace state.
 //!
 //! Holds the serializable data structures that describe a workspace:
