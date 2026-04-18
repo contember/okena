@@ -7,6 +7,10 @@ fn shared_client() -> &'static reqwest::blocking::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
+        #[allow(
+            clippy::expect_used,
+            reason = "reqwest client build only fails on TLS backend init — nothing recoverable at this call site"
+        )]
         reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(5))
