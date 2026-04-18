@@ -533,7 +533,9 @@ impl DiffViewer {
             }));
         }
 
-        let file = self.current_file.as_mut().unwrap();
+        let Some(file) = self.current_file.as_mut() else {
+            return;
+        };
         file.items.splice(item_index..=item_index, new_items);
 
         self.max_line_chars = Self::calc_max_line_chars(file);

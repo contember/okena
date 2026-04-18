@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod diff_viewer;
 pub mod git_header;
 pub mod project_header;

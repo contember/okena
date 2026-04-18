@@ -270,7 +270,7 @@ impl DiffViewer {
             .h(px(line_height))
             .text_size(px(font_size))
             .font_family("monospace")
-            .when(line_bg.is_some(), |d| d.bg(line_bg.unwrap()))
+            .when_some(line_bg, |d, bg| d.bg(bg))
             .on_mouse_down(
                 MouseButton::Left,
                 {

@@ -801,8 +801,12 @@ impl GitHeader {
                                                             .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
                                                             .when(both_selected, |d| {
                                                                 d.on_click(cx.listener(move |this, _, _window, cx| {
-                                                                    let base = this.commit_log_compare_base.clone().unwrap();
-                                                                    let head = this.commit_log_compare_head.clone().unwrap();
+                                                                    let (Some(base), Some(head)) = (
+                                                                        this.commit_log_compare_base.clone(),
+                                                                        this.commit_log_compare_head.clone(),
+                                                                    ) else {
+                                                                        return;
+                                                                    };
                                                                     this.hide_commit_log(cx);
                                                                     broker.update(cx, |broker, cx| {
                                                                         broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
