@@ -1028,17 +1028,18 @@ impl Render for FileViewer {
                                                 &self.active_tab().source_scroll_handle,
                                             ),
                                         )
-                                        .when(scrollbar_geometry.is_some(), |d| {
-                                            let (_, _, thumb_y, thumb_height) =
-                                                scrollbar_geometry.unwrap();
-                                            d.child(self.render_scrollbar(
-                                                &t,
-                                                thumb_y,
-                                                thumb_height,
-                                                is_dragging_scrollbar,
-                                                cx,
-                                            ))
-                                        }),
+                                        .when_some(
+                                            scrollbar_geometry,
+                                            |d, (_, _, thumb_y, thumb_height)| {
+                                                d.child(self.render_scrollbar(
+                                                    &t,
+                                                    thumb_y,
+                                                    thumb_height,
+                                                    is_dragging_scrollbar,
+                                                    cx,
+                                                ))
+                                            },
+                                        ),
                                 )
                             })
                             .when(!tab_loading && !has_error && is_preview_mode, |d| {
@@ -1427,18 +1428,22 @@ impl Render for FileViewer {
                         }))
                 )
             })
-            .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |d| {
-                let bounds = self.filter_button_bounds.unwrap();
-                let entity = cx.entity().downgrade();
-                d.child(crate::list_overlay::file_filter_popover(
-                    bounds, self.show_ignored, self.show_hidden, &t, cx,
-                    move |filter, _, cx| {
-                        if let Some(e) = entity.upgrade() {
-                            e.update(cx, |this, cx| this.toggle_filter(filter, cx));
-                        }
-                    },
-                ))
-            })
+            .when_some(
+                self.filter_popover_open
+                    .then_some(self.filter_button_bounds)
+                    .flatten(),
+                |d, bounds| {
+                    let entity = cx.entity().downgrade();
+                    d.child(crate::list_overlay::file_filter_popover(
+                        bounds, self.show_ignored, self.show_hidden, &t, cx,
+                        move |filter, _, cx| {
+                            if let Some(e) = entity.upgrade() {
+                                e.update(cx, |this, cx| this.toggle_filter(filter, cx));
+                            }
+                        },
+                    ))
+                },
+            )
             .when_some(self.render_context_menu(&t, cx), |d, menu| d.child(menu))
             .when_some(self.render_tab_context_menu(&t, cx), |d, menu| d.child(menu))
             .when_some(self.render_delete_confirm(&t, cx), |d, dialog| d.child(dialog))

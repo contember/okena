@@ -625,18 +625,22 @@ impl Render for FileSearchDialog {
                                 }))
                         )
                     })
-                    .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |modal| {
-                        let bounds = self.filter_button_bounds.unwrap();
-                        let entity = cx.entity().downgrade();
-                        modal.child(crate::list_overlay::file_filter_popover(
-                            bounds, self.show_ignored, self.show_hidden, &t, cx,
-                            move |filter, _, cx| {
-                                if let Some(e) = entity.upgrade() {
-                                    e.update(cx, |this, cx| this.toggle_filter(filter, cx));
-                                }
-                            },
-                        ))
-                    }),
+                    .when_some(
+                        self.filter_popover_open
+                            .then_some(self.filter_button_bounds)
+                            .flatten(),
+                        |modal, bounds| {
+                            let entity = cx.entity().downgrade();
+                            modal.child(crate::list_overlay::file_filter_popover(
+                                bounds, self.show_ignored, self.show_hidden, &t, cx,
+                                move |filter, _, cx| {
+                                    if let Some(e) = entity.upgrade() {
+                                        e.update(cx, |this, cx| this.toggle_filter(filter, cx));
+                                    }
+                                },
+                            ))
+                        },
+                    ),
             )
     }
 }

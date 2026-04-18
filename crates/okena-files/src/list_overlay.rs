@@ -295,7 +295,9 @@ pub fn handle_list_overlay_key<T: Clone>(
             }
         }
         key if key.len() == 1 && state.config.has_search() => {
-            let ch = key.chars().next().unwrap();
+            let Some(ch) = key.chars().next() else {
+                return ListOverlayAction::None;
+            };
             if SEARCH_CHARS.contains(ch) {
                 state.push_search_char(ch);
                 ListOverlayAction::QueryChanged

@@ -1461,26 +1461,30 @@ impl Render for ContentSearchDialog {
                             }))
                     )
                 })
-                .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |d| {
-                    let bounds = self.filter_button_bounds.unwrap();
-                    let entity = cx.entity().downgrade();
-                    d.child(crate::list_overlay::file_filter_popover(
-                        bounds, self.show_ignored, self.show_hidden, &t, cx,
-                        move |filter, _, cx| {
-                            if let Some(e) = entity.upgrade() {
-                                e.update(cx, |this, cx| {
-                                    match filter {
-                                        "ignored" => this.show_ignored = !this.show_ignored,
-                                        "hidden" => this.show_hidden = !this.show_hidden,
-                                        _ => {}
-                                    }
-                                    this.trigger_search(cx);
-                                    cx.notify();
-                                });
-                            }
-                        },
-                    ))
-                })
+                .when_some(
+                    self.filter_popover_open
+                        .then_some(self.filter_button_bounds)
+                        .flatten(),
+                    |d, bounds| {
+                        let entity = cx.entity().downgrade();
+                        d.child(crate::list_overlay::file_filter_popover(
+                            bounds, self.show_ignored, self.show_hidden, &t, cx,
+                            move |filter, _, cx| {
+                                if let Some(e) = entity.upgrade() {
+                                    e.update(cx, |this, cx| {
+                                        match filter {
+                                            "ignored" => this.show_ignored = !this.show_ignored,
+                                            "hidden" => this.show_hidden = !this.show_hidden,
+                                            _ => {}
+                                        }
+                                        this.trigger_search(cx);
+                                        cx.notify();
+                                    });
+                                }
+                            },
+                        ))
+                    },
+                )
                 .into_any_element()
         } else {
             // Compact modal mode
@@ -1518,8 +1522,11 @@ impl Render for ContentSearchDialog {
                                     }))
                             )
                         })
-                        .when(self.filter_popover_open && self.filter_button_bounds.is_some(), |modal| {
-                            let bounds = self.filter_button_bounds.unwrap();
+                        .when_some(
+                            self.filter_popover_open
+                                .then_some(self.filter_button_bounds)
+                                .flatten(),
+                            |modal, bounds| {
                             let entity = cx.entity().downgrade();
                             modal.child(crate::list_overlay::file_filter_popover(
                                 bounds, self.show_ignored, self.show_hidden, &t, cx,

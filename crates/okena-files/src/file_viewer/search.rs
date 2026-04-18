@@ -152,9 +152,10 @@ impl FileViewer {
             Some(0)
         };
 
-        let state = self.search_state.as_mut().unwrap();
-        state.matches = matches;
-        state.current_match_index = current_match_index;
+        if let Some(state) = self.search_state.as_mut() {
+            state.matches = matches;
+            state.current_match_index = current_match_index;
+        }
 
         self.scroll_to_current_search_match();
         cx.notify();
@@ -254,8 +255,10 @@ impl FileViewer {
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let state = self.search_state.as_ref().unwrap();
+    ) -> AnyElement {
+        let Some(state) = self.search_state.as_ref() else {
+            return div().id("file-search-bar-empty").into_any_element();
+        };
         let match_count = state.matches.len();
         let current_idx = state.current_match_index.map(|i| i + 1).unwrap_or(0);
         let match_text = if match_count > 0 {
@@ -381,5 +384,6 @@ impl FileViewer {
                         this.close_search(window, cx);
                     })),
             )
+            .into_any_element()
     }
 }

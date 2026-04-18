@@ -150,7 +150,11 @@ impl FileViewer {
         }
 
         let old_path = state.target.abs_path().to_path_buf();
-        let new_path = old_path.parent().unwrap().join(&new_name);
+        let Some(parent) = old_path.parent() else {
+            cx.notify();
+            return;
+        };
+        let new_path = parent.join(&new_name);
         let current_name = state.target.display_name();
 
         if new_name == current_name {
