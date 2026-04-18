@@ -206,6 +206,10 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
+                #[allow(
+                    clippy::expect_used,
+                    reason = "instance inserted earlier in this function, absence is a bug"
+                )]
                 let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
@@ -457,6 +461,10 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
+                #[allow(
+                    clippy::expect_used,
+                    reason = "instance set to Starting a few lines above, absence is a bug"
+                )]
                 let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Running;
                 instance.terminal_id = Some(terminal_id.clone());
@@ -472,6 +480,10 @@ impl ServiceManager {
                     project_id,
                     e
                 );
+                #[allow(
+                    clippy::expect_used,
+                    reason = "instance set to Starting a few lines above, absence is a bug"
+                )]
                 let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.status = ServiceStatus::Crashed { exit_code: None };
             }
@@ -1179,6 +1191,10 @@ impl ServiceManager {
                 ));
                 self.terminals.lock().insert(terminal_id.clone(), terminal);
 
+                #[allow(
+                    clippy::expect_used,
+                    reason = "Docker log instance ensured earlier in this function, absence is a bug"
+                )]
                 let instance = self.instances.get_mut(&key).expect("bug: service instance must exist");
                 instance.terminal_id = Some(terminal_id.clone());
                 self.terminal_to_service.insert(
