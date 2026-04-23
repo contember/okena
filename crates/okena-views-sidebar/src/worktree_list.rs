@@ -110,24 +110,33 @@ impl Render for WorktreeListPopover {
         let panel = okena_ui::popover::popover_panel("worktree-list-panel", &t)
             .w(px(280.0))
             .max_h(px(400.0))
+            .flex()
+            .flex_col()
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
                     .pb(px(6.0))
                     .child("WORKTREES")
             )
-            .when(worktrees.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.text_muted))
-                        .py(px(8.0))
-                        .child("No worktrees found")
-                )
-            })
-            .children(worktrees.into_iter().map(|(wt_path, branch, is_tracked)| {
+            .child(
+                div()
+                    .id("worktree-list-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(worktrees.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_md(cx))
+                                .text_color(rgb(t.text_muted))
+                                .py(px(8.0))
+                                .child("No worktrees found")
+                        )
+                    })
+                    .children(worktrees.into_iter().map(|(wt_path, branch, is_tracked)| {
                 let project_id = self.project_id.clone();
                 let wt_path_clone = wt_path.clone();
                 let branch_clone = branch.clone();
@@ -198,7 +207,8 @@ impl Render for WorktreeListPopover {
                                     .child(branch.clone())
                             )
                     )
-            }));
+            }))
+            );
 
         let position = self.position;
 
