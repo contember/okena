@@ -4601,6 +4601,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "smol",
+ "tempfile",
 ]
 
 [[package]]
