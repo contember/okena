@@ -139,6 +139,27 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `codex_integration` | bool | `false` | Show Codex status indicator in the status bar |
 | `auto_update_enabled` | bool | `true` | Check for updates automatically |
 
+#### Claude Extension Settings
+
+The Claude extension reads credentials from `~/.claude/.credentials.json` by default. If you maintain multiple Claude Code accounts (for example, a personal account and a work account in a different directory), you can override this via `extension_settings`:
+
+```json
+{
+  "extension_settings": {
+    "claude-code": {
+      "config_dir": "/Users/you/.claude-work"
+    }
+  }
+}
+```
+
+Precedence (highest to lowest):
+1. `extension_settings."claude-code".config_dir` — explicit path in `settings.json` (tilde `~` is expanded)
+2. `CLAUDE_CONFIG_DIR` environment variable — Claude CLI's own convention
+3. `$HOME/.claude` — the default
+
+If the configured directory does not exist, Okena logs a warning and falls back to the next tier.
+
 #### Hooks
 
 Global lifecycle hooks run shell commands on project events. Each hook value is a shell command string (or `null` to disable).
