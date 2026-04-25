@@ -47,7 +47,7 @@ Observable state with auto-notify:
 
 ### Configuration Files
 
-Located in `~/.config/okena/`:
+Located in the platform config dir (macOS: `~/Library/Application Support/okena/`, Linux: `~/.config/okena/`):
 - `workspace.json` — projects, layouts, terminal state
 - `settings.json` — font, theme, shell, session backend
 - `keybindings.json` — custom keyboard shortcuts

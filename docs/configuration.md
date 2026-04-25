@@ -1,17 +1,17 @@
 # Okena Configuration Guide
 
-Okena stores all configuration files in your system's config directory:
+Okena stores all configuration files in your system's config directory (resolved via the `dirs` crate):
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/.config/okena/` |
+| macOS | `~/Library/Application Support/okena/` |
 | Linux | `~/.config/okena/` |
 | Windows | `%APPDATA%\okena\` |
 
 The directory contains:
 
 ```
-~/.config/okena/
+<config-dir>/okena/
   settings.json        # App settings (fonts, theme, shell, etc.)
   keybindings.json     # Custom keyboard shortcuts
   workspace.json       # Project layouts and terminal state (auto-managed)
@@ -316,7 +316,7 @@ Okena warns on startup if it detects conflicting keybindings (same keystroke and
 
 ## Custom Themes
 
-Place custom theme JSON files in `~/.config/okena/themes/`. Okena creates this directory with an `example-theme.json` on first launch.
+Place custom theme JSON files in the `themes/` sub-directory of your platform's config dir (e.g. `~/Library/Application Support/okena/themes/` on macOS). Okena creates this directory with an `example-theme.json` on first launch.
 
 To activate a custom theme, set `theme_mode` to `"Custom"` in `settings.json`, then select your theme from the theme selector (`Cmd+K Cmd+T`).
 
