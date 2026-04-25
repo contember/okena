@@ -170,11 +170,11 @@ cargo run
 | Toggle sidebar | Cmd+B | Ctrl+B |
 | Settings | Cmd+, | Ctrl+, |
 
-All shortcuts are customizable via `~/.config/okena/keybindings.json`.
+All shortcuts are customizable via `keybindings.json` in your platform's config directory.
 
 ## Configuration
 
-Settings are stored in `~/.config/okena/`:
+Settings are stored in the platform's config directory (macOS: `~/Library/Application Support/okena/`, Linux/Windows: `~/.config/okena/` / `%APPDATA%\okena\`):
 
 | File | Purpose |
 |------|---------|

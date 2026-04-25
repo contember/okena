@@ -1,17 +1,17 @@
 # Okena Configuration Guide
 
-Okena stores all configuration files in your system's config directory:
+Okena stores all configuration files in your system's config directory (resolved via the `dirs` crate):
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/.config/okena/` |
+| macOS | `~/Library/Application Support/okena/` |
 | Linux | `~/.config/okena/` |
 | Windows | `%APPDATA%\okena\` |
 
 The directory contains:
 
 ```
-~/.config/okena/
+<config-dir>/okena/
   settings.json        # App settings (fonts, theme, shell, etc.)
   keybindings.json     # Custom keyboard shortcuts
   workspace.json       # Project layouts and terminal state (auto-managed)
@@ -138,6 +138,27 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `claude_code_integration` | bool | `false` | Show Claude Code status indicator in the status bar |
 | `codex_integration` | bool | `false` | Show Codex status indicator in the status bar |
 | `auto_update_enabled` | bool | `true` | Check for updates automatically |
+
+#### Claude Extension Settings
+
+The Claude extension reads credentials from `~/.claude/.credentials.json` by default. If you maintain multiple Claude Code accounts (for example, a personal account and a work account in a different directory), you can override this via `extension_settings`:
+
+```json
+{
+  "extension_settings": {
+    "claude-code": {
+      "config_dir": "/Users/you/.claude-work"
+    }
+  }
+}
+```
+
+Precedence (highest to lowest):
+1. `extension_settings."claude-code".config_dir` — explicit path in `settings.json` (tilde `~` is expanded)
+2. `CLAUDE_CONFIG_DIR` environment variable — Claude CLI's own convention
+3. `$HOME/.claude` — the default
+
+If the configured directory does not exist, Okena logs a warning and falls back to the next tier.
 
 #### Hooks
 
@@ -295,7 +316,7 @@ Okena warns on startup if it detects conflicting keybindings (same keystroke and
 
 ## Custom Themes
 
-Place custom theme JSON files in `~/.config/okena/themes/`. Okena creates this directory with an `example-theme.json` on first launch.
+Place custom theme JSON files in the `themes/` sub-directory of your platform's config dir (e.g. `~/Library/Application Support/okena/themes/` on macOS). Okena creates this directory with an `example-theme.json` on first launch.
 
 To activate a custom theme, set `theme_mode` to `"Custom"` in `settings.json`, then select your theme from the theme selector (`Cmd+K Cmd+T`).
 

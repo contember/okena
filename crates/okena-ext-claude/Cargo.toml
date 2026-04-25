@@ -16,3 +16,7 @@ parking_lot = "0.12"
 dirs = "5.0"
 log = "0.4"
 jiff = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

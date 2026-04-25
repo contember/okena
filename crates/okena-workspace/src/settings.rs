@@ -355,9 +355,10 @@ pub fn get_settings_path() -> std::path::PathBuf {
 /// Load app settings from disk with robust error handling and migration support
 pub fn load_settings() -> AppSettings {
     let path = get_settings_path();
+    log::info!("[settings] loading from {}", path.display());
 
     if !path.exists() {
-        log::info!("Settings file not found at {}, using defaults", path.display());
+        log::warn!("[settings] file not found at {}, using defaults", path.display());
         return AppSettings::default();
     }
 
