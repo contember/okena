@@ -96,6 +96,9 @@ pub struct PtyManager {
     /// Optional sink for streaming PTY output to external consumers (e.g. remote clients).
     /// Publishing happens directly from reader threads to avoid UI event loop latency.
     output_sink: Arc<Mutex<Option<Arc<dyn PtyOutputSink>>>>,
+    /// Extra environment variables injected into every spawned PTY.
+    /// Only variables not already set in the spawning process are injected.
+    extra_env: Mutex<Vec<(String, String)>>,
 }
 
 impl PtyManager {
@@ -129,6 +132,7 @@ impl PtyManager {
                 #[cfg(windows)]
                 session_backend_preference: backend,
                 output_sink: Arc::new(Mutex::new(None)),
+                extra_env: Mutex::new(Vec::new()),
             },
             rx,
         )
@@ -138,6 +142,13 @@ impl PtyManager {
     /// Must be called after construction, before spawning terminals.
     pub fn set_output_sink(&self, sink: Arc<dyn PtyOutputSink>) {
         *self.output_sink.lock() = Some(sink);
+    }
+
+    /// Set extra environment variables to inject into every spawned PTY.
+    /// Variables already present in the process environment are not overwritten.
+    /// Replaces any previously configured extra env.
+    pub fn set_extra_env(&self, env: Vec<(String, String)>) {
+        *self.extra_env.lock() = env;
     }
 
     /// Create a new terminal with a PTY process (uses system default shell)
@@ -198,9 +209,18 @@ impl PtyManager {
 
         // Build command based on session backend and shell config
         #[cfg(unix)]
-        let cmd = self.build_terminal_command(terminal_id, cwd, shell);
+        let mut cmd = self.build_terminal_command(terminal_id, cwd, shell);
         #[cfg(windows)]
-        let (cmd, wsl_distro, wsl_backend) = self.build_terminal_command(terminal_id, cwd, shell);
+        let (mut cmd, wsl_distro, wsl_backend) = self.build_terminal_command(terminal_id, cwd, shell);
+
+        // Inject caller-configured env vars that aren't already in the process environment.
+        // This allows the app layer to propagate settings (e.g. CLAUDE_CONFIG_DIR) without
+        // overriding values the user has already exported in their shell rc.
+        for (key, val) in &*self.extra_env.lock() {
+            if std::env::var(key).is_err() {
+                cmd.env(key, val);
+            }
+        }
 
         // Spawn the process
         let child = pair.slave.spawn_command(cmd)?;
@@ -292,9 +312,10 @@ impl PtyManager {
             _ => None,
         };
 
+        let extra_env = self.extra_env.lock().clone();
         let mut cmd = if let Some((program, args)) = self
             .session_backend
-            .build_command(&self.session_backend.session_name(terminal_id), cwd, custom_command)
+            .build_command(&self.session_backend.session_name(terminal_id), cwd, custom_command, &extra_env)
         {
             let mut cmd = CommandBuilder::new(program);
             for arg in args {

@@ -14,6 +14,7 @@ use crate::services::manager::ServiceManager;
 use crate::settings::{GlobalSettings, settings};
 use crate::views::panels::toast::ToastManager;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
+use okena_ext_claude::resolve_claude_dir;
 use crate::views::root::{RootView, TerminalsRegistry};
 use crate::workspace::persistence;
 use crate::workspace::request_broker::RequestBroker;
@@ -26,6 +27,21 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch as tokio_watch;
+
+/// Push the resolved Claude config directory into the PTY manager as CLAUDE_CONFIG_DIR,
+/// so `claude` invocations inside Okena terminals read the same install as the status-bar widget.
+/// Only set when the resolved dir differs from the CLI default (~/.claude).
+fn sync_claude_pty_env(pty_manager: &Arc<PtyManager>, cx: &App) {
+    let claude_dir = resolve_claude_dir(cx);
+    let default_dir = dirs::home_dir().map(|h| h.join(".claude")).unwrap_or_default();
+    if claude_dir != default_dir {
+        pty_manager.set_extra_env(vec![
+            ("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned()),
+        ]);
+    } else {
+        pty_manager.set_extra_env(vec![]);
+    }
+}
 
 /// Set up an observer that loads/unloads service configs when projects change.
 /// Handles deferred worktrees by skipping projects whose directory doesn't exist yet.
@@ -301,6 +317,15 @@ impl Okena {
             force_remote,
             service_manager: service_manager.clone(),
         };
+
+        // Propagate claude config dir to spawned PTYs so `claude` CLI invocations inside
+        // Okena terminals pick the same install as the status-bar widget.
+        sync_claude_pty_env(&manager.pty_manager, cx);
+        let settings_entity = cx.global::<GlobalSettings>().0.clone();
+        cx.observe(&settings_entity, move |this, _settings, cx| {
+            sync_claude_pty_env(&this.pty_manager, cx);
+        })
+        .detach();
 
         // Start PTY event loop (centralized for all windows)
         manager.start_pty_event_loop(pty_events, cx);

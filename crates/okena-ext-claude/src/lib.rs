@@ -1,8 +1,10 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 mod status;
-mod usage;
+pub mod usage;
 mod ui_helpers;
+
+pub use usage::resolve_claude_dir;
 
 use gpui::AppContext as _;
 use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistration};

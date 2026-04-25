@@ -19,13 +19,13 @@ Okena includes a local HTTP/WebSocket server for remote control — useful for m
 - Server **always** binds to `127.0.0.1` only — never exposed to the network
 - For remote access, use a tunnel (e.g. Cloudflare Tunnel, SSH port forwarding)
 - Pairing codes are 8-character base32, valid for 60 seconds, single-use
-- Tokens are stored as HMAC-SHA256 digests (never plaintext) using a persistent app secret (`~/.config/okena/remote_secret`)
+- Tokens are stored as HMAC-SHA256 digests (never plaintext) using a persistent app secret (`remote_secret` in your platform's config dir)
 - Rate limiting: 5 attempts per IP per minute, 30 globally per minute
 - 300ms delay on every failed pairing attempt
 
 ## Configuration
 
-In `~/.config/okena/settings.json`:
+In `settings.json` in your platform's config dir (macOS: `~/Library/Application Support/okena/`, Linux: `~/.config/okena/`):
 
 ```json
 {
@@ -33,7 +33,7 @@ In `~/.config/okena/settings.json`:
 }
 ```
 
-When running, the server writes `~/.config/okena/remote.json`:
+When running, the server writes `remote.json` to the same config dir:
 
 ```json
 {

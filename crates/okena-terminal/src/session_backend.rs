@@ -164,7 +164,16 @@ impl ResolvedBackend {
     /// Build the command to create or attach to a session
     /// Returns (program, args) tuple
     /// When `command` is Some, the session runs that command instead of the default shell.
-    pub fn build_command(&self, session_name: &str, cwd: &str, command: Option<&str>) -> Option<(String, Vec<String>)> {
+    /// `extra_env` is injected into newly-created sessions where the backend supports it
+    /// (e.g. tmux's `-e KEY=VAL`), so vars set after a long-running daemon was started
+    /// still reach the shell.
+    pub fn build_command(
+        &self,
+        session_name: &str,
+        cwd: &str,
+        command: Option<&str>,
+        extra_env: &[(String, String)],
+    ) -> Option<(String, Vec<String>)> {
         match self {
             Self::None => None,
             Self::Tmux => {
@@ -188,8 +197,15 @@ impl ResolvedBackend {
                     }
                     None => String::new(),
                 };
+                // -e KEY=VAL flags reach the shell even when attaching to a
+                // pre-existing tmux server whose global env predates Okena.
+                let env_args: String = extra_env
+                    .iter()
+                    .map(|(k, v)| format!(" -e {}", shell_escape(&format!("{k}={v}"))))
+                    .collect();
                 let tmux_cmd = format!(
-                    "tmux new-session -A -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}",
+                    "tmux new-session -A{} -s {} -c {}{} \\; set status off \\; set mouse on \\; set default-terminal xterm-256color \\; set terminal-features 'xterm-256color:RGB' \\; set -as terminal-overrides ',xterm-256color:Tc' \\; set-window-option automatic-rename off \\; rename-window {}",
+                    env_args,
                     shell_escape(session_name),
                     shell_escape(cwd),
                     initial_program,
@@ -468,11 +484,11 @@ impl ResolvedBackend {
             Self::None => return None,
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
-                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command)?;
+                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command, &[])?;
                 inner_args.last()?.to_string()
             }
             Self::Screen => {
-                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command)?;
+                let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command, &[])?;
                 let mut parts = vec!["screen".to_string()];
                 parts.extend(inner_args.iter().map(|a| shell_escape(a)));
                 parts.join(" ")
@@ -865,7 +881,7 @@ mod tests {
     #[test]
     fn test_dtach_build_command() {
         let backend = ResolvedBackend::Dtach;
-        let result = backend.build_command("test-session", "/home/user", None);
+        let result = backend.build_command("test-session", "/home/user", None, &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "sh");
@@ -878,7 +894,7 @@ mod tests {
     #[test]
     fn test_dtach_build_command_with_custom_command() {
         let backend = ResolvedBackend::Dtach;
-        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"), &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "sh");
@@ -892,7 +908,7 @@ mod tests {
     #[test]
     fn test_tmux_build_command_with_custom_command() {
         let backend = ResolvedBackend::Tmux;
-        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"), &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "sh");
@@ -906,7 +922,7 @@ mod tests {
     #[test]
     fn test_tmux_build_command_without_command() {
         let backend = ResolvedBackend::Tmux;
-        let result = backend.build_command("test-session", "/home/user", None);
+        let result = backend.build_command("test-session", "/home/user", None, &[]);
         assert!(result.is_some());
         let (_, args) = result.unwrap();
         // Without a command, no '-ic' should appear after the cwd
@@ -916,7 +932,7 @@ mod tests {
     #[test]
     fn test_screen_build_command_with_custom_command() {
         let backend = ResolvedBackend::Screen;
-        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"));
+        let result = backend.build_command("test-session", "/home/user", Some("npm run dev"), &[]);
         assert!(result.is_some());
         let (program, args) = result.unwrap();
         assert_eq!(program, "screen");
@@ -932,8 +948,26 @@ mod tests {
     #[test]
     fn test_none_build_command() {
         let backend = ResolvedBackend::None;
-        assert!(backend.build_command("test-session", "/home/user", None).is_none());
-        assert!(backend.build_command("test-session", "/home/user", Some("echo hi")).is_none());
+        assert!(backend.build_command("test-session", "/home/user", None, &[]).is_none());
+        assert!(backend.build_command("test-session", "/home/user", Some("echo hi"), &[]).is_none());
+    }
+
+    #[test]
+    fn test_tmux_build_command_with_extra_env() {
+        let backend = ResolvedBackend::Tmux;
+        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/tmp/foo".to_string())];
+        let (_, args) = backend
+            .build_command("tm-test", "/tmp", None, &env)
+            .unwrap();
+        // -e KEY=VAL must appear before -s so tmux applies it to the new session
+        assert!(
+            args[1].contains("-e 'CLAUDE_CONFIG_DIR=/tmp/foo'"),
+            "expected -e flag, got: {}",
+            args[1]
+        );
+        let env_pos = args[1].find("-e ").unwrap();
+        let s_pos = args[1].find("-s ").unwrap();
+        assert!(env_pos < s_pos, "expected -e before -s in: {}", args[1]);
     }
 
     #[test]
