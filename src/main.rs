@@ -64,6 +64,7 @@ use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
 use crate::views::panels::toast::{Toast, ToastManager};
 use crate::workspace::persistence;
 use crate::workspace::state::GlobalWorkspace;
+use okena_core::profiles;
 
 /// Quit action handler - flushes pending saves before exiting
 fn quit(_: &Quit, cx: &mut App) {
@@ -281,26 +282,89 @@ fn main() {
         return;
     }
 
+    let args: Vec<String> = std::env::args().collect();
+
+    // Handle --list-profiles before anything else
+    if args.iter().any(|a| a == "--list-profiles") {
+        profiles::list_profiles();
+        return;
+    }
+
+    // Handle --new-profile <name>: create and launch with it
+    let new_profile_name: Option<String> = args
+        .iter()
+        .position(|a| a == "--new-profile")
+        .and_then(|pos| args.get(pos + 1).cloned());
+
     // Propagate the binary's version into okena-terminal so XTVERSION
     // responses identify as `okena(<version>)` rather than the library's
     // internal crate version.
     okena_terminal::terminal::set_app_version(env!("CARGO_PKG_VERSION"));
 
-    // Handle CLI subcommands before GPUI init
+    // Parse --profile <id> (or --profile=<id>)
+    let profile_flag: Option<String> = args
+        .iter()
+        .position(|a| a == "--profile" || a.starts_with("--profile="))
+        .and_then(|pos| {
+            let a = &args[pos];
+            if let Some(val) = a.strip_prefix("--profile=") {
+                Some(val.to_string())
+            } else {
+                args.get(pos + 1).cloned()
+            }
+        });
+
+    // If --new-profile was given, create the profile first then launch with it
+    let effective_flag = if let Some(name) = new_profile_name {
+        match profiles::create_profile(&name) {
+            Ok(id) => {
+                eprintln!("Created profile '{}' (id: {})", name, id);
+                Some(id)
+            }
+            Err(e) => {
+                eprintln!("Failed to create profile: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        profile_flag
+    };
+
+    // Resolve the active profile and register it as the process-wide global.
+    // This must happen before logging (which uses the profile's log path) and
+    // before CLI subcommands (which use config_dir() → profile root).
+    let profile_paths = match profiles::resolve_active_profile(effective_flag) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    unsafe { std::env::set_var("OKENA_PROFILE", &profile_paths.id) };
+    let profile_log = profile_paths.log_path();
+    let profile_log_prev = profile_paths.root.join("okena.log.1");
+    profiles::init_profile(profile_paths);
+
+    // Migrate legacy flat-layout state into profiles/default/ if needed.
+    // Runs before logging so messages go to stderr directly.
+    if let Err(e) = profiles::migrate_legacy_layout_if_needed(profiles::current()) {
+        eprintln!("Warning: profile migration failed: {e}");
+    }
+
+    // Handle CLI subcommands after profile is initialized so that helpers like
+    // discover_server() read the right profile's remote.json.
     if let Some(exit_code) = cli::try_handle_cli() {
         std::process::exit(exit_code);
     }
 
     // Set up file logging: rotate previous log, write to both stderr and file
     let log_target = (|| -> Option<env_logger::fmt::Target> {
-        let config_dir = persistence::get_config_dir();
-        std::fs::create_dir_all(&config_dir).ok()?;
-        let log_path = config_dir.join("okena.log");
-        let prev_path = config_dir.join("okena.log.1");
-        if log_path.exists() {
-            let _ = std::fs::rename(&log_path, &prev_path);
+        let root = &profiles::current().root;
+        std::fs::create_dir_all(root).ok()?;
+        if profile_log.exists() {
+            let _ = std::fs::rename(&profile_log, &profile_log_prev);
         }
-        let file = std::fs::File::create(&log_path).ok()?;
+        let file = std::fs::File::create(&profile_log).ok()?;
         Some(env_logger::fmt::Target::Pipe(Box::new(TeeWriter {
             stderr: std::io::stderr(),
             file,
@@ -330,8 +394,6 @@ fn main() {
         log::error!("PANIC: {}\n{}", info, backtrace);
         default_hook(info);
     }));
-
-    let args: Vec<String> = std::env::args().collect();
 
     // Parse --remote and --listen flags
     let listen_addr: Option<IpAddr> = {

@@ -429,10 +429,14 @@ impl KeybindingConfig {
 
 /// Get the keybindings configuration file path
 pub fn get_keybindings_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("okena")
-        .join("keybindings.json")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.keybindings_json()
+    } else {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("okena")
+            .join("keybindings.json")
+    }
 }
 
 /// Load keybinding configuration from disk

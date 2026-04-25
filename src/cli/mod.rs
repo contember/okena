@@ -43,7 +43,12 @@ pub fn try_handle_cli() -> Option<i32> {
 }
 
 fn print_help() {
-    eprintln!("Usage: okena <command> [args]");
+    eprintln!("Usage: okena [--profile <id>] <command> [args]");
+    eprintln!();
+    eprintln!("Profile flags:");
+    eprintln!("  --profile <id>                     Use the named profile");
+    eprintln!("  --list-profiles                    List all profiles and exit");
+    eprintln!("  --new-profile <name>               Create a new profile and launch with it");
     eprintln!();
     eprintln!("Commands:");
     eprintln!("  state                              Print workspace state (JSON)");

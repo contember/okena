@@ -26,7 +26,11 @@ pub struct ExportedWorkspace {
 
 /// Get the sessions directory path
 fn get_sessions_dir() -> PathBuf {
-    get_config_dir().join("sessions")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.sessions_dir()
+    } else {
+        get_config_dir().join("sessions")
+    }
 }
 
 /// Get path for a named session

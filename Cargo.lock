@@ -5533,12 +5533,16 @@ name = "okena-core"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "async-channel 2.5.0",
+ "dirs 5.0.1",
  "futures",
+ "libc",
  "log",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.24.0",
 ]

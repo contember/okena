@@ -213,13 +213,11 @@ impl PtyManager {
         #[cfg(windows)]
         let (mut cmd, wsl_distro, wsl_backend) = self.build_terminal_command(terminal_id, cwd, shell);
 
-        // Inject caller-configured env vars that aren't already in the process environment.
-        // This allows the app layer to propagate settings (e.g. CLAUDE_CONFIG_DIR) without
-        // overriding values the user has already exported in their shell rc.
+        // Inject caller-configured env vars into the PTY unconditionally.
+        // These are profile-scoped values (e.g. CLAUDE_CONFIG_DIR) that must
+        // override whatever the user's shell rc or the parent process has set.
         for (key, val) in &*self.extra_env.lock() {
-            if std::env::var(key).is_err() {
-                cmd.env(key, val);
-            }
+            cmd.env(key, val);
         }
 
         // Spawn the process

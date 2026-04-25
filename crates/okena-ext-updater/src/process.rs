@@ -12,9 +12,13 @@ pub fn command(program: &str) -> std::process::Command {
     cmd
 }
 
-/// Get the config directory for okena (~/.config/okena/).
+/// Get the updates directory for the active profile.
 pub fn get_config_dir() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("okena")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.updates_dir()
+    } else {
+        dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("okena")
+    }
 }

@@ -328,10 +328,14 @@ impl CustomThemeColors {
 
 /// Get path to custom themes directory
 pub fn get_themes_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("okena")
-        .join("themes")
+    if let Some(p) = okena_core::profiles::try_current() {
+        p.themes_dir()
+    } else {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("okena")
+            .join("themes")
+    }
 }
 
 /// Load custom themes from the themes directory
