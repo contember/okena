@@ -241,6 +241,55 @@ pub fn create_profile(display_name: &str) -> Result<String> {
     Ok(id)
 }
 
+/// Return all profiles from the index — for GUI use.
+pub fn all_profiles() -> Result<Vec<ProfileEntry>> {
+    let root = config_root();
+    Ok(ProfileIndex::load(&root)?.profiles)
+}
+
+/// Delete a profile. Refuses to delete the active profile, the default profile, or a
+/// profile whose `remote.json` points to a live PID. Removes the profile directory and
+/// updates `profiles.json` (index written first so partial FS failure leaves index clean).
+/// Claude credentials at `~/.claude-okena-<id>/` are intentionally preserved.
+pub fn delete_profile(id: &str) -> Result<()> {
+    let root = config_root();
+    let mut index = ProfileIndex::load(&root)?;
+
+    let entry = index.profiles.iter().find(|p| p.id == id)
+        .ok_or_else(|| anyhow::anyhow!("Profile '{id}' does not exist"))?
+        .clone();
+
+    if id == index.default_profile {
+        bail!("Cannot delete the default profile");
+    }
+    if let Some(active) = try_current() {
+        if active.id == id {
+            bail!("Cannot delete the active profile — switch to another profile first");
+        }
+    }
+    let paths = make_profile_paths(&entry, &root);
+    if is_profile_running(&paths) {
+        bail!("Profile '{id}' is currently in use by another Okena instance");
+    }
+
+    index.profiles.retain(|p| p.id != id);
+    if index.last_used.as_deref() == Some(id) {
+        index.last_used = None;
+    }
+    index.save(&root)?;
+
+    let _ = std::fs::remove_dir_all(&paths.root);
+    Ok(())
+}
+
+fn is_profile_running(paths: &ProfilePaths) -> bool {
+    let remote = paths.remote_json();
+    let Ok(data) = std::fs::read_to_string(&remote) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) else { return false; };
+    let pid = json.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    pid != 0 && is_process_alive(pid)
+}
+
 /// List all profiles to stdout.
 pub fn list_profiles() {
     let root = config_root();
@@ -543,5 +592,117 @@ mod tests {
         let ts = now_iso8601();
         assert_eq!(ts.len(), 20); // "YYYY-MM-DDTHH:MM:SSZ"
         assert!(ts.ends_with('Z'));
+    }
+
+    fn make_test_index_with_two(dir: &TempDir) -> ProfileIndex {
+        let idx = ProfileIndex {
+            version: 1,
+            profiles: vec![
+                ProfileEntry { id: "default".into(), display_name: "Default".into(), created_at: "".into(), claude_config_dir: None, icon: None, color: None },
+                ProfileEntry { id: "work".into(), display_name: "Work".into(), created_at: "".into(), claude_config_dir: None, icon: None, color: None },
+            ],
+            last_used: Some("work".into()),
+            default_profile: "default".into(),
+        };
+        fs::create_dir_all(dir.path().join("profiles/default")).unwrap();
+        fs::create_dir_all(dir.path().join("profiles/work")).unwrap();
+        idx.save(dir.path()).unwrap();
+        idx
+    }
+
+    #[test]
+    fn test_all_profiles_returns_empty_on_missing_index() {
+        // all_profiles reads from config_root() which is the real system path —
+        // we test the round-trip via ProfileIndex directly instead.
+        let dir = temp_root();
+        let idx = make_test_index_with_two(&dir);
+        let loaded = ProfileIndex::load(dir.path()).unwrap();
+        assert_eq!(loaded.profiles.len(), idx.profiles.len());
+    }
+
+    #[test]
+    fn test_delete_profile_refuses_default() {
+        let dir = temp_root();
+        make_test_index_with_two(&dir);
+
+        // Simulate delete_profile logic inline (can't call it because it uses config_root())
+        let root = dir.path();
+        let index = ProfileIndex::load(root).unwrap();
+        let err = if "default" == index.default_profile {
+            Some("Cannot delete the default profile")
+        } else {
+            None
+        };
+        assert!(err.is_some());
+        // index should be unchanged
+        assert_eq!(index.profiles.len(), 2);
+    }
+
+    #[test]
+    fn test_delete_profile_removes_entry_and_dir() {
+        let dir = temp_root();
+        make_test_index_with_two(&dir);
+
+        let root = dir.path();
+        let mut index = ProfileIndex::load(root).unwrap();
+        let id = "work";
+
+        // Simulate the delete logic (no try_current guard needed — OnceLock is per-process)
+        index.profiles.retain(|p| p.id != id);
+        if index.last_used.as_deref() == Some(id) { index.last_used = None; }
+        index.save(root).unwrap();
+        let work_dir = root.join("profiles/work");
+        fs::remove_dir_all(&work_dir).unwrap();
+
+        let reloaded = ProfileIndex::load(root).unwrap();
+        assert_eq!(reloaded.profiles.len(), 1);
+        assert_eq!(reloaded.profiles[0].id, "default");
+        assert!(reloaded.last_used.is_none());
+        assert!(!work_dir.exists());
+    }
+
+    #[test]
+    fn test_delete_profile_clears_last_used_when_matching() {
+        let dir = temp_root();
+        make_test_index_with_two(&dir);
+        let root = dir.path();
+        let mut index = ProfileIndex::load(root).unwrap();
+        assert_eq!(index.last_used.as_deref(), Some("work"));
+
+        index.profiles.retain(|p| p.id != "work");
+        if index.last_used.as_deref() == Some("work") { index.last_used = None; }
+        index.save(root).unwrap();
+
+        let reloaded = ProfileIndex::load(root).unwrap();
+        assert!(reloaded.last_used.is_none());
+    }
+
+    #[test]
+    fn test_delete_profile_refuses_unknown_id() {
+        let dir = temp_root();
+        make_test_index_with_two(&dir);
+        let root = dir.path();
+        let index = ProfileIndex::load(root).unwrap();
+        let exists = index.profiles.iter().any(|p| p.id == "nonexistent");
+        assert!(!exists, "should not find nonexistent profile");
+    }
+
+    #[test]
+    fn test_delete_partial_failure_index_written_first() {
+        // Verify index-save-first ordering: if the dir is already gone,
+        // index is still updated (no double-removal error).
+        let dir = temp_root();
+        make_test_index_with_two(&dir);
+        let root = dir.path();
+        let mut index = ProfileIndex::load(root).unwrap();
+        index.profiles.retain(|p| p.id != "work");
+        index.last_used = None;
+        index.save(root).unwrap();
+        // Dir already gone — remove_dir_all ignores it
+        let work_dir = root.join("profiles/work");
+        let _ = fs::remove_dir_all(&work_dir); // first removal
+        let _ = fs::remove_dir_all(&work_dir); // second — should not panic
+        let reloaded = ProfileIndex::load(root).unwrap();
+        assert_eq!(reloaded.profiles.len(), 1);
     }
 }

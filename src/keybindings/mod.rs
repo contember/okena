@@ -48,7 +48,8 @@ actions!(
         StopAllServices,
         ShowHookLog,
         EqualizeLayout,
-        ShowBranchSwitcher,
+ShowBranchSwitcher,
+        ShowProfileManager,
     ]
 );
 
@@ -321,7 +322,8 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "StartAllServices" => Some(KeyBinding::new(keystroke, StartAllServices, context)),
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
         "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
-        "ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
+"ShowBranchSwitcher" => Some(KeyBinding::new(keystroke, ShowBranchSwitcher, context)),
+        "ShowProfileManager" => Some(KeyBinding::new(keystroke, ShowProfileManager, context)),
         _ => {
             log::warn!("Unknown action in keybinding config: {}", action);
             None

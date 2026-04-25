@@ -18,6 +18,7 @@ use crate::views::overlays::diff_viewer::{DiffViewer, DiffViewerEvent};
 use crate::views::overlays::file_viewer::{FileViewer, FileViewerEvent};
 use crate::views::overlays::{ProjectSwitcher, ProjectSwitcherEvent, ShellSelectorOverlay, ShellSelectorOverlayEvent};
 use crate::views::overlays::session_manager::{SessionManager, SessionManagerEvent};
+use crate::views::overlays::profile_manager::{ProfileManager, ProfileManagerEvent};
 use crate::views::overlays::settings_panel::{SettingsPanel, SettingsPanelEvent};
 use crate::views::overlays::theme_selector::{ThemeSelector, ThemeSelectorEvent};
 use crate::views::overlays::pairing_dialog::{PairingDialog, PairingDialogEvent};
@@ -162,6 +163,9 @@ pub enum OverlayManagerEvent {
     TabCloseOthers { project_id: String, layout_path: Vec<usize>, tab_index: usize },
     /// Tab context menu: close tabs to the right
     TabCloseToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
+
+    /// Profile manager: switch to a different profile (triggers relaunch)
+    SwitchProfile(String),
 }
 
 /// Closure that, when invoked, detaches the currently active modal into a
@@ -530,6 +534,33 @@ impl OverlayManager {
                     }
                     SessionManagerEvent::SwitchWorkspace(data) => {
                         cx.emit(OverlayManagerEvent::SwitchWorkspace(data.clone()));
+                        this.close_modal(cx);
+                    }
+                }
+            })
+            .detach();
+            self.open_modal(manager, cx);
+        }
+        cx.notify();
+    }
+
+    // ========================================================================
+    // Profile manager (switch / create / delete)
+    // ========================================================================
+
+    /// Toggle profile manager overlay.
+    pub fn toggle_profile_manager(&mut self, cx: &mut Context<Self>) {
+        if self.is_modal::<ProfileManager>() {
+            self.close_modal(cx);
+        } else {
+            let manager = cx.new(|cx| ProfileManager::new(cx));
+            cx.subscribe(&manager, |this, _, event: &ProfileManagerEvent, cx| {
+                match event {
+                    ProfileManagerEvent::Close => {
+                        this.close_modal(cx);
+                    }
+                    ProfileManagerEvent::SwitchProfile(id) => {
+                        cx.emit(OverlayManagerEvent::SwitchProfile(id.clone()));
                         this.close_modal(cx);
                     }
                 }

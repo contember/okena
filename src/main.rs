@@ -57,7 +57,7 @@ impl std::io::Write for TeeWriter {
 use crate::app::Okena;
 use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
-use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
+use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings, ShowProfileManager};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
@@ -207,6 +207,7 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::action("About Okena", About),
                 MenuItem::separator(),
                 MenuItem::action("Settings...", ShowSettings),
+                MenuItem::action("Profiles...", ShowProfileManager),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
                 MenuItem::separator(),
