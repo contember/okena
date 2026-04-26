@@ -24,7 +24,7 @@ pub struct FileTreeNode {
 pub fn build_file_tree(paths: impl Iterator<Item = (usize, impl AsRef<str>)>) -> FileTreeNode {
     let mut root = FileTreeNode::default();
     for (index, path) in paths {
-        let parts: Vec<&str> = path.as_ref().split('/').collect();
+        let parts: Vec<&str> = path.as_ref().split(['/', '\\']).collect();
         let mut node = &mut root;
         for (i, part) in parts.iter().enumerate() {
             if i == parts.len() - 1 {

@@ -183,7 +183,7 @@ impl FileSearchDialog {
 
             let relative_path = path
                 .strip_prefix(project_path)
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_else(|_| filename.clone());
 
             files.push(FileEntry {

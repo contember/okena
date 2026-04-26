@@ -703,7 +703,7 @@ impl FileViewer {
     /// Compute which folder paths should be expanded to reveal a file.
     fn compute_expanded_for_relative(relative_path: &str) -> HashSet<String> {
         let mut expanded = HashSet::new();
-        let parts: Vec<&str> = relative_path.split('/').collect();
+        let parts: Vec<&str> = relative_path.split(['/', '\\']).collect();
         // Expand all ancestor directories (not the file itself)
         let mut path_so_far = String::new();
         for part in &parts[..parts.len().saturating_sub(1)] {
