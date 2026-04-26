@@ -193,7 +193,7 @@ impl Render for ProfileManager {
         let profiles = self.profiles.clone();
         let new_profile_input = self.new_profile_input.clone();
 
-        if !focus_handle.is_focused(window) {
+        if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
         }
 
