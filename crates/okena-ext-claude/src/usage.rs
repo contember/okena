@@ -4,7 +4,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use parking_lot::Mutex;
-use sha2::{Sha256, Digest};
+#[cfg(target_os = "macos")]
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -64,6 +65,23 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn existing_path(path: &str, source: &str) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let expanded = expand_tilde(path);
+    if expanded.exists() {
+        Some(expanded)
+    } else {
+        log::warn!(
+            "[claude-usage] {source} '{}' does not exist, falling back",
+            path
+        );
+        None
+    }
+}
+
 /// Resolve the Claude config directory using three-tier precedence:
 /// 1. `extension_settings."claude-code".config_dir` in settings.json
 /// 2. `CLAUDE_CONFIG_DIR` environment variable (Claude CLI convention)
@@ -71,21 +89,14 @@ fn expand_tilde(path: &str) -> PathBuf {
 pub fn resolve_claude_dir(cx: &App) -> PathBuf {
     if let Some(settings) = cx.global::<ExtensionSettingsStore>().get("claude-code", cx) {
         if let Some(dir) = settings["config_dir"].as_str() {
-            if !dir.is_empty() {
-                let expanded = expand_tilde(dir);
-                if expanded.exists() {
-                    return expanded;
-                }
-                log::warn!(
-                    "[claude-usage] config_dir '{}' does not exist, falling back to default",
-                    dir
-                );
+            if let Some(expanded) = existing_path(dir, "settings config_dir") {
+                return expanded;
             }
         }
     }
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return expand_tilde(&dir);
+        if let Some(expanded) = existing_path(&dir, "CLAUDE_CONFIG_DIR") {
+            return expanded;
         }
     }
     dirs::home_dir()
@@ -96,6 +107,7 @@ pub fn resolve_claude_dir(cx: &App) -> PathBuf {
 /// Claude API usage indicator with hover popover.
 pub struct ClaudeUsage {
     data: Arc<Mutex<Option<UsageData>>>,
+    claude_dir: Arc<Mutex<PathBuf>>,
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
@@ -278,14 +290,32 @@ impl ClaudeUsage {
         let (wake_tx, wake_rx) = smol::channel::bounded::<()>(1);
         let wake_sent = Arc::new(AtomicBool::new(false));
         let wake_sent_for_task = wake_sent.clone();
-        let claude_dir = Arc::new(resolve_claude_dir(cx));
+        let claude_dir = Arc::new(Mutex::new(resolve_claude_dir(cx)));
         let claude_dir_for_task = claude_dir.clone();
+
+        cx.observe_global::<ExtensionSettingsStore>(move |this, cx| {
+            let resolved = resolve_claude_dir(cx);
+            let changed = {
+                let mut current = this.claude_dir.lock();
+                if *current == resolved {
+                    false
+                } else {
+                    *current = resolved;
+                    true
+                }
+            };
+            if changed && !this.wake_sent.swap(true, Ordering::SeqCst) {
+                let _ = this.wake_tx.try_send(());
+            }
+            cx.notify();
+        })
+        .detach();
 
         let poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let mut consecutive_failures: u32 = 0;
             loop {
                 // Returns (Option<UsageData>, Option<Duration>) — data + optional retry delay
-                let dir = Arc::clone(&claude_dir_for_task);
+                let dir = claude_dir_for_task.lock().clone();
                 let (result, retry_after) = smol::unblock(move || {
                     let token = match read_access_token(&dir) {
                         Some(t) => {
@@ -401,6 +431,7 @@ impl ClaudeUsage {
 
         Self {
             data,
+            claude_dir,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
@@ -813,6 +844,20 @@ mod tests {
         let result = expand_tilde("~");
         let expected = dirs::home_dir().unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_existing_path_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(existing_path(&missing.to_string_lossy(), "test").is_none());
+    }
+
+    #[test]
+    fn test_existing_path_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = existing_path(&dir.path().to_string_lossy(), "test").unwrap();
+        assert_eq!(path, dir.path());
     }
 
     #[test]
