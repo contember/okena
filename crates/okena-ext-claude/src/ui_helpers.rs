@@ -31,20 +31,7 @@ pub fn capitalize_first(s: &str) -> String {
 
 /// Open a URL in the default browser. Fire-and-forget.
 pub fn open_url(url: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", url])
-            .spawn();
-    }
+    okena_core::process::open_url(url);
 }
 
 #[cfg(test)]
@@ -55,10 +42,22 @@ mod tests {
     fn test_format_api_timestamp_valid() {
         let result = format_api_timestamp("2026-03-27T06:59:00.000Z");
         // Should contain date, time, and a timezone label
-        assert!(result.contains("Mar"), "Expected month name, got: {}", result);
+        assert!(
+            result.contains("Mar"),
+            "Expected month name, got: {}",
+            result
+        );
         assert!(result.contains(':'), "Expected HH:MM, got: {}", result);
-        assert!(result.contains(','), "Expected 'Mon D, YYYY' format, got: {}", result);
-        assert!(result.contains('-'), "Expected date-time separator, got: {}", result);
+        assert!(
+            result.contains(','),
+            "Expected 'Mon D, YYYY' format, got: {}",
+            result
+        );
+        assert!(
+            result.contains('-'),
+            "Expected date-time separator, got: {}",
+            result
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+okena-core = { path = "../okena-core" }
 okena-extensions = { path = "../okena-extensions" }
 okena-ui = { path = "../okena-ui" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }

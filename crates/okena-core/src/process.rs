@@ -13,6 +13,17 @@ pub fn command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Spawn a child process and reap it on a background thread.
+pub fn spawn_and_reap(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        if let Err(err) = child.wait() {
+            log::warn!("Failed to reap child process: {}", err);
+        }
+    });
+    Ok(())
+}
+
 /// Run `Command::output()` while catching panics from the standard library's
 /// internal `read2().unwrap()`, which can panic with EBADF under rare race
 /// conditions (e.g. FD pressure during PTY shutdown). Converts the panic
@@ -45,7 +56,8 @@ pub fn safe_output_with_timeout(
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
     // Spawn the child so we can kill it on timeout.
-    let mut child = cmd.stdout(std::process::Stdio::piped())
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
 
@@ -56,17 +68,29 @@ pub fn safe_output_with_timeout(
         match child.try_wait() {
             Ok(Some(status)) => {
                 // Process finished – collect output.
-                let stdout = child.stdout.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                }).unwrap_or_default();
-                let stderr = child.stderr.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                }).unwrap_or_default();
-                return Ok(std::process::Output { status, stdout, stderr });
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                        buf
+                    })
+                    .unwrap_or_default();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
@@ -84,18 +108,18 @@ pub fn safe_output_with_timeout(
     }
 }
 
-/// Open a URL in the default browser. Fire-and-forget (spawn, don't wait).
+/// Open a URL in the default browser and reap the opener process.
 pub fn open_url(url: &str) {
     #[cfg(target_os = "linux")]
     {
-        let _ = command("xdg-open").arg(url).spawn();
+        let _ = spawn_and_reap(command("xdg-open").arg(url));
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = command("open").arg(url).spawn();
+        let _ = spawn_and_reap(command("open").arg(url));
     }
     #[cfg(windows)]
     {
-        let _ = command("cmd").args(["/c", "start", url]).spawn();
+        let _ = spawn_and_reap(command("cmd").args(["/C", "start", "", url]));
     }
 }

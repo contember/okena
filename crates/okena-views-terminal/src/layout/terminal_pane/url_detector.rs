@@ -51,7 +51,8 @@ impl UrlDetector {
         let clean = strip_line_col_suffix(text);
 
         if clean.starts_with("~/") {
-            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            {
                 return PathBuf::from(home).join(&clean[2..]);
             }
             PathBuf::from(clean)
@@ -99,7 +100,12 @@ impl UrlDetector {
 
             // OSC 8 hyperlinks get their own `link_group` namespace so they
             // don't collide with regex-detected URL groups on hover.
-            let regex_group_ceiling = detected.iter().map(|l| l.wrap_group).max().map(|m| m + 1).unwrap_or(0);
+            let regex_group_ceiling = detected
+                .iter()
+                .map(|l| l.wrap_group)
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(0);
 
             self.matches = detected
                 .into_iter()
@@ -142,9 +148,7 @@ impl UrlDetector {
             let osc8 = terminal.detect_hyperlinks();
             for link in osc8 {
                 let overlaps_existing = self.matches.iter().any(|m| {
-                    m.line == link.line
-                        && m.col < link.col + link.len
-                        && link.col < m.col + m.len
+                    m.line == link.line && m.col < link.col + link.len && link.col < m.col + m.len
                 });
                 if overlaps_existing {
                     continue;
@@ -211,20 +215,7 @@ impl UrlDetector {
     /// Open URL in default browser.
     pub fn open_url(url: &str) {
         log::info!("Opening URL: {}", url);
-        #[cfg(target_os = "linux")]
-        {
-            let _ = okena_core::process::command("xdg-open").arg(url).spawn();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = okena_core::process::command("open").arg(url).spawn();
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = okena_core::process::command("cmd")
-                .args(["/C", "start", "", url])
-                .spawn();
-        }
+        okena_core::process::open_url(url);
     }
 
     /// Open a file path in the configured editor or system default.
@@ -240,7 +231,8 @@ impl UrlDetector {
         // Expand ~ to the user's home directory
         let expanded: String;
         let clean_path = if clean_path.starts_with("~/") {
-            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+            {
                 expanded = format!("{}{}", home.to_string_lossy(), &clean_path[1..]);
                 &expanded
             } else {
@@ -250,23 +242,33 @@ impl UrlDetector {
             clean_path
         };
 
-        log::info!("Opening file: {} (line: {:?}, col: {:?}, opener: {:?})", clean_path, file_line, file_col, opener);
+        log::info!(
+            "Opening file: {} (line: {:?}, col: {:?}, opener: {:?})",
+            clean_path,
+            file_line,
+            file_col,
+            opener
+        );
 
         if opener.is_empty() {
             // Use system default
             #[cfg(target_os = "linux")]
             {
-                let _ = okena_core::process::command("xdg-open").arg(clean_path).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command("xdg-open").arg(clean_path),
+                );
             }
             #[cfg(target_os = "macos")]
             {
-                let _ = okena_core::process::command("open").arg(clean_path).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command("open").arg(clean_path),
+                );
             }
             #[cfg(target_os = "windows")]
             {
-                let _ = okena_core::process::command("cmd")
-                    .args(["/C", "start", "", clean_path])
-                    .spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command("cmd").args(["/C", "start", "", clean_path]),
+                );
             }
             return;
         }
@@ -284,7 +286,9 @@ impl UrlDetector {
                     }
                 }
                 args.push(loc);
-                let _ = okena_core::process::command(opener).args(&args).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command(opener).args(&args),
+                );
             }
             "zed" => {
                 // Zed: file:line
@@ -295,7 +299,9 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::command("zed").arg(&loc).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command("zed").arg(&loc),
+                );
             }
             "subl" | "sublime" => {
                 // Sublime Text: file:line:col
@@ -306,7 +312,9 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::command("subl").arg(&loc).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command("subl").arg(&loc),
+                );
             }
             "vim" | "nvim" => {
                 // vim/nvim: +line file
@@ -315,7 +323,9 @@ impl UrlDetector {
                     args.push(format!("+{}", line));
                 }
                 args.push(clean_path.to_string());
-                let _ = okena_core::process::command(opener).args(&args).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command(opener).args(&args),
+                );
             }
             _ => {
                 // Generic: try editor file:line:col pattern
@@ -326,7 +336,9 @@ impl UrlDetector {
                         loc.push_str(&format!(":{}", col));
                     }
                 }
-                let _ = okena_core::process::command(opener).arg(&loc).spawn();
+                let _ = okena_core::process::spawn_and_reap(
+                    okena_core::process::command(opener).arg(&loc),
+                );
             }
         }
     }

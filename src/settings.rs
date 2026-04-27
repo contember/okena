@@ -354,24 +354,19 @@ pub fn open_settings_file() {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = crate::process::command("open")
-            .arg("-t")
-            .arg(&path)
-            .spawn();
+        let _ = crate::process::spawn_and_reap(
+            crate::process::command("open").arg("-t").arg(&path),
+        );
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = crate::process::command("xdg-open")
-            .arg(&path)
-            .spawn();
+        let _ = crate::process::spawn_and_reap(crate::process::command("xdg-open").arg(&path));
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::process::command("notepad")
-            .arg(&path)
-            .spawn();
+        let _ = crate::process::spawn_and_reap(crate::process::command("notepad").arg(&path));
     }
 }
 

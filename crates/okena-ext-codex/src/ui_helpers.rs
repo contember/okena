@@ -48,18 +48,5 @@ pub fn capitalize_first(s: &str) -> String {
 
 /// Open a URL in the default browser. Fire-and-forget.
 pub fn open_url(url: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(url).spawn();
-    }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", url])
-            .spawn();
-    }
+    okena_core::process::open_url(url);
 }
