@@ -108,7 +108,8 @@ impl Render for WorktreeListPopover {
             .collect();
 
         let viewport_h = window.viewport_size().height;
-        let scroll_max_h = (viewport_h - px(120.0)).max(px(160.0)).min(px(500.0));
+        let available = (viewport_h - px(120.0)).max(px(0.0));
+        let scroll_max_h = available.min(px(500.0));
 
         let panel = okena_ui::popover::popover_panel("worktree-list-panel", &t)
             .w(px(280.0))
