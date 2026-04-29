@@ -204,6 +204,18 @@ impl Workspace {
 
     /// Delete a project
     pub fn delete_project(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+        // Queue all project terminals for killing before removing state.
+        // Okena (which owns PtyManager) drains this queue via observer.
+        if let Some(project) = self.project(project_id) {
+            let mut kill_ids: Vec<String> = Vec::new();
+            if let Some(layout) = &project.layout {
+                kill_ids.extend(layout.collect_terminal_ids());
+            }
+            kill_ids.extend(project.hook_terminals.keys().cloned());
+            kill_ids.extend(project.service_terminals.values().cloned());
+            self.queue_terminal_kills(kill_ids);
+        }
+
         // Capture project info before removal for the hook
         let folder = self.folder_for_project_or_parent(project_id);
         let hook_folder_id = folder.map(|f| f.id.clone());

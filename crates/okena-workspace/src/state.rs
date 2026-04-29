@@ -46,6 +46,8 @@ pub struct Workspace {
     /// Transient folder filter — when set, only projects from this folder are shown.
     /// Not serialized; resets to None on restart.
     pub active_folder_filter: Option<String>,
+    /// Terminal IDs queued for killing by the app layer (drained by Okena observer).
+    pending_terminal_kills: Vec<String>,
 }
 
 impl Workspace {
@@ -58,6 +60,7 @@ impl Workspace {
             access_history: ProjectAccessHistory::new(),
             data_version: 0,
             active_folder_filter: None,
+            pending_terminal_kills: Vec::new(),
         }
     }
 
@@ -134,6 +137,16 @@ impl Workspace {
 
     pub fn finish_closing_project(&mut self, project_id: &str) {
         self.lifecycle.finish_closing(project_id);
+    }
+
+    // === Terminal kill queue ===
+
+    pub fn queue_terminal_kills(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.pending_terminal_kills.extend(ids);
+    }
+
+    pub fn drain_pending_terminal_kills(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_terminal_kills)
     }
 
     // === RemoteSyncState conveniences ===
