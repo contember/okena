@@ -335,6 +335,19 @@ impl Okena {
             Arc::new(crate::terminal::backend::LocalBackend::new(manager.pty_manager.clone()));
         manager.start_remote_command_loop(bridge_rx, local_backend, cx);
 
+        // Kill orphaned terminals when projects are deleted
+        cx.observe(&workspace, move |this, workspace, cx| {
+            let kills = workspace.update(cx, |ws, _| ws.drain_pending_terminal_kills());
+            if !kills.is_empty() {
+                let mut reg = this.terminals.lock();
+                for tid in &kills {
+                    this.pty_manager.kill(tid);
+                    reg.remove(tid);
+                }
+            }
+        })
+        .detach();
+
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
             this.handle_detached_terminals_changed(workspace, cx);
