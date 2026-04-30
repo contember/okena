@@ -412,6 +412,18 @@ impl TerminalContent {
                 cx.notify();
             }
         }
+
+        // Sync any non-empty selection to PRIMARY so middle-click paste works
+        // for drag, double-click (word), and triple-click (line) selections.
+        #[cfg(target_os = "linux")]
+        if let Some(ref terminal) = self.terminal {
+            if let Some(text) = terminal.get_selected_text() {
+                if !text.is_empty() {
+                    cx.write_to_primary(ClipboardItem::new_string(text));
+                }
+            }
+        }
+
         self.mouse_down_cell = None;
     }
 }
@@ -583,6 +595,17 @@ impl Render for TerminalContent {
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                     if this.try_forward_mouse_press(1, event.position, &event.modifiers) {
                         cx.notify();
+                        return;
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(ref terminal) = this.terminal {
+                        if let Some(item) = cx.read_from_primary() {
+                            if let Some(text) = item.text() {
+                                if !text.is_empty() {
+                                    terminal.send_paste(&text);
+                                }
+                            }
+                        }
                     }
                 }),
             )
