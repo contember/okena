@@ -444,6 +444,7 @@ fn main() {
                             file_opener: s.settings.file_opener.clone(),
                             default_shell: s.settings.default_shell.clone(),
                             hooks: s.settings.hooks.clone(),
+                            ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
                         }).ok()
                     }
                     "git" => {
@@ -477,6 +478,7 @@ fn main() {
                                 state.settings.file_opener = tvs.file_opener;
                                 state.settings.default_shell = tvs.default_shell;
                                 state.settings.hooks = tvs.hooks;
+                                state.settings.terminal_ctrl_c_copies_selection = tvs.ctrl_c_copies_selection;
                                 state.save_and_notify(cx);
                             });
                         }

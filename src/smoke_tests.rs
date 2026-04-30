@@ -51,6 +51,7 @@ mod tests {
                             file_opener: s.settings.file_opener.clone(),
                             default_shell: s.settings.default_shell.clone(),
                             hooks: s.settings.hooks.clone(),
+                            ctrl_c_copies_selection: s.settings.terminal_ctrl_c_copies_selection,
                         }).ok(),
                         "git" => serde_json::to_value(&okena_views_git::settings::GitViewSettings {
                             diff_view_mode: s.settings.diff_view_mode,

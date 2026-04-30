@@ -282,6 +282,13 @@ pub struct AppSettings {
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
+
+    /// When true, Ctrl+C in a terminal pane copies the active selection (and clears it)
+    /// instead of sending SIGINT. Ctrl+C without a selection still sends SIGINT.
+    /// Ctrl+Shift+C continues to copy unconditionally regardless of this setting.
+    /// Default: false (Ctrl+C always sends SIGINT — matches GNOME Terminal / Kitty).
+    #[serde(default)]
+    pub terminal_ctrl_c_copies_selection: bool,
 }
 
 impl Default for AppSettings {
@@ -322,6 +329,7 @@ impl Default for AppSettings {
             idle_timeout_secs: default_idle_timeout_secs(),
             worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),
+            terminal_ctrl_c_copies_selection: false,
         }
     }
 }

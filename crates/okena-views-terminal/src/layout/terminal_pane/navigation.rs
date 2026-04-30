@@ -85,7 +85,7 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
         });
     }
 
-    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
+    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if let Some(ref terminal) = self.terminal {
             terminal.claim_resize_local();
 
@@ -101,6 +101,26 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             {
                 if terminal.delete_selection() {
                     return;
+                }
+            }
+
+            // Opt-in: Ctrl+C copies selection (and clears it) instead of sending SIGINT.
+            // Without a (non-empty) selection, falls through to the normal Ctrl+C → SIGINT path.
+            // Ctrl+Shift+C is handled by the Copy action and never reaches here.
+            if event.keystroke.key == "c"
+                && event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.alt
+                && !event.keystroke.modifiers.platform
+                && crate::terminal_view_settings(cx).ctrl_c_copies_selection
+            {
+                if let Some(text) = terminal.get_selected_text() {
+                    if !text.is_empty() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        terminal.clear_selection();
+                        cx.notify();
+                        return;
+                    }
                 }
             }
 

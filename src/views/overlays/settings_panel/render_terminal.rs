@@ -34,6 +34,10 @@ impl SettingsPanel {
                         |state, val, cx| state.set_scrollback_lines(val, cx), cx,
                     ))
                     .child(self.render_toggle(
+                        "ctrl-c-copies", "Ctrl+C Copies Selection", s.terminal_ctrl_c_copies_selection, true,
+                        |state, val, cx| state.set_terminal_ctrl_c_copies_selection(val, cx), cx,
+                    ))
+                    .child(self.render_toggle(
                         "idle-detection", "Idle Detection", s.idle_timeout_secs > 0, true,
                         |state, val, cx| state.set_idle_timeout_secs(if val { 5 } else { 0 }, cx), cx,
                     ))

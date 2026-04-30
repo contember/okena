@@ -104,6 +104,7 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
+    setting_setter!(set_terminal_ctrl_c_copies_selection, terminal_ctrl_c_copies_selection, bool);
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
     setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals

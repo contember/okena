@@ -68,6 +68,9 @@ pub struct TerminalViewSettings {
     pub file_opener: String,
     pub default_shell: okena_terminal::shell_config::ShellType,
     pub hooks: okena_workspace::settings::HooksConfig,
+    /// When true, Ctrl+C copies the active selection (and clears it) instead of sending SIGINT.
+    /// Ctrl+C without a selection always sends SIGINT.
+    pub ctrl_c_copies_selection: bool,
 }
 
 /// Read current terminal view settings from ExtensionSettingsStore.
@@ -89,6 +92,7 @@ pub fn terminal_view_settings(cx: &gpui::App) -> TerminalViewSettings {
             file_opener: String::new(),
             default_shell: okena_terminal::shell_config::ShellType::Default,
             hooks: Default::default(),
+            ctrl_c_copies_selection: false,
         })
 }
 
