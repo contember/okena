@@ -107,14 +107,16 @@ impl Render for WorktreeListPopover {
             })
             .collect();
 
+        let viewport_h = window.viewport_size().height;
+        let available = (viewport_h - px(120.0)).max(px(0.0));
+        let scroll_max_h = available.min(px(500.0));
+
         let panel = okena_ui::popover::popover_panel("worktree-list-panel", &t)
             .w(px(280.0))
-            .max_h(px(400.0))
             .flex()
             .flex_col()
             .child(
                 div()
-                    .flex_shrink_0()
                     .text_size(ui_text_ms(cx))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_secondary))
@@ -124,8 +126,7 @@ impl Render for WorktreeListPopover {
             .child(
                 div()
                     .id("worktree-list-scroll")
-                    .flex_1()
-                    .min_h_0()
+                    .max_h(scroll_max_h)
                     .overflow_y_scroll()
                     .when(worktrees.is_empty(), |d| {
                         d.child(
