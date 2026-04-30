@@ -165,6 +165,11 @@ pub enum OverlayManagerEvent {
     TabCloseToRight { project_id: String, layout_path: Vec<usize>, tab_index: usize },
 }
 
+/// Closure that, when invoked, detaches the currently active modal into a
+/// separate OS window. Set by `open_modal_detachable` and consumed by
+/// `detach_active_modal`. `None` means the active modal is not detachable.
+type DetachFn = Box<dyn Fn(&mut OverlayManager, &mut Context<OverlayManager>) + 'static>;
+
 /// Centralized overlay manager that handles all modal overlays.
 ///
 /// Uses a single `active_modal` slot to enforce mutual exclusion -
@@ -179,6 +184,9 @@ pub struct OverlayManager {
 
     /// TypeId of the active modal for toggle detection.
     modal_type_id: Option<std::any::TypeId>,
+
+    /// Detach closure for the active modal, if it supports detaching.
+    detach_active_modal_fn: Option<DetachFn>,
 
     // Context menus remain separate (positioned popups, not full-screen modals)
     context_menu: OverlaySlot<ContextMenu>,
@@ -203,6 +211,7 @@ impl OverlayManager {
             request_broker,
             active_modal: None,
             modal_type_id: None,
+            detach_active_modal_fn: None,
             cached_file_viewers: std::collections::HashMap::new(),
             context_menu: OverlaySlot::new(),
             folder_context_menu: OverlaySlot::new(),
@@ -223,6 +232,7 @@ impl OverlayManager {
         if self.active_modal.is_some() {
             self.active_modal = None;
             self.modal_type_id = None;
+            self.detach_active_modal_fn = None;
             self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
             cx.notify();
         }
@@ -233,6 +243,7 @@ impl OverlayManager {
         if self.active_modal.is_some() {
             self.active_modal = None;
             self.modal_type_id = None;
+            self.detach_active_modal_fn = None;
             self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
             cx.notify();
         }
@@ -252,6 +263,62 @@ impl OverlayManager {
         self.modal_type_id = Some(std::any::TypeId::of::<T>());
         self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
         cx.notify();
+    }
+
+    /// Open a modal that can be detached into a separate OS window.
+    ///
+    /// `before_detach` runs synchronously when the user requests detach,
+    /// before the new window is opened. Use it to mark the entity as
+    /// detached and to remove any cached references the manager holds.
+    fn open_modal_detachable<T, E, F>(
+        &mut self,
+        entity: Entity<T>,
+        title: impl Into<SharedString>,
+        before_detach: F,
+        cx: &mut Context<Self>,
+    ) where
+        T: Render + Focusable + EventEmitter<E> + 'static,
+        E: CloseEvent + 'static,
+        F: Fn(&mut Self, &Entity<T>, &mut Context<Self>) + 'static,
+    {
+        self.close_modal(cx);
+        self.active_modal = Some(entity.clone().into());
+        self.modal_type_id = Some(std::any::TypeId::of::<T>());
+
+        let title = title.into();
+        let entity_for_detach = entity.clone();
+        self.detach_active_modal_fn = Some(Box::new(
+            move |this: &mut Self, cx: &mut Context<Self>| {
+                before_detach(this, &entity_for_detach, cx);
+                // Clear modal slot — entity stays alive via the new window.
+                this.active_modal = None;
+                this.modal_type_id = None;
+                this.detach_active_modal_fn = None;
+                this.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+                crate::app::open_detached_overlay::<T, E>(
+                    title.clone(),
+                    entity_for_detach.clone(),
+                    cx,
+                );
+                cx.notify();
+            },
+        ));
+
+        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        cx.notify();
+
+        // If the user prefers detached-by-default, immediately move the modal
+        // into its own OS window.
+        if crate::settings::settings(cx).detached_overlays_by_default {
+            self.detach_active_modal(cx);
+        }
+    }
+
+    /// Detach the active modal into a separate OS window, if it supports it.
+    pub fn detach_active_modal(&mut self, cx: &mut Context<Self>) {
+        if let Some(detach_fn) = self.detach_active_modal_fn.take() {
+            detach_fn(self, cx);
+        }
     }
 
     /// Get the active modal for rendering.
@@ -1171,24 +1238,15 @@ impl OverlayManager {
         // Reuse cached viewer if available
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
             viewer.update(cx, |v, cx| v.update_config(font_size, is_dark, cx));
-            self.open_modal(viewer.clone(), cx);
+            self.open_file_viewer_modal(viewer.clone(), cx);
             return;
         }
 
         let viewer = cx.new(|cx| FileViewer::new_browse(fs, font_size, is_dark, cx));
 
-        cx.subscribe(&viewer, move |this, _, event: &FileViewerEvent, cx| {
-            match event {
-                FileViewerEvent::Close => {
-                    // Hide but keep cached
-                    this.hide_modal(cx);
-                }
-            }
-        })
-        .detach();
-
+        self.subscribe_file_viewer(&viewer, cx);
         self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_modal(viewer, cx);
+        self.open_file_viewer_modal(viewer, cx);
         cx.notify();
     }
 
@@ -1204,25 +1262,47 @@ impl OverlayManager {
                 v.update_config(font_size, is_dark, cx);
                 v.open_file_in_tab(PathBuf::from(&relative_path), cx);
             });
-            self.open_modal(viewer.clone(), cx);
+            self.open_file_viewer_modal(viewer.clone(), cx);
             return;
         }
 
         let viewer = cx.new(|cx| FileViewer::new(PathBuf::from(&relative_path), fs, font_size, is_dark, cx));
 
-        cx.subscribe(&viewer, |this, _, event: &FileViewerEvent, cx| {
+        self.subscribe_file_viewer(&viewer, cx);
+        self.cached_file_viewers.insert(cache_key, viewer.clone());
+        self.open_file_viewer_modal(viewer, cx);
+        cx.notify();
+    }
+
+    /// Subscribe to a FileViewer's events: Close hides modal (keeps cache),
+    /// Detach moves it to a separate OS window.
+    fn subscribe_file_viewer(&mut self, viewer: &Entity<FileViewer>, cx: &mut Context<Self>) {
+        cx.subscribe(viewer, |this, _, event: &FileViewerEvent, cx| {
             match event {
                 FileViewerEvent::Close => {
-                    // Hide but keep cached
                     this.hide_modal(cx);
+                }
+                FileViewerEvent::Detach => {
+                    this.detach_active_modal(cx);
                 }
             }
         })
         .detach();
+    }
 
-        self.cached_file_viewers.insert(cache_key, viewer.clone());
-        self.open_modal(viewer, cx);
-        cx.notify();
+    /// Open a FileViewer in the modal slot, registering its detach handler.
+    fn open_file_viewer_modal(&mut self, viewer: Entity<FileViewer>, cx: &mut Context<Self>) {
+        self.open_modal_detachable::<FileViewer, FileViewerEvent, _>(
+            viewer,
+            "File Viewer",
+            |this, viewer, cx| {
+                // Drop cache so reopening creates a fresh modal viewer
+                // (the detached window owns the existing one).
+                this.cached_file_viewers.retain(|_, v| v != viewer);
+                viewer.update(cx, |v, cx| v.set_detached(true, cx));
+            },
+            cx,
+        );
     }
 
     // ========================================================================
@@ -1251,11 +1331,21 @@ impl OverlayManager {
                     // when toggled — no manual sync needed on close.
                     this.close_modal(cx);
                 }
+                DiffViewerEvent::Detach => {
+                    this.detach_active_modal(cx);
+                }
             }
         })
         .detach();
 
-        self.open_modal(viewer, cx);
+        self.open_modal_detachable::<DiffViewer, DiffViewerEvent, _>(
+            viewer,
+            "Diff",
+            |_this, viewer, cx| {
+                viewer.update(cx, |v, cx| v.set_detached(true, cx));
+            },
+            cx,
+        );
         cx.notify();
     }
 

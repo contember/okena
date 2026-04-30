@@ -251,6 +251,9 @@ pub struct FileViewer {
     pub(super) delete_confirm: Option<DeleteConfirmState>,
     /// In-file search state (Ctrl+F)
     pub(super) search_state: Option<search::FileSearchState>,
+    /// True when this viewer is hosted inside a detached window.
+    /// Hides the "detach" button and is set by the detached host.
+    pub(super) is_detached: bool,
 }
 
 impl FileViewer {
@@ -360,6 +363,7 @@ impl FileViewer {
             rename_state: None,
             delete_confirm: None,
             search_state: None,
+            is_detached: false,
         }
     }
 
@@ -418,7 +422,27 @@ impl FileViewer {
             rename_state: None,
             delete_confirm: None,
             search_state: None,
+            is_detached: false,
         }
+    }
+
+    /// Mark this viewer as hosted in a detached window so the detach button
+    /// is hidden and the viewer renders for that context.
+    pub fn set_detached(&mut self, detached: bool, cx: &mut Context<Self>) {
+        if self.is_detached != detached {
+            self.is_detached = detached;
+            cx.notify();
+        }
+    }
+
+    /// Whether this viewer is hosted in a detached window.
+    pub fn is_detached(&self) -> bool {
+        self.is_detached
+    }
+
+    /// Request to detach the viewer into a separate OS window.
+    pub(super) fn request_detach(&self, cx: &mut Context<Self>) {
+        cx.emit(FileViewerEvent::Detach);
     }
 
     /// Update configuration (font size and dark mode) from the host app.
@@ -722,6 +746,8 @@ impl FileViewer {
 pub enum FileViewerEvent {
     /// Viewer was closed.
     Close,
+    /// User requested to detach the viewer into a separate OS window.
+    Detach,
 }
 
 impl EventEmitter<FileViewerEvent> for FileViewer {}

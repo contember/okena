@@ -3,6 +3,7 @@
 use super::types::{DiffViewMode, FileTreeNode};
 use super::{DiffViewer, SIDEBAR_WIDTH};
 use okena_core::theme::ThemeColors;
+use okena_ui::modal::{window_drag_spacer, window_min_max_controls};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::tokens::{ui_text_sm, ui_text_ms, ui_text_md, ui_text_xl, ui_text};
 use okena_git::DiffMode;
@@ -22,20 +23,22 @@ impl DiffViewer {
         diff_mode: &DiffMode,
         ignore_whitespace: bool,
         commit_message: Option<&str>,
+        needs_controls: bool,
+        is_maximized: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_working = *diff_mode == DiffMode::WorkingTree;
         let hide_mode_toggle = matches!(diff_mode, DiffMode::Commit(_) | DiffMode::BranchCompare { .. });
         let is_unified = self.view_mode == DiffViewMode::Unified;
+        let detached = self.is_detached;
 
         div()
             .px(px(20.0))
-            .py(px(14.0))
+            .py(if detached { px(8.0) } else { px(14.0) })
             .border_b_1()
             .border_color(rgb(t.border))
             .flex()
             .items_center()
-            .justify_between()
             .child(
                 h_flex()
                     .gap(px(10.0))
@@ -123,6 +126,8 @@ impl DiffViewer {
                         )
                     }),
             )
+            // Drag-to-move spacer (only when detached)
+            .child(window_drag_spacer(detached))
             .child(
                 h_flex()
                     .gap(px(8.0))
@@ -194,6 +199,35 @@ impl DiffViewer {
                             .bg(rgb(t.border))
                             .mx(px(4.0)),
                     )
+                    // Window min/max controls (only when detached + client decorations)
+                    .when(detached, |d| {
+                        d.child(window_min_max_controls(needs_controls, is_maximized, t, cx))
+                    })
+                    // Detach button (hidden when already detached)
+                    .when(!self.is_detached, |d| {
+                        d.child(
+                            div()
+                                .id("detach-button")
+                                .cursor_pointer()
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .tooltip(|window, cx| {
+                                    gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
+                                })
+                                .on_click(cx.listener(|this, _, _window, cx| this.request_detach(cx)))
+                                .child(
+                                    svg()
+                                        .path("icons/external-link.svg")
+                                        .size(px(14.0))
+                                        .text_color(rgb(t.text_muted)),
+                                ),
+                        )
+                    })
                     // Close button
                     .child(
                         div()

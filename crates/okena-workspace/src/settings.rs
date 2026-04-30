@@ -83,6 +83,30 @@ fn default_true() -> bool {
     true
 }
 
+/// Window state for a detached overlay (windowed / maximized / fullscreen).
+/// The bounds in `DetachedWindowBounds` are the *restore* bounds — what the
+/// window snaps back to when leaving maximized or fullscreen mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DetachedWindowState {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+/// Last-used bounds of a detached overlay window. Persisted so the window
+/// reopens at the same position, size, and state (incl. maximized/fullscreen)
+/// instead of resetting to a small default each time.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct DetachedWindowBounds {
+    pub origin_x: f32,
+    pub origin_y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub state: DetachedWindowState,
+}
+
 /// Default sidebar width in pixels.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 250.0;
 /// Minimum sidebar width in pixels.
@@ -217,6 +241,16 @@ pub struct AppSettings {
     #[serde(default)]
     pub diff_ignore_whitespace: bool,
 
+    /// When true, file viewer / diff viewer (and other detachable overlays)
+    /// open directly in a separate OS window instead of as a modal.
+    #[serde(default)]
+    pub detached_overlays_by_default: bool,
+
+    /// Last bounds used by a detached overlay window. Restored on next open
+    /// so the window doesn't reset to a small default each time.
+    #[serde(default)]
+    pub detached_overlay_bounds: Option<DetachedWindowBounds>,
+
     /// Legacy: auto_update_enabled flag. Migrated to enabled_extensions.
     #[serde(default = "default_auto_update_enabled", skip_serializing)]
     auto_update_enabled: bool,
@@ -278,6 +312,8 @@ impl Default for AppSettings {
             remote_listen_address: default_remote_listen_address(),
             min_column_width: default_min_column_width(),
             diff_ignore_whitespace: false,
+            detached_overlays_by_default: false,
+            detached_overlay_bounds: None,
             auto_update_enabled: default_auto_update_enabled(),
             enabled_extensions: HashSet::new(),
             extension_settings: HashMap::new(),

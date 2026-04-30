@@ -1,6 +1,9 @@
+mod detached_overlays;
 mod detached_terminals;
 pub mod headless;
 mod remote_commands;
+
+pub use detached_overlays::open_detached_overlay;
 
 use crate::git::watcher::GitStatusWatcher;
 use crate::workspace::worktree_sync::WorktreeSyncWatcher;

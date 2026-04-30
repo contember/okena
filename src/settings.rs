@@ -92,6 +92,17 @@ impl SettingsState {
     setting_setter!(set_scrollback_lines, scrollback_lines, u32, 100, 100000);
     setting_setter!(set_show_focused_border, show_focused_border, bool);
     setting_setter!(set_color_tinted_background, color_tinted_background, bool);
+    setting_setter!(set_detached_overlays_by_default, detached_overlays_by_default, bool);
+
+    /// Persist the most recent detached overlay window bounds.
+    pub fn set_detached_overlay_bounds(
+        &mut self,
+        bounds: crate::workspace::settings::DetachedWindowBounds,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.detached_overlay_bounds = Some(bounds);
+        self.save_and_notify(cx);
+    }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
     setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);

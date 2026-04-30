@@ -19,7 +19,7 @@ use okena_files::file_tree::build_file_tree;
 use okena_files::code_view::extract_selected_text;
 use okena_files::syntax::load_syntax_set;
 use okena_files::theme::theme;
-use okena_ui::modal::fullscreen_overlay;
+use okena_ui::modal::{fullscreen_overlay, fullscreen_panel};
 use gpui::prelude::*;
 use gpui::*;
 use std::collections::HashSet;
@@ -104,6 +104,9 @@ pub struct DiffViewer {
     delete_confirm: Option<context_menu::DeleteConfirmState>,
     /// Open "Discard changes" confirmation modal.
     discard_confirm: Option<context_menu::DiscardConfirmState>,
+    /// True when this viewer is hosted inside a detached window.
+    /// Hides the "detach" button and is set by the detached host.
+    is_detached: bool,
 }
 
 impl DiffViewer {
@@ -161,6 +164,7 @@ impl DiffViewer {
             file_context_menu: None,
             delete_confirm: None,
             discard_confirm: None,
+            is_detached: false,
         };
 
         if !provider.is_git_repo() {
@@ -419,6 +423,24 @@ impl DiffViewer {
         cx.emit(DiffViewerEvent::Close);
     }
 
+    /// Mark the viewer as hosted inside a detached window.
+    pub fn set_detached(&mut self, detached: bool, cx: &mut Context<Self>) {
+        if self.is_detached != detached {
+            self.is_detached = detached;
+            cx.notify();
+        }
+    }
+
+    /// Whether this viewer is hosted in a detached window.
+    pub fn is_detached(&self) -> bool {
+        self.is_detached
+    }
+
+    /// Request to detach the viewer into a separate OS window.
+    fn request_detach(&self, cx: &mut Context<Self>) {
+        cx.emit(DiffViewerEvent::Detach);
+    }
+
     fn has_commits(&self) -> bool {
         !self.commits.is_empty()
     }
@@ -629,6 +651,8 @@ impl DiffViewer {
 #[derive(Clone, Debug)]
 pub enum DiffViewerEvent {
     Close,
+    /// User requested to detach the viewer into a separate OS window.
+    Detach,
 }
 
 impl EventEmitter<DiffViewerEvent> for DiffViewer {}
@@ -684,10 +708,18 @@ impl Render for DiffViewer {
             window.focus(&focus_handle, cx);
         }
 
-        fullscreen_overlay("diff-viewer", &t)
-            .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
-                d.top(px(28.0))
-            })
+        let outer = if self.is_detached {
+            fullscreen_panel("diff-viewer", &t)
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.pt(px(28.0))
+                })
+        } else {
+            fullscreen_overlay("diff-viewer", &t)
+                .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |d| {
+                    d.top(px(28.0))
+                })
+        };
+        outer
             .track_focus(&focus_handle)
             .key_context("DiffViewer")
             .on_action(cx.listener(|this, _: &Cancel, _window, cx| {
@@ -756,7 +788,12 @@ impl Render for DiffViewer {
                     }
                 }),
             )
-            .child(self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), cx))
+            .child({
+                let needs_controls = self.is_detached
+                    && matches!(window.window_decorations(), Decorations::Client { .. });
+                let is_maximized = window.is_maximized();
+                self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), needs_controls, is_maximized, cx)
+            })
             // Commit info bar (when viewing a commit with navigation)
             .when(self.has_commits(), |d| {
                 d.child(self.render_commit_info_bar(&t, cx))

@@ -3,9 +3,10 @@
 //! Provides reusable builders for modal dialogs with standard styling.
 
 use crate::theme::ThemeColors;
-use crate::tokens::{ui_text, ui_text_ms};
+use crate::tokens::{ui_text, ui_text_md, ui_text_ms};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::v_flex;
+use gpui_component::{h_flex, v_flex};
 
 /// Create a fullscreen overlay that fills the entire window.
 ///
@@ -23,6 +24,101 @@ pub fn fullscreen_overlay(id: impl Into<SharedString>, t: &ThemeColors) -> State
         .bg(rgb(t.bg_primary))
         .flex()
         .flex_col()
+}
+
+/// Like `fullscreen_overlay`, but sized via `size_full()` instead of
+/// absolute positioning. Use when the overlay is hosted inside a parent
+/// that owns the layout (e.g. a detached window's content area), where
+/// absolute positioning does not interact correctly with flex sizing.
+pub fn fullscreen_panel(id: impl Into<SharedString>, t: &ThemeColors) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(id.into()))
+        .occlude()
+        .size_full()
+        .bg(rgb(t.bg_primary))
+        .flex()
+        .flex_col()
+}
+
+/// A spacer that always fills remaining flex space. When `enabled` is true
+/// the spacer also acts as a drag handle for `start_window_move` (used
+/// inside detached overlay headers).
+pub fn window_drag_spacer(enabled: bool) -> Stateful<Div> {
+    div()
+        .id("window-drag-spacer")
+        .flex_1()
+        .h_full()
+        .when(enabled, |d| {
+            d.on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.start_window_move();
+                cx.stop_propagation();
+            })
+        })
+}
+
+/// Render minimize + maximize buttons for a detached overlay window.
+/// Returns an empty container when `needs_controls` is false (the OS draws
+/// the controls itself, e.g. macOS server-side decorations).
+///
+/// The close button is intentionally omitted — the host overlay already has
+/// its own close button which closes the detached window via `Close` event.
+pub fn window_min_max_controls(
+    needs_controls: bool,
+    is_maximized: bool,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    let t = t.clone();
+    div().when(needs_controls, move |d| {
+        d.child(
+            h_flex()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .id("dw-min")
+                        .cursor_pointer()
+                        .w(px(28.0))
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .child("\u{2014}")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(|_, window, cx| {
+                            cx.stop_propagation();
+                            window.minimize_window();
+                        }),
+                )
+                .child(
+                    div()
+                        .id("dw-max")
+                        .cursor_pointer()
+                        .w(px(28.0))
+                        .h(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .text_size(ui_text_md(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .child(if is_maximized { "\u{2750}" } else { "\u{25A1}" })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_click(|_, window, cx| {
+                            cx.stop_propagation();
+                            window.zoom_window();
+                        }),
+                ),
+        )
+    })
 }
 
 /// Create a modal backdrop with click-to-close functionality.

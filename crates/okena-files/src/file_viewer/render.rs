@@ -16,7 +16,7 @@ use okena_core::theme::ThemeColors;
 use std::path::PathBuf;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
-use okena_ui::modal::fullscreen_overlay;
+use okena_ui::modal::{fullscreen_overlay, fullscreen_panel, window_drag_spacer, window_min_max_controls};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
@@ -736,11 +736,20 @@ impl Render for FileViewer {
             window.focus(&focus_handle, cx);
         }
 
-        fullscreen_overlay("file-viewer", &t)
-            .when(
-                cfg!(target_os = "macos") && !window.is_fullscreen(),
-                |d| d.top(px(28.0)),
-            )
+        let outer = if self.is_detached {
+            fullscreen_panel("file-viewer", &t)
+                .when(
+                    cfg!(target_os = "macos") && !window.is_fullscreen(),
+                    |d| d.pt(px(28.0)),
+                )
+        } else {
+            fullscreen_overlay("file-viewer", &t)
+                .when(
+                    cfg!(target_os = "macos") && !window.is_fullscreen(),
+                    |d| d.top(px(28.0)),
+                )
+        };
+        outer
             .track_focus(&focus_handle)
             .key_context("FileViewer")
             .when(!is_preview_mode, |d| d.cursor(CursorStyle::IBeam))
@@ -856,10 +865,14 @@ impl Render for FileViewer {
                 }),
             )
             // Header
-            .child(
+            .child({
+                let detached = self.is_detached;
+                let needs_controls = detached
+                    && matches!(window.window_decorations(), Decorations::Client { .. });
+                let is_maximized = window.is_maximized();
                 div()
                     .px(px(16.0))
-                    .py(px(12.0))
+                    .py(if detached { px(6.0) } else { px(12.0) })
                     .border_b_1()
                     .border_color(rgb(t.border))
                     .flex()
@@ -895,7 +908,31 @@ impl Render for FileViewer {
                                     ),
                             )
                             .child(self.render_nav_buttons(&t, cx))
-                            .child(
+                            .child(if detached {
+                                // Compact single-line title for detached windows
+                                h_flex()
+                                    .gap(px(8.0))
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_size(ui_text(13.0, cx))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(t.text_primary))
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .child(filename),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(ui_text_sm(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .text_ellipsis()
+                                            .overflow_hidden()
+                                            .min_w_0()
+                                            .child(relative_path),
+                                    )
+                                    .into_any_element()
+                            } else {
                                 v_flex()
                                     .gap(px(2.0))
                                     .child(
@@ -910,9 +947,12 @@ impl Render for FileViewer {
                                             .text_size(ui_text_ms(cx))
                                             .text_color(rgb(t.text_muted))
                                             .child(relative_path),
-                                    ),
-                            ),
+                                    )
+                                    .into_any_element()
+                            }),
                     )
+                    // Drag-to-move spacer (only meaningful when detached)
+                    .child(window_drag_spacer(detached))
                     .child(
                         h_flex()
                             .gap(px(12.0))
@@ -933,6 +973,35 @@ impl Render for FileViewer {
                                         )),
                                 )
                             })
+                            .when(!self.is_detached, |d| {
+                                d.child(
+                                    div()
+                                        .id("detach-button")
+                                        .cursor_pointer()
+                                        .w(px(28.0))
+                                        .h(px(28.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(4.0))
+                                        .hover(|s| s.bg(rgb(t.bg_secondary)))
+                                        .tooltip(|window, cx| {
+                                            gpui_component::tooltip::Tooltip::new("Open in new window").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.request_detach(cx);
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path("icons/external-link.svg")
+                                                .size(px(14.0))
+                                                .text_color(rgb(t.text_muted)),
+                                        ),
+                                )
+                            })
+                            .when(detached, |d| {
+                                d.child(window_min_max_controls(needs_controls, is_maximized, &t, cx))
+                            })
                             .child(
                                 div()
                                     .id("close-button")
@@ -949,8 +1018,8 @@ impl Render for FileViewer {
                                             .child("\u{00d7}"),
                                     ),
                             ),
-                    ),
-            )
+                    )
+            })
             // Main content area: sidebar + (tab bar + content)
             .child(
                 h_flex()

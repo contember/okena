@@ -24,6 +24,10 @@ impl SettingsPanel {
                 |state, val, cx| state.set_color_tinted_background(val, cx), cx,
             ))
             .child(self.render_toggle(
+                "detached-by-default", "Detached Overlays by Default", s.detached_overlays_by_default, true,
+                |state, val, cx| state.set_detached_overlays_by_default(val, cx), cx,
+            ))
+            .child(self.render_toggle(
                 "remote-server", "Remote Server", s.remote_server_enabled, true,
                 |state, val, cx| state.set_remote_server_enabled(val, cx), cx,
             ))
