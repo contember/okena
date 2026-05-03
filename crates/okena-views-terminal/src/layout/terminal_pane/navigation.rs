@@ -86,6 +86,24 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     }
 
     pub(super) fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        // Windows: intercept Ctrl+V and route through the clipboard-aware
+        // Paste handler. On macOS / Linux the running TUI (Claude Code, etc.)
+        // can read the OS clipboard itself via pbpaste / xclip / wl-paste, so
+        // we let the raw keystroke pass through. On Windows neither path
+        // works: PowerShell ignores `\x16`, and Claude inside WSL has no
+        // Linux clipboard, so it shows "No image found in clipboard."
+        // Ctrl+Shift+V still goes through the regular Paste action binding.
+        #[cfg(target_os = "windows")]
+        if event.keystroke.key == "v"
+            && event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.shift
+            && !event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.platform
+        {
+            self.handle_paste(cx);
+            return;
+        }
+
         if let Some(ref terminal) = self.terminal {
             terminal.claim_resize_local();
 
