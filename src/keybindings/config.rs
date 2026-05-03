@@ -31,6 +31,13 @@ impl KeybindingConfig {
 
         // Global keybindings
         bindings.insert(
+            "Quit".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-q", None),
+                KeybindingEntry::new("ctrl-q", None),
+            ],
+        );
+        bindings.insert(
             "ToggleSidebar".to_string(),
             vec![
                 KeybindingEntry::new("cmd-b", None),
