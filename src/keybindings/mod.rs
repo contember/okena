@@ -260,6 +260,7 @@ fn register_bindings_from_config(cx: &mut App, config: &KeybindingConfig) {
 fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Option<KeyBinding> {
     // Map action names to actual actions
     match action {
+        "Quit" => Some(KeyBinding::new(keystroke, Quit, context)),
         "Cancel" => Some(KeyBinding::new(keystroke, Cancel, context)),
         "SendEscape" => Some(KeyBinding::new(keystroke, SendEscape, context)),
         "ToggleSidebar" => Some(KeyBinding::new(keystroke, ToggleSidebar, context)),

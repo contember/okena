@@ -6,7 +6,7 @@ use super::{
     CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
     JumpToNextPrompt, JumpToPreviousPrompt,
-    MinimizeTerminal, NewProject, OpenSettingsFile, Paste, ResetZoom, ScrollDown, ScrollUp,
+    MinimizeTerminal, NewProject, OpenSettingsFile, Paste, Quit, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
@@ -19,6 +19,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     let mut map = HashMap::new();
 
     // Global actions
+    map.insert(
+        "Quit",
+        ActionDescription {
+            name: "Quit",
+            description: "Quit Okena",
+            category: "Global",
+            factory: || Box::new(Quit),
+        },
+    );
     map.insert(
         "Cancel",
         ActionDescription {
