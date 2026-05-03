@@ -19,7 +19,7 @@ use okena_files::file_tree::build_file_tree;
 use okena_files::code_view::extract_selected_text;
 use okena_files::syntax::load_syntax_set;
 use okena_files::theme::theme;
-use okena_ui::modal::{fullscreen_overlay, fullscreen_panel};
+use okena_ui::modal::{detached_needs_controls, fullscreen_overlay, fullscreen_panel};
 use gpui::prelude::*;
 use gpui::*;
 use std::collections::HashSet;
@@ -789,8 +789,7 @@ impl Render for DiffViewer {
                 }),
             )
             .child({
-                let needs_controls = self.is_detached
-                    && matches!(window.window_decorations(), Decorations::Client { .. });
+                let needs_controls = self.is_detached && detached_needs_controls(window);
                 let is_maximized = window.is_maximized();
                 self.render_header(&t, has_files, self.file_stats.len(), total_added, total_removed, &diff_mode, self.ignore_whitespace, self.commit_message.as_deref(), needs_controls, is_maximized, cx)
             })

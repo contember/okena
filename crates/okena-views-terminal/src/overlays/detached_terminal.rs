@@ -162,11 +162,7 @@ impl Render for DetachedTerminalView {
         };
 
         let is_maximized = window.is_maximized();
-        let decorations = window.window_decorations();
-        let needs_controls = match decorations {
-            Decorations::Server => false,
-            Decorations::Client { .. } => true,
-        };
+        let needs_controls = okena_ui::modal::detached_needs_controls(window);
 
         // On macOS with server decorations, we need to leave space for traffic lights
         let traffic_light_padding = if cfg!(target_os = "macos") && !needs_controls {
@@ -189,7 +185,11 @@ impl Render for DetachedTerminalView {
             .flex()
             .flex_col()
             .child(
-                // Header bar - draggable for window move
+                // Header bar - draggable for window move. Mirrors the main app
+                // titlebar: WindowControlArea::Drag handles Windows (HTCAPTION,
+                // enabling native snap and unmaximize-on-drag) and macOS;
+                // start_window_move is a Linux-only fallback since the
+                // hit-test callback isn't wired there.
                 div()
                     .h(px(35.0))
                     .pl(traffic_light_padding)
@@ -200,10 +200,11 @@ impl Render for DetachedTerminalView {
                     .bg(rgb(t.bg_header))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    // Make header draggable for window move
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.start_window_move();
-                        cx.stop_propagation();
+                    .window_control_area(WindowControlArea::Drag)
+                    .when(cfg!(target_os = "linux"), |d| {
+                        d.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                            window.start_window_move();
+                        })
                     })
                     .child(
                         div()
@@ -224,6 +225,7 @@ impl Render for DetachedTerminalView {
                             .child(
                                 div()
                                     .id("reattach-btn")
+                                    .occlude()
                                     .cursor_pointer()
                                     .px(px(8.0))
                                     .py(px(4.0))
@@ -240,6 +242,7 @@ impl Render for DetachedTerminalView {
                             )
                             // Window controls - only show if client-side decorations
                             .when(needs_controls, |d| {
+                                let use_native = cfg!(target_os = "windows");
                                 d.child(
                                     h_flex()
                                         .gap(px(2.0))
@@ -258,10 +261,15 @@ impl Render for DetachedTerminalView {
                                                 .text_color(rgb(t.text_secondary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 .child("─")
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                .on_click(|_, window, cx| {
-                                                    cx.stop_propagation();
-                                                    window.minimize_window();
+                                                .when(use_native, |d| {
+                                                    d.occlude().window_control_area(WindowControlArea::Min)
+                                                })
+                                                .when(!use_native, |d| {
+                                                    d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                        .on_click(|_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            window.minimize_window();
+                                                        })
                                                 }),
                                         )
                                         // Maximize/Restore
@@ -279,16 +287,23 @@ impl Render for DetachedTerminalView {
                                                 .text_color(rgb(t.text_secondary))
                                                 .hover(|s| s.bg(rgb(t.bg_hover)))
                                                 .child(if is_maximized { "❐" } else { "□" })
-                                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                                .on_click(|_, window, cx| {
-                                                    cx.stop_propagation();
-                                                    window.zoom_window();
+                                                .when(use_native, |d| {
+                                                    d.occlude().window_control_area(WindowControlArea::Max)
+                                                })
+                                                .when(!use_native, |d| {
+                                                    d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                                        .on_click(|_, window, cx| {
+                                                            cx.stop_propagation();
+                                                            window.zoom_window();
+                                                        })
                                                 }),
                                         )
-                                        // Close
+                                        // Close — re-attach instead of closing the OS window,
+                                        // so we can't hand it off to WindowControlArea::Close.
                                         .child(
                                             div()
                                                 .id("close-btn")
+                                                .occlude()
                                                 .cursor_pointer()
                                                 .w(px(28.0))
                                                 .h(px(28.0))

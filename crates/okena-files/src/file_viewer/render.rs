@@ -16,7 +16,7 @@ use okena_core::theme::ThemeColors;
 use std::path::PathBuf;
 use okena_markdown::RenderedNode;
 use okena_ui::code_block::code_block_container;
-use okena_ui::modal::{fullscreen_overlay, fullscreen_panel, window_drag_spacer, window_min_max_controls};
+use okena_ui::modal::{detached_needs_controls, fullscreen_overlay, fullscreen_panel, window_drag_spacer, window_min_max_controls};
 use okena_ui::toggle::segmented_toggle;
 use okena_ui::file_icon::file_icon;
 use okena_ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
@@ -867,8 +867,7 @@ impl Render for FileViewer {
             // Header
             .child({
                 let detached = self.is_detached;
-                let needs_controls = detached
-                    && matches!(window.window_decorations(), Decorations::Client { .. });
+                let needs_controls = detached && detached_needs_controls(window);
                 let is_maximized = window.is_maximized();
                 div()
                     .px(px(16.0))

@@ -53,11 +53,19 @@ pub fn open_detached_overlay<T, E>(
 
     cx.open_window(
         WindowOptions {
-            titlebar: Some(TitlebarOptions {
-                title: Some(title.clone()),
-                appears_transparent: true,
-                ..Default::default()
-            }),
+            // Match the main app window: on Windows we draw the entire chrome
+            // ourselves (titlebar: None), so the OS doesn't add a system caption
+            // bar above our header. Other platforms keep the transparent titlebar
+            // for native traffic-lights / server-side decorations.
+            titlebar: if cfg!(target_os = "windows") {
+                None
+            } else {
+                Some(TitlebarOptions {
+                    title: Some(title.clone()),
+                    appears_transparent: true,
+                    ..Default::default()
+                })
+            },
             window_bounds: Some(window_bounds),
             is_resizable: true,
             window_decorations: Some(if cfg!(target_os = "windows") {

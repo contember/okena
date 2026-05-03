@@ -55,11 +55,17 @@ impl Okena {
 
         cx.open_window(
             WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some(format!("{} - Detached", terminal_name).into()),
-                    appears_transparent: true,
-                    ..Default::default()
-                }),
+                // On Windows the chrome is fully client-drawn (matches main window);
+                // other platforms keep the transparent titlebar.
+                titlebar: if cfg!(target_os = "windows") {
+                    None
+                } else {
+                    Some(TitlebarOptions {
+                        title: Some(format!("{} - Detached", terminal_name).into()),
+                        appears_transparent: true,
+                        ..Default::default()
+                    })
+                },
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
                     size: size(px(800.0), px(600.0)),

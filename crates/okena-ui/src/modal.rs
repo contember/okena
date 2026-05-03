@@ -41,19 +41,37 @@ pub fn fullscreen_panel(id: impl Into<SharedString>, t: &ThemeColors) -> Statefu
 }
 
 /// A spacer that always fills remaining flex space. When `enabled` is true
-/// the spacer also acts as a drag handle for `start_window_move` (used
-/// inside detached overlay headers).
+/// the spacer also acts as a drag handle for window move, mirroring the
+/// main app titlebar: `WindowControlArea::Drag` (HTCAPTION on Windows,
+/// platform-native drag on macOS) plus a Linux mouse-move fallback since
+/// `WindowControlArea::Drag` is a no-op there.
 pub fn window_drag_spacer(enabled: bool) -> Stateful<Div> {
     div()
         .id("window-drag-spacer")
         .flex_1()
         .h_full()
         .when(enabled, |d| {
-            d.on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.start_window_move();
-                cx.stop_propagation();
-            })
+            d.window_control_area(WindowControlArea::Drag)
+                .when(cfg!(target_os = "linux"), |d| {
+                    d.on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                        window.start_window_move();
+                    })
+                })
         })
+}
+
+/// Whether a detached overlay window should draw its own min/max chrome.
+/// Mirrors the rule used by the main app titlebar so detached windows stay
+/// consistent: always on Windows, never on macOS (native traffic lights),
+/// runtime-determined on Linux.
+pub fn detached_needs_controls(window: &Window) -> bool {
+    if cfg!(target_os = "windows") {
+        true
+    } else if cfg!(target_os = "macos") {
+        false
+    } else {
+        matches!(window.window_decorations(), Decorations::Client { .. })
+    }
 }
 
 /// Render minimize + maximize buttons for a detached overlay window.
@@ -73,52 +91,62 @@ pub fn window_min_max_controls(
         d.child(
             h_flex()
                 .gap(px(2.0))
-                .child(
-                    div()
-                        .id("dw-min")
-                        .cursor_pointer()
-                        .w(px(28.0))
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .child("\u{2014}")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_click(|_, window, cx| {
-                            cx.stop_propagation();
-                            window.minimize_window();
-                        }),
-                )
-                .child(
-                    div()
-                        .id("dw-max")
-                        .cursor_pointer()
-                        .w(px(28.0))
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .text_size(ui_text_md(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .hover(|s| s.bg(rgb(t.bg_hover)))
-                        .child(if is_maximized { "\u{2750}" } else { "\u{25A1}" })
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_click(|_, window, cx| {
-                            cx.stop_propagation();
-                            window.zoom_window();
-                        }),
-                ),
+                .child(window_chrome_button(
+                    "dw-min",
+                    "\u{2014}",
+                    WindowControlArea::Min,
+                    &t,
+                    cx,
+                    |window| window.minimize_window(),
+                ))
+                .child(window_chrome_button(
+                    "dw-max",
+                    if is_maximized { "\u{2750}" } else { "\u{25A1}" },
+                    WindowControlArea::Max,
+                    &t,
+                    cx,
+                    |window| window.zoom_window(),
+                )),
         )
     })
+}
+
+/// Build a single chrome button. On Windows we mark the area with
+/// `WindowControlArea` so the OS handles the click natively (matches the
+/// main titlebar's behavior); on other platforms we wire a normal click
+/// handler.
+fn window_chrome_button(
+    id: &'static str,
+    label: &'static str,
+    area: WindowControlArea,
+    t: &ThemeColors,
+    cx: &App,
+    on_activate: fn(&mut Window),
+) -> Stateful<Div> {
+    let use_native = cfg!(target_os = "windows");
+    div()
+        .id(id)
+        .cursor_pointer()
+        .w(px(28.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .text_size(ui_text_md(cx))
+        .text_color(rgb(t.text_secondary))
+        .hover(|s| s.bg(rgb(t.bg_hover)))
+        .child(label)
+        .when(use_native, |d| d.occlude().window_control_area(area))
+        .when(!use_native, |d| {
+            d.on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_activate(window);
+            })
+        })
 }
 
 /// Create a modal backdrop with click-to-close functionality.
