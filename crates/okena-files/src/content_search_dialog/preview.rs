@@ -92,10 +92,16 @@ impl ContentSearchDialog {
 
         let relative_path = file_path.to_string_lossy().to_string();
 
-        // Scroll to the match line
-        let scroll_to = match_line.saturating_sub(5); // 5 lines above for context
-        self.preview_scroll_handle
-            .scroll_to_item(scroll_to, ScrollStrategy::Top);
+        // Scroll to the match line — only when the selection changed.
+        // Doing this on every render would re-anchor the scroll position
+        // and prevent the user from scrolling past the highlighted row.
+        let scroll_target = (file_path.clone(), match_line);
+        if self.last_scrolled_match.as_ref() != Some(&scroll_target) {
+            let scroll_to = match_line.saturating_sub(5); // 5 lines above for context
+            self.preview_scroll_handle
+                .scroll_to_item(scroll_to, ScrollStrategy::Top);
+            self.last_scrolled_match = Some(scroll_target);
+        }
 
         let view = cx.entity().clone();
 

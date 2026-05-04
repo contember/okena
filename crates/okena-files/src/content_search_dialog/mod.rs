@@ -114,6 +114,10 @@ pub struct ContentSearchDialog {
     pub(super) preview_selection: CodeSelection,
     /// File path currently shown in preview (for selection reset).
     pub(super) preview_file: Option<PathBuf>,
+    /// (file_path, match_line) the preview was last auto-scrolled to.
+    /// Prevents re-anchoring the scroll on every render — without this,
+    /// the user can't scroll past the highlighted row.
+    pub(super) last_scrolled_match: Option<(PathBuf, usize)>,
 }
 
 impl ContentSearchDialog {
@@ -216,6 +220,7 @@ impl ContentSearchDialog {
             scope_path: None,
             preview_selection: CodeSelection::default(),
             preview_file: None,
+            last_scrolled_match: None,
         };
 
         // Run initial search if we have a restored query
