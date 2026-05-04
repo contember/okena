@@ -362,6 +362,27 @@ impl PtyManager {
             _ => None,
         };
 
+        // Wrap a non-WSL shell through the host session backend (psmux) when one
+        // is available. WSL terminals get their own per-distro backend below
+        // because the daemon must live inside WSL, not on the host.
+        let wrap_with_host_backend = |fallback: CommandBuilder| -> CommandBuilder {
+            if !self.session_backend.supports_persistence() {
+                return fallback;
+            }
+            let session_name = self.session_backend.session_name(terminal_id);
+            let extra_env = self.extra_env.lock().clone();
+            match self.session_backend.build_command(&session_name, cwd, custom_command, &extra_env) {
+                Some((program, args)) => {
+                    let mut cmd = CommandBuilder::new(program);
+                    for arg in args {
+                        cmd.arg(arg);
+                    }
+                    cmd
+                }
+                None => fallback,
+            }
+        };
+
         let (mut cmd, wsl_distro, wsl_backend) = match shell {
             Some(ShellType::Wsl { distro }) => {
                 let wsl_backend = resolve_for_wsl(distro.as_deref(), self.session_backend_preference);
@@ -387,11 +408,11 @@ impl PtyManager {
                     )
                 }
             }
-            Some(shell_type) => (shell_type.build_command(cwd), None, None),
+            Some(shell_type) => (wrap_with_host_backend(shell_type.build_command(cwd)), None, None),
             None => {
-                let mut cmd = CommandBuilder::new_default_prog();
-                cmd.cwd(cwd);
-                (cmd, None, None)
+                let mut default_cmd = CommandBuilder::new_default_prog();
+                default_cmd.cwd(cwd);
+                (wrap_with_host_backend(default_cmd), None, None)
             }
         };
 

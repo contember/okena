@@ -25,7 +25,9 @@ pub enum SessionBackend {
     Screen,
     /// Use dtach for minimal session persistence (no scrollback management)
     Dtach,
-    /// Auto-detect: prefer dtach, fallback to tmux, screen, then none (default)
+    /// Use psmux for session persistence on Windows (native ConPTY, tmux-compatible)
+    Psmux,
+    /// Auto-detect: prefer dtach > tmux > screen on Unix; psmux on Windows
     #[default]
     Auto,
 }
@@ -38,6 +40,7 @@ impl SessionBackend {
             "tmux" => Self::Tmux,
             "screen" => Self::Screen,
             "dtach" => Self::Dtach,
+            "psmux" => Self::Psmux,
             "none" | "off" | "false" | "0" => Self::None,
             "auto" | "smart" | "on" | "true" | "1" => Self::Auto,
             _ => Self::None,
@@ -81,21 +84,43 @@ impl SessionBackend {
                     ResolvedBackend::None
                 }
             }
-            Self::Auto => {
-                // Prefer dtach (minimal, no scrollback interference)
-                // then tmux, then screen
-                if is_dtach_available() {
-                    log::info!("Auto-detected dtach for session persistence");
-                    ResolvedBackend::Dtach
-                } else if is_tmux_available() {
-                    log::info!("Auto-detected tmux for session persistence");
-                    ResolvedBackend::Tmux
-                } else if is_screen_available() {
-                    log::info!("Auto-detected screen for session persistence");
-                    ResolvedBackend::Screen
+            Self::Psmux => {
+                if is_psmux_available() {
+                    ResolvedBackend::Psmux
                 } else {
-                    log::info!("No session backend available, sessions won't persist");
+                    log::warn!("psmux requested but not available, falling back to none");
                     ResolvedBackend::None
+                }
+            }
+            Self::Auto => {
+                // On Windows, psmux is the only native session backend (dtach/tmux/screen
+                // require a Unix shell). On Unix, prefer dtach (minimal, no scrollback
+                // interference) then tmux, then screen.
+                #[cfg(windows)]
+                {
+                    if is_psmux_available() {
+                        log::info!("Auto-detected psmux for session persistence");
+                        ResolvedBackend::Psmux
+                    } else {
+                        log::info!("No session backend available, sessions won't persist");
+                        ResolvedBackend::None
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    if is_dtach_available() {
+                        log::info!("Auto-detected dtach for session persistence");
+                        ResolvedBackend::Dtach
+                    } else if is_tmux_available() {
+                        log::info!("Auto-detected tmux for session persistence");
+                        ResolvedBackend::Tmux
+                    } else if is_screen_available() {
+                        log::info!("Auto-detected screen for session persistence");
+                        ResolvedBackend::Screen
+                    } else {
+                        log::info!("No session backend available, sessions won't persist");
+                        ResolvedBackend::None
+                    }
                 }
             }
         }
@@ -105,10 +130,11 @@ impl SessionBackend {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::None => "None (Direct Shell)",
-            Self::Auto => "Auto (dtach > tmux > screen)",
+            Self::Auto => "Auto (best available)",
             Self::Tmux => "tmux",
             Self::Screen => "screen",
             Self::Dtach => "dtach (minimal)",
+            Self::Psmux => "psmux (Windows)",
         }
     }
 
@@ -116,9 +142,14 @@ impl SessionBackend {
     pub fn all_variants() -> &'static [SessionBackend] {
         &[
             SessionBackend::Auto,
+            #[cfg(not(windows))]
             SessionBackend::Dtach,
+            #[cfg(not(windows))]
             SessionBackend::Tmux,
+            #[cfg(not(windows))]
             SessionBackend::Screen,
+            #[cfg(windows)]
+            SessionBackend::Psmux,
             SessionBackend::None,
         ]
     }
@@ -131,6 +162,7 @@ pub enum ResolvedBackend {
     Tmux,
     Screen,
     Dtach,
+    Psmux,
 }
 
 impl ResolvedBackend {
@@ -264,6 +296,48 @@ impl ResolvedBackend {
                 );
                 Some(("sh".to_string(), vec!["-c".to_string(), dtach_cmd]))
             }
+            Self::Psmux => {
+                // psmux speaks tmux command language but we bypass any host shell:
+                // Windows cmd.exe doesn't honor sh-style single-quoting, and we have
+                // no need for it — `;` is psmux's literal command separator when
+                // received as its own argv token (no `\;` shell escaping required).
+                //
+                // The initial pane runs psmux's configured default-shell (PowerShell
+                // on a fresh install). Okena's `default_shell` setting is currently
+                // not propagated into the session — users wanting `cmd.exe` etc.
+                // inside persistent sessions need to set `default-shell` in
+                // `~/.psmux.conf`.
+                let window_name = extract_dir_name(cwd);
+                let mut args = vec!["new-session".to_string(), "-A".to_string()];
+                for (k, v) in extra_env {
+                    args.push("-e".to_string());
+                    args.push(format!("{k}={v}"));
+                }
+                args.push("-s".to_string());
+                args.push(session_name.to_string());
+                args.push("-c".to_string());
+                args.push(cwd.to_string());
+                if let Some(cmd) = command {
+                    // Wrap custom command in cmd.exe so PATH lookup and quoting
+                    // behave consistently regardless of psmux's default-shell.
+                    args.push("cmd.exe".to_string());
+                    args.push("/c".to_string());
+                    args.push(cmd.to_string());
+                }
+                let push_cmd = |args: &mut Vec<String>, parts: &[&str]| {
+                    args.push(";".to_string());
+                    for p in parts {
+                        args.push((*p).to_string());
+                    }
+                };
+                push_cmd(&mut args, &["set", "status", "off"]);
+                push_cmd(&mut args, &["set", "mouse", "on"]);
+                push_cmd(&mut args, &["set-window-option", "automatic-rename", "off"]);
+                args.push(";".to_string());
+                args.push("rename-window".to_string());
+                args.push(window_name);
+                Some(("psmux".to_string(), args))
+            }
         }
     }
 
@@ -325,6 +399,12 @@ impl ResolvedBackend {
                     let _ = std::fs::remove_file(&socket_path);
                     log::debug!("Removed dtach socket: {:?}", socket_path);
                 }
+            }
+            Self::Psmux => {
+                let mut cmd = crate::process::command("psmux");
+                cmd.args(["kill-session", "-t", session_name]);
+                let _ = crate::process::safe_output(&mut cmd);
+                log::debug!("Killed psmux session {}", session_name);
             }
         }
     }
@@ -416,6 +496,23 @@ pub fn resolve_for_wsl(distro: Option<&str>, preference: SessionBackend) -> Reso
                 ResolvedBackend::None
             }
         }
+        SessionBackend::Psmux => {
+            // psmux is a host-Windows backend; WSL terminals need a Unix tool inside the
+            // distro. Pick the best available there instead of refusing persistence.
+            if is_wsl_tool_available(distro, "dtach") {
+                log::info!("psmux requested but inside WSL — using dtach instead");
+                ResolvedBackend::Dtach
+            } else if is_wsl_tool_available(distro, "tmux") {
+                log::info!("psmux requested but inside WSL — using tmux instead");
+                ResolvedBackend::Tmux
+            } else if is_wsl_tool_available(distro, "screen") {
+                log::info!("psmux requested but inside WSL — using screen instead");
+                ResolvedBackend::Screen
+            } else {
+                log::warn!("psmux requested but no session tool available in WSL, falling back to none");
+                ResolvedBackend::None
+            }
+        }
         SessionBackend::Auto => {
             if is_wsl_tool_available(distro, "dtach") {
                 log::info!("Auto-detected dtach in WSL for session persistence");
@@ -481,7 +578,9 @@ impl ResolvedBackend {
         command: Option<&str>,
     ) -> Option<(String, Vec<String>)> {
         let inner_cmd = match self {
-            Self::None => return None,
+            // psmux runs on the Windows host, never inside WSL. resolve_for_wsl
+            // never returns Psmux, so reaching this arm is a programming error.
+            Self::None | Self::Psmux => return None,
             Self::Tmux => {
                 // Tmux doesn't reference host paths or $SHELL, so delegate to build_command
                 let (_program, inner_args) = self.build_command(session_name, wsl_cwd, command, &[])?;
@@ -527,7 +626,9 @@ impl ResolvedBackend {
 #[cfg(windows)]
 pub fn kill_wsl_session(backend: ResolvedBackend, distro: Option<&str>, session_name: &str) {
     let kill_cmd = match backend {
-        ResolvedBackend::None => return,
+        // Psmux is host-Windows only; resolve_for_wsl never returns it,
+        // and kill_wsl_session is only called for WSL terminals.
+        ResolvedBackend::None | ResolvedBackend::Psmux => return,
         ResolvedBackend::Tmux => {
             format!("tmux kill-session -t {}", shell_escape(session_name))
         }
@@ -807,6 +908,26 @@ fn is_tmux_available() -> bool {
     }
 }
 
+/// Check if psmux is available on the system.
+/// Only enabled on Windows — psmux's purpose is being a native Windows tmux
+/// alternative, and the rest of okena's session-backend chain prefers dtach/tmux/screen
+/// on Unix.
+fn is_psmux_available() -> bool {
+    #[cfg(not(windows))]
+    {
+        false
+    }
+
+    #[cfg(windows)]
+    {
+        let mut cmd = crate::process::command("psmux");
+        cmd.arg("-V");
+        crate::process::safe_output(&mut cmd)
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Check if screen is available on the system
 /// Always returns false on Windows as screen is not natively available
 fn is_screen_available() -> bool {
@@ -846,6 +967,8 @@ mod tests {
         assert_eq!(SessionBackend::from_str("screen"), SessionBackend::Screen);
         assert_eq!(SessionBackend::from_str("dtach"), SessionBackend::Dtach);
         assert_eq!(SessionBackend::from_str("DTACH"), SessionBackend::Dtach);
+        assert_eq!(SessionBackend::from_str("psmux"), SessionBackend::Psmux);
+        assert_eq!(SessionBackend::from_str("PSMUX"), SessionBackend::Psmux);
         assert_eq!(SessionBackend::from_str("none"), SessionBackend::None);
         assert_eq!(SessionBackend::from_str("auto"), SessionBackend::Auto);
         assert_eq!(SessionBackend::from_str("smart"), SessionBackend::Auto);
@@ -943,6 +1066,66 @@ mod tests {
         assert_eq!(args[3], user_shell());
         assert_eq!(args[4], "-ic");
         assert_eq!(args[5], "npm run dev");
+    }
+
+    #[test]
+    fn test_psmux_build_command_minimal() {
+        let backend = ResolvedBackend::Psmux;
+        // Use forward slashes so the test passes on Unix CI; on Windows in
+        // production Path::file_name handles both separators identically.
+        let result = backend.build_command("tm-12345678", "C:/projects/app", None, &[]);
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "psmux");
+        assert_eq!(args[0], "new-session");
+        assert_eq!(args[1], "-A");
+        // -A is followed directly by -s NAME -c CWD (no -e) when no extra_env
+        assert_eq!(args[2], "-s");
+        assert_eq!(args[3], "tm-12345678");
+        assert_eq!(args[4], "-c");
+        assert_eq!(args[5], "C:/projects/app");
+        // No initial program, then ';' separators with set/rename commands
+        assert!(args.contains(&";".to_string()));
+        let semi_count = args.iter().filter(|a| a.as_str() == ";").count();
+        assert_eq!(semi_count, 4, "expected four `;` separators (status, mouse, automatic-rename, rename-window)");
+        assert!(args.iter().any(|a| a == "rename-window"));
+        assert_eq!(args.last().unwrap(), "app", "window name = last cwd segment");
+    }
+
+    #[test]
+    fn test_psmux_build_command_with_custom_command() {
+        let backend = ResolvedBackend::Psmux;
+        let result = backend.build_command("tm-test", "C:\\src", Some("npm run dev"), &[]);
+        assert!(result.is_some());
+        let (program, args) = result.unwrap();
+        assert_eq!(program, "psmux");
+        // custom command is wrapped via cmd.exe /c
+        let cmd_pos = args.iter().position(|a| a == "cmd.exe").expect("cmd.exe in args");
+        assert_eq!(args[cmd_pos + 1], "/c");
+        assert_eq!(args[cmd_pos + 2], "npm run dev");
+    }
+
+    #[test]
+    fn test_psmux_build_command_with_extra_env() {
+        let backend = ResolvedBackend::Psmux;
+        let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "C:\\tmp".to_string())];
+        let (_, args) = backend.build_command("tm-test", "C:\\tmp", None, &env).unwrap();
+        // -e KEY=VAL must appear before -s so psmux applies it to the new session
+        let e_pos = args.iter().position(|a| a == "-e").expect("-e in args");
+        let s_pos = args.iter().position(|a| a == "-s").expect("-s in args");
+        assert!(e_pos < s_pos, "expected -e before -s");
+        assert_eq!(args[e_pos + 1], "CLAUDE_CONFIG_DIR=C:\\tmp");
+    }
+
+    #[test]
+    fn test_psmux_socket_path_returns_none() {
+        // psmux uses TCP IPC, not socket files
+        assert!(ResolvedBackend::Psmux.socket_path("tm-anything").is_none());
+    }
+
+    #[test]
+    fn test_psmux_supports_persistence() {
+        assert!(ResolvedBackend::Psmux.supports_persistence());
     }
 
     #[test]
