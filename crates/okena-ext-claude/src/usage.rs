@@ -1,7 +1,9 @@
+use crate::ui_helpers::open_url;
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
-use okena_ui::tokens::{ui_text_xs, ui_text_sm, ui_text_ms, ui_text_md};
+use okena_ui::tokens::{ui_text_xs, ui_text_ms, ui_text_md};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
@@ -9,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Refresh interval for usage data
 const USAGE_INTERVAL: Duration = Duration::from_secs(300);
@@ -19,6 +21,9 @@ const MIN_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Hover delay before showing the popover (ms)
 const HOVER_DELAY_MS: u64 = 300;
+
+/// Minimum interval between hover-triggered re-fetches.
+const HOVER_REFETCH_THROTTLE: Duration = Duration::from_secs(60);
 
 /// Usage info for a single rate-limit tier
 #[derive(Clone)]
@@ -115,6 +120,8 @@ pub struct ClaudeUsage {
     wake_tx: smol::channel::Sender<()>,
     /// Whether a wake signal has already been sent (avoids spamming from render).
     wake_sent: Arc<AtomicBool>,
+    /// Timestamp of the most recent successful fetch — used to throttle hover-triggered refreshes.
+    last_fetch_at: Arc<Mutex<Option<Instant>>>,
     /// Background polling task. Cancelled automatically when this entity is dropped.
     _poll_task: Task<()>,
 }
@@ -292,6 +299,8 @@ impl ClaudeUsage {
         let wake_sent_for_task = wake_sent.clone();
         let claude_dir = Arc::new(Mutex::new(resolve_claude_dir(cx)));
         let claude_dir_for_task = claude_dir.clone();
+        let last_fetch_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let last_fetch_at_for_task = last_fetch_at.clone();
 
         cx.observe_global::<ExtensionSettingsStore>(move |this, cx| {
             let resolved = resolve_claude_dir(cx);
@@ -389,6 +398,7 @@ impl ClaudeUsage {
 
                 if let Some(fetched) = result {
                     *data_for_task.lock() = Some(fetched);
+                    *last_fetch_at_for_task.lock() = Some(Instant::now());
                     consecutive_failures = 0;
                     wake_sent_for_task.store(false, Ordering::SeqCst);
                     if this.update(cx, |_this, cx| cx.notify()).is_err() {
@@ -437,7 +447,24 @@ impl ClaudeUsage {
             hover_token: Arc::new(AtomicU64::new(0)),
             wake_tx,
             wake_sent,
+            last_fetch_at,
             _poll_task: poll_task,
+        }
+    }
+
+    /// Wake the fetch loop, but only if the most recent successful fetch is older
+    /// than [`HOVER_REFETCH_THROTTLE`]. Used to refresh on popover open without
+    /// hammering the API on rapid hover-on/off.
+    fn request_fresh_fetch(&self) {
+        let stale = match *self.last_fetch_at.lock() {
+            None => true,
+            Some(last) => last.elapsed() >= HOVER_REFETCH_THROTTLE,
+        };
+        if !stale {
+            return;
+        }
+        if !self.wake_sent.swap(true, Ordering::SeqCst) {
+            let _ = self.wake_tx.try_send(());
         }
     }
 
@@ -459,6 +486,7 @@ impl ClaudeUsage {
             let _ = this.update(cx, |this, cx| {
                 if hover_token.load(Ordering::SeqCst) == token {
                     this.popover_visible = true;
+                    this.request_fresh_fetch();
                     cx.notify();
                 }
             });
@@ -515,14 +543,13 @@ impl ClaudeUsage {
                     div()
                         .id("claude-usage-popover")
                         .occlude()
-                        .min_w(px(280.0))
-                        .max_w(px(400.0))
+                        .min_w(px(300.0))
+                        .max_w(px(420.0))
                         .bg(rgb(t.bg_primary))
                         .border_1()
                         .border_color(rgb(t.border))
-                        .rounded(px(6.0))
+                        .rounded(px(8.0))
                         .shadow_lg()
-                        .p(px(10.0))
                         .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                             if *hovered {
                                 this.hover_token.fetch_add(1, Ordering::SeqCst);
@@ -535,77 +562,100 @@ impl ClaudeUsage {
                         })
                         .child(
                             v_flex()
-                                .gap(px(8.0))
+                                .child(render_popover_header(t, cx))
                                 .child(
-                                    div()
-                                        .text_size(ui_text_md(cx))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(t.text_primary))
-                                        .child("Claude Usage"),
-                                )
-                                .when_some(data.five_hour.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, cx, "Session (5h)", tier))
-                                })
-                                .when_some(data.seven_day.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, cx, "Weekly (7d)", tier))
-                                })
-                                .when_some(data.seven_day_sonnet.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, cx, "Sonnet (7d)", tier))
-                                })
-                                .when_some(data.seven_day_opus.as_ref(), |el, tier| {
-                                    el.child(render_tier_row(t, cx, "Opus (7d)", tier))
-                                })
-                                .when(
-                                    data.five_hour.as_ref().and_then(|t| t.time_elapsed_pct).is_some()
-                                        || data.seven_day.as_ref().and_then(|t| t.time_elapsed_pct).is_some(),
-                                    |el| {
-                                        el.child(
-                                            div()
-                                                .text_size(ui_text_xs(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child("Bar color = pace · Marker = time elapsed"),
+                                    v_flex()
+                                        .px(px(12.0))
+                                        .py(px(10.0))
+                                        .gap(px(7.0))
+                                        .when_some(data.five_hour.as_ref(), |el, tier| {
+                                            el.child(render_tier_row(t, cx, "Session", "5h", tier, "marker-session"))
+                                        })
+                                        .when_some(data.seven_day.as_ref(), |el, tier| {
+                                            el.child(render_tier_row(t, cx, "Weekly", "7d", tier, "marker-weekly"))
+                                        })
+                                        .when_some(
+                                            data.seven_day_sonnet
+                                                .as_ref()
+                                                .filter(|tier| tier.utilization >= 0.5),
+                                            |el, tier| {
+                                                el.child(render_tier_row(t, cx, "Sonnet", "7d", tier, "marker-sonnet"))
+                                            },
                                         )
-                                    },
-                                )
-                                .when_some(data.extra_usage.as_ref(), |el, extra| {
-                                    if !extra.is_enabled {
-                                        return el;
-                                    }
-                                    el.child(
-                                        v_flex()
-                                            .gap(px(2.0))
-                                            .child(
-                                                h_flex()
-                                                    .justify_between()
-                                                    .child(
-                                                        div()
-                                                            .text_size(ui_text_ms(cx))
-                                                            .text_color(rgb(t.text_secondary))
-                                                            .child("Extra Usage"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_size(ui_text_ms(cx))
-                                                            .text_color(rgb(t.text_primary))
-                                                            .child(format!(
-                                                                "${:.2} / ${:.2}",
-                                                                extra.used_credits / 100.0,
-                                                                extra.monthly_limit / 100.0
-                                                            )),
-                                                    ),
-                                            )
-                                            .child(render_progress_bar(
-                                                t,
-                                                extra.utilization,
-                                            )),
-                                    )
-                                }),
+                                        .when_some(
+                                            data.seven_day_opus
+                                                .as_ref()
+                                                .filter(|tier| tier.utilization >= 0.5),
+                                            |el, tier| {
+                                                el.child(render_tier_row(t, cx, "Opus", "7d", tier, "marker-opus"))
+                                            },
+                                        )
+                                        .when_some(data.extra_usage.as_ref(), |el, extra| {
+                                            if !extra.is_enabled {
+                                                return el;
+                                            }
+                                            el.child(render_divider(t))
+                                                .child(render_extra_usage_row(t, cx, extra))
+                                        }),
+                                ),
                         ),
                 ),
         )
         .with_priority(1)
         .into_any_element()
     }
+}
+
+fn render_popover_header(t: &ThemeColors, cx: &App) -> impl IntoElement {
+    let muted = t.text_muted;
+    let primary = t.text_primary;
+
+    h_flex()
+        .px(px(12.0))
+        .py(px(7.0))
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(rgb(t.border))
+        .child(
+            div()
+                .text_size(ui_text_xs(cx))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(t.text_secondary))
+                .child("CLAUDE USAGE"),
+        )
+        .child(
+            h_flex()
+                .id("claude-usage-settings")
+                .gap(px(4.0))
+                .items_center()
+                .px(px(4.0))
+                .py(px(1.0))
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .text_color(rgb(muted))
+                .hover(|s| s.text_color(rgb(primary)).bg(rgb(t.bg_hover)))
+                .child(
+                    div()
+                        .text_size(ui_text_xs(cx))
+                        .line_height(px(10.0))
+                        .child("Settings"),
+                )
+                .child(
+                    svg()
+                        .path("icons/external-link.svg")
+                        .size(px(10.0)),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(|_, _, _cx| {
+                    open_url("https://claude.ai/settings/usage");
+                })
+                .tooltip(|window, cx| {
+                    Tooltip::new("Open usage settings on claude.ai").build(window, cx)
+                }),
+        )
 }
 
 fn utilization_color(t: &ThemeColors, pct: f64) -> u32 {
@@ -622,47 +672,99 @@ fn render_tier_row(
     t: &ThemeColors,
     cx: &App,
     label: &str,
+    period: &str,
     tier: &TierUsage,
+    marker_id: &'static str,
 ) -> impl IntoElement {
     let pct = tier.utilization;
 
     v_flex()
-        .gap(px(2.0))
+        .gap(px(5.0))
         .child(
             h_flex()
+                .items_baseline()
+                .justify_between()
+                .child(
+                    h_flex()
+                        .gap(px(6.0))
+                        .items_baseline()
+                        .child(
+                            div()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_primary))
+                                .child(label.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(period.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_md(cx))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(utilization_color(t, pct)))
+                        .child(format!("{:.0}%", pct)),
+                ),
+        )
+        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct, marker_id))
+        .when(!tier.resets_at.is_empty(), |el| {
+            el.child(
+                h_flex()
+                    .justify_end()
+                    .child(
+                        div()
+                            .text_size(ui_text_xs(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("resets {}", tier.resets_at)),
+                    ),
+            )
+        })
+}
+
+fn render_extra_usage_row(
+    t: &ThemeColors,
+    cx: &App,
+    extra: &ExtraUsage,
+) -> impl IntoElement {
+    v_flex()
+        .gap(px(5.0))
+        .child(
+            h_flex()
+                .items_baseline()
                 .justify_between()
                 .child(
                     div()
                         .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child(label.to_string()),
+                        .text_color(rgb(t.text_primary))
+                        .child("Extra Usage"),
                 )
                 .child(
-                    h_flex()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(utilization_color(t, pct)))
-                                .child(format!("{:.0}%", pct)),
-                        )
-                        .when(!tier.resets_at.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child(format!("resets {}", tier.resets_at)),
-                            )
-                        }),
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(t.text_primary))
+                        .child(format!(
+                            "${:.2} / ${:.2}",
+                            extra.used_credits / 100.0,
+                            extra.monthly_limit / 100.0
+                        )),
                 ),
         )
-        .child(render_usage_with_time_bar(t, pct, tier.time_elapsed_pct))
+        .child(render_progress_bar(t, extra.utilization))
+}
+
+fn render_divider(t: &ThemeColors) -> impl IntoElement {
+    div().h(px(1.0)).w_full().bg(rgb(t.border))
 }
 
 fn render_usage_with_time_bar(
     t: &ThemeColors,
     usage_pct: f64,
     time_pct: Option<f64>,
+    marker_id: &'static str,
 ) -> impl IntoElement {
     let clamped_usage = usage_pct.clamp(0.0, 100.0) as f32;
 
@@ -673,29 +775,42 @@ fn render_usage_with_time_bar(
     };
 
     div()
-        .h(px(4.0))
+        .h(px(6.0))
         .w_full()
-        .rounded(px(2.0))
+        .rounded_full()
         .bg(rgb(t.bg_secondary))
         .relative()
         .child(
             div()
                 .h_full()
-                .rounded(px(2.0))
+                .rounded_full()
                 .bg(rgb(pace_color))
                 .w(relative(clamped_usage / 100.0)),
         )
         .when_some(time_pct, |el, tp| {
             let clamped_time = tp.clamp(0.0, 100.0) as f32;
+            let marker_color = t.text_primary;
             el.child(
                 div()
+                    .id(marker_id)
                     .absolute()
-                    .top(px(-1.0))
+                    .top(px(-4.0))
                     .left(relative(clamped_time / 100.0))
-                    .w(px(1.5))
-                    .h(px(6.0))
-                    .rounded(px(1.0))
-                    .bg(rgb(t.text_primary)),
+                    .w(px(8.0))
+                    .h(px(14.0))
+                    .flex()
+                    .items_center()
+                    .justify_start()
+                    .child(
+                        div()
+                            .w(px(2.0))
+                            .h(px(10.0))
+                            .rounded(px(1.0))
+                            .bg(rgb(marker_color)),
+                    )
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Time elapsed in this period").build(window, cx)
+                    }),
             )
         })
 }
@@ -705,14 +820,14 @@ fn render_progress_bar(t: &ThemeColors, pct: f64) -> impl IntoElement {
     let color = utilization_color(t, pct);
 
     div()
-        .h(px(4.0))
+        .h(px(6.0))
         .w_full()
-        .rounded(px(2.0))
+        .rounded_full()
         .bg(rgb(t.bg_secondary))
         .child(
             div()
                 .h_full()
-                .rounded(px(2.0))
+                .rounded_full()
                 .bg(rgb(color))
                 .w(relative(clamped / 100.0)),
         )
