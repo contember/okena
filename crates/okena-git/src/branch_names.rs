@@ -109,13 +109,12 @@ fn detect_github_username_inner(repo_path: &Path) -> String {
     }
 
     // Tier 2: git config user.name
-    if let Some(path_str) = repo_path.to_str() {
-        if let Ok(output) = safe_output(command("git").args(["-C", path_str, "config", "user.name"])) {
-            if output.status.success() {
-                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !name.is_empty() {
-                    return sanitize_username(&name);
-                }
+    if let Some(repo) = crate::gix_helpers::open(repo_path) {
+        if let Some(name) = repo.config_snapshot().string("user.name") {
+            let name = name.to_string();
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                return sanitize_username(trimmed);
             }
         }
     }

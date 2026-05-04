@@ -372,27 +372,7 @@ pub fn get_diff_with_options(
 
 /// Get list of untracked files in a repository.
 fn get_untracked_files(path: &Path) -> Vec<String> {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return vec![],
-    };
-
-    match safe_output(
-        command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
-    ) {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        }
-        Ok(_) => vec![],
-        Err(e) => {
-            log::warn!("git ls-files --others failed: {e}");
-            vec![]
-        }
-    }
+    crate::gix_helpers::list_untracked_files(path)
 }
 
 /// Create a FileDiff for an untracked file (shows entire file as added).
@@ -480,16 +460,7 @@ pub fn is_git_repo(path: &Path) -> bool {
         }
     }
 
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let result = safe_output(
-        command("git").args(["-C", path_str, "rev-parse", "--is-inside-work-tree"]),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
+    let result = crate::gix_helpers::open(path).is_some();
 
     // Store in cache and evict stale entries
     {

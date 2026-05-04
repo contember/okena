@@ -3,6 +3,7 @@
 pub mod branch_names;
 pub mod diff;
 pub mod error;
+pub(crate) mod gix_helpers;
 pub mod repository;
 
 pub use error::{GitError, GitResult};
@@ -279,30 +280,17 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
     }
 
     // Get untracked files
-    let output = safe_output(
-        command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
-    )
-    .ok();
-
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for file in stdout.lines() {
-                if !file.is_empty() {
-                    // Count lines in untracked file
-                    let file_path = path.join(file);
-                    let added = std::fs::read_to_string(&file_path)
-                        .map(|c| c.lines().count())
-                        .unwrap_or(0);
-                    summaries.push(FileDiffSummary {
-                        path: file.to_string(),
-                        added,
-                        removed: 0,
-                        is_new: true,
-                    });
-                }
-            }
-        }
+    for file in crate::gix_helpers::list_untracked_files(path) {
+        let file_path = path.join(&file);
+        let added = std::fs::read_to_string(&file_path)
+            .map(|c| c.lines().count())
+            .unwrap_or(0);
+        summaries.push(FileDiffSummary {
+            path: file.clone(),
+            added,
+            removed: 0,
+            is_new: true,
+        });
     }
 
     // Sort by path

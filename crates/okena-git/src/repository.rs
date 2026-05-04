@@ -26,56 +26,19 @@ fn path_str(path: &Path) -> GitResult<&str> {
 /// Get the root directory of the git repository containing the given path.
 /// Returns None if the path is not inside a git repository.
 pub fn get_repo_root(path: &Path) -> Option<PathBuf> {
-    let path_str = path.to_str()?;
-    let output = safe_output(
-        command("git").args(["-C", path_str, "rev-parse", "--show-toplevel"]),
-    )
-    .ok()?;
-
-    if output.status.success() {
-        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !root.is_empty() {
-            return Some(PathBuf::from(root));
-        }
-    }
-
-    None
+    let repo = crate::gix_helpers::open(path)?;
+    repo.workdir().map(|p| p.to_path_buf())
 }
 
-/// Get branches that are already checked out in worktrees
+/// Get branches that are already checked out in worktrees (main + linked).
+/// Detached worktrees are skipped.
 pub(crate) fn get_worktree_branches(path: &Path) -> Vec<String> {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return vec![],
-    };
+    list_git_worktrees(path).into_iter().map(|(_, b)| b).collect()
+}
 
-    let output = match safe_output(
-        command("git").args(["-C", path_str, "worktree", "list", "--porcelain"]),
-    ) {
-        Ok(output) => output,
-        Err(e) => {
-            log::warn!("git worktree list failed: {e}");
-            return vec![];
-        }
-    };
-
-    let mut branches = Vec::new();
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            if line.starts_with("branch ") {
-                let branch = line.strip_prefix("branch refs/heads/").unwrap_or(
-                    line.strip_prefix("branch ").unwrap_or("")
-                );
-                if !branch.is_empty() {
-                    branches.push(branch.to_string());
-                }
-            }
-        }
-    }
-
-    branches
+/// Read the short branch name from a repo's HEAD, or `None` if detached.
+fn head_branch_short(repo: &gix::Repository) -> Option<String> {
+    repo.head_name().ok().flatten().map(|n| n.shorten().to_string())
 }
 
 /// If `target_path` exists but is NOT a currently registered worktree, remove
@@ -230,40 +193,42 @@ pub fn remove_worktree_fast(worktree_path: &Path, main_repo_path: &Path) -> GitR
     Ok(())
 }
 
-/// List all branches in a repository
+/// List all branches in a repository (local + remotes), deduplicating
+/// `origin/<name>` against local `<name>` and skipping `*/HEAD` symrefs.
 pub fn list_branches(path: &Path) -> Vec<String> {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return vec![],
+    let Some(repo) = crate::gix_helpers::open(path) else {
+        return vec![];
     };
 
-    let output = match safe_output(
-        command("git").args(["-C", path_str, "branch", "-a", "--format=%(refname:short)"]),
-    ) {
-        Ok(output) => output,
-        Err(e) => {
-            log::warn!("git branch -a failed: {e}");
-            return vec![];
+    let Ok(refs) = repo.references() else {
+        return vec![];
+    };
+
+    let mut branches: Vec<String> = Vec::new();
+    let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Ok(iter) = refs.local_branches() {
+        for r in iter.flatten() {
+            let name = r.name().shorten().to_string();
+            if !name.is_empty() {
+                local_names.insert(name.clone());
+                branches.push(name);
+            }
         }
-    };
+    }
 
-    let mut branches = Vec::new();
-
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let branch = line.trim();
-            if !branch.is_empty() {
-                // Skip remote tracking branches that duplicate local ones
-                if branch.starts_with("origin/") {
-                    let local_name = branch.strip_prefix("origin/").unwrap_or(branch);
-                    if !branches.contains(&local_name.to_string()) {
-                        branches.push(branch.to_string());
-                    }
-                } else {
-                    branches.push(branch.to_string());
+    if let Ok(iter) = refs.remote_branches() {
+        for r in iter.flatten() {
+            let name = r.name().shorten().to_string();
+            if name.is_empty() || name.ends_with("/HEAD") {
+                continue;
+            }
+            if let Some(local) = name.strip_prefix("origin/") {
+                if local_names.contains(local) {
+                    continue;
                 }
             }
+            branches.push(name);
         }
     }
 
@@ -308,59 +273,46 @@ pub fn get_status(path: &Path) -> Option<GitStatus> {
 /// Check if a worktree/repo has uncommitted changes (staged, unstaged, or untracked).
 /// Always performs a fresh check (no caching).
 pub fn has_uncommitted_changes(path: &Path) -> bool {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return false,
+    let Some(repo) = crate::gix_helpers::open(path) else {
+        return false;
     };
 
-    let output = match command("git")
-        .args(["-C", path_str, "status", "--porcelain"])
-        .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            log::warn!("git status --porcelain failed: {e}");
-            return false;
-        }
+    let Ok(platform) = repo.status(gix::progress::Discard) else {
+        return false;
     };
 
-    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    let Ok(iter) = platform
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        .into_iter(None)
+    else {
+        return false;
+    };
+
+    iter.filter_map(Result::ok).next().is_some()
 }
 
 /// Get the current branch name or short commit hash for detached HEAD.
 pub fn get_current_branch(path: &Path) -> Option<String> {
-    let path_str = path.to_str()?;
+    let repo = crate::gix_helpers::open(path)?;
+    let head = repo.head().ok()?;
 
-    // Try to get branch name
-    let output = safe_output(
-        command("git").args(["-C", path_str, "symbolic-ref", "--short", "HEAD"]),
-    )
-    .ok()?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !branch.is_empty() {
-            return Some(branch);
-        }
+    if let Some(name) = head.referent_name() {
+        // Use the file-name component for the short branch name (matches
+        // `git symbolic-ref --short HEAD`, which strips `refs/heads/`).
+        return Some(name.shorten().to_string());
     }
 
-    // Detached HEAD - get short commit hash
-    let output = safe_output(
-        command("git").args(["-C", path_str, "rev-parse", "--short", "HEAD"]),
-    )
-    .ok()?;
-
-    if output.status.success() {
-        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !hash.is_empty() {
-            return Some(hash);
-        }
-    }
-
-    None
+    // Detached HEAD — return short hash of HEAD's commit.
+    let id = head.id()?;
+    Some(id.shorten().ok()?.to_string())
 }
 
-/// Get diff statistics (lines added, lines removed) for working directory
+/// Get diff statistics (lines added, lines removed) for working directory.
+///
+/// Still shells out to `git diff --numstat HEAD`: the gix equivalent would
+/// require a 3-way walk (HEAD tree → index → worktree) plus per-blob line
+/// diffing via imara-diff. This is the last remaining spawn in the polling
+/// hot path; everything else is now gix-native.
 fn get_diff_stats(path: &Path) -> (usize, usize) {
     let path_str = match path.to_str() {
         Some(s) => s,
@@ -393,60 +345,39 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
     }
 
     // Also include untracked files (count lines)
-    match safe_output(
-        command("git").args(["-C", path_str, "ls-files", "--others", "--exclude-standard"]),
-    ) {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for file in stdout.lines() {
-                if !file.is_empty() {
-                    // Count lines in untracked file
-                    let file_path = path.join(file);
-                    if let Ok(content) = std::fs::read_to_string(&file_path) {
-                        added += content.lines().count();
-                    }
-                }
-            }
+    for file in crate::gix_helpers::list_untracked_files(path) {
+        let file_path = path.join(&file);
+        if let Ok(content) = std::fs::read_to_string(&file_path) {
+            added += content.lines().count();
         }
-        Ok(_) => {}
-        Err(e) => log::warn!("git ls-files failed: {e}"),
     }
 
     (added, removed)
 }
 
 /// Get the default branch of a repository (e.g. "main" or "master").
-/// Checks `git symbolic-ref refs/remotes/origin/HEAD` first, then falls back
-/// to checking for `main` / `master` branches.
+/// Checks the `origin/HEAD` symref first, then falls back to checking for
+/// local `main` / `master` branches.
 pub fn get_default_branch(repo_path: &Path) -> Option<String> {
-    let path_str = repo_path.to_str()?;
+    let repo = crate::gix_helpers::open(repo_path)?;
 
-    // Try symbolic-ref first
-    let output = command("git")
-        .args(["-C", path_str, "symbolic-ref", "refs/remotes/origin/HEAD"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // refs/remotes/origin/main -> main
-        if let Some(branch) = refname.strip_prefix("refs/remotes/origin/") {
-            if !branch.is_empty() {
-                return Some(branch.to_string());
+    // Read refs/remotes/origin/HEAD; it is a symbolic ref whose target points
+    // at e.g. refs/remotes/origin/main.
+    if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(target_name) = head_ref.target().try_name() {
+            let target = target_name.as_bstr().to_string();
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
+                if !branch.is_empty() {
+                    return Some(branch.to_string());
+                }
             }
         }
     }
 
-    // Fallback: check if main or master branch exists
-    for candidate in &["main", "master"] {
-        let output = command("git")
-            .args(["-C", path_str, "rev-parse", "--verify", candidate])
-            .output()
-            .ok();
-        if let Some(output) = output {
-            if output.status.success() {
-                return Some(candidate.to_string());
-            }
+    // Fallback: check if main or master branch exists locally.
+    for candidate in ["main", "master"] {
+        if repo.find_reference(&format!("refs/heads/{}", candidate)).is_ok() {
+            return Some(candidate.to_string());
         }
     }
 
@@ -591,64 +522,57 @@ pub fn push_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
 /// incorrectly report all feature commits as unpushed.
 /// Returns 0 if the branch has never been pushed (no `origin/<branch>` ref).
 pub fn count_unpushed_commits(path: &Path) -> usize {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return 0,
+    let Some(repo) = crate::gix_helpers::open(path) else {
+        return 0;
     };
-    let branch = match get_current_branch(path) {
-        Some(b) => b,
-        None => return 0,
+    let Some(branch) = get_current_branch(path) else {
+        return 0;
     };
-    let remote_ref = format!("origin/{}..HEAD", branch);
-    match command("git")
-        .args(["-C", path_str, "rev-list", &remote_ref, "--count"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<usize>()
-                .unwrap_or(0)
-        }
-        Ok(_) => 0,
-        Err(e) => {
-            log::warn!("git rev-list --count failed: {e}");
-            0
-        }
-    }
+
+    let revspec = format!("origin/{}..HEAD", branch);
+    let Ok(spec) = repo.rev_parse(revspec.as_str()) else {
+        return 0;
+    };
+
+    let gix::revision::plumbing::Spec::Range { from, to } = spec.detach() else {
+        return 0;
+    };
+
+    let Ok(walk) = repo.rev_walk([to]).with_hidden([from]).all() else {
+        return 0;
+    };
+
+    walk.filter_map(Result::ok).count()
 }
 
-/// List all worktrees in a repository.
-/// Returns vec of (path, branch_name) pairs.
+/// List all worktrees in a repository (main + linked). Returns vec of
+/// (path, branch_name) pairs; detached worktrees are omitted.
 pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
-    let path_str = match repo_path.to_str() {
-        Some(s) => s,
-        None => return vec![],
+    let Some(repo) = crate::gix_helpers::open(repo_path) else {
+        return vec![];
     };
-    let output = match command("git")
-        .args(["-C", path_str, "worktree", "list", "--porcelain"])
-        .output()
-    {
-        Ok(output) => output,
-        Err(e) => {
-            log::warn!("git worktree list failed: {e}");
-            return vec![];
-        }
-    };
+
     let mut result = Vec::new();
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut current_path = String::new();
-        for line in stdout.lines() {
-            if let Some(wt_path) = line.strip_prefix("worktree ") {
-                current_path = wt_path.to_string();
-            } else if let Some(branch_ref) = line.strip_prefix("branch refs/heads/") {
-                if !current_path.is_empty() {
-                    result.push((current_path.clone(), branch_ref.to_string()));
-                }
+
+    // Main worktree: open via common_dir, which always resolves to the main
+    // repository even when `repo_path` lives in a linked worktree.
+    if let Ok(main_repo) = gix::open(repo.common_dir()) {
+        if let (Some(workdir), Some(branch)) = (main_repo.workdir(), head_branch_short(&main_repo)) {
+            result.push((workdir.to_string_lossy().into_owned(), branch));
+        }
+    }
+
+    // Linked worktrees from .git/worktrees/*.
+    if let Ok(worktrees) = repo.worktrees() {
+        for proxy in worktrees {
+            let Some(workdir) = proxy.base().ok() else { continue };
+            let Ok(wt_repo) = proxy.into_repo_with_possibly_inaccessible_worktree() else { continue };
+            if let Some(branch) = head_branch_short(&wt_repo) {
+                result.push((workdir.to_string_lossy().into_owned(), branch));
             }
         }
     }
+
     result
 }
 
@@ -1082,6 +1006,157 @@ mod tests {
         (tmp, repo)
     }
 
+    /// Run a git command in `repo`, asserting success.
+    fn git_in(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .output()
+            .expect("git command failed");
+        assert!(status.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&status.stderr));
+    }
+
+    #[test]
+    fn has_uncommitted_detects_untracked() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("untracked.txt"), "hello").unwrap();
+        assert!(has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn has_uncommitted_detects_modified_tracked() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "modified").unwrap();
+        assert!(has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn has_uncommitted_detects_staged_only() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("file.txt"), "staged change").unwrap();
+        git_in(&repo, &["add", "file.txt"]);
+        assert!(has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn has_uncommitted_returns_false_for_clean_repo() {
+        let (_tmp, repo) = init_temp_repo();
+        assert!(!has_uncommitted_changes(&repo));
+    }
+
+    #[test]
+    fn untracked_listing_honors_gitignore() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        git_in(&repo, &["add", ".gitignore"]);
+        git_in(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "ignore"],
+        );
+
+        std::fs::write(repo.join("ignored.txt"), "x").unwrap();
+        std::fs::write(repo.join("seen.txt"), "y").unwrap();
+
+        let untracked = crate::gix_helpers::list_untracked_files(&repo);
+        assert!(untracked.contains(&"seen.txt".to_string()));
+        assert!(!untracked.contains(&"ignored.txt".to_string()));
+    }
+
+    #[test]
+    fn count_unpushed_returns_zero_when_no_remote() {
+        let (_tmp, repo) = init_temp_repo();
+        // No origin/main exists — should return 0, not error.
+        assert_eq!(count_unpushed_commits(&repo), 0);
+    }
+
+    #[test]
+    fn count_unpushed_returns_correct_count() {
+        let (_tmp, repo) = init_temp_repo();
+        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
+        let remote_path = remote_tmp.path().join("origin.git");
+        git_in(&repo, &["init", "--bare", remote_path.to_str().unwrap()]);
+        git_in(&repo, &["remote", "add", "origin", remote_path.to_str().unwrap()]);
+        git_in(&repo, &["push", "-u", "origin", "main"]);
+
+        // No unpushed commits yet.
+        assert_eq!(count_unpushed_commits(&repo), 0);
+
+        // Add two new commits locally.
+        for i in 0..2 {
+            std::fs::write(repo.join(format!("new{}.txt", i)), "x").unwrap();
+            git_in(&repo, &["add", "."]);
+            git_in(
+                &repo,
+                &["-c", "commit.gpgsign=false", "commit", "-m", &format!("c{}", i)],
+            );
+        }
+
+        assert_eq!(count_unpushed_commits(&repo), 2);
+    }
+
+    #[test]
+    fn list_git_worktrees_returns_main_plus_linked() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(&repo, &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"]);
+
+        let mut entries = list_git_worktrees(&repo);
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+        let branches: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn get_worktree_branches_returns_branch_names() {
+        let (_tmp, repo) = init_temp_repo();
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("wt-feat");
+        git_in(&repo, &["worktree", "add", wt_path.to_str().unwrap(), "-b", "feat"]);
+
+        let mut branches = get_worktree_branches(&repo);
+        branches.sort();
+        assert_eq!(branches, vec!["feat", "main"]);
+    }
+
+    #[test]
+    fn list_branches_returns_local_branches() {
+        let (_tmp, repo) = init_temp_repo();
+        git_in(&repo, &["branch", "feature/foo"]);
+        git_in(&repo, &["branch", "feature/bar"]);
+        let mut branches = list_branches(&repo);
+        branches.sort();
+        assert_eq!(branches, vec!["feature/bar", "feature/foo", "main"]);
+    }
+
+    #[test]
+    fn get_default_branch_falls_back_to_main_locally() {
+        let (_tmp, repo) = init_temp_repo();
+        // No origin/HEAD exists — should fall back to local "main".
+        assert_eq!(get_default_branch(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn get_current_branch_returns_main_after_init() {
+        let (_tmp, repo) = init_temp_repo();
+        assert_eq!(get_current_branch(&repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn get_current_branch_returns_short_hash_when_detached() {
+        let (_tmp, repo) = init_temp_repo();
+        // Detach HEAD on the current commit
+        git_in(&repo, &["checkout", "--detach", "HEAD"]);
+        let branch = get_current_branch(&repo).expect("should return short hash");
+        // Short hash from gix has at least 7 chars and is hex
+        assert!(branch.len() >= 7, "expected short hash, got {:?}", branch);
+        assert!(branch.chars().all(|c| c.is_ascii_hexdigit()), "expected hex hash, got {:?}", branch);
+    }
+
     #[test]
     fn get_repo_root_returns_toplevel_for_subdirectory() {
         let (_tmp, repo) = init_temp_repo();
@@ -1095,21 +1170,14 @@ mod tests {
     #[test]
     fn get_repo_root_resolves_worktree_root_not_subdir() {
         let (_tmp, repo) = init_temp_repo();
-        // Create a worktree on a new branch
-        let wt_path = repo.parent().unwrap().join("my-worktree");
-        let status = std::process::Command::new("git")
-            .args([
-                "-C",
-                repo.to_str().unwrap(),
-                "worktree",
-                "add",
-                wt_path.to_str().unwrap(),
-                "-b",
-                "wt-branch",
-            ])
-            .output()
-            .expect("git worktree add");
-        assert!(status.status.success(), "worktree add failed");
+        // Worktree lives in its own tempdir so parallel runs don't collide on
+        // a shared /tmp path that survives between runs.
+        let wt_tmp = tempfile::tempdir().expect("create worktree tempdir");
+        let wt_path = wt_tmp.path().join("my-worktree");
+        git_in(
+            &repo,
+            &["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-branch"],
+        );
 
         // Create a nested subdirectory inside the worktree (monorepo subproject)
         let nested = wt_path.join("packages").join("app");
