@@ -232,7 +232,16 @@ impl FocusManager {
     ///
     /// When entering fullscreen, the current focus and focused_project_id are
     /// pushed to the stack so they can be restored when fullscreen exits.
+    /// If already in fullscreen, the target is swapped in place — switching
+    /// terminals via the zoom header arrows must not grow the stack, otherwise
+    /// each switch would require another exit click to undo.
     pub fn enter_fullscreen(&mut self, project_id: String, layout_path: Vec<usize>, terminal_id: String) {
+        if self.context == FocusContext::Fullscreen {
+            self.current_focus = Some(FocusTarget::with_terminal(project_id.clone(), layout_path, terminal_id));
+            self.focused_project_id = Some(project_id);
+            return;
+        }
+
         // Save current state to stack (target may be None if nothing was focused)
         self.push_focus(self.current_focus.clone(), self.context.clone(), self.focused_project_id.clone());
 
@@ -402,12 +411,31 @@ mod tests {
     #[test]
     fn stack_depth_limit_enforced() {
         let mut fm = FocusManager::new();
-        // Push more than max_stack_depth (10) entries
-        for i in 0..15 {
-            fm.enter_fullscreen(format!("proj{}", i), vec![0], format!("term{}", i));
+        // Push more than max_stack_depth (10) entries via repeated modal entries
+        for _ in 0..15 {
+            fm.enter_modal();
         }
-        // Stack should be capped at 10
         assert!(fm.focus_stack.len() <= fm.max_stack_depth);
+    }
+
+    #[test]
+    fn switching_fullscreen_target_does_not_grow_stack() {
+        let mut fm = FocusManager::new();
+        fm.focus_terminal("proj1".to_string(), vec![0]);
+
+        fm.enter_fullscreen("proj1".to_string(), vec![0], "term1".to_string());
+        let stack_after_first = fm.focus_stack.len();
+
+        // Simulate the zoom header next/prev arrows switching the fullscreened terminal.
+        fm.enter_fullscreen("proj1".to_string(), vec![1], "term2".to_string());
+        fm.enter_fullscreen("proj1".to_string(), vec![2], "term3".to_string());
+
+        assert_eq!(fm.focus_stack.len(), stack_after_first);
+        assert!(fm.is_terminal_fullscreened("proj1", "term3"));
+
+        // A single exit must fully leave fullscreen, not unwind through the switches.
+        fm.exit_fullscreen();
+        assert!(!fm.has_fullscreen());
     }
 
     #[test]
