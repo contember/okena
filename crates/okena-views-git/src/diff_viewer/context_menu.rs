@@ -1,9 +1,10 @@
-//! Context menu and confirmation modals for file-level actions in the diff viewer.
+//! Context menu and confirmation modals for file/folder actions in the diff viewer.
 //!
-//! Reachable via right-click on a file in the file-tree sidebar. Offers
-//! stage / unstage / discard / delete / copy-path, depending on the active
-//! [`DiffMode`]. Mutations run asynchronously via the active [`GitProvider`]
-//! and trigger a diff reload on success.
+//! Reachable via right-click on a file or folder in the file-tree sidebar.
+//! Offers stage / unstage / discard / copy-path (plus delete for files), depending
+//! on the active [`DiffMode`]. Mutations run asynchronously via the active
+//! [`GitProvider`] and trigger a diff reload on success. Folder operations reuse
+//! the per-path provider methods — `git` handles folder paths recursively.
 
 use gpui::prelude::*;
 use gpui::{ClipboardItem, *};
@@ -19,13 +20,39 @@ use okena_workspace::toast::ToastManager;
 
 use super::{Cancel, DiffViewer};
 
-/// Right-click context menu state.
-pub(crate) struct DiffFileContextMenu {
-    pub position: Point<Pixels>,
-    pub file_path: String,
+/// What a context-menu action targets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiffTargetKind {
+    File,
+    Folder,
 }
 
-/// Delete confirmation modal state.
+impl DiffTargetKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::Folder => "Folder",
+        }
+    }
+
+    fn noun_lower(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+/// Right-click context menu state. `path` is repo-relative; for folders it has
+/// no trailing slash.
+pub(crate) struct DiffContextMenu {
+    pub position: Point<Pixels>,
+    pub path: String,
+    pub kind: DiffTargetKind,
+}
+
+/// Delete confirmation modal state. Files only — folder delete is intentionally
+/// not offered from this menu.
 pub(crate) struct DeleteConfirmState {
     pub file_path: String,
     pub error_message: Option<String>,
@@ -33,25 +60,27 @@ pub(crate) struct DeleteConfirmState {
 
 /// Discard confirmation modal state.
 pub(crate) struct DiscardConfirmState {
-    pub file_path: String,
+    pub path: String,
+    pub kind: DiffTargetKind,
     pub error_message: Option<String>,
 }
 
 impl DiffViewer {
     // ── Menu open/close ─────────────────────────────────────────────────────
 
-    pub(super) fn open_file_context_menu(
+    pub(super) fn open_context_menu(
         &mut self,
         position: Point<Pixels>,
-        file_path: String,
+        path: String,
+        kind: DiffTargetKind,
         cx: &mut Context<Self>,
     ) {
-        self.file_context_menu = Some(DiffFileContextMenu { position, file_path });
+        self.context_menu = Some(DiffContextMenu { position, path, kind });
         cx.notify();
     }
 
-    pub(super) fn close_file_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.file_context_menu = None;
+    pub(super) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        self.context_menu = None;
         cx.notify();
     }
 
@@ -69,8 +98,8 @@ impl DiffViewer {
             cx.notify();
             return true;
         }
-        if self.file_context_menu.is_some() {
-            self.file_context_menu = None;
+        if self.context_menu.is_some() {
+            self.context_menu = None;
             cx.notify();
             return true;
         }
@@ -102,13 +131,13 @@ impl DiffViewer {
         .detach();
     }
 
-    pub(super) fn stage_file_from_menu(&mut self, cx: &mut Context<Self>) {
-        let Some(menu) = self.file_context_menu.take() else {
+    pub(super) fn stage_from_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.context_menu.take() else {
             return;
         };
-        let file_path = menu.file_path.clone();
-        let msg = format!("Staged {}", file_path);
-        let path_for_op = file_path.clone();
+        let path = menu.path.clone();
+        let msg = format!("Staged {}", path);
+        let path_for_op = path.clone();
         self.spawn_mutation(
             move |provider| provider.stage_file(&path_for_op),
             msg,
@@ -116,13 +145,13 @@ impl DiffViewer {
         );
     }
 
-    pub(super) fn unstage_file_from_menu(&mut self, cx: &mut Context<Self>) {
-        let Some(menu) = self.file_context_menu.take() else {
+    pub(super) fn unstage_from_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.context_menu.take() else {
             return;
         };
-        let file_path = menu.file_path.clone();
-        let msg = format!("Unstaged {}", file_path);
-        let path_for_op = file_path.clone();
+        let path = menu.path.clone();
+        let msg = format!("Unstaged {}", path);
+        let path_for_op = path.clone();
         self.spawn_mutation(
             move |provider| provider.unstage_file(&path_for_op),
             msg,
@@ -133,11 +162,12 @@ impl DiffViewer {
     // ── Discard flow ────────────────────────────────────────────────────────
 
     pub(super) fn start_discard(&mut self, cx: &mut Context<Self>) {
-        let Some(menu) = self.file_context_menu.take() else {
+        let Some(menu) = self.context_menu.take() else {
             return;
         };
         self.discard_confirm = Some(DiscardConfirmState {
-            file_path: menu.file_path,
+            path: menu.path,
+            kind: menu.kind,
             error_message: None,
         });
         cx.notify();
@@ -147,9 +177,9 @@ impl DiffViewer {
         let Some(confirm) = self.discard_confirm.take() else {
             return;
         };
-        let file_path = confirm.file_path.clone();
-        let msg = format!("Discarded changes in {}", file_path);
-        let path_for_op = file_path.clone();
+        let path = confirm.path.clone();
+        let msg = format!("Discarded changes in {}", path);
+        let path_for_op = path.clone();
         self.spawn_mutation(
             move |provider| provider.discard_file(&path_for_op),
             msg,
@@ -162,14 +192,17 @@ impl DiffViewer {
         cx.notify();
     }
 
-    // ── Delete flow ─────────────────────────────────────────────────────────
+    // ── Delete flow (files only) ────────────────────────────────────────────
 
     pub(super) fn start_delete(&mut self, cx: &mut Context<Self>) {
-        let Some(menu) = self.file_context_menu.take() else {
+        let Some(menu) = self.context_menu.take() else {
             return;
         };
+        if menu.kind != DiffTargetKind::File {
+            return;
+        }
         self.delete_confirm = Some(DeleteConfirmState {
-            file_path: menu.file_path,
+            file_path: menu.path,
             error_message: None,
         });
         cx.notify();
@@ -203,39 +236,44 @@ impl DiffViewer {
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if let Some(el) = self.render_delete_file_confirm(t, cx) {
+        if let Some(el) = self.render_delete_confirm(t, cx) {
             return Some(el);
         }
-        if let Some(el) = self.render_discard_file_confirm(t, cx) {
+        if let Some(el) = self.render_discard_confirm(t, cx) {
             return Some(el);
         }
-        self.render_file_context_menu(t, cx)
+        self.render_context_menu(t, cx)
     }
 
-    fn render_file_context_menu(
+    fn render_context_menu(
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let menu = self.file_context_menu.as_ref()?;
+        let menu = self.context_menu.as_ref()?;
         let position = menu.position;
-        let file_path = menu.file_path.clone();
+        let path = menu.path.clone();
+        let kind = menu.kind;
 
-        let rel_path = file_path.clone();
-        let abs_path = self.provider.absolute_file_path(&file_path);
+        let abs_path = self.provider.absolute_file_path(&path);
 
         let mode = self.diff_mode.clone();
         let is_working = matches!(mode, DiffMode::WorkingTree);
         let is_staged = matches!(mode, DiffMode::Staged);
 
-        let mut panel = context_menu_panel("dv-file-context-menu", t);
+        let mut panel = context_menu_panel("dv-context-menu", t);
 
         if is_working {
             panel = panel.child(
-                menu_item("dv-ctx-stage", "icons/plus.svg", "Stage File", t)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.stage_file_from_menu(cx);
-                    })),
+                menu_item(
+                    "dv-ctx-stage",
+                    "icons/plus.svg",
+                    &format!("Stage {}", kind.noun()),
+                    t,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.stage_from_menu(cx);
+                })),
             );
             panel = panel.child(
                 menu_item_with_color(
@@ -250,32 +288,39 @@ impl DiffViewer {
                     this.start_discard(cx);
                 })),
             );
-            panel = panel.child(
-                menu_item_with_color(
-                    "dv-ctx-delete",
-                    "icons/trash.svg",
-                    "Delete File",
-                    t.error,
-                    t.error,
-                    t,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.start_delete(cx);
-                })),
-            );
+            if kind == DiffTargetKind::File {
+                panel = panel.child(
+                    menu_item_with_color(
+                        "dv-ctx-delete",
+                        "icons/trash.svg",
+                        "Delete File",
+                        t.error,
+                        t.error,
+                        t,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_delete(cx);
+                    })),
+                );
+            }
             panel = panel.child(menu_separator(t));
         } else if is_staged {
             panel = panel.child(
-                menu_item("dv-ctx-unstage", "icons/minus.svg", "Unstage File", t)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.unstage_file_from_menu(cx);
-                    })),
+                menu_item(
+                    "dv-ctx-unstage",
+                    "icons/minus.svg",
+                    &format!("Unstage {}", kind.noun()),
+                    t,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.unstage_from_menu(cx);
+                })),
             );
             panel = panel.child(menu_separator(t));
         }
 
         {
-            let rel_for_click = rel_path.clone();
+            let rel_for_click = path.clone();
             panel = panel.child(
                 menu_item(
                     "dv-ctx-copy-rel-path",
@@ -285,7 +330,7 @@ impl DiffViewer {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(rel_for_click.clone()));
-                    this.close_file_context_menu(cx);
+                    this.close_context_menu(cx);
                 })),
             );
         }
@@ -300,7 +345,7 @@ impl DiffViewer {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(abs.clone()));
-                    this.close_file_context_menu(cx);
+                    this.close_context_menu(cx);
                 })),
             );
         }
@@ -313,13 +358,13 @@ impl DiffViewer {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| {
-                        this.close_file_context_menu(cx);
+                        this.close_context_menu(cx);
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, _, cx| {
-                        this.close_file_context_menu(cx);
+                        this.close_context_menu(cx);
                     }),
                 )
                 .child(deferred(
@@ -329,7 +374,7 @@ impl DiffViewer {
         )
     }
 
-    fn render_delete_file_confirm(
+    fn render_delete_confirm(
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
@@ -476,19 +521,26 @@ impl DiffViewer {
         )
     }
 
-    fn render_discard_file_confirm(
+    fn render_discard_confirm(
         &self,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let confirm = self.discard_confirm.as_ref()?;
-        let file_path = confirm.file_path.clone();
-        let display_name = file_path
+        let path = confirm.path.clone();
+        let kind = confirm.kind;
+        let display_name = path
             .rsplit('/')
             .next()
-            .unwrap_or(&file_path)
+            .unwrap_or(&path)
             .to_string();
         let error_msg = confirm.error_message.clone();
+        let title = format!("Discard {} Changes", kind.noun());
+        let prompt = format!(
+            "Discard all working-tree changes in {} \"{}\"? This cannot be undone.",
+            kind.noun_lower(),
+            display_name,
+        );
 
         Some(
             modal_backdrop("dv-discard-backdrop", t)
@@ -534,7 +586,7 @@ impl DiffViewer {
                                                 .text_size(ui_text_xl(cx))
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(rgb(t.text_primary))
-                                                .child("Discard Changes"),
+                                                .child(title),
                                         ),
                                 )
                                 .child(
@@ -561,16 +613,13 @@ impl DiffViewer {
                                     div()
                                         .text_size(ui_text_md(cx))
                                         .text_color(rgb(t.text_primary))
-                                        .child(format!(
-                                            "Discard all working-tree changes in \"{}\"? This cannot be undone.",
-                                            display_name
-                                        )),
+                                        .child(prompt),
                                 )
                                 .child(
                                     div()
                                         .text_size(ui_text_ms(cx))
                                         .text_color(rgb(t.text_muted))
-                                        .child(file_path.clone()),
+                                        .child(path.clone()),
                                 ),
                         )
                         .when_some(error_msg, |d, msg| {

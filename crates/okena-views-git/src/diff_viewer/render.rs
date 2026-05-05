@@ -798,6 +798,7 @@ impl DiffViewer {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         use okena_files::file_tree::{expandable_folder_row, expandable_file_row};
+        use super::context_menu::DiffTargetKind;
 
         let mut elements: Vec<AnyElement> = Vec::new();
 
@@ -809,13 +810,25 @@ impl DiffViewer {
             };
             let is_expanded = self.expanded_folders.contains(&folder_path);
 
-            let fp = folder_path.clone();
+            let fp_toggle = folder_path.clone();
+            let fp_menu = folder_path.clone();
             elements.push(
                 expandable_folder_row(name, depth, is_expanded, t, cx)
                     .id(ElementId::Name(format!("dv-folder-{}", folder_path).into()))
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_folder(&fp, cx);
+                        this.toggle_folder(&fp_toggle, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_context_menu(
+                                event.position,
+                                fp_menu.clone(),
+                                DiffTargetKind::Folder,
+                                cx,
+                            );
+                        }),
+                    )
                     .into_any_element(),
             );
 
@@ -849,9 +862,10 @@ impl DiffViewer {
                             MouseButton::Right,
                             cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                 this.select_file(file_index, cx);
-                                this.open_file_context_menu(
+                                this.open_context_menu(
                                     event.position,
                                     file_path_for_menu.clone(),
+                                    DiffTargetKind::File,
                                     cx,
                                 );
                             }),

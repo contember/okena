@@ -98,8 +98,8 @@ pub struct DiffViewer {
     commits: Vec<CommitLogEntry>,
     /// Current index in the commits list.
     commit_index: usize,
-    /// Open file-tree right-click context menu.
-    file_context_menu: Option<context_menu::DiffFileContextMenu>,
+    /// Open file-tree right-click context menu (file or folder).
+    context_menu: Option<context_menu::DiffContextMenu>,
     /// Open "Delete file" confirmation modal.
     delete_confirm: Option<context_menu::DeleteConfirmState>,
     /// Open "Discard changes" confirmation modal.
@@ -161,7 +161,7 @@ impl DiffViewer {
             commit_message,
             commits: commits.unwrap_or_default(),
             commit_index: commit_index.unwrap_or(0),
-            file_context_menu: None,
+            context_menu: None,
             delete_confirm: None,
             discard_confirm: None,
             is_detached: false,
