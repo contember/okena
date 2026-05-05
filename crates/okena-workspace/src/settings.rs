@@ -118,6 +118,19 @@ fn default_sidebar_width() -> f32 {
     DEFAULT_SIDEBAR_WIDTH
 }
 
+/// File finder filter preferences.
+///
+/// Persisted default for the "Go to File" dialog's gitignore toggle. The
+/// dialog initializes from this value and writes back to it when the user
+/// toggles the filter, so the last-used state is also the default for
+/// future opens.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FileFinderSettings {
+    /// Include files matched by .gitignore / git exclude rules.
+    #[serde(default)]
+    pub show_ignored: bool,
+}
+
 /// Sidebar settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarSettings {
@@ -289,6 +302,12 @@ pub struct AppSettings {
     /// Default: false (Ctrl+C always sends SIGINT — matches GNOME Terminal / Kitty).
     #[serde(default)]
     pub terminal_ctrl_c_copies_selection: bool,
+
+    /// File finder filter preferences. The "Go to File" dialog reads these
+    /// when opened and writes them back when the user toggles a filter, so
+    /// the last-used state is also the default for future opens.
+    #[serde(default)]
+    pub file_finder: FileFinderSettings,
 }
 
 impl Default for AppSettings {
@@ -330,6 +349,7 @@ impl Default for AppSettings {
             worktree: WorktreeConfig::default(),
             remote_connections: Vec::new(),
             terminal_ctrl_c_copies_selection: false,
+            file_finder: FileFinderSettings::default(),
         }
     }
 }

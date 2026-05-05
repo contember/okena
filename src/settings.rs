@@ -105,6 +105,12 @@ impl SettingsState {
     }
     setting_setter!(set_show_shell_selector, show_shell_selector, bool);
     setting_setter!(set_terminal_ctrl_c_copies_selection, terminal_ctrl_c_copies_selection, bool);
+
+    /// Set file finder "show ignored" preference (persisted default for future opens).
+    pub fn set_file_finder_show_ignored(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.file_finder.show_ignored = value;
+        self.save_and_notify(cx);
+    }
     setting_setter!(set_min_column_width, min_column_width, f32, 100.0, 2000.0);
     setting_setter!(set_idle_timeout_secs, idle_timeout_secs, u32, 0, 300);
     /// Set the default shell type for new terminals

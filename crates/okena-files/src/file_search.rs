@@ -44,11 +44,15 @@ pub struct FileEntry {
 }
 
 /// Remembered state from the last file search session.
+///
+/// The `show_ignored` filter toggle is NOT stored here — it lives in
+/// `AppSettings.file_finder` so it persists across app restarts and acts as
+/// a global default. The caller seeds the dialog with that value and listens
+/// for `FiltersChanged` events to write it back.
 #[derive(Default)]
 struct FileSearchMemory {
     query: String,
     selected_index: usize,
-    show_ignored: bool,
 }
 
 impl Global for FileSearchMemory {}
@@ -72,7 +76,17 @@ pub struct FileSearchDialog {
 
 impl FileSearchDialog {
     /// Create a new file search dialog, restoring the last query if available.
-    pub fn new(fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>, cx: &mut Context<Self>) -> Self {
+    ///
+    /// `show_ignored` comes from `AppSettings.file_finder` — the caller
+    /// (overlay manager) reads it from the global settings and passes it in.
+    /// When the user toggles the filter, the dialog emits
+    /// [`FileSearchDialogEvent::FiltersChanged`] so the caller can persist
+    /// the new value back to settings.
+    pub fn new(
+        fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+        show_ignored: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         let scroll_handle = UniformListScrollHandle::new();
 
@@ -83,10 +97,11 @@ impl FileSearchDialog {
             .size(650.0, 550.0)
             .key_context("FileSearchDialog");
 
-        // Restore from previous session
+        // Restore in-session memory (query + selected_index only — the
+        // show_ignored filter lives in AppSettings and was passed in as a param).
         let memory = cx.try_global::<FileSearchMemory>();
-        let (query, restored_index, show_ignored) = memory
-            .map(|m| (m.query.clone(), m.selected_index, m.show_ignored))
+        let (query, restored_index) = memory
+            .map(|m| (m.query.clone(), m.selected_index))
             .unwrap_or_default();
 
         // Create search input entity
@@ -201,17 +216,20 @@ impl FileSearchDialog {
         cx.set_global(FileSearchMemory {
             query: self.search_input.read(cx).value().to_string(),
             selected_index: self.selected_index,
-            show_ignored: self.show_ignored,
         });
     }
 
-    /// Toggle the gitignore filter and re-scan.
+    /// Toggle the gitignore filter, re-scan, and emit `FiltersChanged` so
+    /// the caller can persist the new value to settings.
     fn toggle_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
         if filter == "ignored" {
             self.show_ignored = !self.show_ignored;
         } else {
             return;
         }
+        cx.emit(FileSearchDialogEvent::FiltersChanged {
+            show_ignored: self.show_ignored,
+        });
         self.rescan(cx);
         cx.notify();
     }
@@ -514,6 +532,11 @@ pub enum FileSearchDialogEvent {
     Close,
     /// A file was selected.
     FileSelected(PathBuf),
+    /// User toggled the gitignore filter. The caller persists this to
+    /// settings so the new state becomes the default for future opens.
+    FiltersChanged {
+        show_ignored: bool,
+    },
 }
 
 impl EventEmitter<FileSearchDialogEvent> for FileSearchDialog {}
