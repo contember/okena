@@ -59,6 +59,7 @@ pub struct FileSearchDialog {
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
     search_input: Entity<SimpleInputState>,
+    fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
     files: Vec<FileEntry>,
     filtered_files: Vec<(usize, Vec<usize>)>,
     selected_index: usize,
@@ -109,10 +110,11 @@ impl FileSearchDialog {
         .detach();
 
         // Load files asynchronously to avoid blocking the UI thread (important for remote projects)
+        let fs_for_scan = fs.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs.list_files(false, false) })
+                .spawn(async move { fs_for_scan.list_files(show_ignored, show_hidden) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.files = files;
@@ -130,6 +132,7 @@ impl FileSearchDialog {
             focus_handle,
             scroll_handle,
             search_input,
+            fs,
             files: Vec::new(),
             filtered_files: vec![],
             selected_index: 0,
@@ -212,10 +215,38 @@ impl FileSearchDialog {
         match filter {
             "ignored" => self.show_ignored = !self.show_ignored,
             "hidden" => self.show_hidden = !self.show_hidden,
-            _ => {}
+            _ => return,
         }
-        // TODO: re-scan with filter options (requires ProjectFs enhancement for remote support)
+        self.rescan(cx);
         cx.notify();
+    }
+
+    /// Re-scan files in the background using current filter flags.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let show_ignored = self.show_ignored;
+        let show_hidden = self.show_hidden;
+        self.loading = true;
+        self.files.clear();
+        self.filtered_files.clear();
+        self.selected_index = 0;
+        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move { fs.list_files(show_ignored, show_hidden) })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                // Discard if flags changed during scan (newer rescan in flight)
+                if this.show_ignored != show_ignored || this.show_hidden != show_hidden {
+                    return;
+                }
+                this.files = files;
+                this.loading = false;
+                this.filter_files(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Close the dialog, saving state for next open.
