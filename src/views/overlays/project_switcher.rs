@@ -109,6 +109,8 @@ impl ProjectSwitcher {
         let show_in_overview = project.show_in_overview;
         let is_worktree = project.worktree_info.is_some();
         let folder_color = t.get_folder_color(project.folder_color);
+        let branch = crate::git::get_git_status(std::path::Path::new(&project.path))
+            .and_then(|s| s.branch);
 
         selectable_list_item(
             ElementId::Name(format!("project-{}", display_index).into()),
@@ -159,7 +161,30 @@ impl ProjectSwitcher {
                                 .text_color(rgb(t.text_primary))
                                 .child(name),
                         )
-                        .when(is_worktree, |d| d.child(badge("worktree", &t))),
+                        .when(is_worktree, |d| d.child(badge("worktree", &t)))
+                        .when_some(branch, |d, b| {
+                            d.child(
+                                h_flex()
+                                    .gap(px(4.0))
+                                    .items_center()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(t.bg_secondary))
+                                    .child(
+                                        svg()
+                                            .path("icons/git-branch.svg")
+                                            .size(px(10.0))
+                                            .text_color(rgb(t.term_green)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(ui_text_ms(cx))
+                                            .text_color(rgb(t.text_secondary))
+                                            .child(b),
+                                    ),
+                            )
+                        }),
                 )
                 .child(
                     div()

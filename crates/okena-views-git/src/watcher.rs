@@ -55,8 +55,30 @@ impl GitStatusWatcher {
             remote_tx,
             remote_subscribed_terminals,
         };
+        watcher.spawn_branch_warmup(cx);
         watcher.spawn_refresh(cx);
         watcher
+    }
+
+    /// One-shot branch-only warmup for ALL non-remote projects, so consumers
+    /// that read the global git cache (project switcher, sidebar worktree
+    /// names, ...) see a branch for projects that aren't currently visible
+    /// and therefore aren't polled by the steady-state loop.
+    fn spawn_branch_warmup(&self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |_, cx| {
+            let paths: Vec<String> = cx.update(|cx| {
+                workspace.read(cx).projects().iter()
+                    .filter(|p| !p.is_remote)
+                    .map(|p| p.path.clone())
+                    .collect()
+            });
+
+            let futures = paths.into_iter().map(|path| {
+                smol::unblock(move || git::warm_branch_cache(Path::new(&path)))
+            });
+            futures::future::join_all(futures).await;
+        }).detach();
     }
 
     /// Get cached git status for a project.

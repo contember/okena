@@ -235,6 +235,29 @@ pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
     status
 }
 
+/// Lightweight startup warmup: populate the cache with branch only (via gix —
+/// no diff stats, no spawn). Skips paths that are already cached so it never
+/// clobbers richer data from the polling watcher. Use for non-visible projects
+/// we don't poll continuously, so the project switcher etc. can show a branch.
+pub fn warm_branch_cache(path: &Path) {
+    let path_buf = path.to_path_buf();
+    let already_cached = with_cache(|cache| cache.contains_key(&path_buf));
+    if already_cached {
+        return;
+    }
+    let Some(branch) = repository::get_current_branch(path) else {
+        return;
+    };
+    with_cache(|cache| {
+        cache.entry(path_buf).or_insert_with(|| Some(GitStatus {
+            branch: Some(branch),
+            lines_added: 0,
+            lines_removed: 0,
+            pr_info: None,
+        }));
+    });
+}
+
 /// Invalidate cache for a specific path (call when you know files changed)
 #[allow(dead_code)]
 pub fn invalidate_cache(path: &Path) {
