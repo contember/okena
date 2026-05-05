@@ -106,8 +106,6 @@ pub struct ContentSearchConfig {
     pub context_lines: usize,
     /// When true, include gitignored files in search.
     pub show_ignored: bool,
-    /// When true, include hidden (dot) files in search.
-    pub show_hidden: bool,
 }
 
 impl Default for ContentSearchConfig {
@@ -119,31 +117,19 @@ impl Default for ContentSearchConfig {
             file_glob: None,
             context_lines: 0,
             show_ignored: false,
-            show_hidden: false,
         }
     }
 }
 
-/// Build an ignore walker for the given project and config.
-/// Directories to always ignore even without .gitignore.
-pub const ALWAYS_IGNORE: &[&str] = &[
-    "!node_modules/",
-    "!.git/",
-    "!target/",
-    "!__pycache__/",
-    "!.venv/",
-    "!venv/",
-    "!dist/",
-    "!build/",
-    "!.next/",
-    "!.nuxt/",
-];
+/// Always ignored regardless of `.gitignore` or the user's "Include gitignored" toggle.
+/// `.git/` itself isn't covered by gitignore patterns and there's no reason to ever walk it.
+pub const ALWAYS_IGNORE: &[&str] = &["!.git/"];
 
 /// Build an ignore walker for the given project and config.
 fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Walk {
     let mut walk_builder = WalkBuilder::new(project_path);
     walk_builder
-        .hidden(!config.show_hidden)
+        .hidden(false)
         .git_ignore(!config.show_ignored)
         .git_global(!config.show_ignored)
         .git_exclude(!config.show_ignored)

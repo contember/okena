@@ -240,14 +240,12 @@ impl Render for ContentSearchDialog {
                     |d, bounds| {
                         let entity = cx.entity().downgrade();
                         d.child(crate::list_overlay::file_filter_popover(
-                            bounds, self.show_ignored, self.show_hidden, &t, cx,
+                            bounds, self.show_ignored, &t, cx,
                             move |filter, _, cx| {
                                 if let Some(e) = entity.upgrade() {
                                     e.update(cx, |this, cx| {
-                                        match filter {
-                                            "ignored" => this.show_ignored = !this.show_ignored,
-                                            "hidden" => this.show_hidden = !this.show_hidden,
-                                            _ => {}
+                                        if filter == "ignored" {
+                                            this.show_ignored = !this.show_ignored;
                                         }
                                         this.trigger_search(cx);
                                         cx.notify();
@@ -301,14 +299,12 @@ impl Render for ContentSearchDialog {
                             |modal, bounds| {
                             let entity = cx.entity().downgrade();
                             modal.child(crate::list_overlay::file_filter_popover(
-                                bounds, self.show_ignored, self.show_hidden, &t, cx,
+                                bounds, self.show_ignored, &t, cx,
                                 move |filter, _, cx| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(cx, |this, cx| {
-                                            match filter {
-                                                "ignored" => this.show_ignored = !this.show_ignored,
-                                                "hidden" => this.show_hidden = !this.show_hidden,
-                                                _ => {}
+                                            if filter == "ignored" {
+                                                this.show_ignored = !this.show_ignored;
                                             }
                                             this.trigger_search(cx);
                                             cx.notify();

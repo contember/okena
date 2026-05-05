@@ -436,18 +436,16 @@ pub fn file_filter_button(
 ///
 /// Returns a `Deferred` element. The caller is responsible for rendering a backdrop
 /// and conditionally showing this popover — see settings panel dropdowns for the pattern.
-/// `on_toggle` is called with `"ignored"` or `"hidden"` when an option is clicked.
+/// `on_toggle` is called with `"ignored"` when the option is clicked.
 pub fn file_filter_popover(
     bounds: Bounds<Pixels>,
     show_ignored: bool,
-    show_hidden: bool,
     t: &okena_core::theme::ThemeColors,
     cx: &App,
-    on_toggle: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    on_toggle: impl Fn(&str, &mut Window, &mut App) + 'static,
 ) -> Deferred {
     use okena_ui::popover::popover_panel;
 
-    let on_toggle2 = on_toggle.clone();
     deferred(
         anchored()
             .position(point(bounds.origin.x, bounds.origin.y + bounds.size.height + px(2.0)))
@@ -457,12 +455,8 @@ pub fn file_filter_popover(
                     .min_w(px(180.0))
                     .py(px(4.0))
                     .child(
-                        file_filter_option("ignored", "Include ignored", show_ignored, t, cx,
+                        file_filter_option("ignored", "Include gitignored", show_ignored, t, cx,
                             move |_, window, cx| on_toggle("ignored", window, cx))
-                    )
-                    .child(
-                        file_filter_option("hidden", "Include hidden", show_hidden, t, cx,
-                            move |_, window, cx| on_toggle2("hidden", window, cx))
                     )
             ),
     )

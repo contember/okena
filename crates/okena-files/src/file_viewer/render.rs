@@ -167,7 +167,7 @@ impl FileViewer {
         tree_elements: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active_count = self.show_ignored as u8 + self.show_hidden as u8;
+        let active_count = self.show_ignored as u8;
         let _is_open = self.filter_popover_open;
 
         div()
@@ -1503,7 +1503,7 @@ impl Render for FileViewer {
                 |d, bounds| {
                     let entity = cx.entity().downgrade();
                     d.child(crate::list_overlay::file_filter_popover(
-                        bounds, self.show_ignored, self.show_hidden, &t, cx,
+                        bounds, self.show_ignored, &t, cx,
                         move |filter, _, cx| {
                             if let Some(e) = entity.upgrade() {
                                 e.update(cx, |this, cx| this.toggle_filter(filter, cx));

@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 /// Provides file system operations from either local disk or a remote server.
 pub trait ProjectFs: Send + Sync + 'static {
     /// List files in the project (for file search dialog).
-    fn list_files(&self, show_ignored: bool, show_hidden: bool) -> Vec<FileEntry>;
+    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry>;
 
     /// Read file content as UTF-8 string.
     fn read_file(&self, relative_path: &str) -> Result<String, String>;
@@ -44,8 +44,8 @@ impl LocalProjectFs {
 }
 
 impl ProjectFs for LocalProjectFs {
-    fn list_files(&self, show_ignored: bool, show_hidden: bool) -> Vec<FileEntry> {
-        crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored, show_hidden)
+    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
+        crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored)
     }
 
     fn read_file(&self, relative_path: &str) -> Result<String, String> {
@@ -102,11 +102,10 @@ impl RemoteProjectFs {
 }
 
 impl ProjectFs for RemoteProjectFs {
-    fn list_files(&self, show_ignored: bool, show_hidden: bool) -> Vec<FileEntry> {
+    fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
         let action = okena_core::api::ActionRequest::ListFiles {
             project_id: self.project_id.clone(),
             show_ignored,
-            show_hidden,
         };
         match self.post_action(action) {
             Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {

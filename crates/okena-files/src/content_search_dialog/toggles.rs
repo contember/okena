@@ -138,7 +138,7 @@ impl ContentSearchDialog {
 
     fn render_file_filter_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = theme(cx);
-        let active_count = self.show_ignored as u8 + self.show_hidden as u8;
+        let active_count = self.show_ignored as u8;
 
         let entity = cx.entity().downgrade();
         let entity2 = entity.clone();

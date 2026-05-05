@@ -62,7 +62,6 @@ impl ContentSearchDialog {
             file_glob: self.file_glob.clone(),
             context_lines: 0,
             show_ignored: self.show_ignored,
-            show_hidden: self.show_hidden,
         };
 
         let project_fs = self.project_fs.clone();

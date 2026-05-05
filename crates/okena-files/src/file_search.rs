@@ -49,7 +49,6 @@ struct FileSearchMemory {
     query: String,
     selected_index: usize,
     show_ignored: bool,
-    show_hidden: bool,
 }
 
 impl Global for FileSearchMemory {}
@@ -66,7 +65,6 @@ pub struct FileSearchDialog {
     project_name: String,
     config: ListOverlayConfig,
     show_ignored: bool,
-    show_hidden: bool,
     filter_popover_open: bool,
     filter_button_bounds: Option<Bounds<Pixels>>,
     loading: bool,
@@ -87,8 +85,8 @@ impl FileSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<FileSearchMemory>();
-        let (query, restored_index, show_ignored, show_hidden) = memory
-            .map(|m| (m.query.clone(), m.selected_index, m.show_ignored, m.show_hidden))
+        let (query, restored_index, show_ignored) = memory
+            .map(|m| (m.query.clone(), m.selected_index, m.show_ignored))
             .unwrap_or_default();
 
         // Create search input entity
@@ -114,7 +112,7 @@ impl FileSearchDialog {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs_for_scan.list_files(show_ignored, show_hidden) })
+                .spawn(async move { fs_for_scan.list_files(show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
                 this.files = files;
@@ -139,7 +137,6 @@ impl FileSearchDialog {
             project_name,
             config,
             show_ignored,
-            show_hidden,
             filter_popover_open: false,
             filter_button_bounds: None,
             loading: true,
@@ -147,18 +144,17 @@ impl FileSearchDialog {
     }
 
     /// Scan files in the project directory using the `ignore` crate.
-    pub fn scan_files(project_path: &PathBuf, show_ignored: bool, show_hidden: bool) -> Vec<FileEntry> {
+    pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
         let mut files = Vec::new();
 
         let mut walk_builder = WalkBuilder::new(project_path);
         walk_builder
-            .hidden(!show_hidden)
+            .hidden(false)
             .git_ignore(!show_ignored)
             .git_global(!show_ignored)
             .git_exclude(!show_ignored)
             .max_depth(Some(15));
 
-        // Always ignore common non-source directories even without .gitignore
         let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
         for pattern in crate::content_search::ALWAYS_IGNORE {
             let _ = override_builder.add(pattern);
@@ -206,16 +202,15 @@ impl FileSearchDialog {
             query: self.search_input.read(cx).value().to_string(),
             selected_index: self.selected_index,
             show_ignored: self.show_ignored,
-            show_hidden: self.show_hidden,
         });
     }
 
-    /// Toggle a file filter option and re-scan.
+    /// Toggle the gitignore filter and re-scan.
     fn toggle_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
-        match filter {
-            "ignored" => self.show_ignored = !self.show_ignored,
-            "hidden" => self.show_hidden = !self.show_hidden,
-            _ => return,
+        if filter == "ignored" {
+            self.show_ignored = !self.show_ignored;
+        } else {
+            return;
         }
         self.rescan(cx);
         cx.notify();
@@ -225,7 +220,6 @@ impl FileSearchDialog {
     fn rescan(&mut self, cx: &mut Context<Self>) {
         let fs = self.fs.clone();
         let show_ignored = self.show_ignored;
-        let show_hidden = self.show_hidden;
         self.loading = true;
         self.files.clear();
         self.filtered_files.clear();
@@ -233,11 +227,11 @@ impl FileSearchDialog {
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { fs.list_files(show_ignored, show_hidden) })
+                .spawn(async move { fs.list_files(show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
-                // Discard if flags changed during scan (newer rescan in flight)
-                if this.show_ignored != show_ignored || this.show_hidden != show_hidden {
+                // Discard if flag changed during scan (newer rescan in flight)
+                if this.show_ignored != show_ignored {
                     return;
                 }
                 this.files = files;
@@ -479,7 +473,7 @@ impl FileSearchDialog {
 
     fn render_filter_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
-        let active_count = self.show_ignored as u8 + self.show_hidden as u8;
+        let active_count = self.show_ignored as u8;
 
         let entity = cx.entity().downgrade();
         let entity2 = entity.clone();
@@ -663,7 +657,7 @@ impl Render for FileSearchDialog {
                         |modal, bounds| {
                             let entity = cx.entity().downgrade();
                             modal.child(crate::list_overlay::file_filter_popover(
-                                bounds, self.show_ignored, self.show_hidden, &t, cx,
+                                bounds, self.show_ignored, &t, cx,
                                 move |filter, _, cx| {
                                     if let Some(e) = entity.upgrade() {
                                         e.update(cx, |this, cx| this.toggle_filter(filter, cx));

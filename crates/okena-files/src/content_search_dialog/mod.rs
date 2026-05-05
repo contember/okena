@@ -34,7 +34,6 @@ struct ContentSearchMemory {
     glob_input: String,
     expanded: bool,
     show_ignored: bool,
-    show_hidden: bool,
 }
 
 impl Global for ContentSearchMemory {}
@@ -82,7 +81,6 @@ pub struct ContentSearchDialog {
     pub(super) regex_mode: bool,
     pub(super) fuzzy_mode: bool,
     pub(super) show_ignored: bool,
-    pub(super) show_hidden: bool,
     pub(super) filter_popover_open: bool,
     pub(super) filter_button_bounds: Option<Bounds<Pixels>>,
     pub(super) file_glob: Option<String>,
@@ -133,7 +131,7 @@ impl ContentSearchDialog {
 
         // Restore from previous session
         let memory = cx.try_global::<ContentSearchMemory>();
-        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored, show_hidden) =
+        let (query, case_sensitive, regex_mode, fuzzy_mode, file_glob, glob_input_text, expanded, show_ignored) =
             memory
                 .map(|m| {
                     (
@@ -145,7 +143,6 @@ impl ContentSearchDialog {
                         m.glob_input.clone(),
                         m.expanded,
                         m.show_ignored,
-                        m.show_hidden,
                     )
                 })
                 .unwrap_or_default();
@@ -202,7 +199,6 @@ impl ContentSearchDialog {
             regex_mode,
             fuzzy_mode,
             show_ignored,
-            show_hidden,
             filter_popover_open: false,
             filter_button_bounds: None,
             file_glob,
@@ -242,7 +238,6 @@ impl ContentSearchDialog {
             glob_input: self.glob_input.read(cx).value().to_string(),
             expanded: self.expanded,
             show_ignored: self.show_ignored,
-            show_hidden: self.show_hidden,
         });
     }
 
