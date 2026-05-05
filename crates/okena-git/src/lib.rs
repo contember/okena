@@ -228,11 +228,26 @@ pub fn get_git_status(path: &Path) -> Option<GitStatus> {
 }
 
 /// Fetch fresh git status and update the cache. Intended for background watchers.
+///
+/// On transient failure (e.g. `git diff --numstat HEAD` exited non-zero or
+/// the gix index walk briefly failed) the cache is left untouched and the
+/// previous cached value is returned, so a single bad poll cycle doesn't
+/// blank the +/- badge in the project header.
 pub fn refresh_git_status(path: &Path) -> Option<GitStatus> {
     let path_buf = path.to_path_buf();
-    let status = repository::get_status(path);
-    with_cache(|cache| { cache.insert(path_buf, status.clone()); });
-    status
+    match repository::get_status(path) {
+        repository::StatusFetch::Status(s) => {
+            with_cache(|cache| { cache.insert(path_buf, Some(s.clone())); });
+            Some(s)
+        }
+        repository::StatusFetch::NotRepo => {
+            with_cache(|cache| { cache.insert(path_buf, None); });
+            None
+        }
+        repository::StatusFetch::Transient => {
+            with_cache(|cache| cache.get(&path_buf).cloned().flatten())
+        }
+    }
 }
 
 /// Lightweight startup warmup: populate the cache with branch only (via gix —
@@ -302,8 +317,8 @@ pub fn get_diff_file_summary(path: &Path) -> Vec<FileDiffSummary> {
         }
     }
 
-    // Get untracked files
-    for file in crate::gix_helpers::list_untracked_files(path) {
+    // Get untracked files (best effort: silently skip on transient gix failure)
+    for file in crate::gix_helpers::list_untracked_files(path).unwrap_or_default() {
         let file_path = path.join(&file);
         let added = std::fs::read_to_string(&file_path)
             .map(|c| c.lines().count())

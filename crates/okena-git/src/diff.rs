@@ -371,8 +371,9 @@ pub fn get_diff_with_options(
 }
 
 /// Get list of untracked files in a repository.
+/// Best-effort: returns an empty list if the gix status walk fails transiently.
 fn get_untracked_files(path: &Path) -> Vec<String> {
-    crate::gix_helpers::list_untracked_files(path)
+    crate::gix_helpers::list_untracked_files(path).unwrap_or_default()
 }
 
 /// Create a FileDiff for an untracked file (shows entire file as added).

@@ -246,23 +246,34 @@ pub fn get_available_branches_for_worktree(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Get git status for a directory path.
-/// Returns None if not a git repository.
-pub fn get_status(path: &Path) -> Option<GitStatus> {
-    // Check if we're in a git repo
-    let output = safe_output(
-        command("git").args(["-C", path.to_str()?, "rev-parse", "--is-inside-work-tree"]),
-    )
-    .ok()?;
+/// Three-state result of a fresh git status fetch.
+///
+/// Distinguishing "not a repo" from "transient failure" lets the polling
+/// watcher preserve the last known +/- counts instead of clobbering them
+/// with `(0, 0)` whenever `git diff --numstat HEAD` or the gix index walk
+/// briefly fails (lock contention with a concurrent `git add`, partial
+/// `.git/index` rewrite, etc).
+pub enum StatusFetch {
+    /// Got a fresh reading.
+    Status(GitStatus),
+    /// Path is definitively not inside a git repository.
+    NotRepo,
+    /// Transient failure — caller should keep the last known cached value.
+    Transient,
+}
 
-    if !output.status.success() {
-        return None;
+/// Get git status for a directory path.
+pub fn get_status(path: &Path) -> StatusFetch {
+    if crate::gix_helpers::open(path).is_none() {
+        return StatusFetch::NotRepo;
     }
 
     let branch = get_current_branch(path);
-    let (lines_added, lines_removed) = get_diff_stats(path);
+    let Some((lines_added, lines_removed)) = get_diff_stats(path) else {
+        return StatusFetch::Transient;
+    };
 
-    Some(GitStatus {
+    StatusFetch::Status(GitStatus {
         branch,
         lines_added,
         lines_removed,
@@ -309,17 +320,18 @@ pub fn get_current_branch(path: &Path) -> Option<String> {
 
 /// Get diff statistics (lines added, lines removed) for working directory.
 ///
+/// Returns `None` on transient failure (numstat spawn failed, numstat exited
+/// non-zero, or the gix-based untracked walk errored). The polling watcher
+/// uses `None` to keep the last known +/- so a single bad cycle doesn't
+/// blank the badge — see `StatusFetch::Transient`.
+///
 /// Still shells out to `git diff --numstat HEAD`: the gix equivalent would
 /// require a 3-way walk (HEAD tree → index → worktree) plus per-blob line
 /// diffing via imara-diff. This is the last remaining spawn in the polling
 /// hot path; everything else is now gix-native.
-fn get_diff_stats(path: &Path) -> (usize, usize) {
-    let path_str = match path.to_str() {
-        Some(s) => s,
-        None => return (0, 0),
-    };
+fn get_diff_stats(path: &Path) -> Option<(usize, usize)> {
+    let path_str = path.to_str()?;
 
-    // Get diff stats for staged + unstaged changes
     let (mut added, mut removed) = (0usize, 0usize);
 
     match safe_output(
@@ -340,19 +352,33 @@ fn get_diff_stats(path: &Path) -> (usize, usize) {
                 }
             }
         }
-        Ok(_) => {}
-        Err(e) => log::warn!("git diff --numstat failed: {e}"),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!(
+                "git diff --numstat HEAD exited {} for {}: {}",
+                output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signal>".into()),
+                path_str,
+                stderr.trim(),
+            );
+            return None;
+        }
+        Err(e) => {
+            log::warn!("git diff --numstat HEAD spawn failed for {}: {e}", path_str);
+            return None;
+        }
     }
 
-    // Also include untracked files (count lines)
-    for file in crate::gix_helpers::list_untracked_files(path) {
+    // Also include untracked files (count lines). A None here means the gix
+    // status walk failed transiently — propagate so we don't undercount.
+    let untracked = crate::gix_helpers::list_untracked_files(path)?;
+    for file in untracked {
         let file_path = path.join(&file);
         if let Ok(content) = std::fs::read_to_string(&file_path) {
             added += content.lines().count();
         }
     }
 
-    (added, removed)
+    Some((added, removed))
 }
 
 /// Get the default branch of a repository (e.g. "main" or "master").
@@ -849,6 +875,47 @@ mod tests {
     }
 
     #[test]
+    fn get_status_returns_not_repo_for_non_git_path() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        match get_status(tmp.path()) {
+            StatusFetch::NotRepo => {}
+            other => panic!("expected NotRepo for non-git path, got {:?}", match other {
+                StatusFetch::Status(_) => "Status",
+                StatusFetch::NotRepo => "NotRepo",
+                StatusFetch::Transient => "Transient",
+            }),
+        }
+    }
+
+    #[test]
+    fn get_status_returns_status_for_clean_repo() {
+        let (_tmp, repo) = init_temp_repo();
+        match get_status(&repo) {
+            StatusFetch::Status(s) => {
+                assert_eq!(s.branch.as_deref(), Some("main"));
+                assert_eq!(s.lines_added, 0);
+                assert_eq!(s.lines_removed, 0);
+            }
+            StatusFetch::NotRepo => panic!("expected Status, got NotRepo"),
+            StatusFetch::Transient => panic!("expected Status, got Transient"),
+        }
+    }
+
+    #[test]
+    fn get_status_counts_untracked_lines() {
+        let (_tmp, repo) = init_temp_repo();
+        std::fs::write(repo.join("new.txt"), "line1\nline2\nline3\n").unwrap();
+        match get_status(&repo) {
+            StatusFetch::Status(s) => assert_eq!(s.lines_added, 3),
+            other => panic!("expected Status with 3 untracked lines, got {}", match other {
+                StatusFetch::Status(_) => "Status",
+                StatusFetch::NotRepo => "NotRepo",
+                StatusFetch::Transient => "Transient",
+            }),
+        }
+    }
+
+    #[test]
     fn has_uncommitted_changes_returns_false_for_invalid_path() {
         let path = PathBuf::from("/nonexistent/path/that/does/not/exist");
         assert!(!has_uncommitted_changes(&path));
@@ -1061,7 +1128,8 @@ mod tests {
         std::fs::write(repo.join("ignored.txt"), "x").unwrap();
         std::fs::write(repo.join("seen.txt"), "y").unwrap();
 
-        let untracked = crate::gix_helpers::list_untracked_files(&repo);
+        let untracked = crate::gix_helpers::list_untracked_files(&repo)
+            .expect("gix status should succeed on a clean test repo");
         assert!(untracked.contains(&"seen.txt".to_string()));
         assert!(!untracked.contains(&"ignored.txt".to_string()));
     }

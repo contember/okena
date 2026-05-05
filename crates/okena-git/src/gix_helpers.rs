@@ -15,13 +15,15 @@ pub(crate) fn open(path: &Path) -> Option<gix::Repository> {
 /// List untracked files honoring `.gitignore`, with paths relative to
 /// `query_path` (matches the previous `git -C path ls-files --others
 /// --exclude-standard` behavior, including for monorepo subdirs).
-pub(crate) fn list_untracked_files(query_path: &Path) -> Vec<String> {
-    let Some(repo) = open(query_path) else {
-        return vec![];
-    };
-    let Some(workdir) = repo.workdir() else {
-        return vec![];
-    };
+///
+/// Returns `None` on a transient failure (gix couldn't open the index, the
+/// status walk init failed, or an iteration step errored). Callers that just
+/// want a best-effort list can use `.unwrap_or_default()`; the polling hot
+/// path uses `None` to keep the previous cached value instead of clobbering
+/// it with a misleading empty list.
+pub(crate) fn list_untracked_files(query_path: &Path) -> Option<Vec<String>> {
+    let repo = open(query_path)?;
+    let workdir = repo.workdir()?;
 
     // Compute the prefix from workdir to query_path. Empty when query_path
     // is the workdir itself.
@@ -36,18 +38,33 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Vec<String> {
         })
         .unwrap_or_default();
 
-    let Ok(platform) = repo.status(gix::progress::Discard) else {
-        return vec![];
+    let platform = match repo.status(gix::progress::Discard) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("gix status init failed for {}: {e}", query_path.display());
+            return None;
+        }
     };
-    let Ok(iter) = platform
+    let iter = match platform
         .untracked_files(gix::status::UntrackedFiles::Files)
         .into_iter(None)
-    else {
-        return vec![];
+    {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("gix status iter init failed for {}: {e}", query_path.display());
+            return None;
+        }
     };
 
     let mut result = Vec::new();
-    for item in iter.flatten() {
+    for item_result in iter {
+        let item = match item_result {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("gix status iteration failed for {}: {e}", query_path.display());
+                return None;
+            }
+        };
         let gix::status::Item::IndexWorktree(
             gix::status::index_worktree::Item::DirectoryContents { entry, .. },
         ) = item
@@ -64,5 +81,5 @@ pub(crate) fn list_untracked_files(query_path: &Path) -> Vec<String> {
             result.push(stripped.to_string());
         }
     }
-    result
+    Some(result)
 }
