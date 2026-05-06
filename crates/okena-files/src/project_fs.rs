@@ -22,7 +22,7 @@ pub trait ProjectFs: Send + Sync + 'static {
         query: &str,
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
-        on_result: &mut dyn FnMut(FileSearchResult),
+        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
     );
 
     /// Project display name (directory name).
@@ -65,7 +65,7 @@ impl ProjectFs for LocalProjectFs {
         query: &str,
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
-        on_result: &mut dyn FnMut(FileSearchResult),
+        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
     ) {
         crate::content_search::search_content(&self.path, query, config, cancelled, on_result);
     }
@@ -152,7 +152,7 @@ impl ProjectFs for RemoteProjectFs {
         query: &str,
         config: &ContentSearchConfig,
         cancelled: &AtomicBool,
-        on_result: &mut dyn FnMut(FileSearchResult),
+        on_result: &mut (dyn FnMut(FileSearchResult) + Send),
     ) {
         let mode = match config.mode {
             SearchMode::Literal => "literal",

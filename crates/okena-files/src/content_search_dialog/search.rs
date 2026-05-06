@@ -80,8 +80,14 @@ impl ContentSearchDialog {
                             results.push(result);
                         },
                     );
-                    // Sort files by best match score (highest first) for fuzzy mode
-                    results.sort_by(|a, b| b.best_score.cmp(&a.best_score));
+                    // Sort files by best match score (highest first) for fuzzy mode,
+                    // breaking ties by relative_path for stable order across runs
+                    // (parallel walker emits in non-deterministic order).
+                    results.sort_by(|a, b| {
+                        b.best_score
+                            .cmp(&a.best_score)
+                            .then_with(|| a.relative_path.cmp(&b.relative_path))
+                    });
                     results
                 })
                 .await;

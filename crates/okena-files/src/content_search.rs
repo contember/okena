@@ -7,11 +7,15 @@ use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// Skip files larger than this for content search. Lockfiles, bundles, and
+/// generated code are typically uninteresting and dominate I/O time.
+const MAX_FILE_SIZE: u64 = 1_000_000;
 
 /// A single search match within a file.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -125,15 +129,16 @@ impl Default for ContentSearchConfig {
 /// `.git/` itself isn't covered by gitignore patterns and there's no reason to ever walk it.
 pub const ALWAYS_IGNORE: &[&str] = &["!.git/"];
 
-/// Build an ignore walker for the given project and config.
-fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Walk {
+/// Configure a walker with the project's ignore rules and our defaults.
+fn configure_walker(project_path: &Path, config: &ContentSearchConfig) -> WalkBuilder {
     let mut walk_builder = WalkBuilder::new(project_path);
     walk_builder
         .hidden(false)
         .git_ignore(!config.show_ignored)
         .git_global(!config.show_ignored)
         .git_exclude(!config.show_ignored)
-        .max_depth(Some(20));
+        .max_depth(Some(20))
+        .max_filesize(Some(MAX_FILE_SIZE));
 
     // Build overrides: always-ignore dirs + optional user glob filter
     let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
@@ -147,7 +152,7 @@ fn build_walker(project_path: &Path, config: &ContentSearchConfig) -> ignore::Wa
         walk_builder.overrides(overrides);
     }
 
-    walk_builder.build()
+    walk_builder
 }
 
 /// Add context lines to matches by reading the file content.
@@ -197,7 +202,7 @@ pub fn search_content(
     query: &str,
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
-    on_result: &mut dyn FnMut(FileSearchResult),
+    on_result: &mut (dyn FnMut(FileSearchResult) + Send),
 ) {
     if query.is_empty() {
         return;
@@ -210,97 +215,110 @@ pub fn search_content(
 }
 
 /// Search using grep-searcher (literal or regex mode).
+///
+/// Walks the project tree in parallel. Each worker thread keeps its own
+/// `Searcher` (it's stateful) and a clone of the matcher; results are funneled
+/// through a `Mutex` around the caller's callback.
 fn search_content_grep(
     project_path: &Path,
     query: &str,
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
-    on_result: &mut dyn FnMut(FileSearchResult),
+    on_result: &mut (dyn FnMut(FileSearchResult) + Send),
 ) {
     let matcher = {
         let mut builder = RegexMatcherBuilder::new();
         builder.case_insensitive(!config.case_sensitive);
 
-        if config.mode == SearchMode::Regex {
-            match builder.build(query) {
-                Ok(m) => m,
-                Err(_) => return,
-            }
+        let pattern = if config.mode == SearchMode::Regex {
+            query.to_string()
         } else {
-            match builder.build(&escape_regex(query)) {
-                Ok(m) => m,
-                Err(_) => return,
-            }
+            escape_regex(query)
+        };
+        match builder.build(&pattern) {
+            Ok(m) => m,
+            Err(_) => return,
         }
     };
 
-    let mut total_matches: usize = 0;
-    let mut searcher = Searcher::new();
+    let total_matches = AtomicUsize::new(0);
+    let max_results = config.max_results;
+    let context_lines = config.context_lines;
+    let on_result = Mutex::new(on_result);
 
-    for entry in build_walker(project_path, config).flatten() {
-        if cancelled.load(Ordering::Relaxed) {
-            return;
-        }
+    configure_walker(project_path, config).build_parallel().run(|| {
+        let matcher = matcher.clone();
+        let mut searcher = Searcher::new();
+        let total_matches = &total_matches;
+        let on_result = &on_result;
 
-        if total_matches >= config.max_results {
-            return;
-        }
+        Box::new(move |entry| {
+            if cancelled.load(Ordering::Relaxed) {
+                return WalkState::Quit;
+            }
+            if total_matches.load(Ordering::Relaxed) >= max_results {
+                return WalkState::Quit;
+            }
 
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return WalkState::Continue,
+            };
 
-        let mut file_matches: Vec<ContentMatch> = Vec::new();
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return WalkState::Continue;
+            }
 
-        let search_result = searcher.search_path(
-            &matcher,
-            path,
-            UTF8(|line_number, line_content| {
-                if cancelled.load(Ordering::Relaxed) {
-                    return Ok(false);
-                }
-                if total_matches + file_matches.len() >= config.max_results {
-                    return Ok(false);
-                }
+            let path = entry.path();
+            let mut file_matches: Vec<ContentMatch> = Vec::new();
 
-                let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
-
-                // Find match ranges within the line
-                let mut match_ranges = Vec::new();
-                matcher.find_iter(line_content.as_bytes(), |m| {
-                    let start = m.start();
-                    let end = m.end().min(line_trimmed.len());
-                    if start < line_trimmed.len() {
-                        match_ranges.push(start..end);
+            let search_result = searcher.search_path(
+                &matcher,
+                path,
+                UTF8(|line_number, line_content| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok(false);
                     }
-                    true
-                }).ok();
+                    if total_matches.load(Ordering::Relaxed) + file_matches.len() >= max_results {
+                        return Ok(false);
+                    }
 
-                // Expand tabs to match syntax highlighter output
-                let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
+                    let line_trimmed = line_content.trim_end_matches(&['\n', '\r'][..]);
 
-                file_matches.push(ContentMatch {
-                    line_number: line_number as usize,
-                    line_content: line_expanded,
-                    match_ranges,
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                });
+                    // Find match ranges within the line
+                    let mut match_ranges = Vec::new();
+                    matcher.find_iter(line_content.as_bytes(), |m| {
+                        let start = m.start();
+                        let end = m.end().min(line_trimmed.len());
+                        if start < line_trimmed.len() {
+                            match_ranges.push(start..end);
+                        }
+                        true
+                    }).ok();
 
-                Ok(true)
-            }),
-        );
+                    // Expand tabs to match syntax highlighter output
+                    let (line_expanded, match_ranges) = expand_tabs(line_trimmed, &match_ranges);
 
-        if search_result.is_err() {
-            continue;
-        }
+                    file_matches.push(ContentMatch {
+                        line_number: line_number as usize,
+                        line_content: line_expanded,
+                        match_ranges,
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
+                    });
 
-        if !file_matches.is_empty() {
-            total_matches += file_matches.len();
+                    Ok(true)
+                }),
+            );
 
-            if config.context_lines > 0 {
-                add_context_lines(&mut file_matches, path, config.context_lines);
+            if search_result.is_err() || file_matches.is_empty() {
+                return WalkState::Continue;
+            }
+
+            total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
+
+            if context_lines > 0 {
+                add_context_lines(&mut file_matches, path, context_lines);
             }
 
             let relative_path = path
@@ -308,102 +326,125 @@ fn search_content_grep(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            on_result(FileSearchResult {
+            let result = FileSearchResult {
                 file_path: path.to_path_buf(),
                 relative_path,
                 matches: file_matches,
                 best_score: 0,
-            });
-        }
-    }
+            };
+
+            if let Ok(mut cb) = on_result.lock() {
+                cb(result);
+            }
+
+            WalkState::Continue
+        })
+    });
 }
 
 /// Search using nucleo-matcher (fuzzy mode).
+///
+/// Walks the project tree in parallel; each worker thread keeps its own
+/// `Matcher` (it's stateful) and reads file contents independently.
 fn search_content_fuzzy(
     project_path: &Path,
     query: &str,
     config: &ContentSearchConfig,
     cancelled: &AtomicBool,
-    on_result: &mut dyn FnMut(FileSearchResult),
+    on_result: &mut (dyn FnMut(FileSearchResult) + Send),
 ) {
     use nucleo_matcher::{Config as NucleoConfig, Matcher, Utf32Str};
 
-    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-    let mut total_matches: usize = 0;
+    let total_matches = AtomicUsize::new(0);
+    let max_results = config.max_results;
+    let context_lines = config.context_lines;
+    let on_result = Mutex::new(on_result);
 
-    for entry in build_walker(project_path, config).flatten() {
-        if cancelled.load(Ordering::Relaxed) {
-            return;
-        }
+    // Minimum score threshold — scale with query length.
+    // Short queries need higher threshold to avoid noise.
+    let query_len = query.chars().count();
+    let min_score: u16 = match query_len {
+        0..=2 => 80,
+        3..=4 => 50,
+        _ => 30,
+    };
 
-        if total_matches >= config.max_results {
-            return;
-        }
+    configure_walker(project_path, config).build_parallel().run(|| {
+        let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+        let total_matches = &total_matches;
+        let on_result = &on_result;
 
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
-
-        // Minimum score threshold — scale with query length.
-        // Short queries need higher threshold to avoid noise.
-        let query_len = query.chars().count();
-        let min_score: u16 = match query_len {
-            0..=2 => 80,
-            3..=4 => 50,
-            _ => 30,
-        };
-
-        for (line_idx, line) in content.lines().enumerate() {
+        Box::new(move |entry| {
             if cancelled.load(Ordering::Relaxed) {
-                return;
+                return WalkState::Quit;
             }
-            if total_matches + scored_matches.len() >= config.max_results {
-                break;
+            if total_matches.load(Ordering::Relaxed) >= max_results {
+                return WalkState::Quit;
             }
 
-            let mut haystack_buf = Vec::new();
-            let haystack = Utf32Str::new(line, &mut haystack_buf);
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => return WalkState::Continue,
+            };
 
-            let mut needle_buf2 = Vec::new();
-            let needle = Utf32Str::new(query, &mut needle_buf2);
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return WalkState::Continue;
+            }
 
-            let mut indices: Vec<u32> = Vec::new();
-            if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
-                if score < min_score {
-                    continue;
+            let path = entry.path();
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) => return WalkState::Continue,
+            };
+
+            let mut scored_matches: Vec<(u16, ContentMatch)> = Vec::new();
+
+            for (line_idx, line) in content.lines().enumerate() {
+                if cancelled.load(Ordering::Relaxed) {
+                    return WalkState::Quit;
+                }
+                if total_matches.load(Ordering::Relaxed) + scored_matches.len() >= max_results {
+                    break;
                 }
 
-                let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
-                let match_ranges: Vec<Range<usize>> = indices
-                    .iter()
-                    .filter_map(|&idx| {
-                        let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
-                        Some(*byte_pos..*byte_pos + ch.len_utf8())
-                    })
-                    .collect();
+                let mut haystack_buf = Vec::new();
+                let haystack = Utf32Str::new(line, &mut haystack_buf);
 
-                // Expand tabs to match syntax highlighter output
-                let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+                let mut needle_buf2 = Vec::new();
+                let needle = Utf32Str::new(query, &mut needle_buf2);
 
-                scored_matches.push((score, ContentMatch {
-                    line_number: line_idx + 1,
-                    line_content: line_expanded,
-                    match_ranges,
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                }));
+                let mut indices: Vec<u32> = Vec::new();
+                if let Some(score) = matcher.fuzzy_indices(haystack, needle, &mut indices) {
+                    if score < min_score {
+                        continue;
+                    }
+
+                    let char_to_byte: Vec<(usize, char)> = line.char_indices().collect();
+                    let match_ranges: Vec<Range<usize>> = indices
+                        .iter()
+                        .filter_map(|&idx| {
+                            let (byte_pos, ch) = char_to_byte.get(idx as usize)?;
+                            Some(*byte_pos..*byte_pos + ch.len_utf8())
+                        })
+                        .collect();
+
+                    // Expand tabs to match syntax highlighter output
+                    let (line_expanded, match_ranges) = expand_tabs(line, &match_ranges);
+
+                    scored_matches.push((score, ContentMatch {
+                        line_number: line_idx + 1,
+                        line_content: line_expanded,
+                        match_ranges,
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
+                    }));
+                }
             }
-        }
 
-        if !scored_matches.is_empty() {
+            if scored_matches.is_empty() {
+                return WalkState::Continue;
+            }
+
             // Sort by score descending — best matches first
             scored_matches.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -413,10 +454,10 @@ fn search_content_fuzzy(
                 .map(|(_, m)| m)
                 .collect();
 
-            total_matches += file_matches.len();
+            total_matches.fetch_add(file_matches.len(), Ordering::Relaxed);
 
-            if config.context_lines > 0 {
-                add_context_lines(&mut file_matches, path, config.context_lines);
+            if context_lines > 0 {
+                add_context_lines(&mut file_matches, path, context_lines);
             }
 
             let relative_path = path
@@ -424,14 +465,20 @@ fn search_content_fuzzy(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            on_result(FileSearchResult {
+            let result = FileSearchResult {
                 file_path: path.to_path_buf(),
                 relative_path,
                 matches: file_matches,
                 best_score,
-            });
-        }
-    }
+            };
+
+            if let Ok(mut cb) = on_result.lock() {
+                cb(result);
+            }
+
+            WalkState::Continue
+        })
+    });
 }
 
 /// Handle for cancelling a running search.
