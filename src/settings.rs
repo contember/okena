@@ -338,7 +338,11 @@ impl SettingsState {
                     this.upgrade().map(|e| e.read(cx).settings.clone())
                 });
                 if let Some(settings) = settings {
-                    if let Err(e) = save_settings(&settings) {
+                    // Run blocking fs IO off the main thread; settings.json
+                    // also reads itself back to merge remote_connections, so
+                    // the cost is two sync IO ops under SETTINGS_LOCK.
+                    let save_result = smol::unblock(move || save_settings(&settings)).await;
+                    if let Err(e) = save_result {
                         log::error!("Failed to save settings: {}", e);
                         let _ = cx.update(|cx| {
                             ToastManager::error(format!("Failed to save settings: {}", e), cx);

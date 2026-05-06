@@ -192,7 +192,11 @@ impl Okena {
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
-                    match persistence::save_workspace(&data) {
+                    // Run blocking fs IO off the GPUI main thread — on Windows
+                    // an AV scan or OneDrive sync of workspace.json can stall
+                    // for seconds and would otherwise freeze the UI.
+                    let save_result = smol::unblock(move || persistence::save_workspace(&data)).await;
+                    match save_result {
                         Ok(()) => {
                             last_saved.store(version, Ordering::Relaxed);
                         }
