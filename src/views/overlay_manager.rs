@@ -1169,7 +1169,10 @@ impl OverlayManager {
     /// Show file search dialog for a project.
     pub fn show_file_search(&mut self, fs: std::sync::Arc<dyn okena_files::project_fs::ProjectFs>, cx: &mut Context<Self>) {
         let fs_for_viewer = fs.clone();
-        let dialog = cx.new(|cx| FileSearchDialog::new(fs, cx));
+        let settings = crate::settings::settings(cx).file_finder.clone();
+        let dialog = cx.new(|cx| {
+            FileSearchDialog::new(fs, settings.show_ignored, cx)
+        });
 
         cx.subscribe(&dialog, move |this, _, event: &FileSearchDialogEvent, cx| {
             match event {
@@ -1180,6 +1183,12 @@ impl OverlayManager {
                     let relative_path = path.to_string_lossy().to_string();
                     this.close_modal(cx);
                     this.show_file_viewer(relative_path, fs_for_viewer.clone(), cx);
+                }
+                FileSearchDialogEvent::FiltersChanged { show_ignored } => {
+                    let show_ignored = *show_ignored;
+                    crate::settings::settings_entity(cx).update(cx, |state, cx| {
+                        state.set_file_finder_show_ignored(show_ignored, cx);
+                    });
                 }
             }
         })
