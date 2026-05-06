@@ -258,6 +258,19 @@ impl RemoteConnectionManager {
 
     /// Handle an event from a connection's tokio task.
     fn handle_event(&mut self, event: ConnectionEvent, cx: &mut Context<Self>) {
+        let event_label: &'static str = match &event {
+            ConnectionEvent::StatusChanged { .. } => "StatusChanged",
+            ConnectionEvent::TokenObtained { .. } => "TokenObtained",
+            ConnectionEvent::StateReceived { .. } => "StateReceived",
+            ConnectionEvent::SubscriptionMappings { .. } => "SubscriptionMappings",
+            ConnectionEvent::GitStatusChanged { .. } => "GitStatusChanged",
+            ConnectionEvent::ServerWarning { .. } => "ServerWarning",
+            ConnectionEvent::TokenRefreshed { .. } => "TokenRefreshed",
+        };
+        let _slow = okena_core::timing::SlowGuard::with_detail(
+            "RemoteConnectionManager::handle_event",
+            event_label,
+        );
         match event {
             ConnectionEvent::StatusChanged {
                 connection_id,

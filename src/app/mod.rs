@@ -189,6 +189,7 @@ impl Okena {
 
                 if save_pending.swap(false, Ordering::Relaxed) {
                     let (data, version) = cx.update(|cx| {
+                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
@@ -488,6 +489,8 @@ impl Okena {
                     Ok(event) => event,
                     Err(_) => break,
                 };
+
+                let _slow = okena_core::timing::SlowGuard::new("Okena::pty_event_batch");
 
                 // Collect exit events and track which terminals received data
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();

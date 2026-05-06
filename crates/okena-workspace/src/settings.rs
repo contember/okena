@@ -629,6 +629,7 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 /// so this function preserves whatever is on disk rather than overwriting with
 /// the (potentially stale) in-memory copy.
 pub fn save_settings(settings: &AppSettings) -> Result<()> {
+    let _slow = okena_core::timing::SlowGuard::new("save_settings");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     save_settings_locked(settings)
 }
@@ -671,6 +672,7 @@ pub fn update_remote_connections<F>(updater: F) -> Result<()>
 where
     F: FnOnce(&mut Vec<RemoteConnectionConfig>),
 {
+    let _slow = okena_core::timing::SlowGuard::new("update_remote_connections");
     let _guard = SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let path = get_settings_path();

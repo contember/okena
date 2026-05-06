@@ -37,6 +37,8 @@ pub(crate) async fn remote_command_loop(
             Err(_) => break,
         };
 
+        let _slow = okena_core::timing::SlowGuard::new("remote_command_loop::iter");
+
         let result = match msg.command {
             RemoteCommand::Action(action) => {
                 match action {

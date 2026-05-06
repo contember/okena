@@ -9,6 +9,10 @@ use super::prompt_marks::advance_with_prompt_marks;
 impl Terminal {
     /// Process output from PTY
     pub fn process_output(&self, data: &[u8]) {
+        let mut _slow = okena_core::timing::SlowGuard::with_detail(
+            "Terminal::process_output",
+            format!("{} bytes", data.len()),
+        );
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();
@@ -72,6 +76,10 @@ impl Terminal {
             }
             std::mem::take(&mut *pending)
         };
+        let _slow = okena_core::timing::SlowGuard::with_detail(
+            "Terminal::drain_pending_output",
+            format!("{} bytes", data.len()),
+        );
         let mut term = self.term.lock();
         let mut processor = self.processor.lock();
         let mut sidecar = self.osc_sidecar.lock();

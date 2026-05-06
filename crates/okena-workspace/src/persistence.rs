@@ -54,6 +54,7 @@ pub fn get_workspace_path() -> PathBuf {
 /// Returns a held `LockGuard` that releases the lock on drop.
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
+    let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
     let lock_path = get_config_dir().join("okena.lock");
 
     if let Some(parent) = lock_path.parent() {
@@ -95,6 +96,7 @@ impl Drop for LockGuard {
 
 /// Check whether a process with the given PID is still alive
 fn is_process_alive(pid: u32) -> bool {
+    let _slow = okena_core::timing::SlowGuard::new("is_process_alive");
     #[cfg(unix)]
     {
         // kill(pid, 0) checks existence without sending a signal
@@ -340,6 +342,7 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 /// 3. Rolling backup — always creates .bak before overwriting
 /// 4. Atomic write — tmp + fsync + rename prevents partial writes
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
+    let _slow = okena_core::timing::SlowGuard::new("save_workspace");
     // Layer 1: block save if we loaded from fallback default
     if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
         log::warn!("Skipping workspace save — loaded from fallback default, protecting file on disk.");

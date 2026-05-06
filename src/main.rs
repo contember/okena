@@ -307,9 +307,17 @@ fn main() {
         })))
     })();
 
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    );
+    // Build the effective filter: always capture errors and SlowGuard warnings
+    // so freezes and panics land in okena.log regardless of what the user has
+    // in RUST_LOG. User's RUST_LOG is appended last so they can refine further.
+    let user_filter = std::env::var("RUST_LOG").ok().unwrap_or_default();
+    let effective_filter = if user_filter.is_empty() {
+        "info,okena_core::timing=warn".to_string()
+    } else {
+        format!("error,okena_core::timing=warn,{user_filter}")
+    };
+    let mut builder = env_logger::Builder::new();
+    builder.parse_filters(&effective_filter);
     if let Some(target) = log_target {
         builder.target(target);
     }
