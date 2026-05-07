@@ -552,8 +552,8 @@ impl Render for RootView {
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {
                 this.workspace.update(cx, |ws, cx| {
-                    // Clear custom column widths → equal distribution
-                    ws.data.project_widths.clear();
+                    // Clear custom column widths → equal distribution.
+                    ws.data.main_window.project_widths.clear();
                     // Equalize pane sizes in the focused terminal's parent split
                     ws.equalize_focused_split(cx);
                 });

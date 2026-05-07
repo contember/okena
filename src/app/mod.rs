@@ -189,15 +189,10 @@ impl Okena {
 
                 if save_pending.swap(false, Ordering::Relaxed) {
                     let (data, version) = cx.update(|cx| {
-                        let _slow = okena_core::timing::SlowGuard::new("workspace_save_clone");
                         let ws = workspace.read(cx);
                         (ws.data().clone(), ws.data_version())
                     });
-                    // Run blocking fs IO off the GPUI main thread — on Windows
-                    // an AV scan or OneDrive sync of workspace.json can stall
-                    // for seconds and would otherwise freeze the UI.
-                    let save_result = smol::unblock(move || persistence::save_workspace(&data)).await;
-                    match save_result {
+                    match persistence::save_workspace(&data) {
                         Ok(()) => {
                             last_saved.store(version, Ordering::Relaxed);
                         }
@@ -489,8 +484,6 @@ impl Okena {
                     Ok(event) => event,
                     Err(_) => break,
                 };
-
-                let _slow = okena_core::timing::SlowGuard::new("Okena::pty_event_batch");
 
                 // Collect exit events and track which terminals received data
                 let mut exit_events: Vec<(String, Option<u32>)> = Vec::new();

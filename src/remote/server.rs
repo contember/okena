@@ -32,7 +32,6 @@ impl RemoteServer {
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
         next_connection_id: Arc<AtomicU64>,
     ) -> anyhow::Result<Self> {
-        let _slow = okena_core::timing::SlowGuard::new("RemoteServer::start");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

@@ -1,6 +1,7 @@
 //! Persistent workspace data — projects, folders, layouts.
 
 use crate::hooks_config::HooksConfig;
+use crate::window_state::WindowState;
 use okena_core::theme::FolderColor;
 use okena_layout::LayoutNode;
 use okena_terminal::shell_config::ShellType;
@@ -15,8 +16,6 @@ pub struct FolderData {
     /// Ordered project IDs inside this folder
     pub project_ids: Vec<String>,
     #[serde(default)]
-    pub collapsed: bool,
-    #[serde(default)]
     pub folder_color: FolderColor,
 }
 
@@ -28,9 +27,6 @@ pub struct WorkspaceData {
     pub version: u32,
     pub projects: Vec<ProjectData>,
     pub project_order: Vec<String>,
-    /// Project column widths as percentages (project_id -> width %)
-    #[serde(default)]
-    pub project_widths: HashMap<String, f32>,
     /// Folders for grouping projects
     #[serde(default)]
     pub folders: Vec<FolderData>,
@@ -40,6 +36,15 @@ pub struct WorkspaceData {
     /// Hook panel heights in pixels (project_id -> height)
     #[serde(default)]
     pub hook_panel_heights: HashMap<String, f32>,
+    /// Filter/UI state for the main window. Always present — schema invariant
+    /// is that closing main quits the app, so a default `WindowState` is
+    /// produced on missing/corrupt input.
+    #[serde(default)]
+    pub main_window: WindowState,
+    /// Filter/UI state for any extra windows open at save time. Empty in the
+    /// single-window case.
+    #[serde(default)]
+    pub extra_windows: Vec<WindowState>,
 }
 
 impl WorkspaceData {
@@ -61,9 +66,6 @@ impl WorkspaceData {
             project_order: self.project_order.iter()
                 .filter(|id| !id.starts_with("remote:") && !remote_ids.contains(id.as_str()))
                 .cloned().collect(),
-            project_widths: self.project_widths.iter()
-                .filter(|(id, _)| !remote_ids.contains(id.as_str()))
-                .map(|(k, v)| (k.clone(), *v)).collect(),
             service_panel_heights: self.service_panel_heights.iter()
                 .filter(|(id, _)| !remote_ids.contains(id.as_str()))
                 .map(|(k, v)| (k.clone(), *v)).collect(),
@@ -73,6 +75,8 @@ impl WorkspaceData {
             folders: self.folders.iter()
                 .filter(|f| !f.id.starts_with("remote:"))
                 .cloned().collect(),
+            main_window: self.main_window.clone(),
+            extra_windows: self.extra_windows.clone(),
         }
     }
 }
@@ -131,8 +135,6 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub path: String,
-    #[serde(default = "default_true", alias = "is_visible")]
-    pub show_in_overview: bool,
     /// Layout tree for terminal panes. None means project is a bookmark without terminals.
     pub layout: Option<LayoutNode>,
     #[serde(default)]
@@ -219,10 +221,6 @@ fn default_workspace_version() -> u32 {
     0 // pre-versioning workspace files
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,7 +230,6 @@ mod tests {
             id: "test-id".to_string(),
             name: "test".to_string(),
             path: path.to_string(),
-            show_in_overview: true,
             layout: None,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -349,6 +346,55 @@ mod tests {
         assert!(project.hooks.worktree.on_create.is_none());
     }
 
+    fn make_workspace() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: Vec::new(),
+            project_order: Vec::new(),
+            folders: Vec::new(),
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_data_old_shape_loads_with_default_main_window() {
+        // Pre-multi-window workspace.json shape — no main_window or
+        // extra_windows fields. Schema invariant: load must always produce a
+        // default main_window and an empty extras vec.
+        let legacy_json = r#"{
+            "version": 1,
+            "projects": [],
+            "project_order": []
+        }"#;
+
+        let data: WorkspaceData = serde_json::from_str(legacy_json).unwrap();
+
+        assert!(data.main_window.hidden_project_ids.is_empty());
+        assert!(data.main_window.folder_filter.is_none());
+        assert!(data.main_window.project_widths.is_empty());
+        assert!(data.main_window.folder_collapsed.is_empty());
+        assert!(data.main_window.os_bounds.is_none());
+        assert!(data.extra_windows.is_empty());
+    }
+
+    #[test]
+    fn workspace_data_roundtrips_window_state() {
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.main_window.folder_filter = Some("f1".to_string());
+        data.extra_windows.push(WindowState::default());
+
+        let json = serde_json::to_string(&data).unwrap();
+        let reloaded: WorkspaceData = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(reloaded.main_window.hidden_project_ids, data.main_window.hidden_project_ids);
+        assert_eq!(reloaded.main_window.folder_filter, data.main_window.folder_filter);
+        assert_eq!(reloaded.extra_windows.len(), 1);
+    }
+
     #[test]
     fn project_data_legacy_hooks_save_roundtrip_uses_grouped_format() {
         // Load legacy → save → reload. The saved JSON must be in the new
@@ -371,5 +417,50 @@ mod tests {
 
         let reloaded: ProjectData = serde_json::from_str(&saved).unwrap();
         assert_eq!(reloaded.hooks.project.on_open.as_deref(), Some("init.sh"));
+    }
+
+    #[test]
+    fn project_data_has_no_show_in_overview_field() {
+        // Per-window visibility lives exclusively on
+        // main_window.hidden_project_ids. The legacy ProjectData.show_in_overview
+        // field has been removed from the struct entirely (not just tombstoned
+        // for save) -- serialization must not produce a "show_in_overview" key.
+        let project = make_project("/tmp/test");
+        let saved = serde_json::to_string(&project).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("show_in_overview"),
+            "ProjectData.show_in_overview must not appear in serialized form (field removed)");
+    }
+
+    #[test]
+    fn folder_data_has_no_collapsed_field() {
+        // Per-window sidebar collapse state lives exclusively on
+        // main_window.folder_collapsed. The legacy FolderData.collapsed
+        // field has been removed from the struct entirely (not just
+        // tombstoned for save) -- serialization must not produce a
+        // "collapsed" key.
+        let folder = FolderData {
+            id: "f1".to_string(),
+            name: "F".to_string(),
+            project_ids: Vec::new(),
+            folder_color: Default::default(),
+        };
+        let saved = serde_json::to_string(&folder).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("collapsed"),
+            "FolderData.collapsed must not appear in serialized form (field removed)");
+    }
+
+    #[test]
+    fn workspace_data_has_no_top_level_project_widths_field() {
+        // Per-window column widths live exclusively on main_window.project_widths.
+        // The legacy top-level WorkspaceData.project_widths field has been
+        // removed from the struct entirely (not just tombstoned for save) --
+        // serialization must not produce a top-level "project_widths" key.
+        let data = make_workspace();
+        let saved = serde_json::to_string(&data).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("project_widths"),
+            "top-level project_widths must not appear in serialized form (field removed)");
     }
 }

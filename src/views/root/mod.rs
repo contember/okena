@@ -427,7 +427,6 @@ impl RootView {
                                 id: prefixed_folder_id.clone(),
                                 name: sf.name.clone(),
                                 project_ids: prefixed_project_ids,
-                                collapsed: false,
                                 folder_color: sf.folder_color,
                             });
                             remote_order.push(prefixed_folder_id);
@@ -494,8 +493,8 @@ impl RootView {
                             existing.worktree_ids = api_project.worktree_ids.iter()
                                 .map(|id| format!("remote:{}:{}", conn_id, id))
                                 .collect();
-                            // Don't overwrite show_in_overview — it's client-side state
-                            // (the user may have toggled visibility locally).
+                            // Don't overwrite the local hidden set — the
+                            // user may have toggled visibility locally.
                         } else {
                             let worktree_info = api_project.worktree_info.as_ref().map(|wt| {
                                 crate::workspace::state::WorktreeMetadata {
@@ -509,11 +508,21 @@ impl RootView {
                             let worktree_ids: Vec<String> = api_project.worktree_ids.iter()
                                 .map(|id| format!("remote:{}:{}", conn_id, id))
                                 .collect();
+                            // Translate the wire-format show_in_overview
+                            // flag into a per-window hidden_project_ids
+                            // entry on initial sync. Subsequent syncs hit
+                            // the `existing` branch above and leave the
+                            // local hidden set alone.
+                            if !api_project.show_in_overview {
+                                ws.data
+                                    .main_window
+                                    .hidden_project_ids
+                                    .insert(prefixed_id.clone());
+                            }
                             ws.data.projects.push(ProjectData {
                                 id: prefixed_id.clone(),
                                 name: api_project.name.clone(),
                                 path: api_project.path.clone(),
-                                show_in_overview: api_project.show_in_overview,
                                 layout,
                                 terminal_names,
                                 hidden_terminals: std::collections::HashMap::new(),
@@ -546,7 +555,6 @@ impl RootView {
 
                     // Add new remote folders
                     for rf in remote_folders {
-                        // Preserve collapsed state from previous sync
                         ws.data.folders.push(rf);
                     }
 

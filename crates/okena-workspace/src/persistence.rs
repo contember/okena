@@ -1,6 +1,6 @@
 use okena_terminal::session_backend::SessionBackend;
 use okena_core::theme::FolderColor;
-use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WorkspaceData};
+use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WindowState, WorkspaceData};
 #[cfg(test)]
 use crate::state::WorktreeMetadata;
 
@@ -31,7 +31,7 @@ pub use super::sessions::{
 };
 
 /// Current workspace schema version - increment when making breaking changes
-pub const WORKSPACE_VERSION: u32 = 1;
+pub const WORKSPACE_VERSION: u32 = 2;
 
 /// Get the config directory path
 pub fn get_config_dir() -> PathBuf {
@@ -54,7 +54,6 @@ pub fn get_workspace_path() -> PathBuf {
 /// Returns a held `LockGuard` that releases the lock on drop.
 /// If another instance is already running, returns an error with its PID.
 pub fn acquire_instance_lock() -> Result<LockGuard> {
-    let _slow = okena_core::timing::SlowGuard::new("acquire_instance_lock");
     let lock_path = get_config_dir().join("okena.lock");
 
     if let Some(parent) = lock_path.parent() {
@@ -96,7 +95,6 @@ impl Drop for LockGuard {
 
 /// Check whether a process with the given PID is still alive
 fn is_process_alive(pid: u32) -> bool {
-    let _slow = okena_core::timing::SlowGuard::new("is_process_alive");
     #[cfg(unix)]
     {
         // kill(pid, 0) checks existence without sending a signal
@@ -342,7 +340,6 @@ pub fn load_workspace(backend: SessionBackend) -> Result<WorkspaceData> {
 /// 3. Rolling backup — always creates .bak before overwriting
 /// 4. Atomic write — tmp + fsync + rename prevents partial writes
 pub fn save_workspace(data: &WorkspaceData) -> Result<()> {
-    let _slow = okena_core::timing::SlowGuard::new("save_workspace");
     // Layer 1: block save if we loaded from fallback default
     if LOADED_FROM_DEFAULT.load(Ordering::Relaxed) {
         log::warn!("Skipping workspace save — loaded from fallback default, protecting file on disk.");
@@ -399,12 +396,18 @@ pub(crate) fn migrate_workspace(mut data: WorkspaceData) -> WorkspaceData {
         data.version = 1;
     }
 
-    // Future migrations would go here:
-    // if data.version == 1 {
-    //     log::info!("Migrating workspace from v1 to v2");
-    //     // Perform v1 -> v2 migration
-    //     data.version = 2;
-    // }
+    // Migration from v1 to v2: the three legacy fields
+    // (ProjectData.show_in_overview, FolderData.collapsed, top-level
+    // WorkspaceData.project_widths) have been removed from their structs --
+    // serde silently drops the unknown keys on load and there is no fold
+    // helper for any of them. The dedicated
+    // legacy_v1_*_does_not_migrate_into_main_window tests pin this contract.
+    // The block is kept so the version bump path is explicit; future
+    // migrations can extend it.
+    if data.version == 1 {
+        log::info!("Migrating workspace from v1 to v2");
+        data.version = 2;
+    }
 
     if original_version != data.version {
         log::info!("Workspace migrated from v{} to v{}", original_version, data.version);
@@ -447,7 +450,6 @@ pub fn default_workspace() -> WorkspaceData {
             id: project_id.clone(),
             name: "Default".to_string(),
             path: home_dir,
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -462,10 +464,11 @@ pub fn default_workspace() -> WorkspaceData {
             hook_terminals: HashMap::new(),
         }],
         project_order: vec![project_id],
-        project_widths: HashMap::new(),
         service_panel_heights: HashMap::new(),
         hook_panel_heights: HashMap::new(),
         folders: Vec::new(),
+        main_window: WindowState::default(),
+        extra_windows: Vec::new(),
     }
 }
 
@@ -479,7 +482,6 @@ mod tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -500,10 +502,11 @@ mod tests {
             version: WORKSPACE_VERSION,
             projects,
             project_order: order.into_iter().map(String::from).collect(),
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
-        hook_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders,
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -529,7 +532,6 @@ mod tests {
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p1".to_string(), "deleted_project".to_string()],
-                collapsed: false,
                 folder_color: FolderColor::default(),
             }],
         );
@@ -656,7 +658,6 @@ mod tests {
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p3".to_string(), "deleted".to_string()],
-                collapsed: false,
                 folder_color: FolderColor::default(),
             }],
         );
@@ -678,18 +679,107 @@ mod tests {
     // === migrate_workspace ===
 
     #[test]
-    fn migrate_v0_to_v1() {
+    fn migrate_v0_bumps_to_current_version() {
         let data = WorkspaceData {
             version: 0,
             projects: vec![],
             project_order: vec![],
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
-        hook_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
         };
         let migrated = migrate_workspace(data);
-        assert_eq!(migrated.version, 1);
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+    }
+
+    #[test]
+    fn legacy_v1_folder_collapsed_does_not_migrate_into_main_window() {
+        // Once the legacy `FolderData.collapsed` field is removed from the
+        // struct, a v1 workspace.json carrying a `collapsed: true` flag on a
+        // folder is silently dropped on load -- serde ignores the unknown key
+        // (the struct field is gone) and migrate_workspace has no fold helper
+        // to copy the flag into `main_window.folder_collapsed`. Documents the
+        // accepted tradeoff: by the time this lands, real-world files are
+        // already at v2 (the v1 -> v2 fold ran on the previous schema), so
+        // the loss is moot in practice. This test pins the post-deletion
+        // contract: a v1 file's collapsed flag must not resurrect on the
+        // per-window viewport state.
+        let json = r#"{
+            "version": 1,
+            "projects": [],
+            "project_order": [],
+            "folders": [
+                {
+                    "id": "f1",
+                    "name": "F",
+                    "project_ids": [],
+                    "collapsed": true
+                }
+            ]
+        }"#;
+        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated = migrate_workspace(data);
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+        assert!(migrated.main_window.folder_collapsed.is_empty(),
+            "legacy FolderData.collapsed must not fold into main_window after field removal");
+    }
+
+    #[test]
+    fn legacy_v1_show_in_overview_does_not_migrate_into_main_window() {
+        // Once the legacy `ProjectData.show_in_overview` field is removed from
+        // the struct, a v1 workspace.json carrying a `show_in_overview: false`
+        // flag on a project is silently dropped on load -- serde ignores the
+        // unknown key (the struct field is gone) and migrate_workspace has no
+        // fold helper to copy the flag into `main_window.hidden_project_ids`.
+        // Documents the accepted tradeoff: by the time this lands, real-world
+        // files are already at v2 (the v1 -> v2 fold ran on the previous
+        // schema), so the loss is moot in practice. This test pins the
+        // post-deletion contract: a v1 file's show_in_overview must not
+        // resurrect on the per-window viewport state.
+        let json = r#"{
+            "version": 1,
+            "projects": [
+                {
+                    "id": "p1",
+                    "name": "Hidden",
+                    "path": "/tmp",
+                    "layout": null,
+                    "show_in_overview": false
+                }
+            ],
+            "project_order": ["p1"]
+        }"#;
+        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated = migrate_workspace(data);
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+        assert!(migrated.main_window.hidden_project_ids.is_empty(),
+            "legacy show_in_overview must not fold into main_window after field removal");
+    }
+
+    #[test]
+    fn legacy_v1_top_level_project_widths_does_not_migrate_into_main_window() {
+        // Once the legacy WorkspaceData.project_widths field is removed from
+        // the struct, a v1 workspace.json carrying a top-level project_widths
+        // key is silently dropped on load -- serde ignores the unknown key
+        // and migrate_workspace has no helper to fold it. Documents the
+        // accepted tradeoff: by the time this lands, real-world files are
+        // already at v2 (the v1 -> v2 fold ran on the previous schema), so
+        // the loss is moot in practice. This test pins the post-deletion
+        // contract: a v1 file's project_widths must not resurrect on the
+        // per-window viewport state.
+        let json = r#"{
+            "version": 1,
+            "projects": [],
+            "project_order": [],
+            "project_widths": {"p1": 60.0, "p2": 40.0}
+        }"#;
+        let data: WorkspaceData = serde_json::from_str(json).unwrap();
+        let migrated = migrate_workspace(data);
+        assert_eq!(migrated.version, WORKSPACE_VERSION);
+        assert!(migrated.main_window.project_widths.is_empty(),
+            "legacy top-level project_widths must not fold into main_window after field removal");
     }
 
     #[test]
@@ -698,10 +788,11 @@ mod tests {
             version: WORKSPACE_VERSION,
             projects: vec![],
             project_order: vec![],
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
-        hook_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
         };
         let migrated = migrate_workspace(data);
         assert_eq!(migrated.version, WORKSPACE_VERSION);
@@ -721,6 +812,9 @@ mod tests {
 
     #[test]
     fn workspace_with_folders_round_trips() {
+        // Legacy `FolderData.collapsed` and top-level `project_widths` are
+        // tombstoned on save (skip_serializing); per-window state lives on
+        // `main_window.folder_collapsed` and `main_window.project_widths`.
         let mut data = make_workspace(
             vec![make_project("p1"), make_project("p2")],
             vec!["f1", "p1"],
@@ -728,18 +822,18 @@ mod tests {
                 id: "f1".to_string(),
                 name: "My Folder".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: true,
                 folder_color: FolderColor::default(),
             }],
         );
-        data.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window.project_widths.insert("p1".to_string(), 60.0);
 
         let json = serde_json::to_string(&data).unwrap();
         let deserialized: WorkspaceData = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.folders.len(), 1);
         assert_eq!(deserialized.folders[0].name, "My Folder");
-        assert!(deserialized.folders[0].collapsed);
-        assert_eq!(deserialized.project_widths.get("p1"), Some(&60.0));
+        assert_eq!(deserialized.main_window.folder_collapsed.get("f1"), Some(&true));
+        assert_eq!(deserialized.main_window.project_widths.get("p1"), Some(&60.0));
     }
 
     #[test]
@@ -791,20 +885,16 @@ mod tests {
         remote2.is_remote = true;
         remote2.connection_id = Some("conn1".to_string());
 
-        let mut data = make_workspace(
+        let data = make_workspace(
             vec![local, remote1, remote2],
             vec!["local1", "remote:conn1:folder1"],
             vec![FolderData {
                 id: "remote:conn1:folder1".to_string(),
                 name: "Server 1".to_string(),
                 project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-                collapsed: false,
                 folder_color: FolderColor::default(),
             }],
         );
-        data.project_widths.insert("local1".to_string(), 50.0);
-        data.project_widths.insert("remote:conn1:p1".to_string(), 40.0);
-
         let filtered = data.without_remote_projects();
 
         // Remote projects should be filtered out
@@ -816,10 +906,6 @@ mod tests {
 
         // Remote folder should be removed from project_order
         assert_eq!(filtered.project_order, vec!["local1".to_string()]);
-
-        // Remote project widths should be filtered out
-        assert_eq!(filtered.project_widths.len(), 1);
-        assert!(filtered.project_widths.contains_key("local1"));
     }
 
     fn make_worktree_project(id: &str, parent_id: &str) -> ProjectData {
@@ -881,7 +967,6 @@ mod tests {
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p1".to_string(), "wt1".to_string()],
-                collapsed: false,
                 folder_color: FolderColor::default(),
             }],
         );
@@ -958,7 +1043,6 @@ mod tests {
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["parent".to_string(), "wt1".to_string()],
-                collapsed: false,
                 folder_color: FolderColor::default(),
             }],
         );

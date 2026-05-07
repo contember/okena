@@ -22,23 +22,64 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Toggle visibility for a single worktree (no propagation to children)
-    pub fn toggle_worktree_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        self.with_project(project_id, cx, |project| {
-            project.show_in_overview = !project.show_in_overview;
-            true
-        });
+    /// Returns whether a project is hidden in this workspace's main window.
+    ///
+    /// Reads from `main_window.hidden_project_ids` (the per-window viewport
+    /// model, the source of truth). Today this is always the main window;
+    /// per-window scoping arrives with the window-scoped mutation API
+    /// (slice 02). Missing entry == visible.
+    pub fn is_project_hidden(&self, project_id: &str) -> bool {
+        self.data
+            .main_window
+            .hidden_project_ids
+            .contains(project_id)
     }
 
-    /// Toggle project overview visibility (also toggles all worktree children)
-    pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let new_visible = self.project(project_id).map(|p| !p.show_in_overview);
-        let Some(new_visible) = new_visible else { return };
+    /// Toggle visibility for a single worktree (no propagation to children).
+    ///
+    /// Writes flow into `main_window.hidden_project_ids` (the per-window
+    /// viewport model's source of truth).
+    pub fn toggle_worktree_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let was_hidden = self
+            .data
+            .main_window
+            .hidden_project_ids
+            .contains(project_id);
+        if was_hidden {
+            self.data.main_window.hidden_project_ids.remove(project_id);
+        } else {
+            self.data
+                .main_window
+                .hidden_project_ids
+                .insert(project_id.to_string());
+        }
+        if self.project(project_id).is_some() {
+            self.notify_data(cx);
+        }
+    }
 
-        self.with_project(project_id, cx, |project| {
-            project.show_in_overview = new_visible;
-            true
-        });
+    /// Toggle project overview visibility (also toggles all worktree children).
+    ///
+    /// Writes flow into `main_window.hidden_project_ids` (the per-window
+    /// viewport model's source of truth).
+    pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if self.project(project_id).is_none() {
+            return;
+        }
+        let was_hidden = self
+            .data
+            .main_window
+            .hidden_project_ids
+            .contains(project_id);
+        if was_hidden {
+            self.data.main_window.hidden_project_ids.remove(project_id);
+        } else {
+            self.data
+                .main_window
+                .hidden_project_ids
+                .insert(project_id.to_string());
+        }
+        self.notify_data(cx);
     }
 
     /// Add a new project
@@ -60,7 +101,6 @@ impl Workspace {
             id: id.clone(),
             name: name.clone(),
             path: path.clone(),
-            show_in_overview: true,
             layout: if with_terminal { Some(LayoutNode::new_terminal()) } else { None },
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -250,8 +290,8 @@ impl Workspace {
             }
         }
 
-        // Remove from widths
-        self.data.project_widths.remove(project_id);
+        // Remove from widths (main_window is the source of truth).
+        self.data.main_window.project_widths.remove(project_id);
         // Clear closing state
         self.lifecycle.finish_closing(project_id);
         // Clear focus if this was the focused project
@@ -334,9 +374,13 @@ impl Workspace {
         }
     }
 
-    /// Update project column widths
+    /// Update project column widths.
+    ///
+    /// Writes to `main_window.project_widths` (the per-window viewport model,
+    /// source of truth). Today this is always the main window; per-window
+    /// scoping arrives with the window-scoped mutation API (slice 02).
     pub fn update_project_widths(&mut self, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
-        self.data.project_widths = widths;
+        self.data.main_window.project_widths = widths;
         self.notify_data(cx);
     }
 
@@ -352,9 +396,13 @@ impl Workspace {
         self.notify_data(cx);
     }
 
-    /// Get project width or default equal distribution
+    /// Get project width or default equal distribution.
+    ///
+    /// Reads from `main_window.project_widths` (the per-window viewport model).
+    /// Today this is always the main window; per-window scoping arrives with the
+    /// window-scoped mutation API (slice 02).
     pub fn get_project_width(&self, project_id: &str, visible_count: usize) -> f32 {
-        self.data.project_widths
+        self.data.main_window.project_widths
             .get(project_id)
             .copied()
             .unwrap_or_else(|| 100.0 / visible_count as f32)
@@ -456,7 +504,6 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
-            show_in_overview: true,
             // When hooks are deferred the worktree directory doesn't exist yet.
             // Use None so no terminals are spawned until creation finishes.
             layout: if fire_hooks { new_layout } else { None },
@@ -585,7 +632,6 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path,
-            show_in_overview: false,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -605,6 +651,15 @@ impl Workspace {
             service_terminals: HashMap::new(),
             hook_terminals: HashMap::new(),
         };
+
+        // Discovered worktrees default to hidden in the main window (the
+        // user did not opt in via Okena UI). Per-window scoping arrives
+        // with the window-scoped mutation API; today we only have one
+        // window so writing main_window matches the legacy intent.
+        self.data
+            .main_window
+            .hidden_project_ids
+            .insert(id.clone());
 
         // Insert after parent in project_order
         self.data.projects.push(project);
@@ -653,7 +708,7 @@ impl Workspace {
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
-        self.data.project_widths.remove(project_id);
+        self.data.main_window.project_widths.remove(project_id);
         // Note: caller is responsible for calling notify_data
     }
 
@@ -725,7 +780,6 @@ mod tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -746,10 +800,11 @@ mod tests {
             version: 1,
             projects: vec![],
             project_order: vec![],
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: crate::state::WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -759,7 +814,7 @@ mod tests {
         for folder in &mut data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
-        data.project_widths.remove(project_id);
+        data.main_window.project_widths.remove(project_id);
     }
 
     #[test]
@@ -771,7 +826,6 @@ mod tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -790,9 +844,20 @@ mod tests {
     #[test]
     fn test_get_project_width_custom() {
         let mut data = make_workspace_data();
-        data.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window.project_widths.insert("p1".to_string(), 60.0);
         let ws = Workspace::new(data);
         assert_eq!(ws.get_project_width("p1", 2), 60.0);
+    }
+
+    #[test]
+    fn get_project_width_reads_from_main_window_project_widths() {
+        // Per-window viewport model: width should come from main_window.project_widths,
+        // not the legacy top-level data.project_widths. Populate only main_window;
+        // legacy field stays empty. After the runtime read-site swap, the value lands.
+        let mut data = make_workspace_data();
+        data.main_window.project_widths.insert("p1".to_string(), 75.0);
+        let ws = Workspace::new(data);
+        assert_eq!(ws.get_project_width("p1", 2), 75.0);
     }
 
     #[test]
@@ -841,10 +906,11 @@ mod gpui_tests {
             version: 1,
             projects: vec![],
             project_order: vec![],
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: crate::state::WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -853,7 +919,6 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -915,6 +980,117 @@ mod gpui_tests {
             assert_eq!(ws.data().projects.len(), 1);
             assert_eq!(ws.data().projects[0].id, "p2");
             assert!(!ws.data().project_order.contains(&"p1".to_string()));
+        });
+    }
+
+    #[gpui::test]
+    fn is_project_hidden_reads_from_main_window_hidden_project_ids(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: hidden state is read from
+        // main_window.hidden_project_ids (the source of truth). Missing
+        // entry == visible.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.is_project_hidden("p1"));
+            // Missing entry defaults to visible (not hidden).
+            assert!(!ws.is_project_hidden("p2"));
+            assert!(!ws.is_project_hidden("missing"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_overview_visibility_writes_to_main_window(cx: &mut gpui::TestAppContext) {
+        // Toggling project visibility flips main_window.hidden_project_ids
+        // (the per-window viewport model's source of truth).
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // First toggle: visible -> hidden. main_window inserts the id.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility("p1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+
+        // Second toggle: hidden -> visible. main_window removes the entry.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility("p1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_worktree_visibility_writes_to_main_window(cx: &mut gpui::TestAppContext) {
+        // Same as toggle_project_overview_visibility but for the worktree
+        // entrypoint: flip main_window.hidden_project_ids.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility("p1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility("p1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_writes_only_to_main_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: writes go to main_window.project_widths
+        // (the source of truth). The legacy top-level WorkspaceData.project_widths
+        // field has been removed entirely.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 60.0);
+            widths.insert("p2".to_string(), 40.0);
+            ws.update_project_widths(widths, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&60.0));
+            assert_eq!(ws.data().main_window.project_widths.get("p2"), Some(&40.0));
+        });
+    }
+
+    #[gpui::test]
+    fn delete_project_clears_main_window_project_width(cx: &mut gpui::TestAppContext) {
+        // Deleting a project must scrub its width from main_window.project_widths
+        // (the source of truth). Without the scrub, a re-added project with the
+        // same id would inherit the deleted project's width on the next render.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window.project_widths.insert("p2".to_string(), 40.0);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_project("p1", &HooksConfig::default(), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.project_widths.contains_key("p1"));
+            assert!(ws.data().main_window.project_widths.contains_key("p2"));
         });
     }
 

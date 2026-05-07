@@ -637,14 +637,7 @@ pub fn execute_action(
             ActionResult::Ok(None)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show } => {
-            let current = match ws.project(&project_id) {
-                Some(p) => p.show_in_overview,
-                None => return ActionResult::Err(format!("project not found: {}", project_id)),
-            };
-            if current != show {
-                ws.toggle_project_overview_visibility(&project_id, cx);
-            }
-            ActionResult::Ok(None)
+            apply_set_project_show_in_overview(ws, &project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             if ws.project(&project_id).is_none() {
@@ -919,6 +912,27 @@ fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<s
     Ok(parent_canonical.join(file_name))
 }
 
+/// Apply the `SetProjectShowInOverview` action.
+///
+/// Reads the current visibility from `Workspace::is_project_hidden`
+/// (sourced from `main_window.hidden_project_ids`, the per-window
+/// viewport model's source of truth).
+fn apply_set_project_show_in_overview(
+    ws: &mut Workspace,
+    project_id: &str,
+    show: bool,
+    cx: &mut Context<Workspace>,
+) -> ActionResult {
+    if ws.project(project_id).is_none() {
+        return ActionResult::Err(format!("project not found: {}", project_id));
+    }
+    let current_visible = !ws.is_project_hidden(project_id);
+    if current_visible != show {
+        ws.toggle_project_overview_visibility(project_id, cx);
+    }
+    ActionResult::Ok(None)
+}
+
 /// Reject names that would escape a directory or traverse paths.
 fn validate_leaf_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -1001,6 +1015,87 @@ mod path_guard_tests {
         assert!(validate_leaf_name("..").is_err());
         assert!(validate_leaf_name("a/b").is_err());
         assert!(validate_leaf_name("a\\b").is_err());
+    }
+}
+
+#[cfg(test)]
+mod set_show_in_overview_tests {
+    use super::{apply_set_project_show_in_overview, ActionResult};
+    use crate::workspace::state::{ProjectData, Workspace, WindowState, WorkspaceData};
+    use crate::workspace::settings::HooksConfig;
+    use gpui::AppContext as _;
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_workspace_data() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    fn make_project(id: &str) -> ProjectData {
+        ProjectData {
+            id: id.to_string(),
+            name: format!("Project {}", id),
+            path: "/tmp/test".to_string(),
+            layout: None,
+            terminal_names: HashMap::new(),
+            hidden_terminals: HashMap::new(),
+            worktree_info: None,
+            worktree_ids: Vec::new(),
+            folder_color: FolderColor::default(),
+            hooks: HooksConfig::default(),
+            is_remote: false,
+            connection_id: None,
+            service_terminals: HashMap::new(),
+            default_shell: None,
+            hook_terminals: HashMap::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_reads_hidden_set(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The action's visibility decision must read from
+        // main_window.hidden_project_ids. This fixture starts with p1 in
+        // the hidden set; the action says `show: true`, so the helper
+        // toggles, clearing the hidden set.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(ws, "p1", true, cx);
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(
+                !ws.is_project_hidden("p1"),
+                "action should have toggled the hidden set off"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_unknown_project_errs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(ws, "missing", true, cx);
+            assert!(matches!(result, ActionResult::Err(_)));
+        });
     }
 }
 

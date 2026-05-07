@@ -9,6 +9,5 @@ pub mod keys;
 pub mod process;
 pub mod selection;
 pub mod theme;
-pub mod timing;
 pub mod types;
 pub mod ws;

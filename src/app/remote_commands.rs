@@ -37,8 +37,6 @@ pub(crate) async fn remote_command_loop(
             Err(_) => break,
         };
 
-        let _slow = okena_core::timing::SlowGuard::new("remote_command_loop::iter");
-
         let result = match msg.command {
             RemoteCommand::Action(action) => {
                 match action {
@@ -128,6 +126,10 @@ pub(crate) async fn remote_command_loop(
                     let project_map: std::collections::HashMap<&str, &crate::workspace::state::ProjectData> =
                         data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
 
+                    // Source of truth for runtime visibility (per-window
+                    // viewport model).
+                    let hidden_project_ids = &data.main_window.hidden_project_ids;
+
                     // Build ordered projects following project_order + folder expansion
                     let mut projects: Vec<ApiProject> = Vec::new();
                     let mut seen: HashSet<String> = HashSet::new();
@@ -163,7 +165,7 @@ pub(crate) async fn remote_command_loop(
                             id: p.id.clone(),
                             name: p.name.clone(),
                             path: p.path.clone(),
-                            show_in_overview: p.show_in_overview,
+                            show_in_overview: api_project_visibility(&p.id, hidden_project_ids),
                             layout: p.layout.as_ref().map(|l| l.to_api()),
                             terminal_names: p.terminal_names.clone(),
                             git_status,
@@ -287,5 +289,41 @@ impl Okena {
             ).await;
         })
         .detach();
+    }
+}
+
+/// Pure visibility projection for the remote `ApiProject.show_in_overview`
+/// wire flag. A project is "shown in overview" iff it is absent from the
+/// per-window hidden set (today: `main_window.hidden_project_ids`).
+fn api_project_visibility(project_id: &str, hidden_project_ids: &HashSet<String>) -> bool {
+    !hidden_project_ids.contains(project_id)
+}
+
+#[cfg(test)]
+mod api_project_visibility_tests {
+    use super::api_project_visibility;
+    use std::collections::HashSet;
+
+    /// Regression: the wire-format visibility flag must derive from the
+    /// per-window hidden set. With the legacy
+    /// `ProjectData.show_in_overview` field removed entirely, this test
+    /// pins the post-deletion contract.
+    #[test]
+    fn api_project_visibility_reads_from_hidden_set() {
+        let hidden: HashSet<String> = ["p1".to_string()].into_iter().collect();
+        assert!(
+            !api_project_visibility("p1", &hidden),
+            "membership in hidden set must read as not-visible",
+        );
+        assert!(
+            api_project_visibility("p2", &hidden),
+            "absent from hidden set must read as visible",
+        );
+    }
+
+    #[test]
+    fn api_project_visibility_empty_hidden_set_is_visible() {
+        let hidden: HashSet<String> = HashSet::new();
+        assert!(api_project_visibility("p1", &hidden));
     }
 }

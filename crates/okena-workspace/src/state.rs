@@ -17,7 +17,7 @@ use std::collections::HashMap;
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
-    PendingWorktreeClose, ProjectData, WorkspaceData, WorktreeMetadata,
+    PendingWorktreeClose, ProjectData, WindowBounds, WindowState, WorkspaceData, WorktreeMetadata,
 };
 
 /// Global workspace wrapper for app-wide access (used by quit handler)
@@ -338,11 +338,19 @@ impl Workspace {
     /// When a folder filter is active, only projects from that folder are shown
     /// (top-level projects are hidden). Focused project override still takes priority.
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
+        // active_folder_filter still lives on the entity in slice 01; map it
+        // into a transient WindowState so compute_visible_projects can read
+        // the filter from a single per-window source. Slice 02 will move
+        // active_folder_filter into main_window.folder_filter outright.
+        let window = WindowState {
+            folder_filter: self.active_folder_filter.clone(),
+            ..self.data.main_window.clone()
+        };
         compute_visible_projects(
             &self.data,
             self.focused_project_id(),
             self.focus_manager.is_focus_individual(),
-            self.active_folder_filter.as_ref(),
+            &window,
         )
     }
 
@@ -447,7 +455,7 @@ impl Workspace {
         self.data.projects.retain(|p| !p.id.starts_with(&prefix));
         self.data.folders.retain(|f| !f.id.starts_with(&prefix));
         self.data.project_order.retain(|id| !id.starts_with(&prefix));
-        self.data.project_widths.retain(|id, _| !id.starts_with(&prefix));
+        self.data.main_window.project_widths.retain(|id, _| !id.starts_with(&prefix));
 
         self.remote_sync.retain_not_starting_with(&prefix);
 
@@ -503,7 +511,7 @@ impl Workspace {
 #[cfg(test)]
 mod workspace_tests {
     use crate::state::{
-        FolderData, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData,
+        FolderData, LayoutNode, ProjectData, SplitDirection, WindowState, Workspace, WorkspaceData,
         WorktreeMetadata,
     };
     use okena_terminal::shell_config::ShellType;
@@ -511,12 +519,11 @@ mod workspace_tests {
     use crate::settings::HooksConfig;
     use std::collections::HashMap;
 
-    fn make_project(id: &str, visible: bool) -> ProjectData {
+    fn make_project(id: &str) -> ProjectData {
         ProjectData {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: visible,
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
                 minimized: false,
@@ -539,23 +546,29 @@ mod workspace_tests {
     }
 
     fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
+        // Per-window viewport model: hidden state lives on
+        // `main_window.hidden_project_ids` and is populated explicitly by
+        // tests that exercise hidden-project behavior. The legacy
+        // `ProjectData.show_in_overview` shortcut has been removed.
         WorkspaceData {
             version: 1,
             projects,
             project_order: order.into_iter().map(String::from).collect(),
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: Vec::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
     #[test]
     fn test_visible_projects_filters_hidden() {
-        let data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", false), make_project("p3", true)],
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
         );
+        data.main_window.hidden_project_ids.insert("p2".to_string());
         let ws = Workspace::new(data);
 
         let visible = ws.visible_projects();
@@ -566,10 +579,11 @@ mod workspace_tests {
 
     #[test]
     fn test_visible_projects_with_focused_project() {
-        let data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", true), make_project("p3", false)],
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
         );
+        data.main_window.hidden_project_ids.insert("p3".to_string());
         let mut ws = Workspace::new(data);
 
         ws.focus_manager.set_focused_project_id(Some("p3".to_string()));
@@ -582,14 +596,13 @@ mod workspace_tests {
     #[test]
     fn test_visible_projects_with_folder() {
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", true)],
+            vec![make_project("p1"), make_project("p2")],
             vec!["f1"],
         );
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -604,7 +617,7 @@ mod workspace_tests {
     #[test]
     fn test_projects_by_recency() {
         let data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", true), make_project("p3", true)],
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["p1", "p2", "p3"],
         );
         let mut ws = Workspace::new(data);
@@ -620,7 +633,7 @@ mod workspace_tests {
 
     #[test]
     fn test_collect_all_detached_terminals() {
-        let mut project = make_project("p1", true);
+        let mut project = make_project("p1");
         project.layout = Some(LayoutNode::Split {
             direction: SplitDirection::Horizontal,
             sizes: vec![50.0, 50.0],
@@ -654,14 +667,13 @@ mod workspace_tests {
     #[test]
     fn test_folder_for_project() {
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), make_project("p2", true)],
+            vec![make_project("p1"), make_project("p2")],
             vec!["f1", "p2"],
         );
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
         let ws = Workspace::new(data);
@@ -674,9 +686,9 @@ mod workspace_tests {
     fn test_visible_projects_with_folder_filter() {
         let mut data = make_workspace_data(
             vec![
-                make_project("p1", true), make_project("p2", true),
-                make_project("p3", true), make_project("p4", true),
-                make_project("p5", true),
+                make_project("p1"), make_project("p2"),
+                make_project("p3"), make_project("p4"),
+                make_project("p5"),
             ],
             vec!["f1", "f2", "p5"],
         );
@@ -685,15 +697,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p3".to_string(), "p4".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
 
@@ -718,8 +728,8 @@ mod workspace_tests {
     fn test_folder_filter_hides_top_level_projects() {
         let mut data = make_workspace_data(
             vec![
-                make_project("p1", true), make_project("p2", true),
-                make_project("p3", true),
+                make_project("p1"), make_project("p2"),
+                make_project("p3"),
             ],
             vec!["f1", "p3"],
         );
@@ -727,7 +737,6 @@ mod workspace_tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -741,9 +750,9 @@ mod workspace_tests {
 
     #[test]
     fn test_visible_projects_worktree_focus() {
-        let mut p1 = make_project("p1", true);
+        let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string(), "w2".to_string()];
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -751,7 +760,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
         });
-        let mut w2 = make_project("w2", true);
+        let mut w2 = make_project("w2");
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -761,7 +770,7 @@ mod workspace_tests {
         });
 
         let data = make_workspace_data(
-            vec![p1, w1, w2, make_project("p2", true)],
+            vec![p1, w1, w2, make_project("p2")],
             vec!["p1", "p2"],
         );
         let mut ws = Workspace::new(data);
@@ -785,9 +794,9 @@ mod workspace_tests {
 
     #[test]
     fn test_folder_filter_includes_worktree_children() {
-        let mut p1 = make_project("p1", true);
+        let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string(), "w2".to_string()];
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -795,7 +804,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: "branch-w1".to_string(),
         });
-        let mut w2 = make_project("w2", true);
+        let mut w2 = make_project("w2");
         w2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -805,14 +814,13 @@ mod workspace_tests {
         });
 
         let mut data = make_workspace_data(
-            vec![p1, w1, w2, make_project("p2", true)],
+            vec![p1, w1, w2, make_project("p2")],
             vec!["f1", "p2"],
         );
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -830,7 +838,7 @@ mod workspace_tests {
 
     #[test]
     fn test_folder_filter_worktree_children_not_duplicated() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -839,18 +847,17 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let mut p1 = make_project("p1", true);
+        let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string()];
 
         let mut data = make_workspace_data(
-            vec![p1, w1, make_project("p2", true)],
+            vec![p1, w1, make_project("p2")],
             vec!["f1", "w1", "p2"],
         );
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -864,7 +871,7 @@ mod workspace_tests {
 
     #[test]
     fn test_worktree_children_ordered_within_folder_section() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -873,11 +880,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let mut p1 = make_project("p1", true);
+        let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string()];
 
         let mut data = make_workspace_data(
-            vec![p1, make_project("p2", true), w1, make_project("p3", true)],
+            vec![p1, make_project("p2"), w1, make_project("p3")],
             vec!["f1", "w1", "f2", "p3"],
         );
         data.folders = vec![
@@ -885,15 +892,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
 
@@ -909,7 +914,7 @@ mod workspace_tests {
 
     #[test]
     fn test_worktree_before_parent_folder_in_project_order() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p2".to_string(),
             color_override: None,
@@ -918,27 +923,26 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let mut p2 = make_project("p2", false);
+        let mut p2 = make_project("p2");
         p2.worktree_ids = vec!["w1".to_string()];
 
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), p2, w1],
+            vec![make_project("p1"), p2, w1],
             vec!["w1", "f1", "f2"],
         );
+        data.main_window.hidden_project_ids.insert("p2".to_string());
         data.folders = vec![
             FolderData {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
 
@@ -953,7 +957,7 @@ mod workspace_tests {
 
     #[test]
     fn test_worktree_children_ordered_when_parent_hidden() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -962,27 +966,26 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let mut p1 = make_project("p1", false);
+        let mut p1 = make_project("p1");
         p1.worktree_ids = vec!["w1".to_string()];
 
         let mut data = make_workspace_data(
-            vec![p1, make_project("p2", true), w1],
+            vec![p1, make_project("p2"), w1],
             vec!["f1", "w1", "f2"],
         );
+        data.main_window.hidden_project_ids.insert("p1".to_string());
         data.folders = vec![
             FolderData {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
 
@@ -996,7 +999,7 @@ mod workspace_tests {
 
     #[test]
     fn test_worktree_child_in_folder_not_duplicated() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -1006,7 +1009,7 @@ mod workspace_tests {
         });
 
         let mut data = make_workspace_data(
-            vec![make_project("p1", true), w1, make_project("p2", true)],
+            vec![make_project("p1"), w1, make_project("p2")],
             vec!["f1", "f2"],
         );
         data.folders = vec![
@@ -1014,15 +1017,13 @@ mod workspace_tests {
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "w1".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
             FolderData {
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
-                collapsed: false,
-                folder_color: FolderColor::default(),
+                    folder_color: FolderColor::default(),
             },
         ];
 
@@ -1038,7 +1039,7 @@ mod workspace_tests {
 
     #[test]
     fn test_orphan_worktree_shown_when_parent_not_in_result() {
-        let mut w1 = make_project("w1", true);
+        let mut w1 = make_project("w1");
         w1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "p1".to_string(),
             color_override: None,
@@ -1047,10 +1048,11 @@ mod workspace_tests {
             branch_name: "branch-w1".to_string(),
         });
 
-        let data = make_workspace_data(
-            vec![make_project("p1", false), w1],
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), w1],
             vec!["p1", "w1"],
         );
+        data.main_window.hidden_project_ids.insert("p1".to_string());
         let ws = Workspace::new(data);
 
         let visible = ws.visible_projects();
@@ -1062,8 +1064,8 @@ mod workspace_tests {
     fn test_folder_filter_with_focus_override() {
         let mut data = make_workspace_data(
             vec![
-                make_project("p1", true), make_project("p2", true),
-                make_project("p3", true),
+                make_project("p1"), make_project("p2"),
+                make_project("p3"),
             ],
             vec!["f1", "p3"],
         );
@@ -1071,7 +1073,6 @@ mod workspace_tests {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
 
@@ -1087,9 +1088,9 @@ mod workspace_tests {
 
     #[test]
     fn test_visible_projects_includes_worktree_children() {
-        let mut parent = make_project("parent", true);
+        let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
-        let mut wt1 = make_project("wt1", true);
+        let mut wt1 = make_project("wt1");
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1097,7 +1098,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
         });
-        let mut wt2 = make_project("wt2", true);
+        let mut wt2 = make_project("wt2");
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1117,9 +1118,9 @@ mod workspace_tests {
 
     #[test]
     fn test_visible_projects_worktree_children_in_folder() {
-        let mut parent = make_project("parent", true);
+        let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string()];
-        let mut wt1 = make_project("wt1", true);
+        let mut wt1 = make_project("wt1");
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1127,13 +1128,12 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
         });
-        let other = make_project("other", true);
+        let other = make_project("other");
         let mut data = make_workspace_data(vec![parent, wt1, other], vec!["f1", "other"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["parent".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         }];
         let ws = Workspace::new(data);
@@ -1147,9 +1147,9 @@ mod workspace_tests {
 
     #[test]
     fn test_focus_parent_shows_parent_and_worktrees() {
-        let mut parent = make_project("parent", true);
+        let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
-        let mut wt1 = make_project("wt1", true);
+        let mut wt1 = make_project("wt1");
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1157,7 +1157,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
         });
-        let mut wt2 = make_project("wt2", true);
+        let mut wt2 = make_project("wt2");
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1178,9 +1178,9 @@ mod workspace_tests {
 
     #[test]
     fn test_focus_worktree_shows_only_worktree() {
-        let mut parent = make_project("parent", true);
+        let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
-        let mut wt1 = make_project("wt1", true);
+        let mut wt1 = make_project("wt1");
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1188,7 +1188,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
         });
-        let mut wt2 = make_project("wt2", true);
+        let mut wt2 = make_project("wt2");
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1207,9 +1207,9 @@ mod workspace_tests {
 
     #[test]
     fn test_focus_parent_individual_shows_only_parent() {
-        let mut parent = make_project("parent", true);
+        let mut parent = make_project("parent");
         parent.worktree_ids = vec!["wt1".to_string(), "wt2".to_string()];
-        let mut wt1 = make_project("wt1", true);
+        let mut wt1 = make_project("wt1");
         wt1.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1217,7 +1217,7 @@ mod workspace_tests {
             worktree_path: "/tmp/wt1".to_string(),
             branch_name: String::new(),
         });
-        let mut wt2 = make_project("wt2", true);
+        let mut wt2 = make_project("wt2");
         wt2.worktree_info = Some(WorktreeMetadata {
             parent_project_id: "parent".to_string(),
             color_override: None,
@@ -1242,7 +1242,7 @@ mod workspace_tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_terminal::shell_config::ShellType;
     use okena_core::theme::FolderColor;
@@ -1253,7 +1253,6 @@ mod gpui_tests {
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
-            show_in_overview: true,
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(format!("term_{}", id)),
                 minimized: false,
@@ -1276,14 +1275,18 @@ mod gpui_tests {
     }
 
     fn make_workspace_data(projects: Vec<ProjectData>, order: Vec<&str>) -> WorkspaceData {
+        // Per-window viewport model: hidden state lives on
+        // `main_window.hidden_project_ids` and is set explicitly by tests
+        // that exercise hidden-project behavior.
         WorkspaceData {
             version: 1,
             projects,
             project_order: order.into_iter().map(String::from).collect(),
-            project_widths: HashMap::new(),
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
         }
     }
 
@@ -1372,12 +1375,12 @@ mod gpui_tests {
 
     #[gpui::test]
     fn test_visible_projects_gpui(cx: &mut gpui::TestAppContext) {
-        let mut p1 = make_project("p1");
+        let p1 = make_project("p1");
         let p2 = make_project("p2");
-        let mut p3 = make_project("p3");
-        p1.show_in_overview = false;
-        p3.show_in_overview = false;
-        let data = make_workspace_data(vec![p1, p2, p3], vec!["p1", "p2", "p3"]);
+        let p3 = make_project("p3");
+        let mut data = make_workspace_data(vec![p1, p2, p3], vec!["p1", "p2", "p3"]);
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.main_window.hidden_project_ids.insert("p3".to_string());
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1422,14 +1425,12 @@ mod gpui_tests {
             id: "remote:conn1:folder1".to_string(),
             name: "Server 1".to_string(),
             project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         });
         data.folders.push(FolderData {
             id: "remote:conn2:folder2".to_string(),
             name: "Server 2".to_string(),
             project_ids: vec!["remote:conn2:p1".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         });
 
@@ -1458,20 +1459,18 @@ mod gpui_tests {
         use crate::state::FolderData;
 
         let local = make_project("local1");
-        let mut remote1 = make_remote_project("remote:conn1:p1", "conn1");
-        remote1.show_in_overview = true;
-        let mut remote2 = make_remote_project("remote:conn1:p2", "conn1");
-        remote2.show_in_overview = false;
+        let remote1 = make_remote_project("remote:conn1:p1", "conn1");
+        let remote2 = make_remote_project("remote:conn1:p2", "conn1");
 
         let mut data = make_workspace_data(
             vec![local, remote1, remote2],
             vec!["local1", "remote:conn1:folder1"],
         );
+        data.main_window.hidden_project_ids.insert("remote:conn1:p2".to_string());
         data.folders.push(FolderData {
             id: "remote:conn1:folder1".to_string(),
             name: "Server 1".to_string(),
             project_ids: vec!["remote:conn1:p1".to_string(), "remote:conn1:p2".to_string()],
-            collapsed: false,
             folder_color: FolderColor::default(),
         });
 
