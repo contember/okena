@@ -585,10 +585,24 @@ fn main() {
                         ..Default::default()
                     })
                 },
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Point::default(),
-                    size: size(px(1200.0), px(800.0)),
-                })),
+                window_bounds: Some({
+                    // Restore main window's last-known OS bounds so position
+                    // (including which monitor) survives relaunch. Falls back
+                    // to a default 1200x800 at origin (0,0) on first launch
+                    // or if the persisted bounds are absent.
+                    let persisted = workspace_data.main_window.os_bounds;
+                    if let Some(b) = persisted {
+                        WindowBounds::Windowed(Bounds {
+                            origin: Point { x: px(b.origin_x), y: px(b.origin_y) },
+                            size: Size { width: px(b.width), height: px(b.height) },
+                        })
+                    } else {
+                        WindowBounds::Windowed(Bounds {
+                            origin: Point::default(),
+                            size: size(px(1200.0), px(800.0)),
+                        })
+                    }
+                }),
                 is_resizable: true,
                 // On Windows, use client-side decorations for custom window controls
                 window_decorations: Some(if cfg!(target_os = "windows") {
@@ -643,6 +657,18 @@ fn main() {
                         .entry(terminal_id)
                         .or_default()
                         .push(weak_content);
+                }));
+
+                // Wire up viewer-count lookup so the terminal-element resize
+                // path can detect "this terminal is rendered in N>1 windows"
+                // and gate resize() to "shrinks only" — prevents ping-pong
+                // between windows of differing bounds.
+                okena_views_terminal::set_viewer_count_fn(Box::new(|terminal_id| {
+                    let registry = crate::views::window::content_pane_registry().lock();
+                    registry
+                        .get(terminal_id)
+                        .map(|weaks| weaks.iter().filter(|w| w.upgrade().is_some()).count())
+                        .unwrap_or(0)
                 }));
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)

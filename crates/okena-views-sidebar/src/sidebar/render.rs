@@ -161,7 +161,7 @@ impl Render for Sidebar {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
                     if let Some(&p) = all_projects.get(wt_id.as_str()) {
-                        let mut info = SidebarProjectInfo::from_project(p, workspace);
+                        let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
                         info.is_closing = workspace.is_project_closing(&p.id);
                         info.is_creating = workspace.is_creating_project(&p.id);
                         // Inherit parent project's color for visual association
@@ -230,7 +230,7 @@ impl Render for Sidebar {
                         p.worktree_info.as_ref().map(|w| w.parent_project_id.as_str()).unwrap_or("")
                     ))
                     .map(|p| {
-                        let mut info = SidebarProjectInfo::from_project(p, workspace);
+                        let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
                         info.is_orphan = p.worktree_info.as_ref().map_or(false, |wt| {
                             !all_project_ids.contains(wt.parent_project_id.as_str())
                         });
@@ -272,7 +272,7 @@ impl Render for Sidebar {
                     }
                 }
                 let mut wt_children = worktree_children_map.remove(&project.id).unwrap_or_default();
-                let mut project_info = SidebarProjectInfo::from_project(project, workspace);
+                let mut project_info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
                 project_info.is_orphan = project.worktree_info.as_ref().map_or(false, |wt| {
                     !all_project_ids.contains(wt.parent_project_id.as_str())
                 });

@@ -125,6 +125,31 @@ pub fn register_content_pane(
     }
 }
 
+/// Callback type for counting how many content panes currently render a given
+/// terminal id. Used by the multi-window resize gate so a terminal shared
+/// across N>1 windows isn't thrashed by each window calling `resize()` on
+/// every paint with its own bounds.
+pub type ViewerCountFn = Box<dyn Fn(&str) -> usize + Send + Sync>;
+
+static VIEWER_COUNT_FN: std::sync::OnceLock<ViewerCountFn> = std::sync::OnceLock::new();
+
+/// Set the global viewer-count function. Called once by the main app at
+/// startup. Implementation reads the `content_pane_registry` and returns the
+/// number of live `WeakEntity<TerminalContent>` for the given `terminal_id`.
+pub fn set_viewer_count_fn(f: ViewerCountFn) {
+    let _ = VIEWER_COUNT_FN.set(f);
+}
+
+/// Number of windows currently rendering this terminal id. Returns 0 if the
+/// callback is not wired (older / headless contexts), so existing single-pane
+/// behavior is preserved by default.
+pub fn viewer_count(terminal_id: &str) -> usize {
+    VIEWER_COUNT_FN
+        .get()
+        .map(|f| f(terminal_id))
+        .unwrap_or(0)
+}
+
 /// Callback type for showing toast notifications.
 pub type ToastErrorFn = Box<dyn Fn(String, &mut gpui::App) + Send + Sync>;
 

@@ -166,6 +166,7 @@ impl Okena {
     fn open_extra_window(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         let pty_manager = self.pty_manager.clone();
+        let terminals = self.terminals.clone();
         let okena = cx.entity().clone();
 
         // Resolve the OS bounds: prefer persisted `os_bounds` (seeded by
@@ -231,16 +232,27 @@ impl Okena {
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), window, cx)
+                    WindowView::new(window_id, workspace.clone(), pty_manager.clone(), terminals.clone(), window, cx)
                 });
                 let view_for_okena = view.clone();
                 let handle = window.window_handle();
-                okena.update(cx, |this, _| {
-                    this.extra_windows.insert(window_id, view_for_okena);
-                    // Track the OS window handle so the remote-bridge command
-                    // loop can resolve actions to whichever window is focused
-                    // (PRD cri 13). The handle is removed on close below.
-                    this.extra_window_handles.insert(window_id, handle);
+                // Defer the registration: this build closure runs while Okena
+                // is already leased (the workspace observer that triggered
+                // `open_extra_window` holds the Okena update lease for the
+                // duration of `flush_effects`). Calling `okena.update` here
+                // synchronously would double-lease and panic. `cx.defer`
+                // schedules the registration to run after the current effect
+                // flush completes, when the lease has released.
+                let okena_for_register = okena.clone();
+                cx.defer(move |cx| {
+                    okena_for_register.update(cx, |this, _| {
+                        this.extra_windows.insert(window_id, view_for_okena);
+                        // Track the OS window handle so the remote-bridge
+                        // command loop can resolve actions to whichever window
+                        // is focused (PRD cri 13). The handle is removed on
+                        // close below.
+                        this.extra_window_handles.insert(window_id, handle);
+                    });
                 });
 
                 // Slice 07 cri 3 close-flow: when the user closes this OS

@@ -13,7 +13,7 @@ use crate::views::components::{
     badge, handle_list_overlay_key, keyboard_hints_footer, modal_backdrop, modal_content,
     modal_header, search_input_area, ListOverlayAction, ListOverlayConfig, ListOverlayState,
 };
-use crate::workspace::state::{ProjectData, Workspace};
+use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -44,7 +44,7 @@ pub struct ProjectSwitcher {
 }
 
 impl ProjectSwitcher {
-    pub fn new(workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
         // Get all projects from workspace, sorted by recency, with effective colors resolved
         let ws = workspace.read(cx);
         let projects: Vec<ProjectData> = ws
@@ -56,7 +56,15 @@ impl ProjectSwitcher {
                 p
             })
             .collect();
-        let hidden_project_ids = ws.data().main_window.hidden_project_ids.clone();
+        // Snapshot the calling window's hidden set (falling back to main if the
+        // targeted extra has been dropped). The eye-icon in the row reflects
+        // visibility in THIS window, not main.
+        let hidden_project_ids = ws
+            .data()
+            .window(window_id)
+            .unwrap_or(&ws.data().main_window)
+            .hidden_project_ids
+            .clone();
 
         let config = ListOverlayConfig::new("Switch Project")
             .subtitle("Type to search, Enter to focus, Space to toggle visibility")

@@ -23,17 +23,17 @@ fn expand_tilde(path: &str) -> String {
 }
 
 impl Workspace {
-    /// Returns whether a project is hidden in this workspace's main window.
+    /// Returns whether a project is hidden in the given window.
     ///
-    /// Reads from `main_window.hidden_project_ids` (the per-window viewport
-    /// model, the source of truth). Today this is always the main window;
-    /// per-window scoping arrives with the window-scoped mutation API
-    /// (slice 02). Missing entry == visible.
-    pub fn is_project_hidden(&self, project_id: &str) -> bool {
-        self.data
-            .main_window
-            .hidden_project_ids
-            .contains(project_id)
+    /// Reads from the targeted `WindowState.hidden_project_ids`. Falls back to
+    /// `main_window` if the targeted extra has been dropped between caller
+    /// resolution and read (drop-race safety). Missing entry == visible.
+    pub fn is_project_hidden(&self, window_id: WindowId, project_id: &str) -> bool {
+        let window_state = self
+            .data
+            .window(window_id)
+            .unwrap_or(&self.data.main_window);
+        window_state.hidden_project_ids.contains(project_id)
     }
 
     /// Toggle visibility for a single worktree (no propagation to children).
@@ -1160,10 +1160,10 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.is_project_hidden("p1"));
+            assert!(ws.is_project_hidden(WindowId::Main, "p1"));
             // Missing entry defaults to visible (not hidden).
-            assert!(!ws.is_project_hidden("p2"));
-            assert!(!ws.is_project_hidden("missing"));
+            assert!(!ws.is_project_hidden(WindowId::Main, "p2"));
+            assert!(!ws.is_project_hidden(WindowId::Main, "missing"));
         });
     }
 

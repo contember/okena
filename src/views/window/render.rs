@@ -47,7 +47,7 @@ impl WindowView {
             return;
         }
 
-        let visible_projects: Vec<String> = workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+        let visible_projects: Vec<String> = workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual())
             .iter().map(|p| p.id.clone()).collect();
         let num_projects = visible_projects.len();
         if num_projects <= 1 {
@@ -106,7 +106,7 @@ impl WindowView {
         if let Some(project_id) = self.pending_center_scroll.take() {
             let workspace = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            let num_visible = workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).len();
+            let num_visible = workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).len();
             let is_zoomed = fm.focused_project_id().is_some();
 
             if is_zoomed || num_visible <= 1 {
@@ -130,7 +130,7 @@ impl WindowView {
             if let Some(pid) = fm.fullscreen_project_id() {
                 vec![pid.to_string()]
             } else {
-                workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| p.id.clone()).collect()
+                workspace.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| p.id.clone()).collect()
             }
         };
 
@@ -596,9 +596,12 @@ impl Render for WindowView {
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {
                 let fm = this.focus_manager.read(cx).clone();
+                let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {
-                    // Clear custom column widths → equal distribution.
-                    ws.data.main_window.project_widths.clear();
+                    // Clear custom column widths in THIS window → equal distribution.
+                    if let Some(window_state) = ws.data.window_mut(window_id) {
+                        window_state.project_widths.clear();
+                    }
                     // Equalize pane sizes in the focused terminal's parent split
                     ws.equalize_focused_split(&fm, cx);
                 });
@@ -874,7 +877,7 @@ impl Render for WindowView {
                 let project_id = fm.focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
                             .first()
                             .map(|p| p.id.clone())
                     });
@@ -895,7 +898,7 @@ impl Render for WindowView {
                 let project_id = fm.focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
                             .first()
                             .map(|p| p.id.clone())
                     });
@@ -923,7 +926,7 @@ impl Render for WindowView {
                 let project_id = fm.focused_terminal_state()
                     .map(|f| f.project_id.clone())
                     .or_else(|| {
-                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                        ws.visible_projects(this.window_id, fm.focused_project_id(), fm.is_focus_individual())
                             .first()
                             .map(|p| p.id.clone())
                     });

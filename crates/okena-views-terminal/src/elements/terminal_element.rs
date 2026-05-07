@@ -299,7 +299,20 @@ impl Element for TerminalElement {
                 cell_width: cell_width_f,
                 cell_height: line_height_f,
             };
-            self.terminal.resize(new_size);
+            // Multi-window resize gate: when the same terminal is rendered in
+            // more than one window, every window's renderer would otherwise
+            // call resize() on every paint with its OWN bounds, ping-ponging
+            // the PTY between sizes. With viewer_count > 1 we accept only
+            // shrinks ("smallest viewer wins" — content fits everywhere; the
+            // bigger window shows extra blank space). With viewer_count <= 1
+            // (single window) the legacy unconditional resize stands.
+            let n_viewers = crate::viewer_count(&self.terminal.terminal_id);
+            let should_resize = n_viewers <= 1
+                || new_cols < current_size.cols
+                || new_rows < current_size.rows;
+            if should_resize {
+                self.terminal.resize(new_size);
+            }
         } else if cell_size_changed {
             let mut rs = self.terminal.resize_state.lock();
             rs.size.cell_width = cell_width_f;

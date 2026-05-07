@@ -146,10 +146,10 @@ impl WindowView {
         window_id: WindowId,
         workspace: Entity<Workspace>,
         pty_manager: Arc<PtyManager>,
+        terminals: TerminalsRegistry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let terminals: TerminalsRegistry = Arc::new(Mutex::new(HashMap::new()));
 
         // Per-window UI request broker. Each window (slice 05 onward) owns its
         // own queue so overlay/sidebar requests stay scoped to the window that
@@ -810,7 +810,7 @@ impl WindowView {
         let visible_projects: Vec<(String, bool, Option<String>)> = {
             let ws = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
-            ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
+            ws.visible_projects(self.window_id, fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| {
                 (p.id.clone(), p.is_remote, p.connection_id.clone())
             }).collect()
         };

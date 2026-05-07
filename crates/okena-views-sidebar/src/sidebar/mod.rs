@@ -515,9 +515,11 @@ impl SidebarProjectInfo {
     /// Build a sidebar projection of a project.
     ///
     /// `show_in_overview` on the projection is derived from
-    /// `workspace.is_project_hidden(&project.id)` (the per-window viewport
-    /// model — `main_window.hidden_project_ids` is the source of truth).
-    pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace) -> Self {
+    /// `workspace.is_project_hidden(window_id, &project.id)` (the per-window
+    /// viewport model — each window has its own `hidden_project_ids`). The
+    /// `window_id` is the id of the window that owns the sidebar instance
+    /// rendering this projection.
+    pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace, window_id: WindowId) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
         let name = if project.worktree_info.is_some() {
@@ -530,7 +532,7 @@ impl SidebarProjectInfo {
         Self {
             id: project.id.clone(),
             name,
-            show_in_overview: !workspace.is_project_hidden(&project.id),
+            show_in_overview: !workspace.is_project_hidden(window_id, &project.id),
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout

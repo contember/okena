@@ -222,14 +222,21 @@ impl Okena {
         })
         .detach();
 
-        // Create the main window's per-window view (get terminals registry from it)
-        let pty_manager_clone = pty_manager.clone();
-        let main_window = cx.new(|cx| {
-            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, window, cx)
-        });
+        // Shared terminals registry — one per Okena instance, threaded into
+        // every WindowView (main + extras). Each TerminalPane looks up the
+        // existing Arc<Terminal> for its terminal_id from this registry; if
+        // each window had its own registry, an extra rendering a project
+        // already shown in main would create a NEW Terminal model and PTY
+        // bytes (which feed the original Arc<Terminal>) would never reach
+        // the extra's content pane.
+        let terminals: TerminalsRegistry = Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-        // Get terminals registry from the main window
-        let terminals = main_window.read(cx).terminals().clone();
+        // Create the main window's per-window view, sharing the registry.
+        let pty_manager_clone = pty_manager.clone();
+        let terminals_for_main = terminals.clone();
+        let main_window = cx.new(|cx| {
+            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, terminals_for_main, window, cx)
+        });
 
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
