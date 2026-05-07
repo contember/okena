@@ -57,7 +57,7 @@ impl std::io::Write for TeeWriter {
 use crate::app::Okena;
 use crate::app::headless::HeadlessApp;
 use crate::assets::{Assets, embedded_fonts};
-use crate::keybindings::{About, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
+use crate::keybindings::{About, NewWindow, Quit, ShowSettings, ShowCommandPalette, ShowThemeSelector, ShowKeybindings};
 use crate::settings::GlobalSettings;
 use crate::terminal::pty_manager::PtyManager;
 use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
@@ -233,6 +233,13 @@ fn set_app_menus(cx: &mut App) {
                 MenuItem::action("Select Theme", ShowThemeSelector),
                 MenuItem::separator(),
                 MenuItem::action("Keyboard Shortcuts", ShowKeybindings),
+            ],
+        },
+        Menu {
+            name: "Window".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::action("New Window", NewWindow),
             ],
         },
     ]);

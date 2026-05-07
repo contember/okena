@@ -1,5 +1,6 @@
 mod detached_overlays;
 mod detached_terminals;
+mod extras;
 pub mod headless;
 mod remote_commands;
 
@@ -109,10 +110,22 @@ pub struct Okena {
     /// The single, always-present main window. Closing it quits the app
     /// (per the multi-window PRD's main-is-special invariant).
     main_window: Entity<WindowView>,
-    /// Ephemeral extras spawned at runtime; empty until slice 05 lands the
-    /// spawn flow. Keyed by `WindowId::Extra(uuid)`.
-    #[allow(dead_code)]
+    /// OS window handle of the main window. Captured from `window.window_handle()`
+    /// in `Okena::new`'s `cx.open_window` build closure (see main.rs). Used by
+    /// the remote-bridge command loop to resolve actions to the focused
+    /// window's per-window `FocusManager` per PRD cri 13.
+    pub(super) main_window_handle: AnyWindowHandle,
+    /// Ephemeral extras spawned at runtime, keyed by `WindowId::Extra(uuid)`.
+    /// Populated by the workspace observer in `handle_extra_windows_changed`
+    /// when `WorkspaceData.extra_windows` gains a new entry; the matching
+    /// `Entity<WindowView>` is created and inserted as part of the
+    /// `cx.open_window` build closure (see `extras.rs`).
     extra_windows: HashMap<WindowId, Entity<WindowView>>,
+    /// OS window handles for extras, keyed by `WindowId::Extra(uuid)`. Populated
+    /// alongside `extra_windows` in `extras.rs::open_extra_window`. Same
+    /// purpose as `main_window_handle` — focused-window resolution at the
+    /// remote-bridge boundary (PRD cri 13).
+    pub(super) extra_window_handles: HashMap<WindowId, AnyWindowHandle>,
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
@@ -302,9 +315,13 @@ impl Okena {
         // Create bridge channel and start command loop
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
+        let main_window_handle = window.window_handle();
+
         let mut manager = Self {
             main_window,
+            main_window_handle,
             extra_windows: HashMap::new(),
+            extra_window_handles: HashMap::new(),
             workspace: workspace.clone(),
             pty_manager,
             terminals,
@@ -358,6 +375,15 @@ impl Okena {
         // Set up observer for detached terminals
         cx.observe(&workspace, move |this, workspace, cx| {
             this.handle_detached_terminals_changed(workspace, cx);
+        })
+        .detach();
+
+        // Open an OS window per fresh `WorkspaceData.extra_windows` entry —
+        // slice 05 keystone. The data-layer `Workspace::spawn_extra_window`
+        // mutation push fires this observer; the diff against
+        // `Okena.extra_windows` is the spawn signal.
+        cx.observe(&workspace, |this, _workspace, cx| {
+            this.handle_extra_windows_changed(cx);
         })
         .detach();
 

@@ -6,7 +6,7 @@ use super::{
     CreateWorktree, FocusActiveProject, FocusDown, FocusLeft, FocusNextTerminal, FocusPrevTerminal, FocusRight,
     FocusSidebar, FocusUp, FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate,
     JumpToNextPrompt, JumpToPreviousPrompt,
-    MinimizeTerminal, NewProject, OpenSettingsFile, Paste, Quit, ResetZoom, ScrollDown, ScrollUp,
+    MinimizeTerminal, NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, ScrollDown, ScrollUp,
     Search, SearchNext, SearchPrev, SendEscape, ShowCommandPalette, ShowDiffViewer,
     ShowContentSearch, ShowFileSearch, ShowHookLog, ShowKeybindings, ShowProjectSwitcher, ShowSessionManager,
     ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical, StartAllServices,
@@ -519,6 +519,16 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Equalize columns and panes to match the focused one",
             category: "Layout",
             factory: || Box::new(EqualizeLayout),
+        },
+    );
+
+    map.insert(
+        "NewWindow",
+        ActionDescription {
+            name: "New Window",
+            description: "Open an additional window onto the workspace",
+            category: "Window",
+            factory: || Box::new(NewWindow),
         },
     );
 

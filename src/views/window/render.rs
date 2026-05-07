@@ -1,4 +1,4 @@
-use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
+use crate::keybindings::{ShowKeybindings, ShowSessionManager, ShowThemeSelector, ShowCommandPalette, ShowSettings, OpenSettingsFile, ShowFileSearch, ShowContentSearch, ShowProjectSwitcher, ShowDiffViewer, ShowHookLog, NewProject, NewWindow, ToggleSidebar, ToggleSidebarAutoHide, TogglePaneSwitcher, CreateWorktree, CheckForUpdates, InstallUpdate, FocusSidebar, FocusActiveProject, ShowPairingDialog, StartAllServices, StopAllServices, ClearFocus, EqualizeLayout};
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
 use crate::views::layout::navigation::{get_pane_map, prune_pane_map};
@@ -179,6 +179,35 @@ impl WindowView {
                                     ws.set_folder_filter(window_id, None, cx);
                                 });
                             }),
+                    )
+                    .into_any_element();
+            }
+            // Empty state when every project is hidden in this window
+            // (e.g. fresh extra window spawned via NewWindow). Per slice 05
+            // criterion 4: a placeholder is rendered when hidden_project_ids
+            // covers every project in the workspace.
+            if !self.workspace.read(cx).projects().is_empty() {
+                let t = theme(cx);
+                return div()
+                    .id("projects-grid-empty")
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(ui_text_xl(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("No projects in this window"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_md(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Click a project in the sidebar to show it here"),
                     )
                     .into_any_element();
             }
@@ -572,6 +601,31 @@ impl Render for WindowView {
                     ws.data.main_window.project_widths.clear();
                     // Equalize pane sizes in the focused terminal's parent split
                     ws.equalize_focused_split(&fm, cx);
+                });
+            }))
+            // Spawn a new extra window onto the workspace. The data-layer
+            // mutation pushes a fresh `WindowState` and bumps `data_version`
+            // so the auto-save observer fires; the OS window itself opens
+            // when the `Okena` observer in `src/app/extras.rs` sees the new
+            // `extra_windows` entry.
+            //
+            // Reads the spawning window's live OS bounds via
+            // `window.window_bounds()` and passes them to the wrapper so
+            // the data layer seeds the new entry's `os_bounds` with a
+            // +30,+30 cascade offset (PRD line 27 + slice 05 cri 2 / 6).
+            // Read at action-handler time -- not in the observer -- because
+            // the observer fires from a workspace-data context that has no
+            // gpui `Window` handle to read bounds from.
+            .on_action(cx.listener(|this, _: &NewWindow, window, cx| {
+                let bounds = window.window_bounds().get_bounds();
+                let spawning_bounds = crate::workspace::state::WindowBounds {
+                    origin_x: f32::from(bounds.origin.x),
+                    origin_y: f32::from(bounds.origin.y),
+                    width: f32::from(bounds.size.width),
+                    height: f32::from(bounds.size.height),
+                };
+                this.workspace.update(cx, |ws, cx| {
+                    ws.spawn_extra_window(Some(spawning_bounds), cx);
                 });
             }))
             // Handle focus sidebar action (keyboard navigation)

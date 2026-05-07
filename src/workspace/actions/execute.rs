@@ -45,9 +45,18 @@ impl ActionResult {
 ///
 /// This is the single source of truth for all client-facing actions.
 /// Both desktop UI handlers and the remote API delegate here.
+///
+/// `window_id` identifies which window's per-window state any per-window
+/// mutation should target (currently only `SetProjectShowInOverview`). For
+/// local UI invocations the caller passes the originating `WindowView`'s
+/// `window_id`; for remote-bridge invocations the caller passes the focused
+/// window resolved via `Okena::focus_manager_for_active_window` per PRD
+/// user story 27 / slice 05 cri 13. Actions that don't touch per-window
+/// state ignore the parameter.
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
+    window_id: WindowId,
     focus_manager: &mut crate::workspace::focus::FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
@@ -638,7 +647,7 @@ pub fn execute_action(
             ActionResult::Ok(None)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show } => {
-            apply_set_project_show_in_overview(ws, &project_id, show, cx)
+            apply_set_project_show_in_overview(ws, window_id, &project_id, show, cx)
         }
         ActionRequest::RemoveWorktreeProject { project_id, force } => {
             if ws.project(&project_id).is_none() {
@@ -913,13 +922,19 @@ fn resolve_new_project_file(project_path: &str, relative_path: &str) -> Result<s
     Ok(parent_canonical.join(file_name))
 }
 
-/// Apply the `SetProjectShowInOverview` action.
+/// Apply the `SetProjectShowInOverview` action against the targeted window.
 ///
-/// Reads the current visibility from `Workspace::is_project_hidden`
-/// (sourced from `main_window.hidden_project_ids`, the per-window
-/// viewport model's source of truth).
+/// Reads the targeted window's `hidden_project_ids` to compute current
+/// visibility, then toggles only when the desired and current states differ.
+/// `window_id` carries through from `execute_action` so that remote-bridge
+/// invocations land on whichever window currently has OS focus (PRD user
+/// story 27 / slice 05 cri 13). For unknown extras (close-race), the read
+/// returns `None`; we treat the project as visible (mirrors
+/// `Workspace::data().window(...)` returning None == nothing tracked) and
+/// the toggle delegates to the silent-no-op path on the data-layer setter.
 fn apply_set_project_show_in_overview(
     ws: &mut Workspace,
+    window_id: WindowId,
     project_id: &str,
     show: bool,
     cx: &mut Context<Workspace>,
@@ -927,9 +942,14 @@ fn apply_set_project_show_in_overview(
     if ws.project(project_id).is_none() {
         return ActionResult::Err(format!("project not found: {}", project_id));
     }
-    let current_visible = !ws.is_project_hidden(project_id);
+    let current_hidden = ws
+        .data()
+        .window(window_id)
+        .map(|w| w.hidden_project_ids.contains(project_id))
+        .unwrap_or(false);
+    let current_visible = !current_hidden;
     if current_visible != show {
-        ws.toggle_project_overview_visibility(WindowId::Main, project_id, cx);
+        ws.toggle_project_overview_visibility(window_id, project_id, cx);
     }
     ActionResult::Ok(None)
 }
@@ -1022,7 +1042,7 @@ mod path_guard_tests {
 #[cfg(test)]
 mod set_show_in_overview_tests {
     use super::{apply_set_project_show_in_overview, ActionResult};
-    use crate::workspace::state::{ProjectData, Workspace, WindowState, WorkspaceData};
+    use crate::workspace::state::{ProjectData, Workspace, WindowId, WindowState, WorkspaceData};
     use crate::workspace::settings::HooksConfig;
     use gpui::AppContext as _;
     use okena_core::theme::FolderColor;
@@ -1065,10 +1085,10 @@ mod set_show_in_overview_tests {
     fn apply_set_project_show_in_overview_reads_hidden_set(
         cx: &mut gpui::TestAppContext,
     ) {
-        // The action's visibility decision must read from
-        // main_window.hidden_project_ids. This fixture starts with p1 in
-        // the hidden set; the action says `show: true`, so the helper
-        // toggles, clearing the hidden set.
+        // The action's visibility decision must read from the targeted
+        // window's hidden_project_ids. This fixture starts with p1 hidden in
+        // main; the action says `show: true`, so the helper toggles,
+        // clearing main's hidden set.
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1")];
         data.project_order = vec!["p1".to_string()];
@@ -1076,14 +1096,14 @@ mod set_show_in_overview_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            let result = apply_set_project_show_in_overview(ws, "p1", true, cx);
+            let result = apply_set_project_show_in_overview(ws, WindowId::Main, "p1", true, cx);
             assert!(matches!(result, ActionResult::Ok(_)));
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(
-                !ws.is_project_hidden("p1"),
-                "action should have toggled the hidden set off"
+                !ws.data().main_window.hidden_project_ids.contains("p1"),
+                "action should have toggled main's hidden set off"
             );
         });
     }
@@ -1094,8 +1114,87 @@ mod set_show_in_overview_tests {
     ) {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            let result = apply_set_project_show_in_overview(ws, "missing", true, cx);
+            let result = apply_set_project_show_in_overview(ws, WindowId::Main, "missing", true, cx);
             assert!(matches!(result, ActionResult::Err(_)));
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_targets_extra_when_window_id_extra(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // PRD user story 27 / slice 05 cri 13: a remote-bridge action issued
+        // while an extra window has OS focus must mutate that extra's
+        // per-window hidden set, not main's. The extra starts with p1 hidden
+        // (mirrors the spawn snapshot semantic where every project is hidden
+        // in a fresh extra); the action says `show: true`, so the helper
+        // toggles only on the extra. Main's hidden set must remain empty.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("p1".to_string());
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(
+                ws,
+                WindowId::Extra(extra_id),
+                "p1",
+                true,
+                cx,
+            );
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extra_state = ws
+                .data()
+                .window(WindowId::Extra(extra_id))
+                .expect("extra still tracked");
+            assert!(
+                !extra_state.hidden_project_ids.contains("p1"),
+                "action should have toggled the targeted extra's hidden set off",
+            );
+            assert!(
+                ws.data().main_window.hidden_project_ids.is_empty(),
+                "main's hidden set must stay untouched when routing to an extra",
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn apply_set_project_show_in_overview_extra_hide_inserts_only_on_extra(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The reverse direction: project visible in both main + extra,
+        // action says `show: false` against the extra. Extra's hidden set
+        // gains p1; main stays unchanged.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows = vec![extra];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let result = apply_set_project_show_in_overview(
+                ws,
+                WindowId::Extra(extra_id),
+                "p1",
+                false,
+                cx,
+            );
+            assert!(matches!(result, ActionResult::Ok(_)));
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extra_state = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(extra_state.hidden_project_ids.contains("p1"));
+            assert!(ws.data().main_window.hidden_project_ids.is_empty());
         });
     }
 }

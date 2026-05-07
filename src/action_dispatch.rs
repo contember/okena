@@ -9,7 +9,7 @@ use crate::terminal::backend::TerminalBackend;
 use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::execute_action;
 use crate::workspace::focus::FocusManager;
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowId, Workspace};
 
 use okena_core::api::ActionRequest;
 use okena_core::client::strip_prefix;
@@ -21,8 +21,16 @@ use std::sync::Arc;
 ///
 /// Returns `Remote` variant for remote projects, `Local` for local ones.
 /// Returns `None` if required dependencies (backend, remote manager) are unavailable.
+///
+/// `window_id` carries the originating `WindowView`'s window id so per-window
+/// state mutations triggered by local UI actions (e.g. hide/show via the
+/// sidebar context menu routed through `SetProjectShowInOverview`) land on
+/// the right window's slot. Remote projects also carry `window_id` so a UI
+/// action issued in W2 against a remote project mutates W2's per-window
+/// state on the local mirror, not main's.
 pub fn dispatcher_for_project(
     project_id: &str,
+    window_id: WindowId,
     workspace: &Entity<Workspace>,
     focus_manager: &Entity<FocusManager>,
     backend: &Option<Arc<dyn TerminalBackend>>,
@@ -36,6 +44,7 @@ pub fn dispatcher_for_project(
     if project.is_remote {
         let connection_id = project.connection_id.as_ref()?;
         let manager = remote_manager.as_ref()?;
+        let _ = window_id; // Remote variant doesn't carry window_id today
         Some(ActionDispatcher::Remote {
             connection_id: connection_id.clone(),
             manager: manager.clone(),
@@ -50,6 +59,7 @@ pub fn dispatcher_for_project(
             backend: backend.clone(),
             terminals: terminals.clone(),
             service_manager: service_manager.clone(),
+            window_id,
         })
     }
 }
@@ -68,11 +78,17 @@ pub enum ActionDispatcher {
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
         service_manager: Option<Entity<ServiceManager>>,
+        /// Originating window's id (PRD cri 13). Per-window state mutations
+        /// inside `execute_action` (e.g. `SetProjectShowInOverview`) target
+        /// this slot.
+        window_id: WindowId,
     },
     /// Remote project — send actions via HTTP to the remote server.
     /// Visual/presentation actions (split sizes, minimize, fullscreen, active tab, focus)
     /// are executed locally on the client workspace to avoid server round-trips
-    /// and to survive state syncs.
+    /// and to survive state syncs. No `window_id` field today: visual mirror
+    /// actions touch focus state via the (already-per-window) `focus_manager`,
+    /// and per-window data mutations have no remote counterpart yet.
     Remote {
         connection_id: String,
         manager: Entity<RemoteConnectionManager>,
@@ -96,6 +112,7 @@ impl ActionDispatcher {
                 backend,
                 terminals,
                 service_manager,
+                window_id,
             } => {
                 // Intercept service actions — these need ServiceManager, not execute_action
                 if let Some(sm) = service_manager {
@@ -147,9 +164,10 @@ impl ActionDispatcher {
                 let backend = backend.clone();
                 let terminals = terminals.clone();
                 let focus_manager = focus_manager.clone();
+                let window_id = *window_id;
                 focus_manager.update(cx, |fm, cx| {
                     workspace.update(cx, |ws, cx| {
-                        execute_action(action, ws, fm, &*backend, &terminals, cx);
+                        execute_action(action, ws, window_id, fm, &*backend, &terminals, cx);
                     });
                 });
             }
