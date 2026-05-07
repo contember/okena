@@ -613,18 +613,27 @@ impl Okena {
                     }
                     // Notify dirty terminal content panes directly (batched in one update).
                     // All notifications happen in the same GPUI update → single layout pass.
+                    // Each terminal_id may be rendered by multiple panes (one per window
+                    // whose visible set includes its host project), so iterate the vec
+                    // and prune dead weaks lazily.
                     if !dirty_terminal_ids.is_empty() {
                         dirty_terminal_ids.dedup();
-                        let registry = crate::views::window::content_pane_registry().lock();
+                        let mut registry = crate::views::window::content_pane_registry().lock();
                         let mut any_local_pane = false;
                         for tid in &dirty_terminal_ids {
-                            if let Some(weak_content) = registry.get(tid) {
-                                let _ = weak_content.update(cx, |_content, cx| {
-                                    cx.notify();
-                                });
-                                any_local_pane = true;
+                            let now_empty = if let Some(weaks) = registry.get_mut(tid) {
+                                if crate::views::window::notify_pane_weaks(weaks, cx) {
+                                    any_local_pane = true;
+                                }
+                                weaks.is_empty()
+                            } else {
+                                false
+                            };
+                            if now_empty {
+                                registry.remove(tid);
                             }
                         }
+                        drop(registry);
                         // Remote-only terminals have no local content pane. Without
                         // cx.notify(), GPUI's draw cycle won't run and the event loop
                         // effectively stalls. Notify main_window to keep GPUI responsive

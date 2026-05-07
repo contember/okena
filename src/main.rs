@@ -639,7 +639,11 @@ fn main() {
 
                 // Wire up content pane registration so PTY events can notify terminal views
                 okena_views_terminal::set_register_content_pane_fn(Box::new(|terminal_id, weak_content| {
-                    crate::views::window::content_pane_registry().lock().insert(terminal_id, weak_content);
+                    crate::views::window::content_pane_registry()
+                        .lock()
+                        .entry(terminal_id)
+                        .or_default()
+                        .push(weak_content);
                 }));
 
                 // Create the main app view wrapped in Root (required for gpui_component inputs)
