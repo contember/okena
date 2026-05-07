@@ -10,15 +10,14 @@ mod search;
 mod selection;
 
 use crate::code_view::ScrollbarDrag;
-use crate::file_search::FileEntry;
-use crate::file_tree::{build_file_tree, FileTreeNode};
+use crate::list_directory::DirEntry;
 use crate::selection::SelectionState;
 use crate::syntax::{load_syntax_set, HighlightedLine};
 use context_menu::{DeleteConfirmState, FileRenameState, FileTreeContextMenu, TabContextMenu};
 use gpui::*;
 use okena_markdown::{MarkdownDocument, MarkdownSelection};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::SystemTime;
 use syntect::parsing::SyntaxSet;
 
@@ -49,8 +48,14 @@ type Selection = SelectionState<(usize, usize)>;
 const SIDEBAR_WIDTH: f32 = 240.0;
 
 /// Per-file state for a single tab in the file viewer.
+///
+/// `relative_path` is the canonical identifier (project-relative, used for
+/// `fs.read_file`, tab equality, history, and tree highlighting). `file_path`
+/// is the derived absolute path used for filesystem-level context-menu
+/// operations (rename/delete) — it's only meaningful for local projects.
 pub(super) struct FileViewerTab {
     pub file_path: PathBuf,
+    pub relative_path: String,
     pub content: String,
     pub highlighted_lines: Vec<HighlightedLine>,
     pub line_count: usize,
@@ -64,7 +69,6 @@ pub(super) struct FileViewerTab {
     pub markdown_scroll_handle: ScrollHandle,
     pub source_scroll_handle: UniformListScrollHandle,
     pub scrollbar_drag: Option<ScrollbarDrag>,
-    pub selected_file_index: Option<usize>,
     /// Last known modification time of the file (for detecting external changes).
     pub modified_at: Option<SystemTime>,
     /// Whether the tab content is still being loaded asynchronously.
@@ -76,6 +80,7 @@ impl FileViewerTab {
     pub(super) fn new_empty() -> Self {
         Self {
             file_path: PathBuf::new(),
+            relative_path: String::new(),
             content: String::new(),
             highlighted_lines: Vec::new(),
             line_count: 0,
@@ -89,17 +94,17 @@ impl FileViewerTab {
             markdown_scroll_handle: ScrollHandle::new(),
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
-            selected_file_index: None,
             modified_at: None,
             loading: false,
         }
     }
 
     /// Create a tab in loading state (content will be filled asynchronously).
-    fn new_loading(file_path: PathBuf, file_index: Option<usize>) -> Self {
+    fn new_loading(relative_path: String, file_path: PathBuf) -> Self {
         let is_markdown = Self::is_markdown_file(&file_path);
         Self {
             file_path,
+            relative_path,
             content: String::new(),
             highlighted_lines: Vec::new(),
             line_count: 0,
@@ -117,7 +122,6 @@ impl FileViewerTab {
             markdown_scroll_handle: ScrollHandle::new(),
             source_scroll_handle: UniformListScrollHandle::new(),
             scrollbar_drag: None,
-            selected_file_index: file_index,
             modified_at: None,
             loading: true,
         }
@@ -125,21 +129,26 @@ impl FileViewerTab {
 
     /// Get the filename for display in the tab bar.
     pub fn filename(&self) -> String {
-        self.file_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Untitled".to_string())
+        if let Some(name) = self.file_path.file_name() {
+            name.to_string_lossy().to_string()
+        } else if let Some(idx) = self.relative_path.rfind(['/', '\\']) {
+            self.relative_path[idx + 1..].to_string()
+        } else if !self.relative_path.is_empty() {
+            self.relative_path.clone()
+        } else {
+            "Untitled".to_string()
+        }
     }
 
     /// Check if this tab has no file loaded.
     pub fn is_empty(&self) -> bool {
-        self.file_path.as_os_str().is_empty()
+        self.relative_path.is_empty()
     }
 }
 
 /// A single entry in the navigation history.
 struct HistoryEntry {
-    file_path: PathBuf,
+    relative_path: String,
 }
 
 /// Back/forward navigation history.
@@ -156,13 +165,13 @@ impl NavigationHistory {
         }
     }
 
-    /// Record a navigation from `current_file` to a new file.
-    fn push(&mut self, current_file: &PathBuf) {
-        if current_file.as_os_str().is_empty() {
+    /// Record a navigation from `current` to a new file.
+    fn push(&mut self, current: &str) {
+        if current.is_empty() {
             return;
         }
         self.back_stack.push(HistoryEntry {
-            file_path: current_file.clone(),
+            relative_path: current.to_string(),
         });
         self.forward_stack.clear();
         if self.back_stack.len() > MAX_HISTORY {
@@ -170,26 +179,26 @@ impl NavigationHistory {
         }
     }
 
-    /// Go back. Returns the file path to navigate to.
-    fn go_back(&mut self, current_file: &PathBuf) -> Option<PathBuf> {
+    /// Go back. Returns the relative path to navigate to.
+    fn go_back(&mut self, current: &str) -> Option<String> {
         let entry = self.back_stack.pop()?;
-        if !current_file.as_os_str().is_empty() {
+        if !current.is_empty() {
             self.forward_stack.push(HistoryEntry {
-                file_path: current_file.clone(),
+                relative_path: current.to_string(),
             });
         }
-        Some(entry.file_path)
+        Some(entry.relative_path)
     }
 
-    /// Go forward. Returns the file path to navigate to.
-    fn go_forward(&mut self, current_file: &PathBuf) -> Option<PathBuf> {
+    /// Go forward. Returns the relative path to navigate to.
+    fn go_forward(&mut self, current: &str) -> Option<String> {
         let entry = self.forward_stack.pop()?;
-        if !current_file.as_os_str().is_empty() {
+        if !current.is_empty() {
             self.back_stack.push(HistoryEntry {
-                file_path: current_file.clone(),
+                relative_path: current.to_string(),
             });
         }
-        Some(entry.file_path)
+        Some(entry.relative_path)
     }
 
     fn can_go_back(&self) -> bool {
@@ -213,12 +222,13 @@ pub struct FileViewer {
     measured_char_width: f32,
     /// Whether the current theme is dark (for syntax highlighting)
     is_dark: bool,
-    /// Whether files are still loading
+    /// True until the project root directory listing arrives.
     loading: bool,
-    /// All files in the project (from file search scan)
-    files: Vec<FileEntry>,
-    /// File tree for sidebar navigation
-    file_tree: FileTreeNode,
+    /// Cache of directory listings keyed by project-relative folder path
+    /// (`""` = project root). Populated lazily as folders are expanded.
+    pub(super) loaded_dirs: HashMap<String, Vec<DirEntry>>,
+    /// Folder paths whose listing is currently in flight.
+    pub(super) loading_dirs: HashSet<String>,
     /// Which folder paths are currently expanded
     expanded_folders: HashSet<String>,
     /// Scroll handle for the file tree sidebar
@@ -255,87 +265,36 @@ pub struct FileViewer {
 }
 
 impl FileViewer {
-    /// Create a new file viewer for the given file path.
+    /// Resolve a project-relative path to an absolute `PathBuf` for filesystem
+    /// ops. For remote projects the absolute path doesn't exist locally;
+    /// callers fall back to the relative path wrapped as a `PathBuf`.
+    fn resolve_absolute(
+        fs: &std::sync::Arc<dyn crate::project_fs::ProjectFs>,
+        relative_path: &str,
+    ) -> PathBuf {
+        match fs.project_root() {
+            Some(root) => root.join(relative_path),
+            None => PathBuf::from(relative_path),
+        }
+    }
+
+    /// Create a new file viewer with `relative_path` (project-relative) opened
+    /// in the first tab.
     pub fn new(
-        file_path: PathBuf,
+        relative_path: String,
         project_fs: std::sync::Arc<dyn crate::project_fs::ProjectFs>,
         font_size: f32,
         is_dark: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-
-        // Compute relative path and expanded folders from the file_path itself
-        // (the file list may not be loaded yet for remote projects).
-        let rel_str = file_path.to_string_lossy();
-        let expanded_folders = Self::compute_expanded_for_relative(&rel_str);
-
+        let expanded_folders = Self::compute_expanded_for_relative(&relative_path);
         let syntax_set = load_syntax_set();
 
-        // Create tab in loading state; content will be loaded in background.
-        let relative_hint = rel_str.to_string();
-        let tab = FileViewerTab::new_loading(file_path.clone(), None);
+        let file_path = Self::resolve_absolute(&project_fs, &relative_path);
+        let tab = FileViewerTab::new_loading(relative_path.clone(), file_path.clone());
 
-        // Load file list asynchronously to avoid blocking the UI thread
-        let fs_clone = project_fs.clone();
-        let file_path_clone = file_path.clone();
-        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
-                .background_executor()
-                .spawn(async move { fs_clone.list_files(false) })
-                .await;
-            let _ = entity.update(cx, |this, cx| {
-                let file_index = files.iter().position(|f| f.path == file_path_clone);
-                if let Some(idx) = file_index {
-                    if let Some(tab) = this.tabs.first_mut() {
-                        tab.selected_file_index = Some(idx);
-                    }
-                }
-                // Recompute expanded folders using the actual relative path from the file list
-                if let Some(entry) = files.iter().find(|f| f.path == file_path_clone) {
-                    let expanded = Self::compute_expanded_for_relative(&entry.relative_path);
-                    this.expanded_folders.extend(expanded);
-                }
-                this.file_tree = build_file_tree(
-                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
-                );
-                this.files = files;
-                this.loading = false;
-                cx.notify();
-            });
-        })
-        .detach();
-
-        // Load the initial tab content in the background
-        {
-            let fs = project_fs.clone();
-            let rel = relative_hint;
-            let target = file_path;
-            cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-                let result: Result<String, String> = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let size = fs.file_size(&rel)?;
-                        if size > MAX_FILE_SIZE {
-                            return Err(format!(
-                                "File too large ({:.1} MB). Maximum size is 5 MB.",
-                                size as f64 / 1024.0 / 1024.0
-                            ));
-                        }
-                        fs.read_file(&rel)
-                    })
-                    .await;
-                let _ = entity.update(cx, |this, cx| {
-                    if let Some(tab) = this.tabs.iter_mut().find(|t| t.file_path == target) {
-                        tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
-
-        Self {
+        let mut viewer = Self {
             focus_handle,
             project_fs,
             syntax_set,
@@ -343,8 +302,8 @@ impl FileViewer {
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
-            files: Vec::new(),
-            file_tree: FileTreeNode::default(),
+            loaded_dirs: HashMap::new(),
+            loading_dirs: HashSet::new(),
             expanded_folders,
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -361,7 +320,13 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
-        }
+        };
+
+        // Kick off the root directory listing and any expanded ancestors so
+        // the tree fills in around the opened file.
+        viewer.fetch_initial_dirs(cx);
+        viewer.spawn_tab_load(relative_path, cx);
+        viewer
     }
 
     /// Create a file viewer for browsing a project without a pre-selected file.
@@ -375,25 +340,7 @@ impl FileViewer {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Load file list asynchronously to avoid blocking the UI thread
-        let fs_clone = project_fs.clone();
-        cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
-                .background_executor()
-                .spawn(async move { fs_clone.list_files(false) })
-                .await;
-            let _ = entity.update(cx, |this, cx| {
-                this.file_tree = build_file_tree(
-                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
-                );
-                this.files = files;
-                this.loading = false;
-                cx.notify();
-            });
-        })
-        .detach();
-
-        Self {
+        let mut viewer = Self {
             focus_handle,
             project_fs,
             syntax_set: load_syntax_set(),
@@ -401,8 +348,8 @@ impl FileViewer {
             measured_char_width: font_size * 0.6,
             is_dark,
             loading: true,
-            files: Vec::new(),
-            file_tree: FileTreeNode::default(),
+            loaded_dirs: HashMap::new(),
+            loading_dirs: HashSet::new(),
             expanded_folders: HashSet::new(),
             tree_scroll_handle: ScrollHandle::new(),
             sidebar_visible: true,
@@ -419,7 +366,9 @@ impl FileViewer {
             delete_confirm: None,
             search_state: None,
             is_detached: false,
-        }
+        };
+        viewer.fetch_initial_dirs(cx);
+        viewer
     }
 
     /// Mark this viewer as hosted in a detached window so the detach button
@@ -448,7 +397,7 @@ impl FileViewer {
         self.file_font_size = font_size;
         self.is_dark = is_dark;
 
-        // Rescan project files so the sidebar reflects added/removed files
+        // Re-fetch directory listings so the sidebar reflects added/removed files
         self.refresh_file_tree_async(cx);
 
         for tab in &mut self.tabs {
@@ -470,26 +419,91 @@ impl FileViewer {
         }
     }
 
-    /// Rescan the project directory and rebuild the file tree asynchronously.
-    /// Preserves expanded folders and updates file indices on open tabs.
-    fn refresh_file_tree_async(&mut self, cx: &mut Context<Self>) {
+    /// Invalidate the cached directory listings and re-fetch the ones that are
+    /// currently expanded. Called when settings change or after file ops that
+    /// might affect multiple folders (e.g. rename across hierarchies).
+    pub(super) fn refresh_file_tree_async(&mut self, cx: &mut Context<Self>) {
+        let to_refetch: Vec<String> = std::iter::once(String::new())
+            .chain(self.expanded_folders.iter().cloned())
+            .collect();
+        self.loaded_dirs.clear();
+        self.loading_dirs.clear();
+        for path in to_refetch {
+            self.fetch_directory(path, cx);
+        }
+    }
+
+    /// Re-fetch listings for a single directory and any of its loaded
+    /// descendants. Use after a targeted file op (create/delete/rename of one
+    /// entry) where a global rescan would be wasteful.
+    pub(super) fn invalidate_directory(&mut self, relative_path: &str, cx: &mut Context<Self>) {
+        let prefix = if relative_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", relative_path)
+        };
+        let to_refetch: Vec<String> = self
+            .loaded_dirs
+            .keys()
+            .filter(|k| k.as_str() == relative_path || k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for path in &to_refetch {
+            self.loaded_dirs.remove(path);
+            self.loading_dirs.remove(path);
+        }
+        // Always re-fetch the target dir even if it wasn't loaded before — the
+        // caller asked us to refresh it.
+        self.fetch_directory(relative_path.to_string(), cx);
+        for path in to_refetch {
+            if path != relative_path {
+                self.fetch_directory(path, cx);
+            }
+        }
+    }
+
+    /// Fetch the initial directory listings: the project root plus any
+    /// ancestor folders that are expanded (so a viewer opened for
+    /// `a/b/c.rs` shows the path expanded out to that file).
+    fn fetch_initial_dirs(&mut self, cx: &mut Context<Self>) {
+        self.fetch_directory(String::new(), cx);
+        let dirs: Vec<String> = self.expanded_folders.iter().cloned().collect();
+        for dir in dirs {
+            self.fetch_directory(dir, cx);
+        }
+    }
+
+    /// Spawn a background task to load `relative_path`'s immediate children
+    /// and stash them in `loaded_dirs`. No-op if already loaded or in flight.
+    pub(super) fn fetch_directory(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        if self.loaded_dirs.contains_key(&relative_path)
+            || !self.loading_dirs.insert(relative_path.clone())
+        {
+            return;
+        }
         let fs = self.project_fs.clone();
         let show_ignored = self.show_ignored;
+        let path_for_task = relative_path.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
-            let files = cx
+            let result: Result<Vec<DirEntry>, String> = cx
                 .background_executor()
-                .spawn(async move { fs.list_files(show_ignored) })
+                .spawn(async move { fs.list_directory(&path_for_task, show_ignored) })
                 .await;
             let _ = entity.update(cx, |this, cx| {
-                this.file_tree = build_file_tree(
-                    files.iter().enumerate().map(|(i, f)| (i, f.relative_path.as_str())),
-                );
-                for tab in &mut this.tabs {
-                    if !tab.is_empty() {
-                        tab.selected_file_index = files.iter().position(|f| f.path == tab.file_path);
+                this.loading_dirs.remove(&relative_path);
+                match result {
+                    Ok(entries) => {
+                        this.loaded_dirs.insert(relative_path.clone(), entries);
+                    }
+                    Err(e) => {
+                        log::warn!("list_directory({}) failed: {}", relative_path, e);
+                        // Cache an empty vec so we don't retry on every render.
+                        this.loaded_dirs.insert(relative_path.clone(), Vec::new());
                     }
                 }
-                this.files = files;
+                if relative_path.is_empty() {
+                    this.loading = false;
+                }
                 cx.notify();
             });
         })
@@ -524,44 +538,35 @@ impl FileViewer {
     /// - If already open in a tab, switches to it.
     /// - If current tab is empty, replaces it.
     /// - Otherwise creates a new tab after the active one.
-    pub fn open_file_in_tab(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+    pub fn open_file_in_tab(&mut self, relative_path: String, cx: &mut Context<Self>) {
         // Already open? Switch to it.
-        if let Some(idx) = self.tabs.iter().position(|t| t.file_path == file_path) {
+        if let Some(idx) = self.tabs.iter().position(|t| t.relative_path == relative_path) {
             if idx != self.active_tab {
-                let current_file = self.active_tab().file_path.clone();
-                self.history.push(&current_file);
+                let current = self.active_tab().relative_path.clone();
+                self.history.push(&current);
                 self.active_tab = idx;
             }
-            // Expand ancestors so sidebar highlights this file
-            let expanded = Self::compute_expanded_for_relative(
-                &self.relative_path_for(&file_path)
-                    .unwrap_or_else(|| file_path.to_string_lossy().to_string()),
-            );
-            self.expanded_folders.extend(expanded);
+            self.expand_ancestors_and_fetch(&relative_path, cx);
             cx.notify();
             return;
         }
 
-        let file_index = self.files.iter().position(|f| f.path == file_path);
-        let relative = self.relative_path_for(&file_path);
-        let expanded = Self::compute_expanded_for_relative(
-            relative.as_deref().unwrap_or(&file_path.to_string_lossy()),
-        );
-        self.expanded_folders.extend(expanded);
+        self.expand_ancestors_and_fetch(&relative_path, cx);
 
-        let new_tab = FileViewerTab::new_loading(file_path.clone(), file_index);
+        let file_path = Self::resolve_absolute(&self.project_fs, &relative_path);
+        let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
 
         // If current tab is empty (no file loaded), replace it
         if self.active_tab().is_empty() {
             self.tabs[self.active_tab] = new_tab;
-            self.spawn_tab_load(file_path, relative, cx);
+            self.spawn_tab_load(relative_path, cx);
             cx.notify();
             return;
         }
 
         // Push history for the current file
-        let current_file = self.active_tab().file_path.clone();
-        self.history.push(&current_file);
+        let current = self.active_tab().relative_path.clone();
+        self.history.push(&current);
 
         if self.tabs.len() >= MAX_TABS {
             // At limit: replace the active tab
@@ -573,8 +578,18 @@ impl FileViewer {
             self.active_tab = insert_at;
         }
 
-        self.spawn_tab_load(file_path, relative, cx);
+        self.spawn_tab_load(relative_path, cx);
         cx.notify();
+    }
+
+    /// Mark all ancestor folders of `relative_path` as expanded and ensure
+    /// their listings are loaded so the tree reveals down to the file.
+    fn expand_ancestors_and_fetch(&mut self, relative_path: &str, cx: &mut Context<Self>) {
+        let expanded = Self::compute_expanded_for_relative(relative_path);
+        for path in &expanded {
+            self.fetch_directory(path.clone(), cx);
+        }
+        self.expanded_folders.extend(expanded);
     }
 
     /// Close a tab by index.
@@ -621,16 +636,12 @@ impl FileViewer {
     /// Switch to a tab by index.
     pub(super) fn set_active_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active_tab {
-            let current_file = self.active_tab().file_path.clone();
-            self.history.push(&current_file);
+            let current = self.active_tab().relative_path.clone();
+            self.history.push(&current);
             self.active_tab = index;
             // Update expanded folders to reveal active tab's file
-            let tab_path = self.tabs[self.active_tab].file_path.clone();
-            let expanded = Self::compute_expanded_for_relative(
-                &self.relative_path_for(&tab_path)
-                    .unwrap_or_else(|| tab_path.to_string_lossy().to_string()),
-            );
-            self.expanded_folders.extend(expanded);
+            let tab_rel = self.tabs[self.active_tab].relative_path.clone();
+            self.expand_ancestors_and_fetch(&tab_rel, cx);
             // Re-run search for the new tab's content
             if self.search_state.is_some() {
                 self.perform_file_search(cx);
@@ -641,55 +652,44 @@ impl FileViewer {
 
     /// Navigate back in history.
     pub(super) fn go_back(&mut self, cx: &mut Context<Self>) {
-        let current_file = self.active_tab().file_path.clone();
-        if let Some(target) = self.history.go_back(&current_file) {
+        let current = self.active_tab().relative_path.clone();
+        if let Some(target) = self.history.go_back(&current) {
             self.navigate_to_file_no_history(target, cx);
         }
     }
 
     /// Navigate forward in history.
     pub(super) fn go_forward(&mut self, cx: &mut Context<Self>) {
-        let current_file = self.active_tab().file_path.clone();
-        if let Some(target) = self.history.go_forward(&current_file) {
+        let current = self.active_tab().relative_path.clone();
+        if let Some(target) = self.history.go_forward(&current) {
             self.navigate_to_file_no_history(target, cx);
         }
     }
 
     /// Navigate to a file without pushing history (used by back/forward).
-    fn navigate_to_file_no_history(&mut self, file_path: PathBuf, cx: &mut Context<Self>) {
+    fn navigate_to_file_no_history(&mut self, relative_path: String, cx: &mut Context<Self>) {
         // If file is open in a tab, switch to it
-        if let Some(idx) = self.tabs.iter().position(|t| t.file_path == file_path) {
+        if let Some(idx) = self.tabs.iter().position(|t| t.relative_path == relative_path) {
             self.active_tab = idx;
             cx.notify();
             return;
         }
 
-        // Replace the current tab with a new one for the target file
-        let file_index = self.files.iter().position(|f| f.path == file_path);
-        let relative = self.relative_path_for(&file_path);
-        let expanded = Self::compute_expanded_for_relative(
-            relative.as_deref().unwrap_or(&file_path.to_string_lossy()),
-        );
-        self.expanded_folders.extend(expanded);
+        self.expand_ancestors_and_fetch(&relative_path, cx);
 
-        let new_tab = FileViewerTab::new_loading(file_path.clone(), file_index);
+        let file_path = Self::resolve_absolute(&self.project_fs, &relative_path);
+        let new_tab = FileViewerTab::new_loading(relative_path.clone(), file_path);
         self.tabs[self.active_tab] = new_tab;
-        self.spawn_tab_load(file_path, relative, cx);
+        self.spawn_tab_load(relative_path, cx);
         cx.notify();
     }
 
-    /// Spawn a background task to load file content for a tab.
-    /// The tab is identified by `file_path` to be resilient to index changes.
-    fn spawn_tab_load(
-        &self,
-        file_path: PathBuf,
-        relative_path: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Spawn a background task to load file content for a tab. The tab is
+    /// identified by `relative_path` so concurrent reorders don't bind us to
+    /// a stale index.
+    fn spawn_tab_load(&self, relative_path: String, cx: &mut Context<Self>) {
         let fs = self.project_fs.clone();
-        let rel = relative_path
-            .unwrap_or_else(|| file_path.to_string_lossy().to_string());
-        let target = file_path;
+        let rel = relative_path.clone();
         cx.spawn(async move |entity: WeakEntity<Self>, cx| {
             let result: Result<String, String> = cx
                 .background_executor()
@@ -705,18 +705,15 @@ impl FileViewer {
                 })
                 .await;
             let _ = entity.update(cx, |this, cx| {
-                if let Some(tab) = this.tabs.iter_mut().find(|t| t.file_path == target) {
+                if let Some(tab) =
+                    this.tabs.iter_mut().find(|t| t.relative_path == relative_path)
+                {
                     tab.apply_loaded_content(result, &this.syntax_set, this.is_dark);
                     cx.notify();
                 }
             });
         })
         .detach();
-    }
-
-    /// Look up the relative path for a file by its absolute path.
-    fn relative_path_for(&self, file_path: &Path) -> Option<String> {
-        self.files.iter().find(|f| f.path == *file_path).map(|f| f.relative_path.clone())
     }
 
     /// Compute which folder paths should be expanded to reveal a file.
@@ -761,8 +758,6 @@ impl Focusable for FileViewer {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{FileViewer, NavigationHistory};
 
     #[::core::prelude::v1::test]
@@ -794,32 +789,29 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_history_back_forward() {
         let mut history = NavigationHistory::new();
-        let a = PathBuf::from("/a.rs");
-        let b = PathBuf::from("/b.rs");
-        let c = PathBuf::from("/c.rs");
 
         // Navigate a -> b -> c
-        history.push(&a);
-        history.push(&b);
+        history.push("a.rs");
+        history.push("b.rs");
 
         assert!(history.can_go_back());
         assert!(!history.can_go_forward());
 
         // Go back from c
-        let target = history.go_back(&c).unwrap();
-        assert_eq!(target, b);
+        let target = history.go_back("c.rs").unwrap();
+        assert_eq!(target, "b.rs");
         assert!(history.can_go_forward());
 
         // Go back again
-        let target = history.go_back(&b).unwrap();
-        assert_eq!(target, a);
+        let target = history.go_back("b.rs").unwrap();
+        assert_eq!(target, "a.rs");
 
         // Go forward
-        let target = history.go_forward(&a).unwrap();
-        assert_eq!(target, b);
+        let target = history.go_forward("a.rs").unwrap();
+        assert_eq!(target, "b.rs");
 
-        let target = history.go_forward(&b).unwrap();
-        assert_eq!(target, c);
+        let target = history.go_forward("b.rs").unwrap();
+        assert_eq!(target, "c.rs");
 
         assert!(!history.can_go_forward());
     }
@@ -827,44 +819,39 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_history_new_navigation_clears_forward() {
         let mut history = NavigationHistory::new();
-        let a = PathBuf::from("/a.rs");
-        let b = PathBuf::from("/b.rs");
-        let c = PathBuf::from("/c.rs");
-        let d = PathBuf::from("/d.rs");
 
-        history.push(&a);
-        history.push(&b);
+        history.push("a.rs");
+        history.push("b.rs");
 
         // Go back from c to b
-        history.go_back(&c);
+        history.go_back("c.rs");
 
         // New navigation from b
-        history.push(&b);
+        history.push("b.rs");
 
         // Forward should be empty
         assert!(!history.can_go_forward());
 
         // Back should give b then a
-        let target = history.go_back(&d).unwrap();
-        assert_eq!(target, b);
-        let target = history.go_back(&b).unwrap();
-        assert_eq!(target, a);
+        let target = history.go_back("d.rs").unwrap();
+        assert_eq!(target, "b.rs");
+        let target = history.go_back("b.rs").unwrap();
+        assert_eq!(target, "a.rs");
     }
 
     #[::core::prelude::v1::test]
     fn test_history_limit() {
         let mut history = NavigationHistory::new();
-        let current = PathBuf::from("/current.rs");
 
         for i in 0..60 {
-            history.push(&PathBuf::from(format!("/file_{}.rs", i)));
+            history.push(&format!("file_{}.rs", i));
         }
 
         assert_eq!(history.back_stack.len(), 50);
 
-        // First entry should be file_10 (0-9 were trimmed)
-        let mut target = history.go_back(&current).unwrap();
-        assert_eq!(target, PathBuf::from("/file_59.rs"));
+        // First entry should be file_59 (0-9 were trimmed)
+        let mut target = history.go_back("current.rs").unwrap();
+        assert_eq!(target, "file_59.rs");
 
         // Drain remaining
         let mut count = 1;

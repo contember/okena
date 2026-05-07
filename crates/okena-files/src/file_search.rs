@@ -295,7 +295,7 @@ impl FileSearchDialog {
         if let Some(&(file_index, _)) = self.filtered_files.get(self.selected_index) {
             let file = &self.files[file_index];
             self.save_memory(cx);
-            cx.emit(FileSearchDialogEvent::FileSelected(file.path.clone()));
+            cx.emit(FileSearchDialogEvent::FileSelected(file.relative_path.clone()));
         }
     }
 
@@ -553,8 +553,10 @@ impl FileSearchDialog {
 pub enum FileSearchDialogEvent {
     /// Dialog was closed without selection.
     Close,
-    /// A file was selected.
-    FileSelected(PathBuf),
+    /// A file was selected. Carries the project-relative path so callers don't
+    /// need to know about absolute path semantics (which differ between local
+    /// and remote projects).
+    FileSelected(String),
     /// User toggled the gitignore filter. The caller persists this to
     /// settings so the new state becomes the default for future opens.
     FiltersChanged {

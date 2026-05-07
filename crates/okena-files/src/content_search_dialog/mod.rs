@@ -50,6 +50,7 @@ pub(super) enum ResultRow {
     /// Match row within a file, with optional context lines.
     Match {
         file_path: PathBuf,
+        relative_path: String,
         line_number: usize,
         line_content: String,
         match_ranges: Vec<std::ops::Range<usize>>,
@@ -252,12 +253,14 @@ impl ContentSearchDialog {
     /// Open file viewer at the selected match.
     pub(super) fn open_selected(&self, cx: &mut Context<Self>) {
         if let Some(row) = self.rows.get(self.selected_index) {
-            let (path, line) = match row {
-                ResultRow::Match { file_path, line_number, .. } => (file_path.clone(), *line_number),
-                ResultRow::FileHeader { file_path, .. } => (file_path.clone(), 1),
+            let (relative_path, line) = match row {
+                ResultRow::Match { relative_path, line_number, .. } => {
+                    (relative_path.clone(), *line_number)
+                }
+                ResultRow::FileHeader { relative_path, .. } => (relative_path.clone(), 1),
             };
             self.save_memory(cx);
-            cx.emit(ContentSearchDialogEvent::FileSelected { path, line });
+            cx.emit(ContentSearchDialogEvent::FileSelected { relative_path, line });
         }
     }
 
@@ -300,7 +303,10 @@ impl ContentSearchDialog {
 #[derive(Clone, Debug)]
 pub enum ContentSearchDialogEvent {
     Close,
-    FileSelected { path: PathBuf, line: usize },
+    /// A match was opened. `relative_path` is project-relative; callers don't
+    /// need to handle absolute path semantics (which differ between local and
+    /// remote projects).
+    FileSelected { relative_path: String, line: usize },
 }
 
 impl EventEmitter<ContentSearchDialogEvent> for ContentSearchDialog {}

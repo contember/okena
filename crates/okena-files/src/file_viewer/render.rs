@@ -5,7 +5,7 @@ use crate::code_view::{
     selection_bg_ranges,
 };
 use crate::file_search::Cancel;
-use crate::file_tree::{expandable_file_row, expandable_folder_row, FileTreeNode};
+use crate::file_tree::{expandable_file_row, expandable_folder_row};
 use crate::selection::{Selection1DExtension, Selection2DNonEmpty};
 use crate::syntax::HighlightedLine;
 use crate::theme::theme;
@@ -31,6 +31,20 @@ fn rgba(color: u32, alpha: f32) -> Rgba {
     let g = ((color >> 8) & 0xFF) as f32 / 255.0;
     let b = (color & 0xFF) as f32 / 255.0;
     Rgba { r, g, b, a: alpha }
+}
+
+/// Placeholder row shown while a directory's children are being fetched.
+fn loading_row(depth: usize, t: &ThemeColors, cx: &App) -> Div {
+    let indent = depth as f32 * 14.0;
+    div()
+        .flex()
+        .items_center()
+        .h(px(22.0))
+        .pl(px(indent + 8.0 + 18.0))
+        .pr(px(12.0))
+        .text_size(ui_text(12.0, cx))
+        .text_color(rgb(t.text_muted))
+        .child("Loading…")
 }
 
 impl FileViewer {
@@ -228,177 +242,234 @@ impl FileViewer {
     }
 
 
-    /// Recursively render file tree nodes with expand/collapse.
+    /// Recursively render file tree nodes with expand/collapse, lazy-loading
+    /// directory listings via `loaded_dirs` as folders open.
     pub(super) fn render_tree_node(
         &self,
-        node: &FileTreeNode,
+        parent_relative: &str,
         depth: usize,
-        parent_path: &str,
         t: &ThemeColors,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut elements: Vec<AnyElement> = Vec::new();
-        let active_file_index = self.active_tab().selected_file_index;
-        // Collect all file indices that have open tabs (for dimmer highlight)
-        let open_file_indices: std::collections::HashSet<usize> = self
+
+        // Active and open file paths drive highlighting in the tree.
+        let active_relative = self.active_tab().relative_path.clone();
+        let open_relatives: std::collections::HashSet<String> = self
             .tabs
             .iter()
-            .filter_map(|t| t.selected_file_index)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.relative_path.clone())
             .collect();
 
-        for (name, child) in &node.children {
-            let folder_path = if parent_path.is_empty() {
-                name.clone()
+        let entries = match self.loaded_dirs.get(parent_relative) {
+            Some(entries) => entries,
+            None => {
+                if self.loading_dirs.contains(parent_relative) {
+                    elements.push(loading_row(depth, t, cx).into_any_element());
+                }
+                return elements;
+            }
+        };
+
+        for entry in entries {
+            let child_relative = if parent_relative.is_empty() {
+                entry.name.clone()
             } else {
-                format!("{}/{}", parent_path, name)
+                format!("{}/{}", parent_relative, entry.name)
             };
-            let is_expanded = self.expanded_folders.contains(&folder_path);
-            let is_renaming = self.is_renaming_folder(&folder_path);
-            let is_ctx_target = self.is_context_menu_target_folder(&folder_path);
 
-            let indent = depth as f32 * 14.0;
-
-            if is_renaming {
-                // Build folder row with inline rename input instead of name label
-                let mut row = div()
-                    .id(ElementId::Name(
-                        format!("fv-folder-{}-rename", folder_path).into(),
-                    ))
-                    .flex()
-                    .items_center()
-                    .h(px(26.0))
-                    .pl(px(indent + 8.0))
-                    .pr(px(12.0))
-                    .bg(rgb(t.bg_selection))
-                    .child(
-                        svg()
-                            .path(if is_expanded { "icons/chevron-down.svg" } else { "icons/chevron-right.svg" })
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_muted))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        svg()
-                            .path("icons/folder.svg")
-                            .size(px(14.0))
-                            .text_color(rgb(t.text_secondary))
-                            .mr(px(4.0))
-                            .flex_shrink_0(),
-                    );
-                if let Some(input) = self.render_rename_input(t, cx) {
-                    row = row.child(input);
-                }
-                row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key.as_str() == "enter" {
-                        this.finish_rename(cx);
-                    }
-                }));
-                elements.push(row.into_any_element());
-            } else {
-                let folder_path_clone = folder_path.clone();
-                let folder_path_for_ctx = folder_path.clone();
-                let abs_path_for_ctx = PathBuf::from(self.project_fs.project_id()).join(&folder_path);
-
-                elements.push(
-                    expandable_folder_row(name, depth, is_expanded, t, cx)
-                        .id(ElementId::Name(
-                            format!("fv-folder-{}", folder_path).into(),
-                        ))
-                        .when(is_ctx_target, |d| d.bg(rgb(t.bg_selection)))
-                        .on_click(cx.listener(move |this, _, _window, cx| {
-                            this.toggle_folder(&folder_path_clone, cx);
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener({
-                                let folder_path = folder_path_for_ctx;
-                                let abs_path = abs_path_for_ctx;
-                                move |this, event: &MouseDownEvent, _, cx| {
-                                    this.open_context_menu(
-                                        event.position,
-                                        TreeNodeTarget::Folder {
-                                            folder_path: folder_path.clone(),
-                                            abs_path: abs_path.clone(),
-                                        },
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                }
-                            }),
-                        )
-                        .into_any_element(),
+            if entry.is_dir {
+                self.render_folder_row(
+                    &mut elements,
+                    entry,
+                    &child_relative,
+                    depth,
+                    t,
+                    cx,
                 );
-            }
-
-            if is_expanded {
-                elements.extend(self.render_tree_node(child, depth + 1, &folder_path, t, cx));
-            }
-        }
-
-        for &file_index in &node.files {
-            if let Some(file) = self.files.get(file_index) {
-                let is_active = active_file_index == Some(file_index);
-                let is_open = open_file_indices.contains(&file_index);
-                let is_renaming = self.is_renaming_file(&file.path);
-                let is_ctx_target = self.is_context_menu_target_file(&file.path);
-
-                let highlight = is_active || is_ctx_target;
-                let indent = depth as f32 * 14.0;
-
-                if is_renaming {
-                    // Build file row with inline rename input instead of name label
-                    let mut row = div()
-                        .id(ElementId::Name(format!("fv-file-{}-rename", file_index).into()))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .h(px(26.0))
-                        .pl(px(indent + 8.0 + 18.0))
-                        .pr(px(12.0))
-                        .bg(rgb(t.bg_selection))
-                        .child(file_icon(&file.filename, t, cx).mr(px(4.0)));
-                    if let Some(input) = self.render_rename_input(t, cx) {
-                        row = row.child(input);
-                    }
-                    row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key.as_str() == "enter" {
-                            this.finish_rename(cx);
-                        }
-                    }));
-                    elements.push(row.into_any_element());
-                } else {
-                    let file_path_for_ctx = file.path.clone();
-                    elements.push(
-                        expandable_file_row(&file.filename, depth, None, is_open || is_active, t, cx)
-                            .id(ElementId::Name(format!("fv-file-{}", file_index).into()))
-                            .when(highlight, |d| d.bg(rgba(t.bg_selection, 0.5)))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.select_file(file_index, cx);
-                            }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener({
-                                    let path = file_path_for_ctx;
-                                    move |this, event: &MouseDownEvent, _, cx| {
-                                        this.open_context_menu(
-                                            event.position,
-                                            TreeNodeTarget::File {
-                                                path: path.clone(),
-                                            },
-                                            cx,
-                                        );
-                                        cx.stop_propagation();
-                                    }
-                                }),
-                            )
-                            .into_any_element(),
-                    );
+                if self.expanded_folders.contains(&child_relative) {
+                    elements.extend(self.render_tree_node(&child_relative, depth + 1, t, cx));
                 }
+            } else {
+                let is_active = active_relative == child_relative;
+                let is_open = open_relatives.contains(&child_relative);
+                self.render_file_row(
+                    &mut elements,
+                    entry,
+                    &child_relative,
+                    depth,
+                    is_active,
+                    is_open,
+                    t,
+                    cx,
+                );
             }
         }
 
         elements
+    }
+
+    fn render_folder_row(
+        &self,
+        elements: &mut Vec<AnyElement>,
+        entry: &crate::list_directory::DirEntry,
+        folder_relative: &str,
+        depth: usize,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) {
+        let is_expanded = self.expanded_folders.contains(folder_relative);
+        let is_renaming = self.is_renaming_folder(folder_relative);
+        let is_ctx_target = self.is_context_menu_target_folder(folder_relative);
+        let indent = depth as f32 * 14.0;
+
+        if is_renaming {
+            let mut row = div()
+                .id(ElementId::Name(
+                    format!("fv-folder-{}-rename", folder_relative).into(),
+                ))
+                .flex()
+                .items_center()
+                .h(px(26.0))
+                .pl(px(indent + 8.0))
+                .pr(px(12.0))
+                .bg(rgb(t.bg_selection))
+                .child(
+                    svg()
+                        .path(if is_expanded {
+                            "icons/chevron-down.svg"
+                        } else {
+                            "icons/chevron-right.svg"
+                        })
+                        .size(px(14.0))
+                        .text_color(rgb(t.text_muted))
+                        .mr(px(4.0))
+                        .flex_shrink_0(),
+                )
+                .child(
+                    svg()
+                        .path("icons/folder.svg")
+                        .size(px(14.0))
+                        .text_color(rgb(t.text_secondary))
+                        .mr(px(4.0))
+                        .flex_shrink_0(),
+                );
+            if let Some(input) = self.render_rename_input(t, cx) {
+                row = row.child(input);
+            }
+            row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key.as_str() == "enter" {
+                    this.finish_rename(cx);
+                }
+            }));
+            elements.push(row.into_any_element());
+            return;
+        }
+
+        let folder_for_click = folder_relative.to_string();
+        let folder_for_ctx = folder_relative.to_string();
+        let abs_path_for_ctx = match self.project_fs.project_root() {
+            Some(root) => root.join(folder_relative),
+            None => PathBuf::from(folder_relative),
+        };
+
+        elements.push(
+            expandable_folder_row(&entry.name, depth, is_expanded, t, cx)
+                .id(ElementId::Name(format!("fv-folder-{}", folder_relative).into()))
+                .when(is_ctx_target, |d| d.bg(rgb(t.bg_selection)))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.toggle_folder(&folder_for_click, cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let folder_path = folder_for_ctx;
+                        let abs_path = abs_path_for_ctx;
+                        move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_context_menu(
+                                event.position,
+                                TreeNodeTarget::Folder {
+                                    folder_path: folder_path.clone(),
+                                    abs_path: abs_path.clone(),
+                                },
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .into_any_element(),
+        );
+    }
+
+    fn render_file_row(
+        &self,
+        elements: &mut Vec<AnyElement>,
+        entry: &crate::list_directory::DirEntry,
+        file_relative: &str,
+        depth: usize,
+        is_active: bool,
+        is_open: bool,
+        t: &ThemeColors,
+        cx: &mut Context<Self>,
+    ) {
+        let abs_path = match self.project_fs.project_root() {
+            Some(root) => root.join(file_relative),
+            None => PathBuf::from(file_relative),
+        };
+        let is_renaming = self.is_renaming_file(&abs_path);
+        let is_ctx_target = self.is_context_menu_target_file(&abs_path);
+        let highlight = is_active || is_ctx_target;
+        let indent = depth as f32 * 14.0;
+
+        if is_renaming {
+            let mut row = div()
+                .id(ElementId::Name(format!("fv-file-{}-rename", file_relative).into()))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(26.0))
+                .pl(px(indent + 8.0 + 18.0))
+                .pr(px(12.0))
+                .bg(rgb(t.bg_selection))
+                .child(file_icon(&entry.name, t, cx).mr(px(4.0)));
+            if let Some(input) = self.render_rename_input(t, cx) {
+                row = row.child(input);
+            }
+            row = row.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key.as_str() == "enter" {
+                    this.finish_rename(cx);
+                }
+            }));
+            elements.push(row.into_any_element());
+            return;
+        }
+
+        let file_relative_for_click = file_relative.to_string();
+        elements.push(
+            expandable_file_row(&entry.name, depth, None, is_open || is_active, t, cx)
+                .id(ElementId::Name(format!("fv-file-{}", file_relative).into()))
+                .when(highlight, |d| d.bg(rgba(t.bg_selection, 0.5)))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    this.select_file(file_relative_for_click.clone(), cx);
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener({
+                        let path = abs_path;
+                        move |this, event: &MouseDownEvent, _, cx| {
+                            this.open_context_menu(
+                                event.position,
+                                TreeNodeTarget::File { path: path.clone() },
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .into_any_element(),
+        );
     }
 
     /// Render scrollbar thumb.
@@ -675,10 +746,11 @@ impl Render for FileViewer {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "File".to_string());
 
-        let relative_path = self.files.iter()
-            .find(|f| f.path == tab.file_path)
-            .map(|f| f.relative_path.clone())
-            .unwrap_or_else(|| tab.file_path.to_string_lossy().to_string());
+        let relative_path = if !tab.relative_path.is_empty() {
+            tab.relative_path.clone()
+        } else {
+            tab.file_path.to_string_lossy().to_string()
+        };
 
         // Measure actual monospace character width from font metrics
         let font = Font {
@@ -705,7 +777,7 @@ impl Render for FileViewer {
 
         // Pre-render tree elements for sidebar
         let tree_elements = if sidebar_visible {
-            self.render_tree_node(&self.file_tree.clone(), 0, "", &t, cx)
+            self.render_tree_node("", 0, &t, cx)
         } else {
             Vec::new()
         };

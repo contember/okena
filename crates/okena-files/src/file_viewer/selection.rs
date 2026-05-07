@@ -82,17 +82,18 @@ impl FileViewer {
     /// Select a file from the tree — opens in a new tab (like VS Code).
     /// If the file is already open, switches to that tab.
     /// If the current tab is empty (no file), replaces it instead of creating a new one.
-    pub(super) fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(file) = self.files.get(index) {
-            let path = file.path.clone();
-            self.open_file_in_tab(path, cx);
-        }
+    pub(super) fn select_file(&mut self, relative_path: String, cx: &mut Context<Self>) {
+        self.open_file_in_tab(relative_path, cx);
     }
 
-    /// Toggle a folder's expanded/collapsed state.
+    /// Toggle a folder's expanded/collapsed state. Lazy-loads its children on
+    /// first expand.
     pub(super) fn toggle_folder(&mut self, folder_path: &str, cx: &mut Context<Self>) {
-        if !self.expanded_folders.remove(folder_path) {
+        if self.expanded_folders.remove(folder_path) {
+            // Collapsing — nothing to fetch.
+        } else {
             self.expanded_folders.insert(folder_path.to_string());
+            self.fetch_directory(folder_path.to_string(), cx);
         }
         cx.notify();
     }

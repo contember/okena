@@ -15,6 +15,29 @@ use std::path::{Path, PathBuf};
 
 use super::FileViewer;
 
+/// Strip the project root from `abs_path` to produce a project-relative path
+/// string (with `/` separators). Returns `None` for remote projects (no local
+/// root) or when `abs_path` lives outside the project.
+fn relative_for(project_root: &Option<PathBuf>, abs_path: &Path) -> Option<String> {
+    let root = project_root.as_ref()?;
+    let stripped = abs_path.strip_prefix(root).ok()?;
+    Some(stripped.to_string_lossy().replace('\\', "/"))
+}
+
+/// Project-relative path of the parent directory of `target`, used to scope
+/// cache invalidation after a file/folder op. Returns `Some("")` when the
+/// target lives directly under the project root.
+fn parent_relative_of_target(
+    target: &TreeNodeTarget,
+    project_root: &Option<PathBuf>,
+) -> Option<String> {
+    let target_rel = relative_for(project_root, target.abs_path())?;
+    Some(match target_rel.rfind('/') {
+        Some(idx) => target_rel[..idx].to_string(),
+        None => String::new(),
+    })
+}
+
 /// What kind of tree node was right-clicked.
 pub(crate) enum TreeNodeTarget {
     File { path: PathBuf },
@@ -172,7 +195,11 @@ impl FileViewer {
             return;
         }
 
-        self.update_tabs_after_rename(&old_path, &new_path);
+        let project_root = self.project_fs.project_root();
+        let old_rel = relative_for(&project_root, &old_path);
+        let new_rel = relative_for(&project_root, &new_path);
+
+        self.update_tabs_after_rename(&old_path, &new_path, old_rel.as_deref(), new_rel.as_deref());
         self.update_expanded_after_rename(&old_path, &new_path);
 
         self.refresh_file_tree_async(cx);
@@ -224,7 +251,13 @@ impl FileViewer {
         )
     }
 
-    fn update_tabs_after_rename(&mut self, old_path: &Path, new_path: &Path) {
+    fn update_tabs_after_rename(
+        &mut self,
+        old_path: &Path,
+        new_path: &Path,
+        old_rel: Option<&str>,
+        new_rel: Option<&str>,
+    ) {
         for tab in &mut self.tabs {
             if tab.file_path == *old_path {
                 tab.file_path = new_path.to_path_buf();
@@ -233,11 +266,28 @@ impl FileViewer {
                     tab.file_path = new_path.join(relative);
                 }
             }
+
+            if let (Some(old_rel), Some(new_rel)) = (old_rel, new_rel) {
+                if tab.relative_path == old_rel {
+                    tab.relative_path = new_rel.to_string();
+                } else {
+                    let prefix = format!("{}/", old_rel);
+                    if tab.relative_path.starts_with(&prefix) {
+                        tab.relative_path = format!(
+                            "{}/{}",
+                            new_rel,
+                            &tab.relative_path[prefix.len()..],
+                        );
+                    }
+                }
+            }
         }
     }
 
     fn update_expanded_after_rename(&mut self, old_path: &Path, new_path: &Path) {
-        let project_path = PathBuf::from(self.project_fs.project_id());
+        let Some(project_path) = self.project_fs.project_root() else {
+            return;
+        };
         let old_rel = match old_path.strip_prefix(&project_path) {
             Ok(p) => p.to_string_lossy().to_string(),
             Err(_) => return,
@@ -297,7 +347,11 @@ impl FileViewer {
 
         self.close_tabs_for_deleted(&confirm.target, cx);
 
-        self.refresh_file_tree_async(cx);
+        // Invalidate just the parent directory so we don't re-fetch the whole
+        // expanded tree for a single deletion.
+        let parent_rel = parent_relative_of_target(&confirm.target, &self.project_fs.project_root())
+            .unwrap_or_default();
+        self.invalidate_directory(&parent_rel, cx);
         cx.notify();
     }
 

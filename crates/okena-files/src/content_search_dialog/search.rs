@@ -127,6 +127,7 @@ impl ContentSearchDialog {
                 self.total_matches += 1;
                 self.rows.push(ResultRow::Match {
                     file_path: file_result.file_path.clone(),
+                    relative_path: file_result.relative_path.clone(),
                     line_number: m.line_number,
                     line_content: m.line_content.clone(),
                     match_ranges: m.match_ranges.clone(),

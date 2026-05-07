@@ -5,7 +5,6 @@
 
 use gpui::*;
 
-use std::path::PathBuf;
 
 use crate::terminal::shell_config::ShellType;
 use crate::views::overlays::command_palette::{CommandPalette, CommandPaletteEvent};
@@ -1179,8 +1178,8 @@ impl OverlayManager {
                 FileSearchDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                FileSearchDialogEvent::FileSelected(path) => {
-                    let relative_path = path.to_string_lossy().to_string();
+                FileSearchDialogEvent::FileSelected(relative_path) => {
+                    let relative_path = relative_path.clone();
                     this.close_modal(cx);
                     this.show_file_viewer(relative_path, fs_for_viewer.clone(), cx);
                 }
@@ -1221,8 +1220,8 @@ impl OverlayManager {
                 ContentSearchDialogEvent::Close => {
                     this.close_modal(cx);
                 }
-                ContentSearchDialogEvent::FileSelected { path, line: _ } => {
-                    let relative_path = path.to_string_lossy().to_string();
+                ContentSearchDialogEvent::FileSelected { relative_path, line: _ } => {
+                    let relative_path = relative_path.clone();
                     this.close_modal(cx);
                     this.show_file_viewer(relative_path, fs_for_viewer.clone(), cx);
                 }
@@ -1269,13 +1268,13 @@ impl OverlayManager {
         if let Some(viewer) = self.cached_file_viewers.get(&cache_key) {
             viewer.update(cx, |v, cx| {
                 v.update_config(font_size, is_dark, cx);
-                v.open_file_in_tab(PathBuf::from(&relative_path), cx);
+                v.open_file_in_tab(relative_path.clone(), cx);
             });
             self.open_file_viewer_modal(viewer.clone(), cx);
             return;
         }
 
-        let viewer = cx.new(|cx| FileViewer::new(PathBuf::from(&relative_path), fs, font_size, is_dark, cx));
+        let viewer = cx.new(|cx| FileViewer::new(relative_path.clone(), fs, font_size, is_dark, cx));
 
         self.subscribe_file_viewer(&viewer, cx);
         self.cached_file_viewers.insert(cache_key, viewer.clone());

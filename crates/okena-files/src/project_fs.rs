@@ -39,6 +39,12 @@ pub trait ProjectFs: Send + Sync + 'static {
 
     /// Unique project identifier (used for caching).
     fn project_id(&self) -> String;
+
+    /// Local absolute path to the project root, if available. Used to convert
+    /// project-relative paths into absolute `PathBuf`s for filesystem
+    /// operations (e.g. context-menu rename/delete). Remote projects return
+    /// `None` because the root only exists on the remote machine.
+    fn project_root(&self) -> Option<PathBuf>;
 }
 
 /// Local file system provider — delegates to existing functions.
@@ -96,6 +102,10 @@ impl ProjectFs for LocalProjectFs {
 
     fn project_id(&self) -> String {
         self.path.to_string_lossy().to_string()
+    }
+
+    fn project_root(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
     }
 }
 
@@ -225,5 +235,9 @@ impl ProjectFs for RemoteProjectFs {
 
     fn project_id(&self) -> String {
         self.project_id.clone()
+    }
+
+    fn project_root(&self) -> Option<PathBuf> {
+        None
     }
 }
