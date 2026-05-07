@@ -29,8 +29,12 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "pdf", "woff", "woff2", "ttf", "eot", "exe", "bin",
 ];
 
-/// Maximum number of files to scan
-const MAX_FILES: usize = 10000;
+/// Maximum number of files to keep in the fuzzy finder index.
+///
+/// The file viewer tree is now lazy (see `crate::list_directory`), so the cap
+/// only constrains the Cmd+P fuzzy finder. 25k covers all but the very
+/// largest monorepos while keeping `nucleo` per-keystroke matching snappy.
+const MAX_FILES: usize = 25_000;
 
 /// A file entry in the search list
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
