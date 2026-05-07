@@ -224,6 +224,8 @@ fn default_workspace_version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::window_id::WindowId;
+    use crate::window_state::WindowBounds;
 
     fn make_project(path: &str) -> ProjectData {
         ProjectData {
@@ -449,6 +451,571 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
         assert!(!value.as_object().unwrap().contains_key("collapsed"),
             "FolderData.collapsed must not appear in serialized form (field removed)");
+    }
+
+    #[test]
+    fn window_lookup_main_is_infallible() {
+        // WindowId::Main always resolves to &main_window. This is the
+        // compile-time invariant that the upcoming window-scoped setters rely
+        // on -- main is never "closed" the way an extra can be, so calling
+        // `data.window(WindowId::Main)` after construction must always succeed.
+        let data = make_workspace();
+        let w = data.window(WindowId::Main).expect("main always present");
+        assert_eq!(w.id, data.main_window.id);
+    }
+
+    #[test]
+    fn window_lookup_extra_by_id_round_trips() {
+        // Mint an extra, push it into extra_windows, then look it up by its
+        // own id. Returns the same WindowState (by id equality).
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let w = data
+            .window(WindowId::Extra(extra_id))
+            .expect("extra was just pushed");
+        assert_eq!(w.id, extra_id);
+    }
+
+    #[test]
+    fn window_lookup_unknown_extra_returns_none() {
+        // The "targeted window was just closed" signal -- window-scoped setters
+        // will treat None as a silent no-op rather than an error. Pin the
+        // contract so a future refactor that switches the lookup to a
+        // panicking variant has to own the breakage.
+        let data = make_workspace();
+        let unknown = uuid::Uuid::new_v4();
+        assert!(data.window(WindowId::Extra(unknown)).is_none());
+    }
+
+    #[test]
+    fn window_mut_extra_mutates_only_target() {
+        // Mutable lookup must mutate the targeted extra without disturbing
+        // siblings. Construct two extras, mutate one via window_mut, assert
+        // the other is unchanged.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        let target = data
+            .window_mut(WindowId::Extra(a_id))
+            .expect("extra a was just pushed");
+        target.folder_filter = Some("f1".to_string());
+
+        let after_a = data.window(WindowId::Extra(a_id)).unwrap();
+        assert_eq!(after_a.folder_filter.as_deref(), Some("f1"));
+        let after_b = data.window(WindowId::Extra(b_id)).unwrap();
+        assert!(after_b.folder_filter.is_none());
+    }
+
+    #[test]
+    fn window_mut_main_writes_to_main_slot() {
+        // window_mut(WindowId::Main) returns &mut main_window. Pin the
+        // contract so the upcoming window-scoped setters can rely on Main
+        // always producing a writable handle.
+        let mut data = make_workspace();
+        let target = data.window_mut(WindowId::Main).expect("main always present");
+        target.hidden_project_ids.insert("p1".to_string());
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn set_folder_filter_writes_to_main_window() {
+        // WindowId::Main routes the write through window_mut to the main slot.
+        // Pins the smallest window-scoped setter contract: Main always succeeds
+        // and Some(value) lands on main_window.folder_filter.
+        let mut data = make_workspace();
+        data.set_folder_filter(WindowId::Main, Some("f1".to_string()));
+        assert_eq!(data.main_window.folder_filter.as_deref(), Some("f1"));
+    }
+
+    #[test]
+    fn set_folder_filter_clears_with_none() {
+        // Passing None must clear the filter. Without this, callers wanting to
+        // exit folder-filter mode would have no API path -- the field would be
+        // write-only.
+        let mut data = make_workspace();
+        data.main_window.folder_filter = Some("f1".to_string());
+        data.set_folder_filter(WindowId::Main, None);
+        assert!(data.main_window.folder_filter.is_none());
+    }
+
+    #[test]
+    fn set_folder_filter_writes_to_targeted_extra() {
+        // Mint two extras, set filter on one via its WindowId::Extra(uuid).
+        // The targeted extra gets the filter; the sibling extra and the main
+        // window are untouched. Defends against a regression that ignores the
+        // id and writes to main, or scatters the write across all extras.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        data.set_folder_filter(WindowId::Extra(a_id), Some("f1".to_string()));
+
+        assert_eq!(
+            data.window(WindowId::Extra(a_id)).unwrap().folder_filter.as_deref(),
+            Some("f1"),
+        );
+        assert!(data.window(WindowId::Extra(b_id)).unwrap().folder_filter.is_none());
+        assert!(data.main_window.folder_filter.is_none());
+    }
+
+    #[test]
+    fn set_folder_filter_unknown_extra_is_silent_noop() {
+        // The "targeted window was just closed" race -- the upcoming Workspace
+        // entity will treat unknown ids as a silent no-op rather than panic.
+        // Mint an extra so there is a sibling to verify is left untouched, then
+        // call with a fresh uuid that does not match any window.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let unknown = uuid::Uuid::new_v4();
+        data.set_folder_filter(WindowId::Extra(unknown), Some("f1".to_string()));
+
+        assert!(data.window(WindowId::Extra(extra_id)).unwrap().folder_filter.is_none());
+        assert!(data.main_window.folder_filter.is_none());
+    }
+
+    #[test]
+    fn toggle_hidden_inserts_when_absent() {
+        // First-toggle contract: an unhidden project becomes hidden. Pins the
+        // smallest leg of the toggle semantics; without this a future
+        // refactor that always-removes (or always-inserts) would silently
+        // break the "Hide Project" sidebar action when invoked on a visible
+        // project.
+        let mut data = make_workspace();
+        data.toggle_hidden(WindowId::Main, "p1");
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn toggle_hidden_removes_when_present() {
+        // Second-toggle contract: an already-hidden project becomes visible.
+        // Defends against a regression that always-inserts (which would
+        // leave the project stuck hidden after the user clicks "Show
+        // Project"). Pinned separately from the insert leg because the two
+        // halves are easy to break independently.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.toggle_hidden(WindowId::Main, "p1");
+        assert!(!data.main_window.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn toggle_hidden_writes_to_targeted_extra() {
+        // Mint two extras, toggle on one via WindowId::Extra(uuid). The
+        // targeted extra's hidden set gains the project; the sibling extra
+        // and the main window are untouched. Defends against a regression
+        // that ignores the id and writes to main, or scatters the write
+        // across all extras.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        data.toggle_hidden(WindowId::Extra(a_id), "p1");
+
+        assert!(data
+            .window(WindowId::Extra(a_id))
+            .unwrap()
+            .hidden_project_ids
+            .contains("p1"));
+        assert!(!data
+            .window(WindowId::Extra(b_id))
+            .unwrap()
+            .hidden_project_ids
+            .contains("p1"));
+        assert!(!data.main_window.hidden_project_ids.contains("p1"));
+    }
+
+    #[test]
+    fn toggle_hidden_unknown_extra_is_silent_noop() {
+        // The "targeted window was just closed" race -- the upcoming Workspace
+        // entity will treat unknown ids as a silent no-op rather than panic.
+        // Mint an extra to verify it is left untouched, then call with a
+        // fresh uuid that does not match any window.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let unknown = uuid::Uuid::new_v4();
+        data.toggle_hidden(WindowId::Extra(unknown), "p1");
+
+        assert!(data
+            .window(WindowId::Extra(extra_id))
+            .unwrap()
+            .hidden_project_ids
+            .is_empty());
+        assert!(data.main_window.hidden_project_ids.is_empty());
+    }
+
+    #[test]
+    fn set_project_width_writes_to_main_window() {
+        // WindowId::Main routes the write through window_mut to the main slot.
+        // Pins the smallest leg of the per-window column-width contract: a
+        // single (project_id, width) pair lands on main_window.project_widths.
+        let mut data = make_workspace();
+        data.set_project_width(WindowId::Main, "p1", 0.42);
+        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(0.42));
+    }
+
+    #[test]
+    fn set_project_width_overwrites_existing_value() {
+        // Re-setting a width for the same project replaces the previous value
+        // rather than ignoring or appending. Defends against a regression that
+        // uses HashMap::entry().or_insert (which would silently keep the old
+        // value on a column-resize).
+        let mut data = make_workspace();
+        data.set_project_width(WindowId::Main, "p1", 0.25);
+        data.set_project_width(WindowId::Main, "p1", 0.75);
+        assert_eq!(data.main_window.project_widths.get("p1").copied(), Some(0.75));
+    }
+
+    #[test]
+    fn set_project_width_writes_to_targeted_extra() {
+        // Mint two extras, set width on one via WindowId::Extra(uuid). The
+        // targeted extra's project_widths gains the entry; the sibling extra
+        // and the main window are untouched. Defends against a regression
+        // that ignores the id and writes to main, or scatters the write
+        // across all extras.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        data.set_project_width(WindowId::Extra(a_id), "p1", 0.42);
+
+        assert_eq!(
+            data.window(WindowId::Extra(a_id)).unwrap().project_widths.get("p1").copied(),
+            Some(0.42),
+        );
+        assert!(data.window(WindowId::Extra(b_id)).unwrap().project_widths.is_empty());
+        assert!(data.main_window.project_widths.is_empty());
+    }
+
+    #[test]
+    fn set_project_width_unknown_extra_is_silent_noop() {
+        // The "targeted window was just closed" race -- the upcoming Workspace
+        // entity will treat unknown ids as a silent no-op rather than panic.
+        // Mint an extra to verify it is left untouched, then call with a
+        // fresh uuid that does not match any window.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let unknown = uuid::Uuid::new_v4();
+        data.set_project_width(WindowId::Extra(unknown), "p1", 0.42);
+
+        assert!(data.window(WindowId::Extra(extra_id)).unwrap().project_widths.is_empty());
+        assert!(data.main_window.project_widths.is_empty());
+    }
+
+    #[test]
+    fn set_folder_collapsed_inserts_when_true() {
+        // WindowId::Main + collapsed=true routes the write through window_mut to
+        // the main slot, inserting (folder_id, true) into folder_collapsed. Pins
+        // the smallest leg of the per-window folder-collapse contract.
+        let mut data = make_workspace();
+        data.set_folder_collapsed(WindowId::Main, "f1", true);
+        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+    }
+
+    #[test]
+    fn set_folder_collapsed_false_removes_existing_entry() {
+        // The "absence == expanded" runtime convention -- the toggle entry point
+        // (Workspace::toggle_folder_collapsed) removes the entry when collapsing
+        // back to expanded rather than storing `false`. The pure setter mirrors
+        // that convention: collapsed=false removes any existing entry. Defends
+        // against a regression that uses `insert(folder_id, collapsed)`
+        // unconditionally (which would store explicit `false` entries and
+        // diverge from the runtime convention).
+        let mut data = make_workspace();
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.set_folder_collapsed(WindowId::Main, "f1", false);
+        assert!(!data.main_window.folder_collapsed.contains_key("f1"));
+    }
+
+    #[test]
+    fn set_folder_collapsed_false_on_missing_entry_is_noop() {
+        // Setting collapsed=false for a folder that is not in the map is a
+        // no-op (it is already expanded). Defends against a regression that
+        // panics or inserts a stub entry.
+        let mut data = make_workspace();
+        data.set_folder_collapsed(WindowId::Main, "f1", false);
+        assert!(data.main_window.folder_collapsed.is_empty());
+    }
+
+    #[test]
+    fn set_folder_collapsed_writes_to_targeted_extra() {
+        // Mint two extras, set collapse on one via WindowId::Extra(uuid). The
+        // targeted extra's folder_collapsed gains the entry; the sibling extra
+        // and the main window are untouched. Defends against a regression that
+        // ignores the id and writes to main, or scatters the write across all
+        // extras.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        data.set_folder_collapsed(WindowId::Extra(a_id), "f1", true);
+
+        assert_eq!(
+            data.window(WindowId::Extra(a_id)).unwrap().folder_collapsed.get("f1").copied(),
+            Some(true),
+        );
+        assert!(data.window(WindowId::Extra(b_id)).unwrap().folder_collapsed.is_empty());
+        assert!(data.main_window.folder_collapsed.is_empty());
+    }
+
+    #[test]
+    fn set_folder_collapsed_unknown_extra_is_silent_noop() {
+        // The "targeted window was just closed" race -- the upcoming Workspace
+        // entity will treat unknown ids as a silent no-op rather than panic.
+        // Mint an extra to verify it is left untouched, then call with a fresh
+        // uuid that does not match any window.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let unknown = uuid::Uuid::new_v4();
+        data.set_folder_collapsed(WindowId::Extra(unknown), "f1", true);
+
+        assert!(data.window(WindowId::Extra(extra_id)).unwrap().folder_collapsed.is_empty());
+        assert!(data.main_window.folder_collapsed.is_empty());
+    }
+
+    #[test]
+    fn set_os_bounds_writes_to_main_window() {
+        // WindowId::Main + Some(bounds) routes the write through window_mut to
+        // the main slot. Pins the smallest leg of the per-window os-bounds
+        // contract: Some(WindowBounds) lands on main_window.os_bounds. Mirrors
+        // the set_folder_filter shape since both fields are Option-typed.
+        let mut data = make_workspace();
+        let bounds = WindowBounds {
+            origin_x: 100.0,
+            origin_y: 50.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        data.set_os_bounds(WindowId::Main, Some(bounds));
+        assert_eq!(data.main_window.os_bounds, Some(bounds));
+    }
+
+    #[test]
+    fn set_os_bounds_clears_with_none() {
+        // Passing None must clear the bounds. Without this, callers wanting to
+        // forget a window's last position would have no API path -- the field
+        // would be write-only. Mirrors set_folder_filter_clears_with_none.
+        let mut data = make_workspace();
+        data.main_window.os_bounds = Some(WindowBounds {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        });
+        data.set_os_bounds(WindowId::Main, None);
+        assert!(data.main_window.os_bounds.is_none());
+    }
+
+    #[test]
+    fn set_os_bounds_writes_to_targeted_extra() {
+        // Mint two extras, set bounds on one via WindowId::Extra(uuid). The
+        // targeted extra gets the bounds; the sibling extra and the main
+        // window are untouched. Defends against a regression that ignores the
+        // id and writes to main, or scatters the write across all extras.
+        let mut data = make_workspace();
+        let a = WindowState::default();
+        let b = WindowState::default();
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        let bounds = WindowBounds {
+            origin_x: 200.0,
+            origin_y: 150.0,
+            width: 1024.0,
+            height: 768.0,
+        };
+        data.set_os_bounds(WindowId::Extra(a_id), Some(bounds));
+
+        assert_eq!(
+            data.window(WindowId::Extra(a_id)).unwrap().os_bounds,
+            Some(bounds),
+        );
+        assert!(data.window(WindowId::Extra(b_id)).unwrap().os_bounds.is_none());
+        assert!(data.main_window.os_bounds.is_none());
+    }
+
+    #[test]
+    fn set_os_bounds_unknown_extra_is_silent_noop() {
+        // The "targeted window was just closed" race -- the upcoming Workspace
+        // entity will treat unknown ids as a silent no-op rather than panic.
+        // Mint an extra to verify it is left untouched, then call with a fresh
+        // uuid that does not match any window.
+        let mut data = make_workspace();
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        let unknown = uuid::Uuid::new_v4();
+        let bounds = WindowBounds {
+            origin_x: 1.0,
+            origin_y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        data.set_os_bounds(WindowId::Extra(unknown), Some(bounds));
+
+        assert!(data.window(WindowId::Extra(extra_id)).unwrap().os_bounds.is_none());
+        assert!(data.main_window.os_bounds.is_none());
+    }
+
+    #[test]
+    fn delete_project_scrub_all_windows_removes_from_main_hidden_and_widths() {
+        // Pin the smallest leg of the contract: a project's id is removed from
+        // both per-project storages on main_window. A regression that scrubbed
+        // only one of the two would leave a tombstone in the other (e.g.
+        // hidden_project_ids cleared but project_widths still pointing at a
+        // gone project) -- a subtle bug that would only surface as orphan
+        // entries in workspace.json over time.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.main_window.project_widths.insert("p1".to_string(), 0.42);
+
+        data.delete_project_scrub_all_windows("p1");
+
+        assert!(!data.main_window.hidden_project_ids.contains("p1"));
+        assert!(!data.main_window.project_widths.contains_key("p1"));
+    }
+
+    #[test]
+    fn delete_project_scrub_all_windows_removes_from_every_extra() {
+        // Mint two extras with the project id present in both per-project
+        // storages on each. After the scrub, every extra is clean. Defends
+        // against a regression that scrubs only main, only the first extra,
+        // or stops at the first match (a "found one, done" early-return).
+        let mut data = make_workspace();
+        let mut a = WindowState::default();
+        a.hidden_project_ids.insert("p1".to_string());
+        a.project_widths.insert("p1".to_string(), 0.30);
+        let mut b = WindowState::default();
+        b.hidden_project_ids.insert("p1".to_string());
+        b.project_widths.insert("p1".to_string(), 0.70);
+        let a_id = a.id;
+        let b_id = b.id;
+        data.extra_windows.push(a);
+        data.extra_windows.push(b);
+
+        data.delete_project_scrub_all_windows("p1");
+
+        let after_a = data.window(WindowId::Extra(a_id)).unwrap();
+        assert!(!after_a.hidden_project_ids.contains("p1"));
+        assert!(!after_a.project_widths.contains_key("p1"));
+        let after_b = data.window(WindowId::Extra(b_id)).unwrap();
+        assert!(!after_b.hidden_project_ids.contains("p1"));
+        assert!(!after_b.project_widths.contains_key("p1"));
+    }
+
+    #[test]
+    fn delete_project_scrub_all_windows_leaves_other_projects_alone() {
+        // A scrub of p1 must not disturb p2's entries on any window. Defends
+        // against a regression that clears the entire hidden set / widths map
+        // rather than removing the targeted id.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.main_window.hidden_project_ids.insert("p2".to_string());
+        data.main_window.project_widths.insert("p1".to_string(), 0.25);
+        data.main_window.project_widths.insert("p2".to_string(), 0.75);
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("p2".to_string());
+        extra.project_widths.insert("p2".to_string(), 0.50);
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        data.delete_project_scrub_all_windows("p1");
+
+        assert!(data.main_window.hidden_project_ids.contains("p2"));
+        assert_eq!(data.main_window.project_widths.get("p2").copied(), Some(0.75));
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(after.hidden_project_ids.contains("p2"));
+        assert_eq!(after.project_widths.get("p2").copied(), Some(0.50));
+    }
+
+    #[test]
+    fn delete_project_scrub_all_windows_unknown_id_is_noop() {
+        // Idempotent contract: a project id absent from every window is a
+        // no-op. Defends against a regression that panics on a missing-key
+        // remove (HashMap/HashSet remove return Option/bool and never panic,
+        // but a hypothetical refactor to a different data structure with
+        // stricter semantics would). Pre-populate sibling state so the
+        // assertion checks "nothing was touched", not "everything is empty".
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p2".to_string());
+        data.main_window.project_widths.insert("p2".to_string(), 0.42);
+        let mut extra = WindowState::default();
+        extra.hidden_project_ids.insert("p2".to_string());
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+
+        data.delete_project_scrub_all_windows("unknown_id");
+
+        assert!(data.main_window.hidden_project_ids.contains("p2"));
+        assert_eq!(data.main_window.project_widths.get("p2").copied(), Some(0.42));
+        let after = data.window(WindowId::Extra(extra_id)).unwrap();
+        assert!(after.hidden_project_ids.contains("p2"));
+    }
+
+    #[test]
+    fn delete_project_scrub_all_windows_does_not_touch_unrelated_per_window_fields() {
+        // The scrub is scoped to per-project storage (hidden_project_ids,
+        // project_widths). The folder_collapsed map is keyed by folder id (not
+        // project id), folder_filter is a folder-id Option, and os_bounds is
+        // not per-project. None of these may be cleared as a side-effect of
+        // a project delete. Defends against a regression that "clear every
+        // map on the targeted window" would silently break window state on
+        // every project delete.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        data.main_window.project_widths.insert("p1".to_string(), 0.42);
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        data.main_window.folder_filter = Some("f1".to_string());
+        data.main_window.os_bounds = Some(WindowBounds {
+            origin_x: 1.0,
+            origin_y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        });
+
+        data.delete_project_scrub_all_windows("p1");
+
+        assert_eq!(data.main_window.folder_collapsed.get("f1").copied(), Some(true));
+        assert_eq!(data.main_window.folder_filter.as_deref(), Some("f1"));
+        assert!(data.main_window.os_bounds.is_some());
     }
 
     #[test]

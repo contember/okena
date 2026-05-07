@@ -19,7 +19,7 @@ use crate::views::panels::toast::ToastOverlay;
 use crate::views::chrome::title_bar::TitleBar;
 use crate::settings::settings;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::Workspace;
+use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use parking_lot::Mutex;
 use std::cell::RefCell;
@@ -44,6 +44,15 @@ pub fn content_pane_registry() -> &'static ContentPaneRegistry {
 
 /// Root view of the application
 pub struct RootView {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// view addresses (folder filter, hidden set, widths, collapse, focus
+    /// zoom). Today every reader of window-scoped state still passes
+    /// `WindowId::Main` literal at the call site; subsequent slice 03 commits
+    /// migrate those readers to route through `self.window_id`. Slice 05
+    /// then spawns extra windows that mint `WindowId::Extra(uuid)` and
+    /// thread it in here so each `RootView` (soon-to-be `WindowView`) sees
+    /// only its own per-window state.
+    window_id: WindowId,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
     backend: Arc<dyn TerminalBackend>,
@@ -95,6 +104,7 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(
+        window_id: WindowId,
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
         pty_manager: Arc<PtyManager>,
@@ -107,7 +117,7 @@ impl RootView {
         let sidebar_ctrl = SidebarController::new(&app_settings);
 
         // Create sidebar entity once to preserve state
-        let sidebar = cx.new(|cx| Sidebar::new(workspace.clone(), request_broker.clone(), terminals.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(window_id, workspace.clone(), request_broker.clone(), terminals.clone(), cx));
 
         // Create title bar entity (sync initial sidebar state)
         let sidebar_initially_open = sidebar_ctrl.is_open();
@@ -126,7 +136,7 @@ impl RootView {
         });
 
         // Create overlay manager
-        let overlay_manager = cx.new(|_cx| OverlayManager::new(workspace.clone(), request_broker.clone()));
+        let overlay_manager = cx.new(|_cx| OverlayManager::new(window_id, workspace.clone(), request_broker.clone()));
 
         // Create toast overlay
         let toast_overlay = cx.new(ToastOverlay::new);
@@ -180,6 +190,7 @@ impl RootView {
         }
 
         let mut view = Self {
+            window_id,
             workspace,
             request_broker,
             backend,
@@ -247,6 +258,18 @@ impl RootView {
     /// Get the terminals registry (for sharing with detached windows)
     pub fn terminals(&self) -> &TerminalsRegistry {
         &self.terminals
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// view addresses. Always `WindowId::Main` today (single-window runtime);
+    /// slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
+    /// Field is read directly within the impl via `self.window_id`; this
+    /// public getter exists for external callers (e.g. the slice 05 spawn
+    /// flow on `Okena`) that need to address window-scoped state on
+    /// `Workspace` in the same window this view inhabits.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     /// Set the git watcher entity (called by Okena after creation).
@@ -739,9 +762,11 @@ impl RootView {
         let ws_for_observe = self.workspace.clone();
 
         let git_provider = self.build_git_provider(project_id, cx)?;
+        let window_id = self.window_id;
 
         Some(cx.new(move |cx| {
             let mut col = ProjectColumn::new(
+                window_id,
                 workspace_clone,
                 request_broker_clone,
                 id,
@@ -788,8 +813,10 @@ impl RootView {
             }
         };
 
+        let window_id = self.window_id;
         let entity = cx.new(move |cx| {
             let mut col = ProjectColumn::new(
+                window_id,
                 workspace_clone,
                 request_broker_clone,
                 id,

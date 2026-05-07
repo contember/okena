@@ -11,5 +11,5 @@ okena-layout = { path = "../okena-layout" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.10", features = ["v4"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
 log = "0.4"

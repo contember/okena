@@ -63,7 +63,7 @@ impl RootView {
         let container_width = f32::from(self.projects_grid_bounds.borrow().size.width);
 
         let raw_widths: Vec<f32> = visible_projects.iter()
-            .map(|id| workspace.get_project_width(id, num_projects))
+            .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
             .collect();
         let widths = Self::normalize_widths(&raw_widths);
         let pixel_widths = Self::to_pixel_widths(&widths, container_width, settings.min_column_width);
@@ -143,10 +143,11 @@ impl RootView {
 
         // Empty state when folder filter yields no results
         if num_projects == 0 {
-            let has_folder_filter = self.workspace.read(cx).active_folder_filter().is_some();
+            let has_folder_filter = self.workspace.read(cx).active_folder_filter(self.window_id).is_some();
             if has_folder_filter {
                 let t = theme(cx);
                 let workspace = self.workspace.clone();
+                let window_id = self.window_id;
                 return div()
                     .id("projects-grid-empty")
                     .flex_1()
@@ -172,7 +173,7 @@ impl RootView {
                             .child("Show all projects")
                             .on_click(move |_, _window, cx| {
                                 workspace.update(cx, |ws, cx| {
-                                    ws.set_folder_filter(None, cx);
+                                    ws.set_folder_filter(window_id, None, cx);
                                 });
                             }),
                     )
@@ -188,7 +189,7 @@ impl RootView {
         } else {
             let workspace = self.workspace.read(cx);
             let raw_widths: Vec<f32> = visible_projects.iter()
-                .map(|id| workspace.get_project_width(id, num_projects))
+                .map(|id| workspace.get_project_width(self.window_id, id, num_projects))
                 .collect();
             Self::normalize_widths(&raw_widths)
         };
@@ -222,6 +223,7 @@ impl RootView {
                 if i < num_projects - 1 {
                     let min_col_width = settings_entity(cx).read(cx).settings.min_column_width;
                     let divider = render_project_divider(
+                        self.window_id,
                         self.workspace.clone(),
                         i,
                         visible_projects.clone(),
@@ -457,7 +459,7 @@ impl Render for RootView {
                             }
                             _ => {
                                 // Handle split and project column resize
-                                compute_resize(event.position, state, &workspace, cx);
+                                compute_resize(this.window_id, event.position, state, &workspace, cx);
                                 // Bypass all .cached() views so terminal elements
                                 // repaint with new bounds during drag.
                                 window.refresh();
@@ -524,9 +526,10 @@ impl Render for RootView {
             }))
             // Handle clear focus action (show all projects)
             .on_action(cx.listener(|this, _: &ClearFocus, _window, cx| {
+                let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {
                     ws.set_focused_project(None, cx);
-                    ws.set_folder_filter(None, cx);
+                    ws.set_folder_filter(window_id, None, cx);
                 });
             }))
             // Toggle focus on the active terminal's project (zoom in / zoom out)
@@ -534,9 +537,10 @@ impl Render for RootView {
                 let ws = this.workspace.read(cx);
                 let is_focused = ws.focus_manager.focused_project_id().is_some();
                 if is_focused {
+                    let window_id = this.window_id;
                     this.workspace.update(cx, |ws, cx| {
                         ws.set_focused_project(None, cx);
-                        ws.set_folder_filter(None, cx);
+                        ws.set_folder_filter(window_id, None, cx);
                     });
                 } else {
                     let project_id = this.workspace.read(cx).focus_manager
