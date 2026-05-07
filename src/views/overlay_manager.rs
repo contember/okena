@@ -183,9 +183,10 @@ pub struct OverlayManager {
     /// to a local before any `self.workspace.update` closure to avoid the
     /// implicit borrow conflict between `&mut self.workspace` and reads
     /// through `self.`); also threaded as the first arg to
-    /// `FolderContextMenu::new` in `show_folder_context_menu` (hoisted to a
-    /// local for the same `cx.new` capture reason that af0e312 pinned for
-    /// the `WindowView::new` -> `OverlayManager::new` call site).
+    /// `FolderContextMenu::new` in `show_folder_context_menu` and
+    /// `ContextMenu::new` in `show_context_menu` (each hoisted to a local
+    /// for the same `cx.new` capture reason that af0e312 pinned for the
+    /// `WindowView::new` -> `OverlayManager::new` call site).
     pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<crate::workspace::focus::FocusManager>,
@@ -716,7 +717,8 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let menu = cx.new(|cx| ContextMenu::new(workspace.clone(), request, cx));
+        let window_id = self.window_id;
+        let menu = cx.new(|cx| ContextMenu::new(window_id, workspace.clone(), request, cx));
 
         cx.subscribe(&menu, |this, _, event: &ContextMenuEvent, cx| {
             match event {

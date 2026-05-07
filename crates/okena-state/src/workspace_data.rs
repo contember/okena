@@ -1261,6 +1261,66 @@ mod tests {
     }
 
     #[test]
+    fn close_extra_window_removes_matching_entry_only() {
+        // Slice 07 cri 3: close-extra removes the entry from
+        // `extra_windows`. Pin the lookup-by-id contract: the call removes
+        // exactly the targeted entry, leaving siblings (and main) untouched.
+        // Defends against a regression that walks the Vec by index (which
+        // would silently target the wrong sibling after intermediate removes)
+        // or that scrubs more than the targeted entry.
+        let mut data = make_workspace();
+        let id_a = data.spawn_extra_window(None);
+        let id_b = data.spawn_extra_window(None);
+        let id_c = data.spawn_extra_window(None);
+        assert_eq!(data.extra_windows.len(), 3);
+
+        data.close_extra_window(id_b);
+
+        assert_eq!(data.extra_windows.len(), 2);
+        assert!(data.window(id_a).is_some(), "sibling A survives");
+        assert!(data.window(id_b).is_none(), "targeted B is gone");
+        assert!(data.window(id_c).is_some(), "sibling C survives");
+    }
+
+    #[test]
+    fn close_extra_window_main_is_silent_noop() {
+        // PRD line 53 + slice 07 cri 4: main is the always-present slot;
+        // closing main quits the app via `LastWindowClosed`, it does NOT
+        // delete persisted main state. Targeting `WindowId::Main` at this
+        // helper must be a silent no-op so a future caller that
+        // unconditionally routes a close event through here cannot
+        // accidentally erase main's hidden set / widths / folder filter.
+        let mut data = make_workspace();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let id_extra = data.spawn_extra_window(None);
+
+        data.close_extra_window(WindowId::Main);
+
+        // Main untouched.
+        assert!(data.main_window.hidden_project_ids.contains("p1"));
+        // Extras untouched.
+        assert_eq!(data.extra_windows.len(), 1);
+        assert!(data.window(id_extra).is_some());
+    }
+
+    #[test]
+    fn close_extra_window_unknown_extra_is_silent_noop() {
+        // Close-race contract: a fresh uuid that does not match any live
+        // extra (e.g. a double-close where two close events fire for the
+        // same OS window, or a save-then-rebuild race where the entry was
+        // already pruned) is a silent no-op. Mirrors the silent-no-op shape
+        // of every other window-scoped operation in this module — callers
+        // do not need to pre-check existence.
+        let mut data = make_workspace();
+        let id_extra = data.spawn_extra_window(None);
+
+        data.close_extra_window(WindowId::Extra(uuid::Uuid::new_v4()));
+
+        assert_eq!(data.extra_windows.len(), 1);
+        assert!(data.window(id_extra).is_some());
+    }
+
+    #[test]
     fn spawn_extra_window_two_calls_with_same_spawning_bounds_cascade_independently() {
         // Each spawn computes the cascade offset from its own caller-
         // supplied bounds; the data layer does not track "previous spawn"

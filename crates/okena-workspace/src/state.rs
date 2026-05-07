@@ -251,6 +251,28 @@ impl Workspace {
         id
     }
 
+    /// Drop the extra window entry from `extra_windows`.
+    ///
+    /// Slice 07 cri 3 lifecycle counterpart to `spawn_extra_window` —
+    /// the close-flow in `src/app/extras.rs::open_extra_window`'s
+    /// `on_window_should_close` hook calls this when the user closes an
+    /// extra OS window so the entry stops being persisted (PRD user
+    /// story 22). Delegates to `data.close_extra_window`, which retains
+    /// every entry whose `state.id != uuid`.
+    ///
+    /// `WindowId::Main` is a silent no-op at the data layer (main is
+    /// the always-present slot). `WindowId::Extra(uuid)` for an unknown
+    /// extra (double-close race) is also a silent no-op.
+    ///
+    /// Bumps `data_version` because removing an entry shrinks the
+    /// persisted state — the auto-save observer must trigger so the
+    /// next launch (slice 07 cri 6) does not see the closed extra
+    /// reappear.
+    pub fn close_extra_window(&mut self, id: WindowId, cx: &mut Context<Self>) {
+        self.data.close_extra_window(id);
+        self.notify_data(cx);
+    }
+
     // === ProjectLifecycleTracker conveniences ===
 
     pub fn is_creating_project(&self, project_id: &str) -> bool {
@@ -2394,6 +2416,60 @@ mod gpui_tests {
             assert_eq!(bounds.origin_y, 105.0);
             assert_eq!(bounds.width, 1024.0);
             assert_eq!(bounds.height, 768.0);
+        });
+    }
+
+    #[gpui::test]
+    fn close_extra_window_drops_targeted_entry_and_bumps_version(cx: &mut gpui::TestAppContext) {
+        // Slice 07 cri 3: the entity wrapper for close-extra delegates to
+        // `data.close_extra_window` and bumps `data_version` so the auto-
+        // save observer captures the shrunk `extra_windows` Vec. Without
+        // the version bump, a closed extra would reappear on the next
+        // launch (cri 6 would silently regress). Pin both halves: the
+        // targeted entry is gone AND the version moved.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let (id_a, id_b) = workspace.update(cx, |ws: &mut Workspace, cx| {
+            let a = ws.spawn_extra_window(None, cx);
+            let b = ws.spawn_extra_window(None, cx);
+            (a, b)
+        });
+        let after_spawn_version = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_extra_window(id_a, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().window(id_a).is_none(), "closed entry is gone");
+            assert!(ws.data().window(id_b).is_some(), "sibling survives");
+            assert_eq!(ws.data().extra_windows.len(), 1);
+            assert_eq!(
+                ws.data_version(),
+                after_spawn_version + 1,
+                "version bumps so auto-save fires"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn close_extra_window_main_does_not_remove_main_state(cx: &mut gpui::TestAppContext) {
+        // PRD line 53: main is the always-present slot; closing main quits
+        // the app via `LastWindowClosed`, it does not delete persisted
+        // main state. Targeting `WindowId::Main` at the wrapper must
+        // leave main_window's per-window state intact even if a future
+        // caller routes a close event through here unconditionally.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.close_extra_window(WindowId::Main, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
         });
     }
 
