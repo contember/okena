@@ -388,6 +388,23 @@ pub fn execute_action(
                 None => ActionResult::Err(format!("project not found: {}", project_id)),
             }
         }
+        ActionRequest::ListDirectory { project_id, relative_path, show_ignored } => {
+            match ws.project(&project_id) {
+                Some(p) => {
+                    let path = match std::path::Path::new(&p.path).canonicalize() {
+                        Ok(c) => c,
+                        Err(e) => return ActionResult::Err(format!("Cannot resolve project path: {}", e)),
+                    };
+                    match okena_files::list_directory::list_directory(&path, &relative_path, show_ignored) {
+                        Ok(entries) => ActionResult::Ok(Some(
+                            serde_json::to_value(entries).expect("BUG: DirEntry must serialize"),
+                        )),
+                        Err(e) => ActionResult::Err(e),
+                    }
+                }
+                None => ActionResult::Err(format!("project not found: {}", project_id)),
+            }
+        }
         ActionRequest::ReadFile { project_id, relative_path } => {
             match ws.project(&project_id) {
                 Some(p) => {

@@ -302,6 +302,13 @@ pub enum ActionRequest {
         #[serde(default)]
         show_ignored: bool,
     },
+    ListDirectory {
+        project_id: String,
+        #[serde(default)]
+        relative_path: String,
+        #[serde(default)]
+        show_ignored: bool,
+    },
     ReadFile {
         project_id: String,
         relative_path: String,

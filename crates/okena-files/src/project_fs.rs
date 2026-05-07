@@ -2,6 +2,7 @@
 
 use crate::content_search::{ContentSearchConfig, FileSearchResult, SearchMode};
 use crate::file_search::FileEntry;
+use crate::list_directory::DirEntry;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -9,6 +10,14 @@ use std::sync::atomic::AtomicBool;
 pub trait ProjectFs: Send + Sync + 'static {
     /// List files in the project (for file search dialog).
     fn list_files(&self, show_ignored: bool) -> Vec<FileEntry>;
+
+    /// List immediate children of a project-relative directory (for the lazy
+    /// file viewer tree). `relative_path = ""` lists the project root.
+    fn list_directory(
+        &self,
+        relative_path: &str,
+        show_ignored: bool,
+    ) -> Result<Vec<DirEntry>, String>;
 
     /// Read file content as UTF-8 string.
     fn read_file(&self, relative_path: &str) -> Result<String, String>;
@@ -46,6 +55,14 @@ impl LocalProjectFs {
 impl ProjectFs for LocalProjectFs {
     fn list_files(&self, show_ignored: bool) -> Vec<FileEntry> {
         crate::file_search::FileSearchDialog::scan_files(&self.path, show_ignored)
+    }
+
+    fn list_directory(
+        &self,
+        relative_path: &str,
+        show_ignored: bool,
+    ) -> Result<Vec<DirEntry>, String> {
+        crate::list_directory::list_directory(&self.path, relative_path, show_ignored)
     }
 
     fn read_file(&self, relative_path: &str) -> Result<String, String> {
@@ -113,6 +130,23 @@ impl ProjectFs for RemoteProjectFs {
                 Vec::new()
             }),
             _ => Vec::new(),
+        }
+    }
+
+    fn list_directory(
+        &self,
+        relative_path: &str,
+        show_ignored: bool,
+    ) -> Result<Vec<DirEntry>, String> {
+        let action = okena_core::api::ActionRequest::ListDirectory {
+            project_id: self.project_id.clone(),
+            relative_path: relative_path.to_string(),
+            show_ignored,
+        };
+        match self.post_action(action)? {
+            Some(value) => serde_json::from_value(value)
+                .map_err(|e| format!("Failed to deserialize directory list: {}", e)),
+            None => Err("Empty response".to_string()),
         }
     }
 

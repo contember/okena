@@ -588,6 +588,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             show_ignored,
         },
+        ActionRequest::ListDirectory { project_id, relative_path, show_ignored } => {
+            ActionRequest::ListDirectory {
+                project_id: s(&project_id),
+                relative_path,
+                show_ignored,
+            }
+        }
         ActionRequest::ReadFile { project_id, relative_path } => ActionRequest::ReadFile {
             project_id: s(&project_id),
             relative_path,
