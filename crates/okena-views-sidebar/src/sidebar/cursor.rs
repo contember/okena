@@ -90,7 +90,7 @@ impl Sidebar {
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 cursor_items.push(SidebarCursorItem::Folder { folder_id: folder.id.clone() });
 
-                if !workspace.is_folder_collapsed(&folder.id) {
+                if !workspace.is_folder_collapsed(self.window_id, &folder.id) {
                     for pid in &folder.project_ids {
                         if let Some(&project) = all_projects.get(pid.as_str()) {
                             // Skip worktree children that have a parent in the project list
@@ -335,8 +335,9 @@ impl Sidebar {
                 self.saved_focus = None;
             }
             SidebarCursorItem::Folder { folder_id } => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_folder_collapsed(&folder_id, cx);
+                    ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                 });
             }
             SidebarCursorItem::GroupHeader { project_id, group } => {
@@ -401,8 +402,9 @@ impl Sidebar {
 
         match item.clone() {
             SidebarCursorItem::Folder { folder_id } => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_folder_collapsed(&folder_id, cx);
+                    ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                 });
             }
             SidebarCursorItem::Project { project_id } => {

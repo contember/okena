@@ -20,7 +20,7 @@ use crate::terminal::terminal::{Terminal, TerminalSize};
 use crate::workspace::state::DropZone;
 use okena_terminal::TerminalsRegistry;
 use crate::workspace::hooks;
-use crate::workspace::state::{LayoutNode, Workspace};
+use crate::workspace::state::{LayoutNode, WindowId, Workspace};
 use gpui::*;
 use std::sync::Arc;
 
@@ -928,7 +928,7 @@ fn apply_set_project_show_in_overview(
     }
     let current_visible = !ws.is_project_hidden(project_id);
     if current_visible != show {
-        ws.toggle_project_overview_visibility(project_id, cx);
+        ws.toggle_project_overview_visibility(WindowId::Main, project_id, cx);
     }
     ActionResult::Ok(None)
 }

@@ -25,7 +25,7 @@ use okena_ui::rename_state::RenameState;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text_ms, ui_text_xl};
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::state::{FolderData, ProjectData, Workspace};
+use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
 use gpui::*;
 use gpui_component::h_flex;
 use std::collections::{HashMap, HashSet};
@@ -98,6 +98,16 @@ pub enum SidebarCursorItem {
 
 /// Sidebar view with project and terminal list
 pub struct Sidebar {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// sidebar addresses (folder filter, hidden set, widths, collapse, focus
+    /// zoom). Today every reader of window-scoped state inside this entity's
+    /// impl still passes the literal `WindowId::Main` at the call site;
+    /// subsequent slice 03 commits migrate those readers (cursor.rs, mod.rs,
+    /// folder_list.rs, project_list.rs -- all `impl Sidebar`) to route
+    /// through `self.window_id`. Slice 05 then spawns extra windows that
+    /// mint `WindowId::Extra(uuid)` and thread it in here so each `Sidebar`
+    /// sees only its own per-window state.
+    pub(crate) window_id: WindowId,
     pub(crate) workspace: Entity<Workspace>,
     pub request_broker: Entity<RequestBroker>,
     pub(crate) expanded_projects: HashSet<String>,
@@ -150,7 +160,7 @@ pub struct Sidebar {
 }
 
 impl Sidebar {
-    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>, terminals: TerminalsRegistry, cx: &mut Context<Self>) -> Self {
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()
         // where Window access is available (needed for focus/rename).
@@ -169,6 +179,7 @@ impl Sidebar {
         // longer auto-expand the sidebar project when hooks appear.
 
         Self {
+            window_id,
             workspace,
             request_broker,
             expanded_projects: HashSet::new(),
@@ -195,6 +206,22 @@ impl Sidebar {
             send_remote_action: None,
             get_remote_folder: None,
         }
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// sidebar addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Field is read directly within the impl via
+    /// `self.window_id`; this public getter exists for external callers
+    /// (e.g. the slice 05 spawn flow on `Okena`) that need to address
+    /// window-scoped state on `Workspace` in the same window this sidebar
+    /// inhabits. Note: the dead_code lint tracks fields and methods as
+    /// separate items, so a future runtime read of `self.window_id` does
+    /// NOT mark this getter as used; the attribute stays until an external
+    /// caller of the getter lands.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     /// Set the dispatch action callback.
@@ -397,6 +424,7 @@ impl Sidebar {
     pub(super) fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace_entity = self.workspace.clone();
+        let window_id = self.window_id;
 
         div()
             .h(px(28.0))
@@ -410,7 +438,7 @@ impl Sidebar {
             .on_click(move |_, _window, cx| {
                 workspace_entity.update(cx, |ws, cx| {
                     ws.set_focused_project(None, cx);
-                    ws.set_folder_filter(None, cx);
+                    ws.set_folder_filter(window_id, None, cx);
                 });
             })
             .child(

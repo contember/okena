@@ -5,7 +5,7 @@
 use okena_core::theme::FolderColor;
 use crate::hooks;
 use crate::persistence::HooksConfig;
-use crate::state::{LayoutNode, ProjectData, Workspace};
+use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
 use gpui::*;
 use std::collections::HashMap;
 
@@ -37,49 +37,37 @@ impl Workspace {
 
     /// Toggle visibility for a single worktree (no propagation to children).
     ///
-    /// Writes flow into `main_window.hidden_project_ids` (the per-window
-    /// viewport model's source of truth).
-    pub fn toggle_worktree_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        let was_hidden = self
-            .data
-            .main_window
-            .hidden_project_ids
-            .contains(project_id);
-        if was_hidden {
-            self.data.main_window.hidden_project_ids.remove(project_id);
-        } else {
-            self.data
-                .main_window
-                .hidden_project_ids
-                .insert(project_id.to_string());
-        }
-        if self.project(project_id).is_some() {
-            self.notify_data(cx);
-        }
+    /// Delegates to `Workspace::toggle_hidden(window_id, ...)`, which flips
+    /// membership in the targeted window's `hidden_project_ids` and bumps
+    /// `data_version` so the auto-save observer triggers. Per the multi-window
+    /// viewport model, hidden state IS persisted -- the bump is unconditional,
+    /// even for ids that do not currently match a project. Unknown extra ids
+    /// are a silent no-op (close-race contract inherited from `toggle_hidden`).
+    pub fn toggle_worktree_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut Context<Self>) {
+        self.toggle_hidden(window_id, project_id, cx);
     }
 
     /// Toggle project overview visibility (also toggles all worktree children).
     ///
-    /// Writes flow into `main_window.hidden_project_ids` (the per-window
-    /// viewport model's source of truth).
-    pub fn toggle_project_overview_visibility(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    /// Delegates to `Workspace::toggle_hidden(window_id, ...)` after a
+    /// project-existence early-return guard. The guard is load-bearing: this
+    /// entrypoint is invoked from the sidebar context menu where a click
+    /// landing on a stale id (project just deleted by another path) must be
+    /// a silent no-op rather than insert the stale id into the persisted
+    /// hidden set. The sister entrypoint `toggle_worktree_visibility` has
+    /// no guard and bumps data_version unconditionally; the asymmetry is
+    /// intentional.
+    ///
+    /// Per the multi-window viewport model, the toggle is scoped to the
+    /// targeted window's `hidden_project_ids`. Unknown extra ids are a
+    /// silent no-op (close-race contract inherited from `toggle_hidden`),
+    /// distinct from the project-existence guard above (which gates on
+    /// project, not window).
+    pub fn toggle_project_overview_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut Context<Self>) {
         if self.project(project_id).is_none() {
             return;
         }
-        let was_hidden = self
-            .data
-            .main_window
-            .hidden_project_ids
-            .contains(project_id);
-        if was_hidden {
-            self.data.main_window.hidden_project_ids.remove(project_id);
-        } else {
-            self.data
-                .main_window
-                .hidden_project_ids
-                .insert(project_id.to_string());
-        }
-        self.notify_data(cx);
+        self.toggle_hidden(window_id, project_id, cx);
     }
 
     /// Add a new project
@@ -290,8 +278,13 @@ impl Workspace {
             }
         }
 
-        // Remove from widths (main_window is the source of truth).
-        self.data.main_window.project_widths.remove(project_id);
+        // Scrub the project id from every window's per-project storage
+        // (hidden set + widths map on main + every extra). Per the multi-
+        // window viewport model, project delete is a workspace-level event
+        // whose effect must propagate to every viewport so no orphan
+        // entries survive. The trailing `notify_data(cx)` below covers the
+        // data_version bump for the whole delete path.
+        self.data.delete_project_scrub_all_windows(project_id);
         // Clear closing state
         self.lifecycle.finish_closing(project_id);
         // Clear focus if this was the focused project
@@ -374,13 +367,34 @@ impl Workspace {
         }
     }
 
-    /// Update project column widths.
+    /// Update project column widths on the targeted window.
     ///
-    /// Writes to `main_window.project_widths` (the per-window viewport model,
-    /// source of truth). Today this is always the main window; per-window
-    /// scoping arrives with the window-scoped mutation API (slice 02).
-    pub fn update_project_widths(&mut self, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
-        self.data.main_window.project_widths = widths;
+    /// Wholesale-replaces the targeted window's `project_widths` map with the
+    /// supplied map. The leading clear is routed through the `window_mut`
+    /// lookup pair so an unknown extra id (e.g. caller raced a close) is a
+    /// silent no-op for the clear; the per-entry `set_project_width` calls
+    /// then also no-op via the same lookup contract. `notify_data` still
+    /// bumps `data_version` so the auto-save observer's cadence is unchanged
+    /// in the close-race path -- consistent with the silent-no-op contract
+    /// the data-layer setters absorb.
+    ///
+    /// Each entry is written via `data.set_project_width(window_id, ...)` so
+    /// a future migration off the wholesale shape inherits the per-entry
+    /// pair-shaped contract automatically. The runtime shape of a column-resize
+    /// is per-column; the wholesale shape on this entrypoint is a relic of the
+    /// prior data layout where `project_widths` was a top-level field.
+    ///
+    /// Bumps `data_version` exactly once per call (not per entry) -- the data
+    /// layer setter does not notify, so the single trailing `notify_data` keeps
+    /// the auto-save observer's debounce cadence identical to the pre-migration
+    /// body.
+    pub fn update_project_widths(&mut self, window_id: WindowId, widths: HashMap<String, f32>, cx: &mut Context<Self>) {
+        if let Some(w) = self.data.window_mut(window_id) {
+            w.project_widths.clear();
+        }
+        for (id, w) in widths {
+            self.data.set_project_width(window_id, &id, w);
+        }
         self.notify_data(cx);
     }
 
@@ -398,13 +412,17 @@ impl Workspace {
 
     /// Get project width or default equal distribution.
     ///
-    /// Reads from `main_window.project_widths` (the per-window viewport model).
-    /// Today this is always the main window; per-window scoping arrives with the
-    /// window-scoped mutation API (slice 02).
-    pub fn get_project_width(&self, project_id: &str, visible_count: usize) -> f32 {
-        self.data.main_window.project_widths
-            .get(project_id)
-            .copied()
+    /// Reads from the targeted window's `project_widths` map. `WindowId::Main`
+    /// always lands on `main_window`. `WindowId::Extra(_)` targets the matching
+    /// extra by id; an unknown extra (e.g. raced a close) routes through
+    /// `data.window(window_id) == None` and falls back to the equal-distribution
+    /// default, matching the "missing entry == default" contract on the lookup
+    /// side. Default is `100.0 / visible_count` so a render path that asks for
+    /// every visible column gets a balanced grid when no widths are set yet.
+    pub fn get_project_width(&self, window_id: WindowId, project_id: &str, visible_count: usize) -> f32 {
+        self.data
+            .window(window_id)
+            .and_then(|w| w.project_widths.get(project_id).copied())
             .unwrap_or_else(|| 100.0 / visible_count as f32)
     }
 
@@ -708,7 +726,10 @@ impl Workspace {
         for folder in &mut self.data.folders {
             folder.project_ids.retain(|id| id != project_id);
         }
-        self.data.main_window.project_widths.remove(project_id);
+        // Scrub the worktree id from every window's per-project storage
+        // (hidden set + widths map on main + every extra). Same fan-out as
+        // the primary `delete_project` path.
+        self.data.delete_project_scrub_all_windows(project_id);
         // Note: caller is responsible for calling notify_data
     }
 
@@ -838,7 +859,7 @@ mod tests {
     fn test_get_project_width() {
         let ws = Workspace::new(make_workspace_data());
         // Default: equal distribution
-        assert_eq!(ws.get_project_width("p1", 4), 25.0);
+        assert_eq!(ws.get_project_width(WindowId::Main, "p1", 4), 25.0);
     }
 
     #[test]
@@ -846,18 +867,55 @@ mod tests {
         let mut data = make_workspace_data();
         data.main_window.project_widths.insert("p1".to_string(), 60.0);
         let ws = Workspace::new(data);
-        assert_eq!(ws.get_project_width("p1", 2), 60.0);
+        assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 60.0);
     }
 
     #[test]
     fn get_project_width_reads_from_main_window_project_widths() {
-        // Per-window viewport model: width should come from main_window.project_widths,
-        // not the legacy top-level data.project_widths. Populate only main_window;
-        // legacy field stays empty. After the runtime read-site swap, the value lands.
+        // Per-window viewport model: WindowId::Main routes through
+        // data.window(...) and reads main_window.project_widths.
         let mut data = make_workspace_data();
         data.main_window.project_widths.insert("p1".to_string(), 75.0);
         let ws = Workspace::new(data);
-        assert_eq!(ws.get_project_width("p1", 2), 75.0);
+        assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 75.0);
+    }
+
+    #[test]
+    fn get_project_width_extra_reads_from_targeted_window() {
+        // Per-window viewport model: WindowId::Extra(uuid) routes through
+        // data.window(...) and reads the matching extra's project_widths -- not
+        // main's. Fixture writes p1 -> 80.0 only on the extra; main's map is
+        // empty. Reading with the extra id returns 80.0; reading with Main
+        // falls back to the equal-distribution default. Defends against a
+        // regression that ignores window_id and unconditionally reads main.
+        let mut data = make_workspace_data();
+        let mut extra = WindowState::default();
+        extra.project_widths.insert("p1".to_string(), 80.0);
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let ws = Workspace::new(data);
+
+        assert_eq!(ws.get_project_width(WindowId::Extra(extra_id), "p1", 2), 80.0);
+        // Main has no entry for p1 -> equal-distribution default of 50.0 (2 visible).
+        assert_eq!(ws.get_project_width(WindowId::Main, "p1", 2), 50.0);
+    }
+
+    #[test]
+    fn get_project_width_unknown_extra_returns_default() {
+        // Close-race contract: a fresh uuid that does not match any extra is
+        // a `data.window(...) == None`, which falls back to the equal-
+        // distribution default rather than panicking. Mirrors the silent
+        // no-op shape of the window-scoped setters when targeted at an
+        // already-closed extra.
+        let mut data = make_workspace_data();
+        // Pre-populate main with a value to ensure the unknown-extra path
+        // does NOT silently read from main as a fallback.
+        data.main_window.project_widths.insert("p1".to_string(), 90.0);
+        let ws = Workspace::new(data);
+
+        let unknown = uuid::Uuid::new_v4();
+        // Default for visible_count = 4 -> 25.0, NOT 90.0 (main's value).
+        assert_eq!(ws.get_project_width(WindowId::Extra(unknown), "p1", 4), 25.0);
     }
 
     #[test]
@@ -896,7 +954,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
@@ -1013,7 +1071,7 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden. main_window inserts the id.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility("p1", cx);
+            ws.toggle_project_overview_visibility(WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -1021,7 +1079,7 @@ mod gpui_tests {
 
         // Second toggle: hidden -> visible. main_window removes the entry.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility("p1", cx);
+            ws.toggle_project_overview_visibility(WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -1031,24 +1089,229 @@ mod gpui_tests {
     #[gpui::test]
     fn toggle_worktree_visibility_writes_to_main_window(cx: &mut gpui::TestAppContext) {
         // Same as toggle_project_overview_visibility but for the worktree
-        // entrypoint: flip main_window.hidden_project_ids.
+        // entrypoint: flip main_window.hidden_project_ids when targeted at
+        // WindowId::Main.
         let mut data = make_workspace_data();
         data.projects = vec![make_project("p1")];
         data.project_order = vec!["p1".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_worktree_visibility("p1", cx);
+            ws.toggle_worktree_visibility(WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_worktree_visibility("p1", cx);
+            ws.toggle_worktree_visibility(WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_worktree_visibility_bumps_data_version_for_unknown_id(cx: &mut gpui::TestAppContext) {
+        // Post-migration contract: toggle_worktree_visibility delegates through
+        // Workspace::toggle_hidden(window_id, ...), which unconditionally bumps
+        // data_version. The pure data setter mutates the hidden set regardless
+        // of whether the id corresponds to a real project, so the mutation IS
+        // a persisted state change that must trigger auto-save. The
+        // pre-migration body gated notify_data on `self.project(id).is_some()`,
+        // which would leave data_version at 0 here. Pinning the new behavior
+        // defends against a regression that re-introduces the gate.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility(WindowId::Main, "unknown_id", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_worktree_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
+        // only that extra's hidden_project_ids -- main and any sibling extras
+        // stay untouched. Defends against a regression that ignores window_id
+        // and unconditionally writes to main, scatters the toggle across all
+        // extras, or routes through main's slot. Pre-populate main + sibling
+        // extra with sibling state to verify isolation.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        data.main_window.hidden_project_ids.insert("p2".to_string());
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let mut extra_b = WindowState::default();
+        extra_b.hidden_project_ids.insert("p2".to_string());
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // First toggle: visible -> hidden in extra_a.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Targeted extra got p1 hidden.
+            assert!(ws.data().extra_windows[0].hidden_project_ids.contains("p1"));
+            // Main does NOT have p1 hidden.
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+            // Sibling extra does NOT have p1 hidden.
+            assert!(!ws.data().extra_windows[1].hidden_project_ids.contains("p1"));
+            // Sibling p2 state preserved on main + sibling extra.
+            assert!(ws.data().main_window.hidden_project_ids.contains("p2"));
+            assert!(ws.data().extra_windows[1].hidden_project_ids.contains("p2"));
+            assert_eq!(extra_b_id, ws.data().extra_windows[1].id);
+        });
+
+        // Second toggle: hidden -> visible in extra_a.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().extra_windows[0].hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_worktree_visibility_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra
+        // produces no panic; main_window stays untouched. Pre-populate main
+        // with hidden state for p1 to ensure the unknown-extra path does NOT
+        // silently fall back to main as a default. data_version still bumps
+        // via notify_data, matching the silent-no-op contract on the
+        // data-layer setter. Defends against a regression that replaces the
+        // window_mut lookup with direct main_window access.
+        let mut data = make_workspace_data();
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let unknown = uuid::Uuid::new_v4();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_worktree_visibility(WindowId::Extra(unknown), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Main's p1 hidden state is unchanged (NOT toggled to visible).
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_overview_visibility_unknown_id_is_noop(cx: &mut gpui::TestAppContext) {
+        // Post-migration contract: the project-existence early-return guard
+        // (`if self.project(project_id).is_none() { return; }`) at the top of
+        // toggle_project_overview_visibility is preserved through the
+        // delegation onto Workspace::toggle_hidden. An unknown id must NOT
+        // mutate main_window.hidden_project_ids and must NOT bump data_version
+        // -- the sidebar context-menu UX expects a no-op on a stale id (the
+        // entrypoint is the project-overview row, where a click landing after
+        // a delete must be silent).
+        //
+        // This contrasts with toggle_worktree_visibility (no guard, bumps
+        // unconditionally per the previous commit) and is the load-bearing
+        // difference between the two delegating wrappers. Defends against a
+        // regression that drops the guard "for symmetry with
+        // toggle_worktree_visibility" or that lifts the guard into the
+        // shared toggle_hidden setter (which would force every caller to
+        // either accept the guard or bypass via direct data access).
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility(WindowId::Main, "unknown_id", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.hidden_project_ids.contains("unknown_id"));
+            assert_eq!(ws.data_version(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_overview_visibility_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: toggling on WindowId::Extra(uuid) flips
+        // only that extra's hidden_project_ids -- main and any sibling extras
+        // stay untouched. Defends against a regression that ignores window_id
+        // and unconditionally writes to main, scatters the toggle across all
+        // extras, or routes through main's slot. Pre-populate main + sibling
+        // extra with sibling state to verify isolation.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        data.main_window.hidden_project_ids.insert("p2".to_string());
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let mut extra_b = WindowState::default();
+        extra_b.hidden_project_ids.insert("p2".to_string());
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        // First toggle: visible -> hidden in extra_a.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Targeted extra got p1 hidden.
+            assert!(ws.data().extra_windows[0].hidden_project_ids.contains("p1"));
+            // Main does NOT have p1 hidden.
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+            // Sibling extra does NOT have p1 hidden.
+            assert!(!ws.data().extra_windows[1].hidden_project_ids.contains("p1"));
+            // Sibling p2 state preserved on main + sibling extra.
+            assert!(ws.data().main_window.hidden_project_ids.contains("p2"));
+            assert!(ws.data().extra_windows[1].hidden_project_ids.contains("p2"));
+            assert_eq!(extra_b_id, ws.data().extra_windows[1].id);
+        });
+
+        // Second toggle: hidden -> visible in extra_a. Pins the round-trip
+        // semantic so a regression that hard-codes insert-only or remove-only
+        // would surface here.
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().extra_windows[0].hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_project_overview_visibility_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra
+        // produces no panic; main_window stays untouched. Pre-populate main
+        // with hidden state for p1 to ensure the unknown-extra path does NOT
+        // silently fall back to main as a default. data_version still bumps
+        // via notify_data (the project-existence guard is satisfied because
+        // p1 IS a real project; only the WINDOW lookup misses), matching
+        // the silent-no-op contract on the data-layer setter. Defends
+        // against a regression that replaces the window_mut lookup with
+        // direct main_window access.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1")];
+        data.project_order = vec!["p1".to_string()];
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let unknown = uuid::Uuid::new_v4();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_project_overview_visibility(WindowId::Extra(unknown), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Main's p1 hidden state is unchanged (NOT toggled to visible).
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
+            assert_eq!(ws.data_version(), 1);
         });
     }
 
@@ -1063,12 +1326,125 @@ mod gpui_tests {
             let mut widths = HashMap::new();
             widths.insert("p1".to_string(), 60.0);
             widths.insert("p2".to_string(), 40.0);
-            ws.update_project_widths(widths, cx);
+            ws.update_project_widths(WindowId::Main, widths, cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&60.0));
             assert_eq!(ws.data().main_window.project_widths.get("p2"), Some(&40.0));
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_wholesale_replaces_existing_entries(cx: &mut gpui::TestAppContext) {
+        // Wholesale-replace contract: keys absent from the supplied map are
+        // removed from main_window.project_widths. Pins the semantic so a
+        // future refactor that drops the leading clear() (e.g. switching to a
+        // merge body) silently breaks here. Pre-populate p1, then call with a
+        // map containing only p2 -- p1 must be gone.
+        let mut data = make_workspace_data();
+        data.main_window.project_widths.insert("p1".to_string(), 0.50);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p2".to_string(), 0.40);
+            ws.update_project_widths(WindowId::Main, widths, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.project_widths.contains_key("p1"));
+            assert_eq!(ws.data().main_window.project_widths.get("p2").copied(), Some(0.40));
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_bumps_data_version_exactly_once(cx: &mut gpui::TestAppContext) {
+        // One call -> one data_version bump, even when the supplied map has
+        // multiple entries. Defends against a future refactor that delegates
+        // to the entity-level `set_project_width(WindowId, ...)` per entry,
+        // which would bump per entry and disturb the auto-save observer's
+        // debounce cadence.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 0.30);
+            widths.insert("p2".to_string(), 0.40);
+            widths.insert("p3".to_string(), 0.30);
+            ws.update_project_widths(WindowId::Main, widths, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: writes targeted at WindowId::Extra(uuid)
+        // land on that extra's project_widths only -- main and any sibling
+        // extras stay untouched. Defends against a regression that ignores
+        // window_id and unconditionally writes to main, scatters the write
+        // across all extras, or routes through main's slot.
+        let mut data = make_workspace_data();
+        let mut extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let mut extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        // Pre-populate sibling state on main + extra_b to verify isolation.
+        data.main_window.project_widths.insert("p1".to_string(), 100.0);
+        extra_b.project_widths.insert("p1".to_string(), 200.0);
+        // extra_a starts empty.
+        let _ = extra_a_id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 60.0);
+            widths.insert("p2".to_string(), 40.0);
+            ws.update_project_widths(WindowId::Extra(extra_a_id), widths, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Targeted extra got both new entries.
+            let extra_a_widths = &ws.data().extra_windows[0].project_widths;
+            assert_eq!(extra_a_widths.get("p1"), Some(&60.0));
+            assert_eq!(extra_a_widths.get("p2"), Some(&40.0));
+            // Main's p1 width is untouched.
+            assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&100.0));
+            // Sibling extra's p1 width is untouched.
+            assert_eq!(ws.data().extra_windows[1].project_widths.get("p1"), Some(&200.0));
+            // Sibling extra has no p2 from the targeted write.
+            assert!(!ws.data().extra_windows[1].project_widths.contains_key("p2"));
+            // Main has no p2 from the targeted write.
+            assert!(!ws.data().main_window.project_widths.contains_key("p2"));
+            assert_eq!(extra_b_id, ws.data().extra_windows[1].id);
+        });
+    }
+
+    #[gpui::test]
+    fn update_project_widths_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra
+        // produces no panic; main_window stays untouched. Pre-populate main
+        // to ensure the unknown-extra path does NOT silently fall back to
+        // main as a default. data_version still bumps via notify_data,
+        // matching the silent-no-op contract on the data-layer setters.
+        let mut data = make_workspace_data();
+        data.main_window.project_widths.insert("p1".to_string(), 50.0);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let unknown = uuid::Uuid::new_v4();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let mut widths = HashMap::new();
+            widths.insert("p1".to_string(), 99.0);
+            ws.update_project_widths(WindowId::Extra(unknown), widths, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.project_widths.get("p1"), Some(&50.0));
+            assert_eq!(ws.data_version(), 1);
         });
     }
 
@@ -1091,6 +1467,88 @@ mod gpui_tests {
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.project_widths.contains_key("p1"));
             assert!(ws.data().main_window.project_widths.contains_key("p2"));
+        });
+    }
+
+    #[gpui::test]
+    fn delete_project_scrubs_extra_window_per_project_state(cx: &mut gpui::TestAppContext) {
+        // Per the multi-window viewport model, deleting a project must scrub
+        // its id from EVERY window's per-project storage -- not just main.
+        // Without the fan-out, an extra window would retain orphan width and
+        // hidden-set entries for a project that no longer exists; on next
+        // launch those entries would either (a) bloat the on-disk shape or
+        // (b) silently re-apply if a project with the same id were ever
+        // re-added. This pins the slice 02 acceptance criterion "Project
+        // delete invokes `delete_project_scrub_all_windows` so no orphan
+        // entries remain" -- specifically the extras leg, since slice 05 has
+        // not landed yet so extras only exist in manually-constructed test
+        // fixtures today. Defends against a regression that drops the helper
+        // call and falls back to a main-only inline scrub.
+        let mut data = make_workspace_data();
+        data.projects = vec![make_project("p1"), make_project("p2")];
+        data.project_order = vec!["p1".to_string(), "p2".to_string()];
+        data.main_window.project_widths.insert("p1".to_string(), 60.0);
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let mut extra1 = WindowState::default();
+        extra1.project_widths.insert("p1".to_string(), 30.0);
+        extra1.project_widths.insert("p2".to_string(), 70.0);
+        extra1.hidden_project_ids.insert("p1".to_string());
+        let mut extra2 = WindowState::default();
+        extra2.project_widths.insert("p1".to_string(), 50.0);
+        extra2.hidden_project_ids.insert("p1".to_string());
+        extra2.hidden_project_ids.insert("p2".to_string());
+        data.extra_windows.push(extra1);
+        data.extra_windows.push(extra2);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.delete_project("p1", &HooksConfig::default(), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Main: p1 scrubbed from both per-project fields, p2 untouched.
+            assert!(!ws.data().main_window.project_widths.contains_key("p1"));
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+            // Every extra: p1 scrubbed; sibling project state preserved.
+            for extra in &ws.data().extra_windows {
+                assert!(!extra.project_widths.contains_key("p1"));
+                assert!(!extra.hidden_project_ids.contains("p1"));
+            }
+            assert!(ws.data().extra_windows[0].project_widths.contains_key("p2"));
+            assert!(ws.data().extra_windows[1].hidden_project_ids.contains("p2"));
+        });
+    }
+
+    #[gpui::test]
+    fn remove_stale_worktree_scrubs_extra_window_per_project_state(cx: &mut gpui::TestAppContext) {
+        // `remove_stale_worktree` is the secondary project-removal path (called
+        // when a worktree's directory has been deleted on disk by an external
+        // tool); it must produce the same per-window scrub fan-out as the
+        // primary `delete_project` flow. Without this pinning, the worktree
+        // path could regress to a main-only scrub silently while the primary
+        // delete stays correct, leaving extras with orphan worktree entries.
+        let mut data = make_workspace_data();
+        let parent = make_project("parent");
+        let wt = make_worktree_project("wt1", "parent");
+        data.projects = vec![parent, wt];
+        data.project_order = vec!["parent".to_string()];
+        data.main_window.project_widths.insert("wt1".to_string(), 35.0);
+        data.main_window.hidden_project_ids.insert("wt1".to_string());
+        let mut extra = WindowState::default();
+        extra.project_widths.insert("wt1".to_string(), 20.0);
+        extra.hidden_project_ids.insert("wt1".to_string());
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            ws.remove_stale_worktree("wt1");
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.project_widths.contains_key("wt1"));
+            assert!(!ws.data().main_window.hidden_project_ids.contains("wt1"));
+            assert!(!ws.data().extra_windows[0].project_widths.contains_key("wt1"));
+            assert!(!ws.data().extra_windows[0].hidden_project_ids.contains("wt1"));
         });
     }
 

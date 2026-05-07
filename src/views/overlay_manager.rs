@@ -38,7 +38,7 @@ use crate::remote::GlobalRemoteInfo;
 use crate::remote_client::manager::RemoteConnectionManager;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::requests::{ContextMenuRequest, FolderContextMenuRequest, OverlayRequest, ProjectOverlay, ProjectOverlayKind, SidebarRequest};
-use crate::workspace::state::{Workspace, WorkspaceData};
+use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
 
 // Re-export generic overlay utilities from okena-ui
 pub use okena_ui::overlay::{CloseEvent, OverlaySlot};
@@ -176,6 +176,17 @@ type DetachFn = Box<dyn Fn(&mut OverlayManager, &mut Context<OverlayManager>) + 
 /// only one modal can be open at a time. Context menus remain as
 /// separate slots since they are positioned popups, not full-screen modals.
 pub struct OverlayManager {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// overlay manager addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Read in-impl via `self.window_id` (hoisted
+    /// to a local before any `self.workspace.update` closure to avoid the
+    /// implicit borrow conflict between `&mut self.workspace` and reads
+    /// through `self.`); also threaded as the first arg to
+    /// `FolderContextMenu::new` in `show_folder_context_menu` (hoisted to a
+    /// local for the same `cx.new` capture reason that af0e312 pinned for
+    /// the `RootView::new` -> `OverlayManager::new` call site).
+    pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
 
@@ -205,8 +216,9 @@ pub struct OverlayManager {
 
 impl OverlayManager {
     /// Create a new OverlayManager.
-    pub fn new(workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>) -> Self {
+    pub fn new(window_id: WindowId, workspace: Entity<Workspace>, request_broker: Entity<RequestBroker>) -> Self {
         Self {
+            window_id,
             workspace,
             request_broker,
             active_modal: None,
@@ -221,6 +233,21 @@ impl OverlayManager {
             worktree_list: OverlaySlot::new(),
             color_picker: OverlaySlot::new(),
         }
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// overlay manager addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct `WindowId::Extra(uuid)`s.
+    /// Field is read directly within the impl via `self.window_id` once readers
+    /// land; this public getter exists for external callers (e.g. the slice 05
+    /// spawn flow on `Okena`) that need to address window-scoped state on
+    /// `Workspace` in the same window this overlay manager inhabits.
+    /// `#[allow(dead_code)]` because no caller reads it yet -- rustc tracks
+    /// fields and methods separately, so the field being used by the ctor does
+    /// NOT mark the getter as used.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     // ========================================================================
@@ -804,7 +831,8 @@ impl OverlayManager {
         self.close_all_context_menus();
 
         let workspace = self.workspace.clone();
-        let menu = cx.new(|cx| FolderContextMenu::new(workspace.clone(), request, cx));
+        let window_id = self.window_id;
+        let menu = cx.new(|cx| FolderContextMenu::new(window_id, workspace.clone(), request, cx));
 
         cx.subscribe(&menu, |this, _, event: &FolderContextMenuEvent, cx| {
             match event {
@@ -828,8 +856,9 @@ impl OverlayManager {
                 }
                 FolderContextMenuEvent::FilterToFolder { folder_id } => {
                     this.hide_folder_context_menu(cx);
+                    let window_id = this.window_id;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_focus(folder_id, cx);
+                        ws.toggle_folder_focus(window_id, folder_id, cx);
                     });
                 }
             }

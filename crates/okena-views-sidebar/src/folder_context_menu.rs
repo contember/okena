@@ -4,7 +4,7 @@ use crate::Cancel;
 use okena_ui::menu::{context_menu_panel, menu_item, menu_item_with_color, menu_separator};
 use okena_ui::theme::theme;
 use okena_workspace::requests::FolderContextMenuRequest;
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 use gpui::prelude::*;
 use gpui::*;
 
@@ -22,6 +22,14 @@ impl okena_ui::overlay::CloseEvent for FolderContextMenuEvent {
 
 /// Folder context menu component
 pub struct FolderContextMenu {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// folder context menu addresses. Always `WindowId::Main` today
+    /// (single-window runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Read directly in `render` via
+    /// `ws.active_folder_filter(self.window_id)` -- a direct `&self` field
+    /// access on a disjoint field from the `ws` read borrow, no hoist
+    /// needed (WindowId is Copy).
+    pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
     request: FolderContextMenuRequest,
     focus_handle: FocusHandle,
@@ -29,16 +37,34 @@ pub struct FolderContextMenu {
 
 impl FolderContextMenu {
     pub fn new(
+        window_id: WindowId,
         workspace: Entity<Workspace>,
         request: FolderContextMenuRequest,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         Self {
+            window_id,
             workspace,
             request,
             focus_handle,
         }
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// folder context menu addresses. Always `WindowId::Main` today
+    /// (single-window runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. The field is read directly within `render`
+    /// via `self.window_id`; this public getter exists for external callers
+    /// (e.g. the slice 05 spawn flow on `Okena`) that need to address
+    /// window-scoped state on `Workspace` in the same window this menu
+    /// inhabits. `#[allow(dead_code)]` because no external caller reads it
+    /// yet -- rustc tracks fields and methods separately, so the field
+    /// being used by the ctor + the render path does NOT mark the getter
+    /// as used.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -82,7 +108,7 @@ impl Render for FolderContextMenu {
         let ws = self.workspace.read(cx);
         let folder = ws.folder(&self.request.folder_id);
         let project_count = folder.map(|f| f.project_ids.len()).unwrap_or(0);
-        let is_active_filter = ws.active_folder_filter() == Some(&self.request.folder_id);
+        let is_active_filter = ws.active_folder_filter(self.window_id) == Some(&self.request.folder_id);
 
         div()
             .track_focus(&self.focus_handle)
