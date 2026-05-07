@@ -90,7 +90,7 @@ impl Sidebar {
             if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
                 cursor_items.push(SidebarCursorItem::Folder { folder_id: folder.id.clone() });
 
-                if !folder.collapsed {
+                if !workspace.is_folder_collapsed(&folder.id) {
                     for pid in &folder.project_ids {
                         if let Some(&project) = all_projects.get(pid.as_str()) {
                             // Skip worktree children that have a parent in the project list

@@ -12,6 +12,9 @@ mod render;
 mod renames;
 mod worktree;
 
+#[cfg(test)]
+mod from_project_test;
+
 use okena_core::api::ActionRequest;
 use okena_core::client::{ConnectionStatus, RemoteConnectionConfig};
 use okena_core::theme::FolderColor;
@@ -476,7 +479,12 @@ pub struct SidebarProjectInfo {
 }
 
 impl SidebarProjectInfo {
-    pub(crate) fn from_project(project: &ProjectData) -> Self {
+    /// Build a sidebar projection of a project.
+    ///
+    /// `show_in_overview` on the projection is derived from
+    /// `workspace.is_project_hidden(&project.id)` (the per-window viewport
+    /// model — `main_window.hidden_project_ids` is the source of truth).
+    pub(crate) fn from_project(project: &ProjectData, workspace: &Workspace) -> Self {
         let layout = project.layout.as_ref();
         // For worktree projects, show the git branch instead of the stored name.
         let name = if project.worktree_info.is_some() {
@@ -489,7 +497,7 @@ impl SidebarProjectInfo {
         Self {
             id: project.id.clone(),
             name,
-            show_in_overview: project.show_in_overview,
+            show_in_overview: !workspace.is_project_hidden(&project.id),
             folder_color: project.folder_color,
             has_layout: layout.is_some(),
             terminal_ids: layout
