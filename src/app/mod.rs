@@ -21,7 +21,7 @@ use okena_ext_claude::resolve_claude_dir;
 use crate::views::root::{RootView, TerminalsRegistry};
 use crate::workspace::persistence;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{GlobalWorkspace, Workspace, WorkspaceData};
+use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
 use okena_core::api::ApiGitStatus;
@@ -218,7 +218,7 @@ impl Okena {
         let pty_manager_clone = pty_manager.clone();
         let request_broker_clone = request_broker.clone();
         let root_view = cx.new(|cx| {
-            RootView::new(workspace.clone(), request_broker_clone, pty_manager_clone, cx)
+            RootView::new(WindowId::Main, workspace.clone(), request_broker_clone, pty_manager_clone, cx)
         });
 
         // Get terminals registry from root view

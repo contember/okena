@@ -8,7 +8,7 @@ use crate::theme::{theme, ThemeColors};
 use crate::views::layout::layout_container::LayoutContainer;
 use crate::views::layout::split_pane::ActiveDrag;
 use crate::workspace::request_broker::RequestBroker;
-use crate::workspace::state::{ProjectData, Workspace};
+use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm, ui_text_xl};
 use gpui::prelude::*;
 use gpui::*;
@@ -24,6 +24,16 @@ use crate::views::root::TerminalsRegistry;
 
 /// A single project column with header and layout
 pub struct ProjectColumn {
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// project column addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. Read in-impl via `self.window_id` -- the
+    /// hide-project button's `on_click` listener in `render_header`
+    /// captures it as a `window_id_for_hide` local hoisted alongside
+    /// `workspace_for_hide` and `project_id_for_hide`, which the move
+    /// closure then captures by Copy for the
+    /// `toggle_project_overview_visibility` call.
+    pub(crate) window_id: WindowId,
     workspace: Entity<Workspace>,
     request_broker: Entity<RequestBroker>,
     project_id: String,
@@ -49,6 +59,7 @@ pub struct ProjectColumn {
 
 impl ProjectColumn {
     pub fn new(
+        window_id: WindowId,
         workspace: Entity<Workspace>,
         request_broker: Entity<RequestBroker>,
         project_id: String,
@@ -106,6 +117,7 @@ impl ProjectColumn {
         cx.observe(&hook_panel, |_, _, cx| cx.notify()).detach();
 
         Self {
+            window_id,
             workspace,
             request_broker,
             project_id,
@@ -119,6 +131,22 @@ impl ProjectColumn {
             service_panel,
             hook_panel,
         }
+    }
+
+    /// Identifies which window-scoped slot on the shared `Workspace` this
+    /// project column addresses. Always `WindowId::Main` today (single-window
+    /// runtime); slice 05 spawns extras that mint distinct
+    /// `WindowId::Extra(uuid)`s. The field is read directly within `render_header`
+    /// via the `window_id_for_hide` hoist captured by the hide-project button's
+    /// `on_click` move closure. This public getter exists for external callers
+    /// (e.g. the slice 05 spawn flow on `Okena`) that need to address
+    /// window-scoped state on `Workspace` in the same window this project
+    /// column inhabits. Marked `#[allow(dead_code)]` because rustc tracks
+    /// fields and methods separately -- the field being used at runtime does
+    /// NOT mark the getter as used.
+    #[allow(dead_code)]
+    pub fn window_id(&self) -> WindowId {
+        self.window_id
     }
 
     /// Set the action dispatcher (used for remote projects).
@@ -338,6 +366,7 @@ impl ProjectColumn {
         let workspace_for_hide = self.workspace.clone();
         let project_id = self.project_id.clone();
         let project_id_for_hide = self.project_id.clone();
+        let window_id_for_hide = self.window_id;
         let effective_color = self.workspace.read(cx).effective_folder_color(project);
         let folder_color = t.get_folder_color(effective_color);
 
@@ -495,7 +524,7 @@ impl ProjectColumn {
                                     .on_click(move |_, _window, cx| {
                                         cx.stop_propagation();
                                         workspace_for_hide.update(cx, |ws, cx| {
-                                            ws.toggle_project_overview_visibility(&project_id_for_hide, cx);
+                                            ws.toggle_project_overview_visibility(window_id_for_hide, &project_id_for_hide, cx);
                                         });
                                     })
                                     .child(

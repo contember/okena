@@ -17,7 +17,8 @@ use std::collections::HashMap;
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::{
     DropZone, FocusedTerminalState, FolderData, HookTerminalEntry, HookTerminalStatus,
-    PendingWorktreeClose, ProjectData, WindowBounds, WindowState, WorkspaceData, WorktreeMetadata,
+    PendingWorktreeClose, ProjectData, WindowBounds, WindowId, WindowState, WorkspaceData,
+    WorktreeMetadata,
 };
 
 /// Global workspace wrapper for app-wide access (used by quit handler)
@@ -43,9 +44,6 @@ pub struct Workspace {
     /// Monotonic counter incremented only on persistent data mutations.
     /// The auto-save observer compares this to skip saves for UI-only changes.
     data_version: u64,
-    /// Transient folder filter — when set, only projects from this folder are shown.
-    /// Not serialized; resets to None on restart.
-    pub active_folder_filter: Option<String>,
     /// Terminal IDs queued for killing by the app layer (drained by Okena observer).
     pending_terminal_kills: Vec<String>,
 }
@@ -59,7 +57,6 @@ impl Workspace {
             remote_sync: RemoteSyncState::new(),
             access_history: ProjectAccessHistory::new(),
             data_version: 0,
-            active_folder_filter: None,
             pending_terminal_kills: Vec::new(),
         }
     }
@@ -88,7 +85,6 @@ impl Workspace {
     pub fn replace_data(&mut self, data: WorkspaceData, cx: &mut Context<Self>) {
         self.data = data;
         self.focus_manager.clear_all();
-        self.active_folder_filter = None;
         cx.notify();
     }
 
@@ -104,13 +100,120 @@ impl Workspace {
         projects
     }
 
-    pub fn active_folder_filter(&self) -> Option<&String> {
-        self.active_folder_filter.as_ref()
+    /// Current folder filter for the targeted window's viewport.
+    ///
+    /// Routes through `data.window(window_id)` (the lookup pair on
+    /// `WorkspaceData`): `WindowId::Main` always returns the main slot,
+    /// `WindowId::Extra(uuid)` walks `extra_windows`. Unknown extra ids
+    /// (a paint racing a close) yield `None` -- the same default used when
+    /// the targeted window has no folder_filter set. Mirrors the silent
+    /// no-op shape of the window-scoped setters.
+    pub fn active_folder_filter(&self, window_id: WindowId) -> Option<&String> {
+        self.data
+            .window(window_id)
+            .and_then(|w| w.folder_filter.as_ref())
     }
 
-    pub fn set_folder_filter(&mut self, folder_id: Option<String>, cx: &mut Context<Self>) {
-        self.active_folder_filter = folder_id;
-        cx.notify();
+    /// Set the folder filter on the targeted window.
+    ///
+    /// Delegates to `data.set_folder_filter`, which writes to the targeted
+    /// window's `WindowState::folder_filter`. Unknown extra ids are a silent
+    /// no-op (the targeted window was just closed).
+    ///
+    /// Bumps `data_version` because folder_filter is persisted -- the
+    /// auto-save observer must trigger.
+    pub fn set_folder_filter(
+        &mut self,
+        window_id: WindowId,
+        folder_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.set_folder_filter(window_id, folder_id);
+        self.notify_data(cx);
+    }
+
+    /// Toggle a project's hidden state in the targeted window.
+    ///
+    /// Delegates to `data.toggle_hidden`, which inserts the project id into
+    /// the targeted window's `hidden_project_ids` if absent and removes it if
+    /// present. Unknown extra ids are a silent no-op (the targeted window
+    /// was just closed).
+    ///
+    /// Bumps `data_version` because hidden state is persisted -- the
+    /// auto-save observer must trigger.
+    pub fn toggle_hidden(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.toggle_hidden(window_id, project_id);
+        self.notify_data(cx);
+    }
+
+    /// Set a single project's column width on the targeted window.
+    ///
+    /// Delegates to `data.set_project_width`, which writes the
+    /// (project_id, width) pair into the targeted window's
+    /// `project_widths` map, overwriting any prior value. Unknown extra
+    /// ids are a silent no-op (the targeted window was just closed).
+    ///
+    /// Bumps `data_version` because project widths are persisted -- the
+    /// auto-save observer must trigger.
+    pub fn set_project_width(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.set_project_width(window_id, project_id, width);
+        self.notify_data(cx);
+    }
+
+    /// Set a folder's collapsed state on the targeted window.
+    ///
+    /// Delegates to `data.set_folder_collapsed`, which inserts
+    /// `(folder_id, true)` into the targeted window's `folder_collapsed`
+    /// when `collapsed=true`, or removes any existing entry when
+    /// `collapsed=false` (the "absence == expanded" runtime convention).
+    /// Unknown extra ids are a silent no-op (the targeted window was just
+    /// closed).
+    ///
+    /// Bumps `data_version` because folder-collapsed state is persisted --
+    /// the auto-save observer must trigger.
+    pub fn set_folder_collapsed(
+        &mut self,
+        window_id: WindowId,
+        folder_id: &str,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.set_folder_collapsed(window_id, folder_id, collapsed);
+        self.notify_data(cx);
+    }
+
+    /// Set the OS window bounds on the targeted window.
+    ///
+    /// Delegates to `data.set_os_bounds`, which writes the
+    /// `Option<WindowBounds>` into the targeted window's `os_bounds` slot.
+    /// `Some(bounds)` records the latest OS-reported origin/size so the next
+    /// launch can restore the window in the same place; `None` clears the
+    /// slot (the next launch falls back to the OS default / cascade-offset).
+    /// Unknown extra ids are a silent no-op (the targeted window was just
+    /// closed -- a debounced bounds-observer firing after a close lands on
+    /// a no-op rather than panicking).
+    ///
+    /// Bumps `data_version` because os_bounds is persisted -- the auto-save
+    /// observer must trigger.
+    pub fn set_os_bounds(
+        &mut self,
+        window_id: WindowId,
+        bounds: Option<WindowBounds>,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.set_os_bounds(window_id, bounds);
+        self.notify_data(cx);
     }
 
     // === ProjectLifecycleTracker conveniences ===
@@ -338,19 +441,13 @@ impl Workspace {
     /// When a folder filter is active, only projects from that folder are shown
     /// (top-level projects are hidden). Focused project override still takes priority.
     pub fn visible_projects(&self) -> Vec<&ProjectData> {
-        // active_folder_filter still lives on the entity in slice 01; map it
-        // into a transient WindowState so compute_visible_projects can read
-        // the filter from a single per-window source. Slice 02 will move
-        // active_folder_filter into main_window.folder_filter outright.
-        let window = WindowState {
-            folder_filter: self.active_folder_filter.clone(),
-            ..self.data.main_window.clone()
-        };
+        // Source folder filter (and hidden set / widths / collapse map) from
+        // the main window's persisted WindowState.
         compute_visible_projects(
             &self.data,
             self.focused_project_id(),
             self.focus_manager.is_focus_individual(),
-            &window,
+            &self.data.main_window,
         )
     }
 
@@ -711,13 +808,13 @@ mod workspace_tests {
 
         assert_eq!(ws.visible_projects().len(), 5);
 
-        ws.active_folder_filter = Some("f1".to_string());
+        ws.data.main_window.folder_filter = Some("f1".to_string());
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p2");
 
-        ws.active_folder_filter = Some("f2".to_string());
+        ws.data.main_window.folder_filter = Some("f2".to_string());
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p3");
@@ -741,7 +838,7 @@ mod workspace_tests {
         }];
 
         let mut ws = Workspace::new(data);
-        ws.active_folder_filter = Some("f1".to_string());
+        ws.data.main_window.folder_filter = Some("f1".to_string());
 
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 2);
@@ -828,7 +925,7 @@ mod workspace_tests {
 
         assert_eq!(ws.visible_projects().len(), 4);
 
-        ws.active_folder_filter = Some("f1".to_string());
+        ws.data.main_window.folder_filter = Some("f1".to_string());
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "p1");
@@ -862,7 +959,7 @@ mod workspace_tests {
         }];
 
         let mut ws = Workspace::new(data);
-        ws.active_folder_filter = Some("f1".to_string());
+        ws.data.main_window.folder_filter = Some("f1".to_string());
 
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 2);
@@ -1077,7 +1174,7 @@ mod workspace_tests {
         }];
 
         let mut ws = Workspace::new(data);
-        ws.active_folder_filter = Some("f1".to_string());
+        ws.data.main_window.folder_filter = Some("f1".to_string());
 
         ws.focus_manager.set_focused_project_id(Some("p3".to_string()));
 
@@ -1237,12 +1334,38 @@ mod workspace_tests {
         let visible = ws.visible_projects();
         assert_eq!(visible.len(), 3);
     }
+
+    #[test]
+    fn visible_projects_reads_folder_filter_from_main_window() {
+        // visible_projects must source the folder filter from
+        // `data.main_window.folder_filter` (the persisted, per-window
+        // viewport model). A regression that re-introduces a transient
+        // override on the entity would see None and return all 3 projects
+        // instead of just f1's 2.
+        let mut data = make_workspace_data(
+            vec![make_project("p1"), make_project("p2"), make_project("p3")],
+            vec!["f1", "p3"],
+        );
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec!["p1".to_string(), "p2".to_string()],
+            folder_color: FolderColor::default(),
+        }];
+        data.main_window.folder_filter = Some("f1".to_string());
+        let ws = Workspace::new(data);
+
+        let visible = ws.visible_projects();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, "p1");
+        assert_eq!(visible[1].id, "p2");
+    }
 }
 
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowState, Workspace, WorkspaceData};
+    use crate::state::{HookTerminalEntry, HookTerminalStatus, LayoutNode, ProjectData, WindowBounds, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_terminal::shell_config::ShellType;
     use okena_core::theme::FolderColor;
@@ -1390,7 +1513,7 @@ mod gpui_tests {
         });
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility("p1", cx);
+            ws.toggle_project_overview_visibility(WindowId::Main, "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1638,6 +1761,557 @@ mod gpui_tests {
             assert!(ids.contains(&"hook-2".to_string()));
 
             assert!(ws.hook_terminal_ids_for_project("nonexistent").is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_filter_main_writes_to_data(cx: &mut gpui::TestAppContext) {
+        // Window-scoped entity setter: WindowId::Main writes to
+        // data.main_window.folder_filter (the persisted source of truth).
+        // data_version bumps because folder_filter is persisted -- the
+        // auto-save observer must trigger.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(WindowId::Main, Some("f1".to_string()), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
+            assert_eq!(ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()), Some("f1"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_filter_main_clears_with_none(cx: &mut gpui::TestAppContext) {
+        // Passing None must clear the data-layer filter. Without this,
+        // callers wanting to exit folder-filter mode (e.g. ClearFocus) would
+        // have no API path -- the setter would be write-only.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(WindowId::Main, Some("f1".to_string()), cx);
+            ws.set_folder_filter(WindowId::Main, None, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_filter.is_none());
+            assert!(ws.active_folder_filter(WindowId::Main).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_filter_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Targeting an extra window writes to that extra's WindowState only.
+        // The main window's filter is untouched. Defends against a regression
+        // that ignores the WindowId and writes to main, or scatters the write
+        // across all windows.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(WindowId::Extra(extra_id), Some("f1".to_string()), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extra_w = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert_eq!(extra_w.folder_filter.as_deref(), Some("f1"));
+            assert!(ws.data().main_window.folder_filter.is_none());
+            assert!(ws.active_folder_filter(WindowId::Main).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_filter_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // The "targeted window was just closed" race: the entity setter
+        // delegates to data.set_folder_filter, which silently no-ops on a
+        // missing extra id. Pin the contract so a future refactor that swaps
+        // the data layer to a panicking variant fails here loudly.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_filter(WindowId::Extra(unknown), Some("f1".to_string()), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_filter.is_none());
+            assert!(ws.active_folder_filter(WindowId::Main).is_none());
+            assert!(ws.data().extra_windows.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_hidden_main_inserts_when_absent(cx: &mut gpui::TestAppContext) {
+        // Window-scoped entity setter: WindowId::Main + previously-visible
+        // project lands the project's id in main_window.hidden_project_ids.
+        // data_version bumps because hidden state is persisted -- the
+        // auto-save observer must trigger.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_hidden(WindowId::Main, "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_hidden_main_removes_when_present(cx: &mut gpui::TestAppContext) {
+        // The "Show Project" leg: a previously-hidden project becomes visible
+        // again after toggling. Pinned separately from the insert leg because
+        // a future refactor that always-inserts would leave projects stuck
+        // hidden after the user clicks "Show Project".
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.hidden_project_ids.insert("p1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_hidden(WindowId::Main, "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_hidden_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Targeting an extra window writes to that extra's WindowState only.
+        // Main and the sibling extra are untouched. Defends against a
+        // regression that ignores the WindowId, scatters the write across
+        // every window, or always writes to main.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows.push(extra_a);
+        data.extra_windows.push(extra_b);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_hidden(WindowId::Extra(extra_a_id), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let a = ws.data().window(WindowId::Extra(extra_a_id)).unwrap();
+            let b = ws.data().window(WindowId::Extra(extra_b_id)).unwrap();
+            assert!(a.hidden_project_ids.contains("p1"));
+            assert!(!b.hidden_project_ids.contains("p1"));
+            assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_hidden_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // The "targeted window was just closed" race: the entity setter
+        // delegates to data.toggle_hidden, which silently no-ops on a
+        // missing extra id. Pin the contract so a future refactor that swaps
+        // the data layer to a panicking variant fails here loudly.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_hidden(WindowId::Extra(unknown), "p1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.hidden_project_ids.is_empty());
+            let kept = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(kept.hidden_project_ids.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_width_main_writes_to_data(cx: &mut gpui::TestAppContext) {
+        // Window-scoped entity setter: WindowId::Main writes the
+        // (project_id, width) pair into data.main_window.project_widths
+        // (the persisted source of truth). data_version bumps because
+        // project widths are persisted -- the auto-save observer must
+        // trigger.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_width(WindowId::Main, "p1", 0.42, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.42));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_width_main_overwrites_existing_value(cx: &mut gpui::TestAppContext) {
+        // Re-setting a width for the same project must replace the prior
+        // value, not silently keep the first write. Without this, every
+        // column-resize after the first would be a silent no-op (the user
+        // would see the column "snap back" once they tried to resize the
+        // same column twice). Pinned via two consecutive sets.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_width(WindowId::Main, "p1", 0.25, cx);
+            ws.set_project_width(WindowId::Main, "p1", 0.75, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.project_widths.get("p1").copied(), Some(0.75));
+            assert_eq!(ws.data_version(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_width_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Targeting an extra window writes to that extra's WindowState only.
+        // Main and the sibling extra are untouched. Defends against a
+        // regression that ignores the WindowId, scatters the write across
+        // every window, or always writes to main.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows.push(extra_a);
+        data.extra_windows.push(extra_b);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_width(WindowId::Extra(extra_a_id), "p1", 0.42, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let a = ws.data().window(WindowId::Extra(extra_a_id)).unwrap();
+            let b = ws.data().window(WindowId::Extra(extra_b_id)).unwrap();
+            assert_eq!(a.project_widths.get("p1").copied(), Some(0.42));
+            assert!(b.project_widths.is_empty());
+            assert!(ws.data().main_window.project_widths.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_project_width_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // The "targeted window was just closed" race: the entity setter
+        // delegates to data.set_project_width, which silently no-ops on a
+        // missing extra id. Pin the contract so a future refactor that swaps
+        // the data layer to a panicking variant fails here loudly.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_project_width(WindowId::Extra(unknown), "p1", 0.42, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.project_widths.is_empty());
+            let kept = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(kept.project_widths.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_collapsed_main_inserts_when_true(cx: &mut gpui::TestAppContext) {
+        // Window-scoped entity setter: WindowId::Main + collapsed=true inserts
+        // (folder_id, true) into data.main_window.folder_collapsed (the
+        // persisted source of truth). data_version bumps because
+        // folder-collapsed state is persisted -- the auto-save observer must
+        // trigger.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_collapsed(WindowId::Main, "f1", true, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.folder_collapsed.get("f1"), Some(&true));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_collapsed_main_removes_when_false(cx: &mut gpui::TestAppContext) {
+        // The "absence == expanded" runtime convention: collapsed=false on a
+        // previously-collapsed folder removes the entry, NOT inserts
+        // Some(false). Defends against a regression that uses unconditional
+        // insert (which would leave Some(false) tombstones bloating the on-
+        // disk shape over time).
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_collapsed(WindowId::Main, "f1", false, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_collapsed_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Targeting an extra window writes to that extra's WindowState only.
+        // Main and the sibling extra are untouched. Defends against a
+        // regression that ignores the WindowId, scatters the write across
+        // every window, or always writes to main.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows.push(extra_a);
+        data.extra_windows.push(extra_b);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_collapsed(WindowId::Extra(extra_a_id), "f1", true, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let a = ws.data().window(WindowId::Extra(extra_a_id)).unwrap();
+            let b = ws.data().window(WindowId::Extra(extra_b_id)).unwrap();
+            assert_eq!(a.folder_collapsed.get("f1"), Some(&true));
+            assert!(b.folder_collapsed.is_empty());
+            assert!(ws.data().main_window.folder_collapsed.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_folder_collapsed_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // The "targeted window was just closed" race: the entity setter
+        // delegates to data.set_folder_collapsed, which silently no-ops on a
+        // missing extra id. Pin the contract so a future refactor that swaps
+        // the data layer to a panicking variant fails here loudly.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_folder_collapsed(WindowId::Extra(unknown), "f1", true, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_collapsed.is_empty());
+            let kept = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(kept.folder_collapsed.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn set_os_bounds_main_writes_to_data(cx: &mut gpui::TestAppContext) {
+        // Window-scoped entity setter: WindowId::Main + Some(bounds) writes
+        // to data.main_window.os_bounds (the persisted source of truth).
+        // data_version bumps because os_bounds is persisted -- the auto-save
+        // observer must trigger.
+        let data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let bounds = WindowBounds {
+            origin_x: 100.0,
+            origin_y: 50.0,
+            width: 1280.0,
+            height: 800.0,
+        };
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_os_bounds(WindowId::Main, Some(bounds), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.os_bounds, Some(bounds));
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_os_bounds_main_clears_with_none(cx: &mut gpui::TestAppContext) {
+        // Passing None must clear the bounds. Without this leg, callers
+        // wanting to forget a window's last position would have no API path
+        // through the entity. Pinned at the entity layer because the
+        // asymmetric set/clear contract is part of the integration surface
+        // runtime code touches; data_version bumps even on the clear.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.os_bounds = Some(WindowBounds {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        });
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_os_bounds(WindowId::Main, None, cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.os_bounds.is_none());
+            assert_eq!(ws.data_version(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_os_bounds_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Targeting an extra window writes to that extra's WindowState only.
+        // Main and the sibling extra are untouched. Defends against a
+        // regression that ignores the WindowId, scatters the write across
+        // every window, or always writes to main.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows.push(extra_a);
+        data.extra_windows.push(extra_b);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let bounds = WindowBounds {
+            origin_x: 200.0,
+            origin_y: 150.0,
+            width: 1024.0,
+            height: 768.0,
+        };
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_os_bounds(WindowId::Extra(extra_a_id), Some(bounds), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let a = ws.data().window(WindowId::Extra(extra_a_id)).unwrap();
+            let b = ws.data().window(WindowId::Extra(extra_b_id)).unwrap();
+            assert_eq!(a.os_bounds, Some(bounds));
+            assert!(b.os_bounds.is_none());
+            assert!(ws.data().main_window.os_bounds.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn set_os_bounds_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // The "targeted window was just closed" race: the entity setter
+        // delegates to data.set_os_bounds, which silently no-ops on a
+        // missing extra id. Pin the contract so a future refactor that swaps
+        // the data layer to a panicking variant fails here loudly.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        let extra = WindowState::default();
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        let bounds = WindowBounds {
+            origin_x: 1.0,
+            origin_y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_os_bounds(WindowId::Extra(unknown), Some(bounds), cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.os_bounds.is_none());
+            let kept = ws.data().window(WindowId::Extra(extra_id)).unwrap();
+            assert!(kept.os_bounds.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn active_folder_filter_main_reads_main_windows_folder_filter(cx: &mut gpui::TestAppContext) {
+        // Source-of-truth contract: targeting `WindowId::Main` reads from
+        // `data.main_window.folder_filter` (the persisted, per-window model).
+        // This fixture writes the filter directly to main_window via a
+        // WorkspaceData mutation -- never through the entity setter -- and
+        // asserts the getter surfaces it. Defends against a regression that
+        // re-introduces a transient cache field on the entity.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.folder_filter = Some("f1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()), Some("f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn active_folder_filter_extra_reads_targeted_extras_folder_filter(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: targeting `WindowId::Extra(uuid)` reads
+        // from that extra's `WindowState::folder_filter` (NOT main's). The
+        // fixture pre-populates main + a sibling extra with their own
+        // distinct filters so a regression that ignores window_id and
+        // unconditionally returns main's filter, scatters across extras,
+        // or routes through the wrong slot would surface here.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.folder_filter = Some("main_folder".to_string());
+        let mut extra_a = WindowState::default();
+        extra_a.folder_filter = Some("extra_a_folder".to_string());
+        let extra_a_id = extra_a.id;
+        let mut extra_b = WindowState::default();
+        extra_b.folder_filter = Some("extra_b_folder".to_string());
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Extra(extra_a_id)).map(|s| s.as_str()),
+                Some("extra_a_folder"),
+            );
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Extra(extra_b_id)).map(|s| s.as_str()),
+                Some("extra_b_folder"),
+            );
+            // Main is unchanged by the extras' reads.
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()),
+                Some("main_folder"),
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn active_folder_filter_unknown_extra_returns_none(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra
+        // returns `None` (no panic, no fallback to main's filter). Pre-
+        // populate main with a filter to ensure the unknown-extra path does
+        // NOT silently surface main's value as a default. Mirrors the
+        // silent-no-op shape of the window-scoped setters.
+        let mut data = make_workspace_data(vec![make_project("p1")], vec!["p1"]);
+        data.main_window.folder_filter = Some("main_folder".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let unknown = uuid::Uuid::new_v4();
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.active_folder_filter(WindowId::Extra(unknown)).is_none());
+            // Main's filter is still readable via its own id.
+            assert_eq!(
+                ws.active_folder_filter(WindowId::Main).map(|s| s.as_str()),
+                Some("main_folder"),
+            );
         });
     }
 }

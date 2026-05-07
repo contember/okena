@@ -190,11 +190,12 @@ impl Sidebar {
                     .on_click(cx.listener({
                         let project_id = project_id.clone();
                         move |this, _, _window, cx| {
+                            let window_id = this.window_id;
                             this.workspace.update(cx, |ws, cx| {
                                 if is_worktree_style {
-                                    ws.toggle_worktree_visibility(&project_id, cx);
+                                    ws.toggle_worktree_visibility(window_id, &project_id, cx);
                                 } else {
-                                    ws.toggle_project_overview_visibility(&project_id, cx);
+                                    ws.toggle_project_overview_visibility(window_id, &project_id, cx);
                                 }
                             });
                             cx.stop_propagation();

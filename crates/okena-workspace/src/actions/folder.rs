@@ -3,7 +3,7 @@
 //! Actions for creating, modifying, and deleting sidebar folders.
 
 use okena_core::theme::FolderColor;
-use crate::state::{FolderData, Workspace};
+use crate::state::{FolderData, WindowId, Workspace};
 use gpui::*;
 
 impl Workspace {
@@ -23,9 +23,17 @@ impl Workspace {
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
     pub fn delete_folder(&mut self, folder_id: &str, cx: &mut Context<Self>) {
-        // Clear folder filter if the deleted folder was the active filter
-        if self.active_folder_filter().map(|s| s.as_str()) == Some(folder_id) {
-            self.active_folder_filter = None;
+        // Clear folder filter on main if the deleted folder was its active
+        // filter. Folder delete is a workspace-level event (no window_id
+        // parameter on this action), so the scrub stays main-only here. A
+        // future helper analogous to `delete_project_scrub_all_windows`
+        // would fan the clear out to every window's folder_filter; until
+        // then, an extra holding the deleted folder's id as its filter
+        // surfaces an empty viewport instead of an unfiltered grid -- the
+        // visibility computation already treats a stale folder id as "no
+        // matches", so the UI still degrades gracefully.
+        if self.active_folder_filter(WindowId::Main).map(|s| s.as_str()) == Some(folder_id) {
+            self.data.main_window.folder_filter = None;
         }
 
         let project_ids = self.data.folders.iter()
@@ -65,39 +73,45 @@ impl Workspace {
         }
     }
 
-    /// Returns whether a folder is collapsed in this workspace's main window.
+    /// Returns whether a folder is collapsed in the targeted window.
     ///
-    /// Reads from `main_window.folder_collapsed` (the per-window viewport
-    /// model, new source of truth). Today this is always the main window;
-    /// per-window scoping arrives with the window-scoped mutation API
-    /// (slice 02). Missing entry == expanded.
-    pub fn is_folder_collapsed(&self, folder_id: &str) -> bool {
+    /// Routes through `data.window(window_id)` (the lookup pair on
+    /// `WorkspaceData`): `WindowId::Main` always returns the main slot,
+    /// `WindowId::Extra(uuid)` walks `extra_windows`. An unknown extra
+    /// (e.g. a paint racing a close) yields `None` and falls back to the
+    /// "absence == expanded" default of `false` -- the same default used
+    /// when the targeted window has no entry for the folder. Mirrors the
+    /// silent-no-op shape of the window-scoped setters.
+    pub fn is_folder_collapsed(&self, window_id: WindowId, folder_id: &str) -> bool {
         self.data
-            .main_window
-            .folder_collapsed
-            .get(folder_id)
-            .copied()
+            .window(window_id)
+            .and_then(|w| w.folder_collapsed.get(folder_id).copied())
             .unwrap_or(false)
     }
 
-    /// Toggle folder collapsed state.
+    /// Toggle folder collapsed state in the targeted window.
     ///
-    /// Writes to `main_window.folder_collapsed` (the source of truth).
-    /// Absence in the map == expanded.
-    pub fn toggle_folder_collapsed(&mut self, folder_id: &str, cx: &mut Context<Self>) {
+    /// Reads the current state via `is_folder_collapsed(window_id, ...)` and
+    /// writes the inverted bool via `set_folder_collapsed(window_id, ...)`.
+    /// The "absence == expanded" runtime convention is inherited from
+    /// `set_folder_collapsed` (collapsing inserts `(folder_id, true)`,
+    /// expanding removes the entry rather than storing `false`).
+    ///
+    /// Project-existence guard at the top: if `folder_id` is not in the
+    /// shared `data.folders` list, the toggle is a silent no-op. The guard
+    /// prevents stale ids from a sidebar context-menu race from inserting
+    /// tombstone entries into the per-window map. The guard reads the
+    /// shared list (not a per-window thing), so it stays in this wrapper
+    /// rather than moving to the data layer.
+    ///
+    /// Unknown extra ids inherit the silent no-op contract from
+    /// `set_folder_collapsed`.
+    pub fn toggle_folder_collapsed(&mut self, window_id: WindowId, folder_id: &str, cx: &mut Context<Self>) {
         if !self.data.folders.iter().any(|f| f.id == folder_id) {
             return;
         }
-        let now_collapsed = !self.is_folder_collapsed(folder_id);
-        if now_collapsed {
-            self.data
-                .main_window
-                .folder_collapsed
-                .insert(folder_id.to_string(), true);
-        } else {
-            self.data.main_window.folder_collapsed.remove(folder_id);
-        }
-        self.notify_data(cx);
+        let now_collapsed = !self.is_folder_collapsed(window_id, folder_id);
+        self.set_folder_collapsed(window_id, folder_id, now_collapsed, cx);
     }
 
     /// Move a project into a folder at a given position
@@ -279,7 +293,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
-    use crate::state::{FolderData, LayoutNode, ProjectData, Workspace, WorkspaceData};
+    use crate::state::{FolderData, LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_core::theme::FolderColor;
     use std::collections::HashMap;
@@ -406,11 +420,11 @@ mod gpui_tests {
 
         // Set folder filter to f1
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_folder_filter(Some("f1".to_string()), cx);
+            ws.set_folder_filter(WindowId::Main, Some("f1".to_string()), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.active_folder_filter(), Some(&"f1".to_string()));
+            assert_eq!(ws.active_folder_filter(WindowId::Main), Some(&"f1".to_string()));
         });
 
         // Delete f1 — filter should auto-clear
@@ -419,17 +433,17 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.active_folder_filter().is_none());
+            assert!(ws.active_folder_filter(WindowId::Main).is_none());
         });
     }
 
     #[gpui::test]
     fn is_folder_collapsed_reads_from_main_window_folder_collapsed(cx: &mut gpui::TestAppContext) {
-        // Per-window viewport model: collapsed state is read from
-        // main_window.folder_collapsed (the new source of truth). A future
-        // regression that re-routes the read back to FolderData.collapsed
-        // should fail loudly: this fixture populates ONLY main_window and
-        // leaves FolderData.collapsed=false.
+        // Per-window viewport model: WindowId::Main routes through
+        // data.window(...) and reads main_window.folder_collapsed (the new
+        // source of truth). A future regression that re-routes the read back
+        // to FolderData.collapsed should fail loudly: this fixture populates
+        // ONLY main_window and leaves FolderData.collapsed=false.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
@@ -441,17 +455,73 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert!(ws.is_folder_collapsed("f1"));
+            assert!(ws.is_folder_collapsed(WindowId::Main, "f1"));
             // Missing entry defaults to expanded.
-            assert!(!ws.is_folder_collapsed("missing"));
+            assert!(!ws.is_folder_collapsed(WindowId::Main, "missing"));
+        });
+    }
+
+    #[gpui::test]
+    fn is_folder_collapsed_extra_reads_from_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: WindowId::Extra(uuid) routes through
+        // data.window(...) and reads the matching extra's folder_collapsed --
+        // not main's. Fixture writes (f1, true) only on the extra; main's map
+        // is empty. Reading with the extra id returns true; reading with Main
+        // returns false (absence == expanded). Defends against a regression
+        // that ignores window_id and unconditionally reads main, which would
+        // silently break the per-window sidebar contract once extras land in
+        // slice 05.
+        let mut data = make_workspace_data(vec![], vec!["f1"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        let mut extra = WindowState::default();
+        extra.folder_collapsed.insert("f1".to_string(), true);
+        let extra_id = extra.id;
+        data.extra_windows.push(extra);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.is_folder_collapsed(WindowId::Extra(extra_id), "f1"));
+            // Main has no entry for f1 -> absence == expanded.
+            assert!(!ws.is_folder_collapsed(WindowId::Main, "f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn is_folder_collapsed_unknown_extra_returns_default(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra is
+        // a `data.window(...) == None`, which falls back to the "absence ==
+        // expanded" default rather than panicking. Pre-populate main with
+        // (f1, true) to ensure the unknown-extra path does NOT silently fall
+        // back to main as a default -- a window-cross-contamination bug
+        // would surface here.
+        let mut data = make_workspace_data(vec![], vec!["f1"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        data.main_window.folder_collapsed.insert("f1".to_string(), true);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        let unknown = uuid::Uuid::new_v4();
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Unknown extra -> false, NOT main's true.
+            assert!(!ws.is_folder_collapsed(WindowId::Extra(unknown), "f1"));
         });
     }
 
     #[gpui::test]
     fn toggle_folder_collapsed_writes_to_main_window(cx: &mut gpui::TestAppContext) {
-        // Toggling collapsed flips main_window.folder_collapsed (the source of
-        // truth). The legacy FolderData.collapsed field has been removed from
-        // the struct; runtime mutations now have only one site to write.
+        // Toggling on WindowId::Main flips main_window.folder_collapsed via the
+        // window-scoped delegate. The "absence == expanded" runtime convention
+        // is inherited from set_folder_collapsed: collapsing inserts true,
+        // expanding removes the entry rather than storing false.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
             id: "f1".to_string(),
@@ -463,7 +533,7 @@ mod gpui_tests {
 
         // First toggle: false -> true. main_window inserts true.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_collapsed("f1", cx);
+            ws.toggle_folder_collapsed(WindowId::Main, "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert_eq!(ws.data().main_window.folder_collapsed.get("f1"), Some(&true));
@@ -472,10 +542,71 @@ mod gpui_tests {
         // Second toggle: true -> false. main_window removes the entry
         // (absence == expanded).
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_folder_collapsed("f1", cx);
+            ws.toggle_folder_collapsed(WindowId::Main, "f1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_collapsed_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: WindowId::Extra(uuid) routes through
+        // set_folder_collapsed targeting the matching extra -- not main and
+        // not the sibling extra. Defends against a regression that ignores
+        // window_id and unconditionally writes to main, scatters the write
+        // across all extras, or routes the read through main while the write
+        // hits the extra (a subtle bug that would surface as a folder
+        // collapsing on every other click instead of every click, since the
+        // read leg of the toggle would always see main's state).
+        let mut data = make_workspace_data(vec![], vec!["f1"]);
+        data.folders = vec![FolderData {
+            id: "f1".to_string(),
+            name: "Folder".to_string(),
+            project_ids: vec![],
+            folder_color: FolderColor::default(),
+        }];
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let extra_b = WindowState::default();
+        let extra_b_id = extra_b.id;
+        data.extra_windows.push(extra_a);
+        data.extra_windows.push(extra_b);
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_collapsed(WindowId::Extra(extra_a_id), "f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            let extras = &ws.data().extra_windows;
+            let a = extras.iter().find(|w| w.id == extra_a_id).unwrap();
+            let b = extras.iter().find(|w| w.id == extra_b_id).unwrap();
+            assert_eq!(a.folder_collapsed.get("f1"), Some(&true));
+            assert!(!b.folder_collapsed.contains_key("f1"));
+            assert!(!ws.data().main_window.folder_collapsed.contains_key("f1"));
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_collapsed_unknown_id_is_noop(cx: &mut gpui::TestAppContext) {
+        // Project-existence guard: a folder id not in data.folders is a
+        // silent no-op -- no entry inserted, no data_version bump. Pins the
+        // guard against a future refactor that drops it "for symmetry with
+        // the data-layer setter" (the data-layer setter has no such guard
+        // because it is the general-purpose window-scoped writer; the guard
+        // belongs at this wrapper because it reads from the shared folder
+        // list).
+        let data = make_workspace_data(vec![], vec![]);
+        // No folders -- "stale" is unknown.
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_collapsed(WindowId::Main, "stale", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_collapsed.is_empty());
         });
     }
 
@@ -531,7 +662,7 @@ mod gpui_tests {
 
         // Set folder filter to f1
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_folder_filter(Some("f1".to_string()), cx);
+            ws.set_folder_filter(WindowId::Main, Some("f1".to_string()), cx);
         });
 
         // Delete f2 — filter should remain on f1
@@ -540,7 +671,7 @@ mod gpui_tests {
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
-            assert_eq!(ws.active_folder_filter(), Some(&"f1".to_string()));
+            assert_eq!(ws.active_folder_filter(WindowId::Main), Some(&"f1".to_string()));
         });
     }
 }

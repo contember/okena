@@ -2,7 +2,7 @@
 //!
 //! Actions for managing terminal and project focus, including fullscreen mode.
 
-use crate::state::Workspace;
+use crate::state::{Workspace, WindowId};
 use gpui::*;
 
 impl Workspace {
@@ -39,12 +39,21 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Toggle folder selection: sets folder filter and focuses the first terminal inside.
-    /// If the folder is already selected, deselects it.
-    pub fn toggle_folder_focus(&mut self, folder_id: &str, cx: &mut Context<Self>) {
-        let selecting = self.active_folder_filter().map(|s| s.as_str()) != Some(folder_id);
+    /// Toggle folder selection on the targeted window: sets the window's
+    /// folder filter and focuses the first terminal inside the folder.
+    /// If the folder is already selected (per the targeted window's filter),
+    /// deselects it.
+    ///
+    /// Reads the current filter via
+    /// `active_folder_filter(window_id)` and delegates the mutation to
+    /// `set_folder_filter(window_id, ...)` so both legs route through the
+    /// targeted window's `WindowState::folder_filter`. Unknown extra ids
+    /// are a silent no-op (close-race contract inherited from both the
+    /// reader and the setter).
+    pub fn toggle_folder_focus(&mut self, window_id: WindowId, folder_id: &str, cx: &mut Context<Self>) {
+        let selecting = self.active_folder_filter(window_id).map(|s| s.as_str()) != Some(folder_id);
         if selecting {
-            self.set_folder_filter(Some(folder_id.to_string()), cx);
+            self.set_folder_filter(window_id, Some(folder_id.to_string()), cx);
             // Clear project focus so all visible folder projects show
             self.focus_manager.set_focused_project_id(None);
             // Focus the first project's terminal
@@ -52,7 +61,7 @@ impl Workspace {
                 self.focus_first_terminal_in(&first_pid);
             }
         } else {
-            self.set_folder_filter(None, cx);
+            self.set_folder_filter(window_id, None, cx);
         }
         cx.notify();
     }
@@ -174,5 +183,146 @@ impl Workspace {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gpui_tests {
+    use gpui::AppContext as _;
+    use crate::state::{FolderData, WindowId, WindowState, Workspace, WorkspaceData};
+    use okena_core::theme::FolderColor;
+    use std::collections::HashMap;
+
+    fn make_workspace_data() -> WorkspaceData {
+        WorkspaceData {
+            version: 1,
+            projects: vec![],
+            project_order: vec![],
+            service_panel_heights: HashMap::new(),
+            hook_panel_heights: HashMap::new(),
+            folders: vec![FolderData {
+                id: "f1".to_string(),
+                name: "Folder".to_string(),
+                project_ids: vec![],
+                folder_color: FolderColor::default(),
+            }],
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    fn toggle_folder_focus_main_writes_to_main_folder_filter(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: targeting WindowId::Main flips
+        // main_window.folder_filter through Workspace::set_folder_filter.
+        // First toggle: None -> Some("f1"). Second toggle (selecting state
+        // computed against main, which now matches): Some("f1") -> None.
+        // Pins the round-trip semantic on the main path, byte-for-byte
+        // identical to the pre-migration shape.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Main, "f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Main, "f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().main_window.folder_filter.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_focus_extra_writes_only_to_targeted_window(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: targeting WindowId::Extra(uuid) writes
+        // to that extra's folder_filter -- main and any sibling extras stay
+        // untouched. Defends against a regression that ignores window_id and
+        // unconditionally writes to main, scatters the write across all
+        // extras, or routes through main's slot. Pre-populate sibling extra
+        // with a non-default filter to verify isolation.
+        let mut data = make_workspace_data();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        let mut extra_b = WindowState::default();
+        extra_b.folder_filter = Some("f1".to_string());
+        let extra_b_id = extra_b.id;
+        data.extra_windows = vec![extra_a, extra_b];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Targeted extra got the filter.
+            assert_eq!(ws.data().extra_windows[0].folder_filter.as_deref(), Some("f1"));
+            // Main stays untouched.
+            assert!(ws.data().main_window.folder_filter.is_none());
+            // Sibling extra's pre-existing filter is preserved.
+            assert_eq!(ws.data().extra_windows[1].folder_filter.as_deref(), Some("f1"));
+            assert_eq!(extra_b_id, ws.data().extra_windows[1].id);
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_focus_extra_round_trip_uses_extras_own_filter(cx: &mut gpui::TestAppContext) {
+        // Per-window viewport model: with `active_folder_filter` migrated to
+        // take a WindowId, the SELECT/DESELECT round trip on an extra reads
+        // and writes the extra's own slot. First toggle on extra_a:
+        // None -> Some("f1") (selecting=true since extra_a's filter is
+        // None). Second toggle on the same extra: Some("f1") -> None
+        // (selecting=false since extra_a's filter now matches). Defends
+        // against a regression that re-introduces a main-only reader and
+        // makes every extra's first toggle compute selecting=true.
+        let mut data = make_workspace_data();
+        let extra_a = WindowState::default();
+        let extra_a_id = extra_a.id;
+        data.extra_windows = vec![extra_a];
+        let workspace = cx.new(|_cx| Workspace::new(data));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert_eq!(ws.data().extra_windows[0].folder_filter.as_deref(), Some("f1"));
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Extra(extra_a_id), "f1", cx);
+        });
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            assert!(ws.data().extra_windows[0].folder_filter.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn toggle_folder_focus_unknown_extra_is_silent_noop(cx: &mut gpui::TestAppContext) {
+        // Close-race contract: a fresh uuid that does not match any extra
+        // produces no panic; main_window stays untouched. Pre-populate main
+        // with an existing filter to ensure the unknown-extra path does NOT
+        // silently fall back to main as a default. data_version still bumps
+        // via notify_data, matching the silent-no-op contract on the
+        // data-layer setter (the entity-level set_folder_filter wrapper
+        // unconditionally calls notify_data after delegating to the data
+        // layer's window_mut lookup).
+        let mut data = make_workspace_data();
+        data.main_window.folder_filter = Some("f1".to_string());
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        let unknown = uuid::Uuid::new_v4();
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.toggle_folder_focus(WindowId::Extra(unknown), "f1", cx);
+        });
+
+        workspace.read_with(cx, |ws: &Workspace, _cx| {
+            // Main's pre-existing filter is unchanged (NOT cleared by a
+            // fallback-to-main bug).
+            assert_eq!(ws.data().main_window.folder_filter.as_deref(), Some("f1"));
+            assert!(ws.data_version() >= 1);
+        });
     }
 }

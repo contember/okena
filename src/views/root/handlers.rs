@@ -188,8 +188,9 @@ impl RootView {
                 });
             }
             OverlayManagerEvent::ToggleProjectVisibility(project_id) => {
+                let window_id = self.window_id;
                 self.workspace.update(cx, |ws, cx| {
-                    ws.toggle_project_overview_visibility(project_id, cx);
+                    ws.toggle_project_overview_visibility(window_id, project_id, cx);
                 });
             }
             OverlayManagerEvent::RemoteReconnect { connection_id } => {
