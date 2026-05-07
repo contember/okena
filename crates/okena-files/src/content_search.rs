@@ -127,7 +127,10 @@ impl Default for ContentSearchConfig {
 
 /// Always ignored regardless of `.gitignore` or the user's "Include gitignored" toggle.
 /// `.git/` itself isn't covered by gitignore patterns and there's no reason to ever walk it.
-pub const ALWAYS_IGNORE: &[&str] = &["!.git/"];
+/// `.claude/worktrees/` are agent worktrees (full repo checkouts) — gitignore inside each
+/// sub-worktree masks them from the parent's view, so they slip past gitignore-based filtering
+/// and can blow the file scan budget.
+pub const ALWAYS_IGNORE: &[&str] = &["!.git/", "!.claude/worktrees/"];
 
 /// Configure a walker with the project's ignore rules and our defaults.
 fn configure_walker(project_path: &Path, config: &ContentSearchConfig) -> WalkBuilder {
