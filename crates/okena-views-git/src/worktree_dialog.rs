@@ -7,7 +7,7 @@ use okena_git as git;
 use okena_git::repository::{compute_target_paths, normalize_path};
 use okena_core::process::command;
 use okena_workspace::settings::{HooksConfig, WorktreeConfig};
-use okena_workspace::state::Workspace;
+use okena_workspace::state::{WindowId, Workspace};
 
 use crate::simple_input::SimpleInputState;
 
@@ -38,6 +38,11 @@ impl EventEmitter<WorktreeDialogEvent> for WorktreeDialog {}
 /// Dialog for creating a new worktree from a project
 pub struct WorktreeDialog {
     pub(super) workspace: Entity<Workspace>,
+    /// Spawning window for the multi-window new-project visibility rule
+    /// (PRD user story 14): the new worktree is visible in this window
+    /// only, hidden in every other window. Threaded from the originating
+    /// `WindowView` through `OverlayManager::show_worktree_dialog`.
+    pub(super) window_id: WindowId,
     pub(super) project_id: String,
     pub(super) project_path: String,
     /// The git repository root (may differ from project_path in monorepos)
@@ -69,6 +74,7 @@ impl WorktreeDialog {
         project_path: String,
         worktree_config: WorktreeConfig,
         hooks_config: HooksConfig,
+        window_id: WindowId,
         cx: &mut Context<Self>,
     ) -> Self {
         // Determine git repo root: if parent is already a worktree, use its
@@ -107,6 +113,7 @@ impl WorktreeDialog {
 
         Self {
             workspace,
+            window_id,
             project_id,
             project_path,
             git_root,
@@ -212,8 +219,9 @@ impl WorktreeDialog {
         let hooks_config = self.hooks_config.clone();
 
         // Create the worktree project
+        let window_id = self.window_id;
         let result = self.workspace.update(cx, |ws, cx| {
-            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, cx)
+            ws.create_worktree_project(&project_id, &branch, &git_root, &worktree_path, &project_path, create_branch, &hooks_config, window_id, cx)
         });
 
         match result {

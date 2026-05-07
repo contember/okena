@@ -104,6 +104,45 @@ impl WorkspaceData {
         }
     }
 
+    /// Apply the multi-window new-project visibility rule.
+    ///
+    /// PRD `plans/multi-window.md` user story 14: "I want to add a project
+    /// from any window so that the project lands in that window only
+    /// (visible there, hidden everywhere else by default)." Walks
+    /// `main_window` plus every entry in `extra_windows` and inserts
+    /// `project_id` into each window's `hidden_project_ids` set EXCEPT the
+    /// `spawning_window`'s. Called from project-creation paths after the
+    /// project is pushed onto `projects` so the new project becomes visible
+    /// in the spawning window only.
+    ///
+    /// Idempotent: a window that already has the id in its set is a no-op
+    /// for that window (HashSet::insert returns bool but never panics on a
+    /// duplicate). Other per-window fields (`project_widths`,
+    /// `folder_collapsed`, `folder_filter`, `os_bounds`) are left untouched
+    /// since the rule is scoped to the visibility set.
+    ///
+    /// `WindowId::Extra(uuid)` for an unknown extra (e.g. the caller raced
+    /// a close, or a sentinel id is passed for the no-spawning-window case)
+    /// degenerates to "hide in main + every extra" -- the spawning window
+    /// doesn't exist as a viewport that would benefit from default
+    /// visibility, so the rule defaults to fully hidden. Mirrors the
+    /// silent-no-op shape of the window-scoped setters when targeted at an
+    /// already-closed extra.
+    ///
+    /// Mirrors the inverse helper `delete_project_scrub_all_windows`,
+    /// which removes the id from every window's per-project storage on
+    /// project-delete so no orphan entries survive.
+    pub fn add_project_hide_in_other_windows(&mut self, project_id: &str, spawning_window: WindowId) {
+        if spawning_window != WindowId::Main {
+            self.main_window.hidden_project_ids.insert(project_id.to_string());
+        }
+        for extra in &mut self.extra_windows {
+            if spawning_window != WindowId::Extra(extra.id) {
+                extra.hidden_project_ids.insert(project_id.to_string());
+            }
+        }
+    }
+
     /// Remove a project's id from every window's per-project storage.
     ///
     /// Walks `main_window` plus every entry in `extra_windows`, and removes
