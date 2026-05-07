@@ -9,9 +9,9 @@ use gpui::*;
 use gpui::prelude::*;
 use std::future::Future;
 
-use super::RootView;
+use super::WindowView;
 
-impl RootView {
+impl WindowView {
     /// Normalize raw project widths to percentages summing to 100%.
     fn normalize_widths(raw_widths: &[f32]) -> Vec<f32> {
         let total: f32 = raw_widths.iter().sum();
@@ -40,13 +40,14 @@ impl RootView {
         };
 
         let workspace = self.workspace.read(cx);
+        let fm = self.focus_manager.read(cx);
 
         // Don't scroll when zoomed to a single project
-        if workspace.focus_manager.fullscreen_project_id().is_some() {
+        if fm.fullscreen_project_id().is_some() {
             return;
         }
 
-        let visible_projects: Vec<String> = workspace.visible_projects()
+        let visible_projects: Vec<String> = workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
             .iter().map(|p| p.id.clone()).collect();
         let num_projects = visible_projects.len();
         if num_projects <= 1 {
@@ -104,8 +105,9 @@ impl RootView {
         // the layout has been recalculated with all projects visible.
         if let Some(project_id) = self.pending_center_scroll.take() {
             let workspace = self.workspace.read(cx);
-            let num_visible = workspace.visible_projects().len();
-            let is_zoomed = workspace.focus_manager.focused_project_id().is_some();
+            let fm = self.focus_manager.read(cx);
+            let num_visible = workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).len();
+            let is_zoomed = fm.focused_project_id().is_some();
 
             if is_zoomed || num_visible <= 1 {
                 // Still zoomed or only one project — no centering needed
@@ -123,11 +125,12 @@ impl RootView {
 
         let visible_projects: Vec<_> = {
             let workspace = self.workspace.read(cx);
+            let fm = self.focus_manager.read(cx);
             // When zoomed, show only the zoomed project's column
-            if let Some(pid) = workspace.focus_manager.fullscreen_project_id() {
+            if let Some(pid) = fm.fullscreen_project_id() {
                 vec![pid.to_string()]
             } else {
-                workspace.visible_projects().iter().map(|p| p.id.clone()).collect()
+                workspace.visible_projects(fm.focused_project_id(), fm.is_focus_individual()).iter().map(|p| p.id.clone()).collect()
             }
         };
 
@@ -379,7 +382,7 @@ impl RootView {
 
 }
 
-impl Render for RootView {
+impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
@@ -527,39 +530,48 @@ impl Render for RootView {
             // Handle clear focus action (show all projects)
             .on_action(cx.listener(|this, _: &ClearFocus, _window, cx| {
                 let window_id = this.window_id;
-                this.workspace.update(cx, |ws, cx| {
-                    ws.set_focused_project(None, cx);
-                    ws.set_folder_filter(window_id, None, cx);
+                let workspace = this.workspace.clone();
+                this.focus_manager.update(cx, |fm, cx| {
+                    workspace.update(cx, |ws, cx| {
+                        ws.set_focused_project(fm, None, cx);
+                        ws.set_folder_filter(window_id, None, cx);
+                    });
                 });
             }))
             // Toggle focus on the active terminal's project (zoom in / zoom out)
             .on_action(cx.listener(|this, _: &FocusActiveProject, _window, cx| {
-                let ws = this.workspace.read(cx);
-                let is_focused = ws.focus_manager.focused_project_id().is_some();
+                let is_focused = this.focus_manager.read(cx).focused_project_id().is_some();
                 if is_focused {
                     let window_id = this.window_id;
-                    this.workspace.update(cx, |ws, cx| {
-                        ws.set_focused_project(None, cx);
-                        ws.set_folder_filter(window_id, None, cx);
+                    let workspace = this.workspace.clone();
+                    this.focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.set_focused_project(fm, None, cx);
+                            ws.set_folder_filter(window_id, None, cx);
+                        });
                     });
                 } else {
-                    let project_id = this.workspace.read(cx).focus_manager
+                    let project_id = this.focus_manager.read(cx)
                         .focused_terminal_state()
                         .map(|state| state.project_id);
                     if let Some(project_id) = project_id {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.set_focused_project(Some(project_id), cx);
+                        let workspace = this.workspace.clone();
+                        this.focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.set_focused_project(fm, Some(project_id), cx);
+                            });
                         });
                     }
                 }
             }))
             // Handle equalize layout action
             .on_action(cx.listener(|this, _: &EqualizeLayout, _window, cx| {
+                let fm = this.focus_manager.read(cx).clone();
                 this.workspace.update(cx, |ws, cx| {
                     // Clear custom column widths → equal distribution.
                     ws.data.main_window.project_widths.clear();
                     // Equalize pane sizes in the focused terminal's parent split
-                    ws.equalize_focused_split(cx);
+                    ws.equalize_focused_split(&fm, cx);
                 });
             }))
             // Handle focus sidebar action (keyboard navigation)
@@ -777,78 +789,70 @@ impl Render for RootView {
                 this.create_worktree_from_focus(cx);
             }))
             // Handle start all services action
-            .on_action(cx.listener({
-                let workspace = workspace.clone();
-                move |this, _: &StartAllServices, _window, cx| {
-                    if let Some(ref sm) = this.service_manager {
-                        let project_id = workspace.read(cx).focus_manager
-                            .focused_terminal_state()
-                            .map(|f| f.project_id.clone());
-                        if let Some(pid) = project_id {
-                            let path = sm.read(cx).project_path(&pid).cloned();
-                            if let Some(path) = path {
-                                sm.update(cx, |sm, cx| sm.start_all(&pid, &path, cx));
-                            }
+            .on_action(cx.listener(|this, _: &StartAllServices, _window, cx| {
+                if let Some(ref sm) = this.service_manager {
+                    let project_id = this.focus_manager.read(cx)
+                        .focused_terminal_state()
+                        .map(|f| f.project_id.clone());
+                    if let Some(pid) = project_id {
+                        let path = sm.read(cx).project_path(&pid).cloned();
+                        if let Some(path) = path {
+                            sm.update(cx, |sm, cx| sm.start_all(&pid, &path, cx));
                         }
                     }
                 }
             }))
             // Handle stop all services action
-            .on_action(cx.listener({
-                let workspace = workspace.clone();
-                move |this, _: &StopAllServices, _window, cx| {
-                    if let Some(ref sm) = this.service_manager {
-                        let project_id = workspace.read(cx).focus_manager
-                            .focused_terminal_state()
-                            .map(|f| f.project_id.clone());
-                        if let Some(pid) = project_id {
-                            sm.update(cx, |sm, cx| sm.stop_all(&pid, cx));
-                        }
+            .on_action(cx.listener(|this, _: &StopAllServices, _window, cx| {
+                if let Some(ref sm) = this.service_manager {
+                    let project_id = this.focus_manager.read(cx)
+                        .focused_terminal_state()
+                        .map(|f| f.project_id.clone());
+                    if let Some(pid) = project_id {
+                        sm.update(cx, |sm, cx| sm.stop_all(&pid, cx));
                     }
                 }
             }))
             // Handle show file search action
-            .on_action(cx.listener({
-                let workspace = workspace.clone();
-                move |this, _: &ShowFileSearch, _window, cx| {
-                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
-                        .map(|f| f.project_id.clone())
-                        .or_else(|| {
-                            workspace.read(cx).visible_projects()
-                                .first()
-                                .map(|p| p.id.clone())
-                        });
+            .on_action(cx.listener(|this, _: &ShowFileSearch, _window, cx| {
+                let fm = this.focus_manager.read(cx);
+                let ws = this.workspace.read(cx);
+                let project_id = fm.focused_terminal_state()
+                    .map(|f| f.project_id.clone())
+                    .or_else(|| {
+                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                            .first()
+                            .map(|p| p.id.clone())
+                    });
 
-                    if let Some(project_id) = project_id {
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(
-                                OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::FileSearch }),
-                                cx,
-                            );
-                        });
-                    }
+                if let Some(project_id) = project_id {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::FileSearch }),
+                            cx,
+                        );
+                    });
                 }
             }))
             // Handle show content search action
-            .on_action(cx.listener({
-                let workspace = workspace.clone();
-                move |this, _: &ShowContentSearch, _window, cx| {
-                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
-                        .map(|f| f.project_id.clone())
-                        .or_else(|| {
-                            workspace.read(cx).visible_projects()
-                                .first()
-                                .map(|p| p.id.clone())
-                        });
+            .on_action(cx.listener(|this, _: &ShowContentSearch, _window, cx| {
+                let fm = this.focus_manager.read(cx);
+                let ws = this.workspace.read(cx);
+                let project_id = fm.focused_terminal_state()
+                    .map(|f| f.project_id.clone())
+                    .or_else(|| {
+                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                            .first()
+                            .map(|p| p.id.clone())
+                    });
 
-                    if let Some(project_id) = project_id {
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(
-                                OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::ContentSearch }),
-                                cx,
-                            );
-                        });
-                    }
+                if let Some(project_id) = project_id {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(
+                            OverlayRequest::Project(ProjectOverlay { project_id, kind: ProjectOverlayKind::ContentSearch }),
+                            cx,
+                        );
+                    });
                 }
             }))
             // Handle show project switcher action
@@ -859,28 +863,26 @@ impl Render for RootView {
                 }
             }))
             // Handle show diff viewer action (from keybinding or command palette - no path data)
-            .on_action(cx.listener({
-                let workspace = workspace.clone();
-                move |this, _: &ShowDiffViewer, _window, cx| {
-                    // Get the focused or first visible project ID
-                    let project_id = workspace.read(cx).focus_manager.focused_terminal_state()
-                        .map(|f| f.project_id.clone())
-                        .or_else(|| {
-                            workspace.read(cx).visible_projects()
-                                .first()
-                                .map(|p| p.id.clone())
-                        });
+            .on_action(cx.listener(|this, _: &ShowDiffViewer, _window, cx| {
+                let fm = this.focus_manager.read(cx);
+                let ws = this.workspace.read(cx);
+                let project_id = fm.focused_terminal_state()
+                    .map(|f| f.project_id.clone())
+                    .or_else(|| {
+                        ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
+                            .first()
+                            .map(|p| p.id.clone())
+                    });
 
-                    if let Some(project_id) = project_id {
-                        this.request_broker.update(cx, |broker, cx| {
-                            broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
-                                project_id,
-                                kind: ProjectOverlayKind::DiffViewer {
-                                    file: None, mode: None, commit_message: None, commits: None, commit_index: None,
-                                },
-                            }), cx);
-                        });
-                    }
+                if let Some(project_id) = project_id {
+                    this.request_broker.update(cx, |broker, cx| {
+                        broker.push_overlay_request(OverlayRequest::Project(ProjectOverlay {
+                            project_id,
+                            kind: ProjectOverlayKind::DiffViewer {
+                                file: None, mode: None, commit_message: None, commits: None, commit_index: None,
+                            },
+                        }), cx);
+                    });
                 }
             }))
             // Title bar at the top (with window controls)

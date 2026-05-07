@@ -6,7 +6,7 @@ use crate::remote::bridge::{BridgeMessage, BridgeReceiver, CommandResult, Remote
 use crate::remote::types::{ActionRequest, ApiFolder, ApiFullscreen, ApiProject, ApiServiceInfo, StateResponse};
 use crate::services::manager::{ServiceManager, ServiceStatus};
 use crate::terminal::backend::TerminalBackend;
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::actions::execute::{ensure_terminal, execute_action};
 use crate::workspace::state::Workspace;
 use gpui::*;
@@ -25,6 +25,7 @@ pub(crate) async fn remote_command_loop(
     bridge_rx: BridgeReceiver,
     backend: Arc<dyn TerminalBackend>,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<crate::workspace::focus::FocusManager>,
     terminals: TerminalsRegistry,
     state_version: Arc<tokio_watch::Sender<u64>>,
     git_status_tx: Arc<tokio_watch::Sender<HashMap<String, ApiGitStatus>>>,
@@ -108,9 +109,11 @@ pub(crate) async fn remote_command_loop(
                     }
                     action => {
                         cx.update(|cx| {
-                            workspace.update(cx, |ws, cx| {
-                                execute_action(action, ws, &*backend, &terminals, cx)
-                                    .into_command_result()
+                            focus_manager.update(cx, |fm, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    execute_action(action, ws, fm, &*backend, &terminals, cx)
+                                        .into_command_result()
+                                })
                             })
                         })
                     }
@@ -216,17 +219,16 @@ pub(crate) async fn remote_command_loop(
                         }
                     }).collect();
 
-                    let fullscreen = ws.focus_manager.fullscreen_state().map(|(pid, tid)| {
-                        ApiFullscreen {
-                            project_id: pid.to_string(),
-                            terminal_id: tid.to_string(),
-                        }
-                    });
+                    // Per multi-window slice 03 PRD: "Remote sees a flat
+                    // workspace; multi-window is local-only for v1." Focus
+                    // state is per-window now, so the remote API exposes
+                    // None until/unless we expose a window-scoped focus.
+                    let fullscreen: Option<ApiFullscreen> = None;
 
                     let resp = StateResponse {
                         state_version: sv,
                         projects,
-                        focused_project_id: ws.focused_project_id().cloned(),
+                        focused_project_id: None,
                         fullscreen_terminal: fullscreen,
                         project_order: data.project_order.clone(),
                         folders,
@@ -279,6 +281,8 @@ impl Okena {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        // Per the multi-window PRD, remote actions target main window's per-window state.
+        let focus_manager = self.main_window.read(cx).focus_manager();
         let terminals = self.terminals.clone();
         let state_version = self.state_version.clone();
         let git_status_tx = self.git_status_tx.clone();
@@ -286,7 +290,7 @@ impl Okena {
 
         cx.spawn(async move |_this: WeakEntity<Okena>, cx: &mut AsyncApp| {
             remote_command_loop(
-                bridge_rx, backend, workspace, terminals,
+                bridge_rx, backend, workspace, focus_manager, terminals,
                 state_version, git_status_tx, service_manager, cx,
             ).await;
         })

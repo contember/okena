@@ -6,9 +6,9 @@ use crate::workspace::hooks;
 use gpui::*;
 use std::sync::Arc;
 
-use super::RootView;
+use super::WindowView;
 
-impl RootView {
+impl WindowView {
     /// Spawn terminals for all layout slots in a project that have terminal_id: None
     /// Used after creating a worktree project to immediately populate terminals
     pub(super) fn spawn_terminals_for_project(&mut self, project_id: String, cx: &mut Context<Self>) {
@@ -133,11 +133,12 @@ impl RootView {
         // Get the focused project ID and info
         let project_info = {
             let ws = self.workspace.read(cx);
-            let project_id = ws.focus_manager.focused_terminal_state()
+            let fm = self.focus_manager.read(cx);
+            let project_id = fm.focused_terminal_state()
                 .map(|f| f.project_id.clone())
                 .or_else(|| {
                     // Fallback: use the first visible project
-                    ws.visible_projects()
+                    ws.visible_projects(fm.focused_project_id(), fm.is_focus_individual())
                         .first()
                         .map(|p| p.id.clone())
                 });

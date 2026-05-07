@@ -1,7 +1,7 @@
 //! Color picker popover — standalone overlay entity.
 //!
 //! Shows a color swatch grid for project or folder color selection.
-//! Rendered at RootView level via OverlayManager, like context menus.
+//! Rendered at WindowView level via OverlayManager, like context menus.
 
 use okena_core::theme::FolderColor;
 use okena_ui::overlay::CloseEvent;

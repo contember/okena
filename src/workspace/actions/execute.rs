@@ -48,13 +48,14 @@ impl ActionResult {
 pub fn execute_action(
     action: ActionRequest,
     ws: &mut Workspace,
+    focus_manager: &mut crate::workspace::focus::FocusManager,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     cx: &mut Context<Workspace>,
 ) -> ActionResult {
     match action {
         ActionRequest::CreateTerminal { project_id } => {
-            ws.add_terminal(&project_id, cx);
+            ws.add_terminal(focus_manager, &project_id, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::SplitTerminal {
@@ -62,7 +63,7 @@ pub fn execute_action(
             path,
             direction,
         } => {
-            ws.split_terminal(&project_id, &path, direction, cx);
+            ws.split_terminal(focus_manager, &project_id, &path, direction, cx);
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
         ActionRequest::CloseTerminal {
@@ -74,7 +75,7 @@ pub fn execute_action(
                 Some(path) => {
                     backend.kill(&terminal_id);
                     terminals.lock().remove(&terminal_id);
-                    ws.close_terminal_and_focus_sibling(&project_id, &path, cx);
+                    ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
                     ActionResult::Ok(None)
                 }
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
@@ -91,7 +92,7 @@ pub fn execute_action(
                     Some(path) => {
                         backend.kill(terminal_id);
                         terminals.lock().remove(terminal_id);
-                        ws.close_terminal_and_focus_sibling(&project_id, &path, cx);
+                        ws.close_terminal_and_focus_sibling(focus_manager, &project_id, &path, cx);
                     }
                     None => {
                         last_err = Some(format!("terminal not found: {}", terminal_id));
@@ -110,7 +111,7 @@ pub fn execute_action(
             let path = find_terminal_path(ws, &project_id, &terminal_id);
             match path {
                 Some(path) => {
-                    ws.set_focused_terminal(project_id, path, cx);
+                    ws.set_focused_terminal(focus_manager, project_id, path, cx);
                     ActionResult::Ok(None)
                 }
                 None => ActionResult::Err(format!("terminal not found: {}", terminal_id)),
@@ -185,8 +186,8 @@ pub fn execute_action(
             terminal_id,
         } => {
             match terminal_id {
-                Some(tid) => ws.set_fullscreen_terminal(project_id, tid, cx),
-                None => ws.exit_fullscreen(cx),
+                Some(tid) => ws.set_fullscreen_terminal(focus_manager, project_id, tid, cx),
+                None => ws.exit_fullscreen(focus_manager, cx),
             }
             ActionResult::Ok(None)
         }
@@ -204,9 +205,9 @@ pub fn execute_action(
             in_group,
         } => {
             if in_group {
-                ws.add_tab_to_group(&project_id, &path, cx);
+                ws.add_tab_to_group(focus_manager, &project_id, &path, cx);
             } else {
-                ws.add_tab(&project_id, &path, cx);
+                ws.add_tab(focus_manager, &project_id, &path, cx);
             }
             spawn_uninitialized_terminals(ws, &project_id, backend, terminals, cx)
         }
@@ -235,7 +236,7 @@ pub fn execute_action(
             target_project_id,
         } => {
             let target_pid = target_project_id.as_deref().unwrap_or(&project_id);
-            ws.move_terminal_to_tab_group(&project_id, &terminal_id, target_pid, &target_path, position, cx);
+            ws.move_terminal_to_tab_group(focus_manager, &project_id, &terminal_id, target_pid, &target_path, position, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::MovePaneTo {
@@ -253,7 +254,7 @@ pub fn execute_action(
                 "center" => DropZone::Center,
                 _ => return ActionResult::Err(format!("invalid drop zone: {}", zone)),
             };
-            ws.move_pane(&project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
+            ws.move_pane(focus_manager, &project_id, &terminal_id, &target_project_id, &target_terminal_id, drop_zone, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::GitStatus { project_id } => {
@@ -633,7 +634,7 @@ pub fn execute_action(
                 return ActionResult::Err(format!("project not found: {}", project_id));
             }
             let global_hooks = settings(cx).hooks.clone();
-            ws.delete_project(&project_id, &global_hooks, cx);
+            ws.delete_project(focus_manager, &project_id, &global_hooks, cx);
             ActionResult::Ok(None)
         }
         ActionRequest::SetProjectShowInOverview { project_id, show } => {
@@ -644,7 +645,7 @@ pub fn execute_action(
                 return ActionResult::Err(format!("project not found: {}", project_id));
             }
             let global_hooks = settings(cx).hooks.clone();
-            match ws.remove_worktree_project(&project_id, force, &global_hooks, cx) {
+            match ws.remove_worktree_project(focus_manager, &project_id, force, &global_hooks, cx) {
                 Ok(()) => ActionResult::Ok(None),
                 Err(e) => ActionResult::Err(e),
             }

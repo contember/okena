@@ -42,7 +42,9 @@ struct CommandEntry {
 
 /// Command palette for quick access to all commands
 pub struct CommandPalette {
+    #[allow(dead_code)]
     workspace: Entity<okena_workspace::state::Workspace>,
+    focus_manager: Entity<okena_workspace::focus::FocusManager>,
     focus_handle: FocusHandle,
     state: ListOverlayState<CommandEntry>,
     /// When true, the entire query is "selected" — first keystroke replaces it.
@@ -50,7 +52,7 @@ pub struct CommandPalette {
 }
 
 impl CommandPalette {
-    pub fn new(workspace: Entity<okena_workspace::state::Workspace>, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<okena_workspace::state::Workspace>, focus_manager: Entity<okena_workspace::focus::FocusManager>, cx: &mut Context<Self>) -> Self {
         // Build command list from action descriptions
         let descriptions = get_action_descriptions();
         let config_data = get_config();
@@ -107,7 +109,7 @@ impl CommandPalette {
         let state = ListOverlayState::new(commands, config, cx);
         let focus_handle = state.focus_handle.clone();
 
-        let mut palette = Self { workspace, focus_handle, state, select_all };
+        let mut palette = Self { workspace, focus_manager, focus_handle, state, select_all };
 
         if !query.is_empty() {
             palette.state.search_query = query;
@@ -156,7 +158,7 @@ impl CommandPalette {
             // context-scoped actions (e.g. CloseTerminal on "TerminalPane")
             // are routed to the correct element.
             let pane_map = okena_views_terminal::layout::navigation::get_pane_map();
-            if let Some(focused) = self.workspace.read(cx).focus_manager
+            if let Some(focused) = self.focus_manager.read(cx)
                 .focused_terminal_state()
             {
                 if let Some(pane) = pane_map.find_pane(&focused.project_id, &focused.layout_path) {

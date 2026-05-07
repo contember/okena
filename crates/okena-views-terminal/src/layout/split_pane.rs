@@ -81,7 +81,7 @@ pub fn new_active_drag() -> ActiveDrag {
 /// The `window_id` parameter selects which window's `project_widths` slot
 /// receives the dragged column widths in the `DragState::ProjectColumn`
 /// arm. Mirrors `render_project_divider`'s parameter-threaded shape: the
-/// caller (today `RootView`'s mouse-move listener) passes its own
+/// caller (today `WindowView`'s mouse-move listener) passes its own
 /// `WindowView::window_id` so a drag in window N writes back to window
 /// N's per-column widths.
 pub fn compute_resize(
@@ -181,7 +181,7 @@ pub fn compute_resize(
             });
         }
         DragState::Sidebar | DragState::ServicePanel { .. } | DragState::HookPanel { .. } => {
-            // Handled directly in RootView's on_mouse_move
+            // Handled directly in WindowView's on_mouse_move
         }
     }
 }

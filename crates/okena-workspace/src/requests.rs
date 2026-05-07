@@ -77,7 +77,7 @@ pub enum FolderOverlayKind {
     ColorPicker { position: gpui::Point<gpui::Pixels> },
 }
 
-/// Requests consumed by RootView::process_pending_requests().
+/// Requests consumed by WindowView::process_pending_requests().
 ///
 /// Project-scoped and folder-scoped variants are grouped into
 /// `ProjectOverlay` and `FolderOverlay` to avoid duplicating

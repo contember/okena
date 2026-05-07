@@ -18,9 +18,8 @@ use crate::settings::{GlobalSettings, settings};
 use crate::views::panels::toast::ToastManager;
 use crate::terminal::pty_manager::{PtyEvent, PtyManager};
 use okena_ext_claude::resolve_claude_dir;
-use crate::views::root::{RootView, TerminalsRegistry};
+use crate::views::window::{TerminalsRegistry, WindowView};
 use crate::workspace::persistence;
-use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{GlobalWorkspace, WindowId, Workspace, WorkspaceData};
 use async_channel::Receiver;
 use gpui::*;
@@ -107,10 +106,14 @@ fn sync_services(
 
 /// Main application state and view
 pub struct Okena {
-    root_view: Entity<RootView>,
-    pub(crate) workspace: Entity<Workspace>,
+    /// The single, always-present main window. Closing it quits the app
+    /// (per the multi-window PRD's main-is-special invariant).
+    main_window: Entity<WindowView>,
+    /// Ephemeral extras spawned at runtime; empty until slice 05 lands the
+    /// spawn flow. Keyed by `WindowId::Extra(uuid)`.
     #[allow(dead_code)]
-    request_broker: Entity<RequestBroker>,
+    extra_windows: HashMap<WindowId, Entity<WindowView>>,
+    pub(crate) workspace: Entity<Workspace>,
     pub(crate) pty_manager: Arc<PtyManager>,
     pub(crate) terminals: TerminalsRegistry,
     /// Track which detached windows we've already opened
@@ -159,9 +162,6 @@ impl Okena {
         // Create workspace entity
         let workspace = cx.new(|_cx| Workspace::new(workspace_data));
         cx.set_global(GlobalWorkspace(workspace.clone()));
-
-        // Create request broker entity (decoupled UI request routing)
-        let request_broker = cx.new(|_| RequestBroker::new());
 
         // Shared flag for debounced save
         let save_pending = Arc::new(AtomicBool::new(false));
@@ -214,15 +214,14 @@ impl Okena {
         })
         .detach();
 
-        // Create root view (get terminals registry from it)
+        // Create the main window's per-window view (get terminals registry from it)
         let pty_manager_clone = pty_manager.clone();
-        let request_broker_clone = request_broker.clone();
-        let root_view = cx.new(|cx| {
-            RootView::new(WindowId::Main, workspace.clone(), request_broker_clone, pty_manager_clone, cx)
+        let main_window = cx.new(|cx| {
+            WindowView::new(WindowId::Main, workspace.clone(), pty_manager_clone, cx)
         });
 
-        // Get terminals registry from root view
-        let terminals = root_view.read(cx).terminals().clone();
+        // Get terminals registry from the main window
+        let terminals = main_window.read(cx).terminals().clone();
 
         // Create service manager for project-scoped background processes
         let local_backend_for_services: Arc<dyn crate::terminal::backend::TerminalBackend> =
@@ -230,7 +229,7 @@ impl Okena {
         let service_manager = cx.new(|_cx| {
             ServiceManager::new(local_backend_for_services.clone(), terminals.clone())
         });
-        root_view.update(cx, |rv, cx| {
+        main_window.update(cx, |rv, cx| {
             rv.set_service_manager(service_manager.clone(), cx);
         });
 
@@ -240,11 +239,11 @@ impl Okena {
             terminals.clone(),
         ));
 
-        // Create remote connection manager and wire to root view
+        // Create remote connection manager and wire to main window
         let remote_manager = cx.new(|cx| {
             RemoteConnectionManager::new(terminals.clone(), cx)
         });
-        root_view.update(cx, |rv, cx| {
+        main_window.update(cx, |rv, cx| {
             rv.set_remote_manager(remote_manager.clone(), cx);
         });
         // Auto-connect to saved connections with valid tokens
@@ -278,8 +277,8 @@ impl Okena {
             |cx| WorktreeSyncWatcher::new(workspace, cx)
         });
 
-        // Pass git_watcher to root view so ProjectColumns can observe it
-        root_view.update(cx, |rv, cx| {
+        // Pass git_watcher to main window so ProjectColumns can observe it
+        main_window.update(cx, |rv, cx| {
             rv.set_git_watcher(git_watcher.clone(), cx);
         });
 
@@ -304,9 +303,9 @@ impl Okena {
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
 
         let mut manager = Self {
-            root_view,
+            main_window,
+            extra_windows: HashMap::new(),
             workspace: workspace.clone(),
-            request_broker,
             pty_manager,
             terminals,
             opened_detached_windows: HashSet::new(),
@@ -616,7 +615,7 @@ impl Okena {
                     // All notifications happen in the same GPUI update → single layout pass.
                     if !dirty_terminal_ids.is_empty() {
                         dirty_terminal_ids.dedup();
-                        let registry = crate::views::root::content_pane_registry().lock();
+                        let registry = crate::views::window::content_pane_registry().lock();
                         let mut any_local_pane = false;
                         for tid in &dirty_terminal_ids {
                             if let Some(weak_content) = registry.get(tid) {
@@ -628,10 +627,10 @@ impl Okena {
                         }
                         // Remote-only terminals have no local content pane. Without
                         // cx.notify(), GPUI's draw cycle won't run and the event loop
-                        // effectively stalls. Notify root_view to keep GPUI responsive
+                        // effectively stalls. Notify main_window to keep GPUI responsive
                         // for bridge commands, state queries, and other remote work.
                         if !any_local_pane {
-                            this.root_view.update(cx, |_, cx| cx.notify());
+                            this.main_window.update(cx, |_, cx| cx.notify());
                         }
                     }
 
@@ -672,7 +671,7 @@ impl Okena {
                     }
 
                     if !exit_events.is_empty() {
-                        this.root_view.update(cx, |_, cx| cx.notify());
+                        this.main_window.update(cx, |_, cx| cx.notify());
                     }
                 });
             }
@@ -713,34 +712,39 @@ impl Okena {
             }
 
             // Single workspace.update: set hook status, then handle pending close atomically.
-            let pending_data = self.workspace.update(cx, |ws, cx| {
-                // Update hook terminal status
-                let status = if success {
-                    crate::workspace::state::HookTerminalStatus::Succeeded
-                } else {
-                    let code = exit_code.map(|c| c as i32).unwrap_or(-1);
-                    crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
-                };
-                ws.update_hook_terminal_status(&tid, status, cx);
+            // Pull the focus_manager from main_window so the delete_project call
+            // scrubs focus state on the main window's per-window manager.
+            let focus_manager = self.main_window.read(cx).focus_manager();
+            let pending_data = focus_manager.update(cx, |fm, cx| {
+                self.workspace.update(cx, |ws, cx| {
+                    // Update hook terminal status
+                    let status = if success {
+                        crate::workspace::state::HookTerminalStatus::Succeeded
+                    } else {
+                        let code = exit_code.map(|c| c as i32).unwrap_or(-1);
+                        crate::workspace::state::HookTerminalStatus::Failed { exit_code: code }
+                    };
+                    ws.update_hook_terminal_status(&tid, status, cx);
 
-                // Check for pending worktree close tied to this hook terminal
-                let pending = ws.take_pending_worktree_close(&tid)?;
-                let folder = ws.folder_for_project_or_parent(&pending.project_id);
-                let hook_folder_id = folder.map(|f| f.id.clone());
-                let hook_folder_name = folder.map(|f| f.name.clone());
-                let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
-                    .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
-                    .unwrap_or((None, None));
-                if success {
-                    ws.remove_hook_terminal(&tid, cx);
-                    // Collect remaining hook terminal IDs before deleting the project
-                    let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
-                    ws.delete_project(&pending.project_id, &settings(cx).hooks, cx);
-                    Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
-                } else {
-                    ws.finish_closing_project(&pending.project_id);
-                    None
-                }
+                    // Check for pending worktree close tied to this hook terminal
+                    let pending = ws.take_pending_worktree_close(&tid)?;
+                    let folder = ws.folder_for_project_or_parent(&pending.project_id);
+                    let hook_folder_id = folder.map(|f| f.id.clone());
+                    let hook_folder_name = folder.map(|f| f.name.clone());
+                    let (project_path_for_git, hook_info) = ws.project(&pending.project_id)
+                        .map(|p| (Some(p.path.clone()), Some((p.hooks.clone(), p.name.clone(), p.path.clone()))))
+                        .unwrap_or((None, None));
+                    if success {
+                        ws.remove_hook_terminal(&tid, cx);
+                        // Collect remaining hook terminal IDs before deleting the project
+                        let remaining_hook_tids = ws.hook_terminal_ids_for_project(&pending.project_id);
+                        ws.delete_project(fm, &pending.project_id, &settings(cx).hooks, cx);
+                        Some((pending, project_path_for_git, hook_info, remaining_hook_tids, hook_folder_id, hook_folder_name))
+                    } else {
+                        ws.finish_closing_project(&pending.project_id);
+                        None
+                    }
+                })
             });
 
             if let Some((pending, project_path_for_git, hook_info, remaining_hook_tids, folder_id, folder_name)) = pending_data {
@@ -840,7 +844,7 @@ impl Okena {
 
 impl Render for Okena {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(self.root_view.clone())
+        div().size_full().child(self.main_window.clone())
     }
 }
 

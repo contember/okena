@@ -13,9 +13,9 @@ use super::TerminalPane;
 
 impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub(super) fn is_zoomed(&self, cx: &Context<Self>) -> bool {
-        let ws = self.workspace.read(cx);
+        let fm = self.focus_manager.read(cx);
         self.terminal_id.as_ref().map_or(false, |tid| {
-            ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
+            fm.is_terminal_fullscreened(&self.project_id, tid)
         })
     }
 

@@ -99,7 +99,7 @@ impl GitStatusWatcher {
                     let ws = workspace.read(cx);
 
                     // Start with locally visible projects
-                    let mut project_ids: HashSet<String> = ws.visible_projects()
+                    let mut project_ids: HashSet<String> = ws.visible_projects(None, false)
                         .iter()
                         .filter(|p| !p.is_remote)
                         .map(|p| p.id.clone())

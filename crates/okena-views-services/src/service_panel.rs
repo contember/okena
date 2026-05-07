@@ -31,6 +31,7 @@ use std::sync::Arc;
 pub struct ServicePanel<D: ActionDispatch + Send + Sync> {
     project_id: String,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<okena_workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
     backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
@@ -54,6 +55,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
     pub fn new(
         project_id: String,
         workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         request_broker: Entity<RequestBroker>,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
@@ -64,6 +66,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
         Self {
             project_id,
             workspace,
+            focus_manager,
             request_broker,
             backend,
             terminals,
@@ -175,6 +178,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
                 .unwrap_or_default();
 
             let ws = self.workspace.clone();
+            let fm = self.focus_manager.clone();
             let rb = self.request_broker.clone();
             let backend = self.backend.clone();
             let terminals = self.terminals.clone();
@@ -183,6 +187,7 @@ impl<D: ActionDispatch + Send + Sync> ServicePanel<D> {
             let pane = cx.new(move |cx| {
                 TerminalPane::new(
                     ws,
+                    fm,
                     rb,
                     pid,
                     project_path,
