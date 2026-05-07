@@ -159,15 +159,40 @@ impl FileSearchDialog {
     }
 
     /// Scan files in the project directory using the `ignore` crate.
+    ///
+    /// `show_ignored` is additive: regular (non-gitignored) files are scanned
+    /// first, then gitignored files are appended up to `MAX_FILES`. Without
+    /// this two-pass split, a single huge gitignored directory (e.g. an
+    /// Android `build/` tree) can fill the cap alphabetically and crowd out
+    /// real project files later in the walk.
     pub fn scan_files(project_path: &PathBuf, show_ignored: bool) -> Vec<FileEntry> {
         let mut files = Vec::new();
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
+        Self::collect_files(project_path, false, &mut files, &mut seen);
+        if show_ignored {
+            Self::collect_files(project_path, true, &mut files, &mut seen);
+        }
+
+        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        files
+    }
+
+    /// Walk the project, appending entries to `files` until `MAX_FILES` is
+    /// reached. `seen` tracks already-collected paths so the gitignored pass
+    /// doesn't duplicate the regular pass.
+    fn collect_files(
+        project_path: &PathBuf,
+        include_ignored: bool,
+        files: &mut Vec<FileEntry>,
+        seen: &mut std::collections::HashSet<PathBuf>,
+    ) {
         let mut walk_builder = WalkBuilder::new(project_path);
         walk_builder
             .hidden(false)
-            .git_ignore(!show_ignored)
-            .git_global(!show_ignored)
-            .git_exclude(!show_ignored)
+            .git_ignore(!include_ignored)
+            .git_global(!include_ignored)
+            .git_exclude(!include_ignored)
             .max_depth(Some(15));
 
         let mut override_builder = ignore::overrides::OverrideBuilder::new(project_path);
@@ -178,15 +203,16 @@ impl FileSearchDialog {
             walk_builder.overrides(overrides);
         }
 
-        let walker = walk_builder.build();
-
-        for entry in walker.flatten() {
+        for entry in walk_builder.build().flatten() {
             if files.len() >= MAX_FILES {
                 break;
             }
 
             let path = entry.path();
             if !path.is_file() {
+                continue;
+            }
+            if !seen.insert(path.to_path_buf()) {
                 continue;
             }
 
@@ -206,9 +232,6 @@ impl FileSearchDialog {
                 filename,
             });
         }
-
-        files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-        files
     }
 
     /// Save current state for next open.
