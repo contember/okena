@@ -56,8 +56,8 @@ impl Sidebar {
 
         let is_renaming = is_renaming(&self.folder_rename, &folder.id);
         let ws = self.workspace.read(cx);
-        let is_collapsed = ws.is_folder_collapsed(&folder.id);
-        let is_active_filter = ws.active_folder_filter() == Some(&folder.id)
+        let is_collapsed = ws.is_folder_collapsed(self.window_id, &folder.id);
+        let is_active_filter = ws.active_folder_filter(self.window_id) == Some(&folder.id)
             && ws.focused_project_id().is_none();
 
         // Folder header row
@@ -125,8 +125,9 @@ impl Sidebar {
                 let folder_id = folder_id.clone();
                 move |this, _, _window, cx| {
                     this.cursor_index = None;
+                    let window_id = this.window_id;
                     this.workspace.update(cx, |ws, cx| {
-                        ws.toggle_folder_focus(&folder_id, cx);
+                        ws.toggle_folder_focus(window_id, &folder_id, cx);
                     });
                 }
             }))
@@ -139,8 +140,9 @@ impl Sidebar {
                 .on_click(cx.listener({
                     let folder_id = folder_id.clone();
                     move |this, _, _window, cx| {
+                        let window_id = this.window_id;
                         this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_folder_collapsed(&folder_id, cx);
+                            ws.toggle_folder_collapsed(window_id, &folder_id, cx);
                         });
                         cx.stop_propagation();
                     }
@@ -184,8 +186,9 @@ impl Sidebar {
                                 this.start_folder_rename(folder_id.clone(), folder_name.clone(), window, cx);
                             } else {
                                 this.cursor_index = None;
+                                let window_id = this.window_id;
                                 this.workspace.update(cx, |ws, cx| {
-                                    ws.toggle_folder_focus(&folder_id, cx);
+                                    ws.toggle_folder_focus(window_id, &folder_id, cx);
                                 });
                             }
                             cx.stop_propagation();
@@ -399,8 +402,9 @@ impl Sidebar {
                 .on_click(cx.listener({
                     let project_id = project_id.clone();
                     move |this, _, _window, cx| {
+                        let window_id = this.window_id;
                         this.workspace.update(cx, |ws, cx| {
-                            ws.toggle_project_overview_visibility(&project_id, cx);
+                            ws.toggle_project_overview_visibility(window_id, &project_id, cx);
                         });
                         cx.stop_propagation();
                     }
