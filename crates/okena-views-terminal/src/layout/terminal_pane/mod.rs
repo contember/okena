@@ -20,6 +20,7 @@ use okena_terminal::backend::TerminalBackend;
 use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::{Terminal, TerminalSize};
 use okena_terminal::TerminalsRegistry;
+use okena_workspace::focus::FocusManager;
 use okena_workspace::hooks;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::Workspace;
@@ -31,6 +32,7 @@ use std::time::Duration;
 pub struct TerminalPane<D: ActionDispatch> {
     // Identity
     workspace: Entity<Workspace>,
+    pub(super) focus_manager: Entity<FocusManager>,
     request_broker: Entity<RequestBroker>,
     project_id: String,
     project_path: String,
@@ -64,6 +66,7 @@ pub struct TerminalPane<D: ActionDispatch> {
 impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
     pub fn new(
         workspace: Entity<Workspace>,
+        focus_manager: Entity<FocusManager>,
         request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
@@ -93,13 +96,14 @@ impl<D: ActionDispatch + Send + Sync> TerminalPane<D> {
             )
         });
 
-        let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), cx));
+        let search_bar = cx.new(|cx| SearchBar::new(workspace.clone(), focus_manager.clone(), cx));
 
         cx.subscribe(&search_bar, Self::handle_search_bar_event).detach();
         cx.subscribe(&content, Self::handle_content_event).detach();
 
         let mut pane = Self {
             workspace,
+            focus_manager,
             request_broker,
             project_id,
             project_path,

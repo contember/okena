@@ -3,6 +3,7 @@
 //! Actions for creating, modifying, and deleting projects.
 
 use okena_core::theme::FolderColor;
+use crate::focus::FocusManager;
 use crate::hooks;
 use crate::persistence::HooksConfig;
 use crate::state::{LayoutNode, ProjectData, Workspace, WindowId};
@@ -90,7 +91,13 @@ impl Workspace {
     /// silent no-op (close-race contract inherited from `toggle_hidden`),
     /// distinct from the project-existence guard above (which gates on
     /// project, not window).
-    pub fn toggle_project_overview_visibility(&mut self, window_id: WindowId, project_id: &str, cx: &mut Context<Self>) {
+    pub fn toggle_project_overview_visibility(
+        &mut self,
+        focus_manager: &mut FocusManager,
+        window_id: WindowId,
+        project_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         if self.project(project_id).is_none() {
             return;
         }
@@ -101,14 +108,19 @@ impl Workspace {
         // after the toggle. Otherwise keyboard shortcuts stop working because
         // focus points at a column that's no longer rendered.
         let needs_focus_redirect = !was_hidden
-            && self
-                .focus_manager
+            && focus_manager
                 .focused_terminal_state()
                 .map(|s| s.project_id)
                 .as_deref()
                 == Some(project_id);
         let visible_before: Vec<String> = if needs_focus_redirect {
-            self.visible_projects().iter().map(|p| p.id.clone()).collect()
+            self.visible_projects(
+                focus_manager.focused_project_id(),
+                focus_manager.is_focus_individual(),
+            )
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
         } else {
             Vec::new()
         };
@@ -116,12 +128,18 @@ impl Workspace {
         self.toggle_hidden(window_id, project_id, cx);
 
         if needs_focus_redirect {
-            let visible_after: Vec<String> =
-                self.visible_projects().iter().map(|p| p.id.clone()).collect();
+            let visible_after: Vec<String> = self
+                .visible_projects(
+                    focus_manager.focused_project_id(),
+                    focus_manager.is_focus_individual(),
+                )
+                .iter()
+                .map(|p| p.id.clone())
+                .collect();
             let replacement = pick_focus_replacement(&visible_before, &visible_after, project_id);
             match replacement {
-                Some(next_id) => self.focus_first_terminal_in(&next_id),
-                None => self.focus_manager.clear_focus(),
+                Some(next_id) => self.focus_first_terminal_in(focus_manager, &next_id),
+                None => focus_manager.clear_focus(),
             }
             cx.notify();
         }
@@ -173,7 +191,7 @@ impl Workspace {
     }
 
     /// Add a new terminal to a project by splitting the root layout
-    pub fn add_terminal(&mut self, project_id: &str, cx: &mut Context<Self>) {
+    pub fn add_terminal(&mut self, focus_manager: &mut FocusManager, project_id: &str, cx: &mut Context<Self>) {
         if let Some(project) = self.project_mut(project_id) {
             if let Some(ref old_layout) = project.layout {
                 let old_layout = old_layout.clone();
@@ -194,7 +212,7 @@ impl Workspace {
             .and_then(|p| p.layout.as_ref())
             .and_then(|l| l.find_uninitialized_terminal_path());
         if let Some(path) = new_path {
-            self.set_focused_terminal(project_id.to_string(), path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), path, cx);
         }
     }
 
@@ -288,7 +306,7 @@ impl Workspace {
     }
 
     /// Delete a project
-    pub fn delete_project(&mut self, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
+    pub fn delete_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, global_hooks: &HooksConfig, cx: &mut Context<Self>) {
         // Queue all project terminals for killing before removing state.
         // Okena (which owns PtyManager) drains this queue via observer.
         if let Some(project) = self.project(project_id) {
@@ -345,12 +363,12 @@ impl Workspace {
         // Clear closing state
         self.lifecycle.finish_closing(project_id);
         // Clear focus if this was the focused project
-        if self.focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
-            self.focus_manager.set_focused_project_id(None);
+        if focus_manager.focused_project_id().map(|s| s.as_str()) == Some(project_id) {
+            focus_manager.set_focused_project_id(None);
         }
         // Exit fullscreen if this project's terminal was in fullscreen
-        if self.focus_manager.fullscreen_project_id() == Some(project_id) {
-            self.focus_manager.exit_fullscreen();
+        if focus_manager.fullscreen_project_id() == Some(project_id) {
+            focus_manager.exit_fullscreen();
         }
         self.notify_data(cx);
 
@@ -806,7 +824,7 @@ impl Workspace {
 
     /// Remove a worktree project and its git worktree
 
-    pub fn remove_worktree_project(&mut self, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn remove_worktree_project(&mut self, focus_manager: &mut FocusManager, project_id: &str, force: bool, global_hooks: &HooksConfig, cx: &mut Context<Self>) -> Result<(), String> {
         let project = self.project(project_id)
             .ok_or_else(|| "Project not found".to_string())?;
 
@@ -839,7 +857,7 @@ impl Workspace {
             .map_err(|e| e.to_string())?;
 
         // Delete the project from workspace (this also fires on_project_close)
-        self.delete_project(project_id, global_hooks, cx);
+        self.delete_project(focus_manager, project_id, global_hooks, cx);
 
         Ok(())
     }
@@ -1051,6 +1069,7 @@ mod tests {
 #[cfg(test)]
 mod gpui_tests {
     use gpui::AppContext as _;
+    use crate::focus::FocusManager;
     use crate::state::{LayoutNode, ProjectData, WindowId, WindowState, Workspace, WorkspaceData};
     use crate::settings::HooksConfig;
     use okena_core::theme::FolderColor;
@@ -1128,7 +1147,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1168,7 +1187,7 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden. main_window inserts the id.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -1176,7 +1195,7 @@ mod gpui_tests {
 
         // Second toggle: hidden -> visible. main_window removes the entry.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Main, "p1", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "p1", cx);
         });
         workspace.read_with(cx, |ws: &Workspace, _cx| {
             assert!(!ws.data().main_window.hidden_project_ids.contains("p1"));
@@ -1324,7 +1343,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Main, "unknown_id", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Main, "unknown_id", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1355,7 +1374,7 @@ mod gpui_tests {
 
         // First toggle: visible -> hidden in extra_a.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1375,7 +1394,7 @@ mod gpui_tests {
         // semantic so a regression that hard-codes insert-only or remove-only
         // would surface here.
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Extra(extra_a_id), "p1", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(extra_a_id), "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1402,7 +1421,7 @@ mod gpui_tests {
         let unknown = uuid::Uuid::new_v4();
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.toggle_project_overview_visibility(WindowId::Extra(unknown), "p1", cx);
+            ws.toggle_project_overview_visibility(&mut FocusManager::new(), WindowId::Extra(unknown), "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1558,7 +1577,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1599,7 +1618,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("p1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "p1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1687,7 +1706,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("wt1", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "wt1", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1707,7 +1726,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.delete_project("parent", &HooksConfig::default(), cx);
+            ws.delete_project(&mut FocusManager::new(), "parent", &HooksConfig::default(), cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -1744,15 +1763,14 @@ mod gpui_tests {
         data.project_order = vec!["p1".to_string(), "p2".to_string(), "p3".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
+        let mut fm = FocusManager::new();
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_focused_terminal("p2".to_string(), vec![], cx);
-            ws.toggle_project_overview_visibility("p2", cx);
+            ws.set_focused_terminal(&mut fm, "p2".to_string(), vec![], cx);
+            ws.toggle_project_overview_visibility(&mut fm, WindowId::Main, "p2", cx);
         });
 
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let state = ws.focus_manager.focused_terminal_state().expect("focus should be set");
-            assert_eq!(state.project_id, "p3");
-        });
+        let state = fm.focused_terminal_state().expect("focus should be set");
+        assert_eq!(state.project_id, "p3");
     }
 
     #[gpui::test]
@@ -1762,15 +1780,14 @@ mod gpui_tests {
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
+        let mut fm = FocusManager::new();
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_focused_terminal("p2".to_string(), vec![], cx);
-            ws.toggle_project_overview_visibility("p2", cx);
+            ws.set_focused_terminal(&mut fm, "p2".to_string(), vec![], cx);
+            ws.toggle_project_overview_visibility(&mut fm, WindowId::Main, "p2", cx);
         });
 
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let state = ws.focus_manager.focused_terminal_state().expect("focus should be set");
-            assert_eq!(state.project_id, "p1");
-        });
+        let state = fm.focused_terminal_state().expect("focus should be set");
+        assert_eq!(state.project_id, "p1");
     }
 
     #[gpui::test]
@@ -1780,15 +1797,14 @@ mod gpui_tests {
         data.project_order = vec!["p1".to_string(), "p2".to_string()];
         let workspace = cx.new(|_cx| Workspace::new(data));
 
+        let mut fm = FocusManager::new();
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.set_focused_terminal("p1".to_string(), vec![], cx);
-            ws.toggle_project_overview_visibility("p2", cx);
+            ws.set_focused_terminal(&mut fm, "p1".to_string(), vec![], cx);
+            ws.toggle_project_overview_visibility(&mut fm, WindowId::Main, "p2", cx);
         });
 
-        workspace.read_with(cx, |ws: &Workspace, _cx| {
-            let state = ws.focus_manager.focused_terminal_state().expect("focus should remain");
-            assert_eq!(state.project_id, "p1");
-        });
+        let state = fm.focused_terminal_state().expect("focus should remain");
+        assert_eq!(state.project_id, "p1");
     }
 
     #[gpui::test]
@@ -1799,7 +1815,7 @@ mod gpui_tests {
         let workspace = cx.new(|_cx| Workspace::new(data));
 
         workspace.update(cx, |ws: &mut Workspace, cx| {
-            ws.add_terminal("p1", cx);
+            ws.add_terminal(&mut FocusManager::new(), "p1", cx);
         });
 
         workspace.read_with(cx, |ws: &Workspace, _cx| {

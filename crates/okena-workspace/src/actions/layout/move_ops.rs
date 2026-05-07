@@ -1,5 +1,6 @@
 //! Pane and tab moves (same-project and cross-project).
 
+use crate::focus::FocusManager;
 use crate::state::{DropZone, LayoutNode, SplitDirection, Workspace};
 use gpui::*;
 
@@ -11,6 +12,7 @@ impl Workspace {
     /// Supports both same-project and cross-project moves.
     pub fn move_pane(
         &mut self,
+        focus_manager: &mut FocusManager,
         source_project_id: &str,
         source_terminal_id: &str,
         target_project_id: &str,
@@ -24,15 +26,16 @@ impl Workspace {
         }
 
         if source_project_id == target_project_id {
-            self.move_pane_same_project(source_project_id, source_terminal_id, target_terminal_id, zone, cx);
+            self.move_pane_same_project(focus_manager, source_project_id, source_terminal_id, target_terminal_id, zone, cx);
         } else {
-            self.move_pane_cross_project(source_project_id, source_terminal_id, target_project_id, target_terminal_id, zone, cx);
+            self.move_pane_cross_project(focus_manager, source_project_id, source_terminal_id, target_project_id, target_terminal_id, zone, cx);
         }
     }
 
     /// Same-project pane move (original logic).
     fn move_pane_same_project(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         source_terminal_id: &str,
         target_terminal_id: &str,
@@ -115,13 +118,14 @@ impl Workspace {
 
         // Update focus to moved terminal's new path
         if let Some(new_path) = new_focus_path {
-            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), new_path, cx);
         }
     }
 
     /// Cross-project pane move: extract terminal from source project, insert into target project.
     fn move_pane_cross_project(
         &mut self,
+        focus_manager: &mut FocusManager,
         source_project_id: &str,
         source_terminal_id: &str,
         target_project_id: &str,
@@ -233,7 +237,7 @@ impl Workspace {
 
         // Focus the moved terminal in the target project
         if let Some(new_path) = new_focus_path {
-            self.set_focused_terminal(target_project_id.to_string(), new_path, cx);
+            self.set_focused_terminal(focus_manager, target_project_id.to_string(), new_path, cx);
         }
     }
 
@@ -283,6 +287,7 @@ impl Workspace {
     /// `source_project_id`.
     pub fn move_terminal_to_tab_group(
         &mut self,
+        focus_manager: &mut FocusManager,
         source_project_id: &str,
         terminal_id: &str,
         target_project_id: &str,
@@ -291,15 +296,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if source_project_id == target_project_id {
-            self.move_terminal_to_tab_group_same_project(source_project_id, terminal_id, tabs_path, insert_index, cx);
+            self.move_terminal_to_tab_group_same_project(focus_manager, source_project_id, terminal_id, tabs_path, insert_index, cx);
         } else {
-            self.move_terminal_to_tab_group_cross_project(source_project_id, terminal_id, target_project_id, tabs_path, insert_index, cx);
+            self.move_terminal_to_tab_group_cross_project(focus_manager, source_project_id, terminal_id, target_project_id, tabs_path, insert_index, cx);
         }
     }
 
     /// Same-project tab group move (original logic).
     fn move_terminal_to_tab_group_same_project(
         &mut self,
+        focus_manager: &mut FocusManager,
         project_id: &str,
         terminal_id: &str,
         tabs_path: &[usize],
@@ -411,13 +417,14 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some(new_path) = new_focus_path {
-            self.set_focused_terminal(project_id.to_string(), new_path, cx);
+            self.set_focused_terminal(focus_manager, project_id.to_string(), new_path, cx);
         }
     }
 
     /// Cross-project tab group move: extract terminal from source project, insert into target tab group.
     fn move_terminal_to_tab_group_cross_project(
         &mut self,
+        focus_manager: &mut FocusManager,
         source_project_id: &str,
         terminal_id: &str,
         target_project_id: &str,
@@ -546,7 +553,7 @@ impl Workspace {
         self.notify_data(cx);
 
         if let Some(new_path) = new_focus_path {
-            self.set_focused_terminal(target_project_id.to_string(), new_path, cx);
+            self.set_focused_terminal(focus_manager, target_project_id.to_string(), new_path, cx);
         }
     }
 }

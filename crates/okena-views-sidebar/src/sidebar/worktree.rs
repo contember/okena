@@ -16,6 +16,7 @@ impl Sidebar {
         }
 
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
         let parent_id = project_id.to_string();
         let parent_id_for_cleanup = parent_id.clone();
 
@@ -145,9 +146,11 @@ impl Sidebar {
                     log::error!("Quick worktree git operation failed: {}", e);
                     // Remove the optimistically-added project since git worktree add failed
                     let _ = cx.update(|cx| {
-                        workspace.update(cx, |ws, cx| {
-                            ws.finish_creating_project(&project_id);
-                            ws.delete_project(&project_id, &hooks_for_error, cx);
+                        focus_manager.update(cx, |fm, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.finish_creating_project(&project_id);
+                                ws.delete_project(fm, &project_id, &hooks_for_error, cx);
+                            });
                         });
                     });
                 }

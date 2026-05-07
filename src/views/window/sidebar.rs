@@ -2,9 +2,9 @@ use crate::settings::settings_entity;
 use crate::views::sidebar_controller::{AnimationTarget, SidebarController, FRAME_TIME_MS};
 use gpui::*;
 
-use super::RootView;
+use super::WindowView;
 
-impl RootView {
+impl WindowView {
     /// Toggle sidebar visibility with animation
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         let target = self.sidebar_ctrl.toggle();
@@ -73,7 +73,7 @@ impl RootView {
         let steps = SidebarController::animation_steps();
         let step_duration = std::time::Duration::from_millis(FRAME_TIME_MS);
 
-        cx.spawn(async move |this: WeakEntity<RootView>, cx| {
+        cx.spawn(async move |this: WeakEntity<WindowView>, cx| {
             for i in 1..=steps {
                 smol::Timer::after(step_duration).await;
 

@@ -58,6 +58,7 @@ pub struct GitHeader {
     project_id: String,
     request_broker: Entity<RequestBroker>,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<okena_workspace::focus::FocusManager>,
     git_provider: Arc<dyn GitProvider>,
     /// Optional handle to the centralized git poller, used to trigger an
     /// immediate refresh after user-initiated branch changes.
@@ -108,6 +109,7 @@ impl GitHeader {
         project_id: String,
         request_broker: Entity<RequestBroker>,
         workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         git_provider: Arc<dyn GitProvider>,
         git_watcher: Option<Entity<GitStatusWatcher>>,
         cx: &mut Context<Self>,
@@ -124,6 +126,7 @@ impl GitHeader {
             project_id,
             request_broker,
             workspace,
+            focus_manager,
             git_provider,
             git_watcher,
             current_branch: None,

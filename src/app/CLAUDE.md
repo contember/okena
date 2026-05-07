@@ -1,6 +1,6 @@
 # app/ — Main Application Entity
 
-The `Okena` entity is the central coordinator that owns the top-level GPUI entities (RootView, Workspace, RequestBroker, PtyManager) and routes events between them.
+The `Okena` entity is the central coordinator that owns the top-level GPUI entities (WindowView, Workspace, RequestBroker, PtyManager) and routes events between them.
 
 ## Files
 

@@ -317,8 +317,8 @@ impl Render for Sidebar {
 
         // Determine which project is focused — only highlight when explicitly focused via sidebar click
         let (focused_project_id, focus_individual) = {
-            let ws = self.workspace.read(cx);
-            (ws.focus_manager.focused_project_id().cloned(), ws.focus_manager.is_focus_individual())
+            let fm = self.focus_manager.read(cx);
+            (fm.focused_project_id().cloned(), fm.is_focus_individual())
         };
 
         // Build flat elements with cursor tracking

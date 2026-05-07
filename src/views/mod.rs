@@ -7,7 +7,7 @@
 //! - `chrome` - Window chrome (title bar, header buttons)
 //! - `components` - Reusable UI components (inputs, etc.)
 //!
-//! The root view is in this module as `root.rs`.
+//! The per-window view is in this module as `window.rs`.
 
 // Submodules
 pub mod chrome;
@@ -16,5 +16,5 @@ pub mod layout;
 pub mod overlay_manager;
 pub mod overlays;
 pub mod panels;
-pub mod root;
+pub mod window;
 pub mod sidebar_controller;

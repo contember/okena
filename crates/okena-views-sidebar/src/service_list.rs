@@ -181,8 +181,12 @@ impl Sidebar {
                     if let Some(entity) = entity.upgrade() {
                         entity.update(cx, |this, cx| {
                             this.cursor_index = None;
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_focused_project_individual(Some(project_id.clone()), cx);
+                            let workspace = this.workspace.clone();
+                            let pid = project_id.clone();
+                            this.focus_manager.update(cx, |fm, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.set_focused_project_individual(fm, Some(pid), cx);
+                                });
                             });
                             this.request_broker.update(cx, |broker, cx| {
                                 broker.push_overlay_request(

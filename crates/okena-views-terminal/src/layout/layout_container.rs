@@ -10,6 +10,7 @@ use crate::layout::pane_drag::{PaneDrag, DropZone};
 use crate::layout::split_pane::{ActiveDrag, render_split_divider};
 use crate::layout::terminal_pane::TerminalPane;
 use okena_terminal::TerminalsRegistry;
+use okena_workspace::focus::FocusManager;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{LayoutNode, SplitDirection, Workspace};
 use gpui::*;
@@ -25,6 +26,7 @@ pub use okena_ui::rename_state::*;
 /// Recursive layout container that renders terminal/split/tabs nodes
 pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) workspace: Entity<Workspace>,
+    pub(super) focus_manager: Entity<FocusManager>,
     pub(super) request_broker: Entity<RequestBroker>,
     pub(super) project_id: String,
     pub(super) project_path: String,
@@ -47,6 +49,7 @@ pub struct LayoutContainer<D: ActionDispatch> {
 impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     pub fn new(
         workspace: Entity<Workspace>,
+        focus_manager: Entity<FocusManager>,
         request_broker: Entity<RequestBroker>,
         project_id: String,
         project_path: String,
@@ -58,6 +61,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
     ) -> Self {
         Self {
             workspace,
+            focus_manager,
             request_broker,
             project_id,
             project_path,
@@ -102,6 +106,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         if needs_new_pane {
             let workspace = self.workspace.clone();
+            let focus_manager = self.focus_manager.clone();
             let request_broker = self.request_broker.clone();
             let project_id = self.project_id.clone();
             let project_path = self.project_path.clone();
@@ -113,6 +118,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             self.terminal_pane = Some(cx.new(move |cx| {
                 TerminalPane::new(
                     workspace,
+                    focus_manager,
                     request_broker,
                     project_id,
                     project_path,
@@ -144,8 +150,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         children: &[LayoutNode],
         cx: &Context<Self>,
     ) -> Option<usize> {
-        let ws = self.workspace.read(cx);
-        let (fs_project_id, fs_terminal_id) = ws.focus_manager.fullscreen_state()?;
+        let fm = self.focus_manager.read(cx);
+        let (fs_project_id, fs_terminal_id) = fm.fullscreen_state()?;
         if fs_project_id != self.project_id {
             return None;
         }
@@ -190,7 +196,10 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             window,
             cx,
         ));
-        self.workspace.update(cx, |ws, cx| ws.clear_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.clear_focused_terminal(fm, cx));
+        });
         cx.notify();
     }
 
@@ -207,13 +216,19 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 );
             }
         }
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+        });
         cx.notify();
     }
 
     pub(super) fn cancel_tab_rename(&mut self, cx: &mut Context<Self>) {
         cancel_rename(&mut self.tab_rename_state);
-        self.workspace.update(cx, |ws, cx| ws.restore_focused_terminal(cx));
+        let workspace = self.workspace.clone();
+        self.focus_manager.update(cx, |fm, cx| {
+            workspace.update(cx, |ws, cx| ws.restore_focused_terminal(fm, cx));
+        });
         cx.notify();
     }
 
@@ -229,8 +244,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let in_tab_group = self.is_in_tab_group(cx);
         let is_zoomed = terminal_id.as_ref().map_or(false, |tid| {
-            let ws = self.workspace.read(cx);
-            ws.focus_manager.is_terminal_fullscreened(&self.project_id, tid)
+            let fm = self.focus_manager.read(cx);
+            fm.is_terminal_fullscreened(&self.project_id, tid)
         });
 
         let mut container = div()
@@ -385,6 +400,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.focus_manager.clone(),
                             self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),
@@ -449,6 +465,7 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     cx.new(|_cx| {
                         LayoutContainer::new(
                             self.workspace.clone(),
+                            self.focus_manager.clone(),
                             self.request_broker.clone(),
                             self.project_id.clone(),
                             self.project_path.clone(),

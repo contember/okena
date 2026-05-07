@@ -8,7 +8,7 @@ use crate::action_dispatch::ActionDispatcher;
 use crate::terminal::backend::TerminalBackend;
 use crate::theme::ThemeColors;
 use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
-use crate::views::root::TerminalsRegistry;
+use crate::views::window::TerminalsRegistry;
 use crate::workspace::request_broker::RequestBroker;
 use crate::workspace::state::{HookTerminalEntry, HookTerminalStatus, Workspace};
 
@@ -26,6 +26,7 @@ use std::sync::Arc;
 pub struct HookPanel {
     project_id: String,
     workspace: Entity<Workspace>,
+    focus_manager: Entity<crate::workspace::focus::FocusManager>,
     request_broker: Entity<RequestBroker>,
     backend: Arc<dyn TerminalBackend>,
     terminals: TerminalsRegistry,
@@ -50,6 +51,7 @@ impl HookPanel {
     pub fn new(
         project_id: String,
         workspace: Entity<Workspace>,
+        focus_manager: Entity<crate::workspace::focus::FocusManager>,
         request_broker: Entity<RequestBroker>,
         backend: Arc<dyn TerminalBackend>,
         terminals: TerminalsRegistry,
@@ -98,6 +100,7 @@ impl HookPanel {
         Self {
             project_id,
             workspace,
+            focus_manager,
             request_broker,
             backend,
             terminals,
@@ -127,6 +130,7 @@ impl HookPanel {
             .unwrap_or_default();
 
         let ws = self.workspace.clone();
+        let fm = self.focus_manager.clone();
         let rb = self.request_broker.clone();
         let backend = self.backend.clone();
         let terminals = self.terminals.clone();
@@ -136,6 +140,7 @@ impl HookPanel {
         let pane = cx.new(move |cx| {
             TerminalPane::new(
                 ws,
+                fm,
                 rb,
                 pid,
                 project_path,

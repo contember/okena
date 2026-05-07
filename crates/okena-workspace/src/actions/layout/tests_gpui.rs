@@ -2,6 +2,7 @@
 //! entity via TestAppContext.
 
 use gpui::AppContext as _;
+use crate::focus::FocusManager;
 use crate::state::{DropZone, LayoutNode, ProjectData, SplitDirection, Workspace, WorkspaceData};
 use crate::settings::HooksConfig;
 use okena_terminal::shell_config::ShellType;
@@ -55,7 +56,7 @@ fn test_split_terminal_gpui(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.split_terminal("p1", &[], SplitDirection::Vertical, cx);
+        ws.split_terminal(&mut FocusManager::new(), "p1", &[], SplitDirection::Vertical, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -81,7 +82,7 @@ fn test_add_tab_gpui(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.add_tab("p1", &[], cx);
+        ws.add_tab(&mut FocusManager::new(), "p1", &[], cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -287,7 +288,7 @@ fn test_move_pane_left_creates_vertical_split(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t2", DropZone::Left, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Left, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -317,7 +318,7 @@ fn test_move_pane_top_creates_horizontal_split(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t2", DropZone::Top, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Top, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -347,7 +348,7 @@ fn test_move_pane_bottom_creates_horizontal_split(cx: &mut gpui::TestAppContext)
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t2", DropZone::Bottom, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Bottom, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -377,7 +378,7 @@ fn test_move_pane_center_creates_tab_group(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t2", DropZone::Center, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t2", DropZone::Center, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -408,7 +409,7 @@ fn test_move_pane_self_drop_is_noop(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t1", DropZone::Top, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t1", DropZone::Top, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -427,7 +428,7 @@ fn test_move_pane_only_terminal_is_noop(cx: &mut gpui::TestAppContext) {
     let v0 = workspace.read_with(cx, |ws: &Workspace, _cx| ws.data_version());
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "term_p1", "p1", "term_p1", DropZone::Left, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "term_p1", "p1", "term_p1", DropZone::Left, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -456,7 +457,7 @@ fn test_move_terminal_to_tab_group_inserts_at_position(cx: &mut gpui::TestAppCon
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_terminal_to_tab_group("p1", "t3", "p1", &[0], Some(1), cx);
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t3", "p1", &[0], Some(1), cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -495,7 +496,7 @@ fn test_move_terminal_to_tab_group_appends(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_terminal_to_tab_group("p1", "t3", "p1", &[0], None, cx);
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t3", "p1", &[0], None, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -527,7 +528,7 @@ fn test_move_terminal_to_tab_group_same_group_reorders(cx: &mut gpui::TestAppCon
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_terminal_to_tab_group("p1", "t1", "p1", &[], Some(2), cx);
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t1", "p1", &[], Some(2), cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -558,7 +559,7 @@ fn test_move_pane_3_children_with_flatten(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p1", "t3", DropZone::Top, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p1", "t3", DropZone::Top, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -715,7 +716,7 @@ fn test_move_pane_cross_project(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p2", "t3", DropZone::Left, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Left, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -750,7 +751,7 @@ fn test_move_pane_cross_project_center(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p2", "t3", DropZone::Center, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Center, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -776,7 +777,7 @@ fn test_move_pane_cross_project_last_terminal(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p2", "t2", DropZone::Left, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t2", DropZone::Left, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -807,7 +808,7 @@ fn test_move_pane_cross_project_metadata_migration(cx: &mut gpui::TestAppContext
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_pane("p1", "t1", "p2", "t3", DropZone::Right, cx);
+        ws.move_pane(&mut FocusManager::new(), "p1", "t1", "p2", "t3", DropZone::Right, cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {
@@ -862,7 +863,7 @@ fn test_move_to_tab_group_cross_project(cx: &mut gpui::TestAppContext) {
     let workspace = cx.new(|_cx| Workspace::new(data));
 
     workspace.update(cx, |ws: &mut Workspace, cx| {
-        ws.move_terminal_to_tab_group("p1", "t1", "p2", &[], Some(1), cx);
+        ws.move_terminal_to_tab_group(&mut FocusManager::new(), "p1", "t1", "p2", &[], Some(1), cx);
     });
 
     workspace.read_with(cx, |ws: &Workspace, _cx| {

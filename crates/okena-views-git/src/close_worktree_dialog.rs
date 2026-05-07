@@ -46,6 +46,7 @@ pub(super) enum ProcessingState {
 /// Checks for dirty state and optionally merges the branch back.
 pub struct CloseWorktreeDialog {
     pub(super) workspace: Entity<Workspace>,
+    pub(super) focus_manager: Entity<okena_workspace::focus::FocusManager>,
     pub(super) focus_handle: FocusHandle,
     pub(super) project_id: String,
     pub(super) project_name: String,
@@ -68,6 +69,7 @@ pub struct CloseWorktreeDialog {
 impl CloseWorktreeDialog {
     pub fn new(
         workspace: Entity<Workspace>,
+        focus_manager: Entity<okena_workspace::focus::FocusManager>,
         project_id: String,
         worktree_config: WorktreeConfig,
         hooks_config: HooksConfig,
@@ -90,6 +92,7 @@ impl CloseWorktreeDialog {
 
         Self {
             workspace,
+            focus_manager,
             focus_handle: cx.focus_handle(),
             project_id,
             project_name,

@@ -32,6 +32,7 @@ impl CloseWorktreeDialog {
         let delete_branch_enabled = self.delete_branch_enabled;
         let is_dirty = self.is_dirty;
         let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
 
         // Read hooks config and monitor before spawning
         let ws = workspace.read(cx);
@@ -452,8 +453,10 @@ impl CloseWorktreeDialog {
                 });
 
                 cx.update(|cx| {
-                    let result = workspace.update(cx, |ws, cx| {
-                        ws.remove_worktree_project(&project_id, force_remove, &global_hooks, cx)
+                    let result = focus_manager.update(cx, |fm, cx| {
+                        workspace.update(cx, |ws, cx| {
+                            ws.remove_worktree_project(fm, &project_id, force_remove, &global_hooks, cx)
+                        })
                     });
 
                     match result {
